@@ -1934,7 +1934,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
     testssl = _find_tool("testssl.sh") or _find_tool("testssl")
     if testssl:
         out_f = out.output_path(phase, f"testssl_{hostname}_{port}")
-        cmd   = [testssl, "--quiet", "--severity", "LOW", target["url"]]
+        cmd   = [testssl, "--color", "0", "--quiet", "--severity", "LOW", target["url"]]
         vc.log(f"[tls] Running testssl.sh on {host_port}", "INFO")
         try:
             proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
