@@ -177,6 +177,8 @@ PIP_PACKAGES = [
     "colorama>=0.4.6",
     "beautifulsoup4>=4.12.0",
     "sqlmap",
+    "selenium>=4.0.0",
+    "webdriver-manager>=4.0.0",
 ]
 
 

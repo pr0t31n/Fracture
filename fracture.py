@@ -47,6 +47,21 @@ VERSION = "1.1.0"
 # and exclude /usr/local/bin where Homebrew installs tools on macOS.
 # _find_tool() falls back to known absolute paths when shutil.which() fails.
 
+
+def _real_home() -> Path:
+    """Return the real user's home directory even when running under sudo."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        try:
+            import pwd
+            return Path(pwd.getpwnam(sudo_user).pw_dir)
+        except Exception:
+            pass
+    return Path.home()
+
+
+_HOME = _real_home()
+
 _TOOL_PATHS: dict = {
     "nikto": {
         "Darwin": ["/usr/local/bin/nikto", "/opt/homebrew/bin/nikto",
@@ -56,18 +71,20 @@ _TOOL_PATHS: dict = {
     },
     "nuclei": {
         "Darwin": ["/usr/local/bin/nuclei", "/opt/homebrew/bin/nuclei",
-                   str(Path.home() / "go" / "bin" / "nuclei"),
+                   str(_HOME / "go" / "bin" / "nuclei"),
                    "/root/go/bin/nuclei"],
         "Linux":  ["/usr/local/bin/nuclei", "/usr/bin/nuclei",
-                   str(Path.home() / "go" / "bin" / "nuclei"),
+                   str(_HOME / "go" / "bin" / "nuclei"),
                    "/root/go/bin/nuclei", "/opt/nuclei/nuclei"],
     },
     "gobuster": {
         "Darwin": ["/usr/local/bin/gobuster", "/opt/homebrew/bin/gobuster",
-                   str(Path.home() / "go" / "bin" / "gobuster")],
+                   str(_HOME / "go" / "bin" / "gobuster"),
+                   "/root/go/bin/gobuster"],
         "Linux":  ["/usr/bin/gobuster", "/usr/local/bin/gobuster",
                    "/opt/gobuster/gobuster",
-                   str(Path.home() / "go" / "bin" / "gobuster")],
+                   str(_HOME / "go" / "bin" / "gobuster"),
+                   "/root/go/bin/gobuster"],
     },
     "wpscan": {
         "Darwin": ["/usr/local/bin/wpscan", "/opt/homebrew/bin/wpscan"],
@@ -96,15 +113,19 @@ _TOOL_PATHS: dict = {
                    "/opt/feroxbuster/feroxbuster"],
     },
     "whatweb": {
-        "Darwin": ["/usr/local/bin/whatweb", "/opt/homebrew/bin/whatweb"],
+        "Darwin": ["/usr/local/bin/whatweb", "/opt/homebrew/bin/whatweb",
+                   "/opt/homebrew/opt/ruby/bin/whatweb",
+                   str(_HOME / ".gem" / "ruby" / "bin" / "whatweb")],
         "Linux":  ["/usr/bin/whatweb", "/usr/local/bin/whatweb",
-                   "/opt/whatweb/whatweb"],
+                   "/opt/whatweb/whatweb",
+                   str(_HOME / ".gem" / "ruby" / "bin" / "whatweb")],
     },
     "ffuf": {
         "Darwin": ["/usr/local/bin/ffuf", "/opt/homebrew/bin/ffuf",
-                   str(Path.home() / "go" / "bin" / "ffuf")],
+                   str(_HOME / "go" / "bin" / "ffuf"),
+                   "/root/go/bin/ffuf"],
         "Linux":  ["/usr/bin/ffuf", "/usr/local/bin/ffuf",
-                   str(Path.home() / "go" / "bin" / "ffuf"),
+                   str(_HOME / "go" / "bin" / "ffuf"),
                    "/root/go/bin/ffuf"],
     },
     "searchsploit": {
@@ -121,9 +142,10 @@ _TOOL_PATHS: dict = {
     },
     "dalfox": {
         "Darwin": ["/usr/local/bin/dalfox", "/opt/homebrew/bin/dalfox",
-                   str(Path.home() / "go" / "bin" / "dalfox")],
+                   str(_HOME / "go" / "bin" / "dalfox"),
+                   "/root/go/bin/dalfox"],
         "Linux":  ["/usr/bin/dalfox", "/usr/local/bin/dalfox",
-                   str(Path.home() / "go" / "bin" / "dalfox"),
+                   str(_HOME / "go" / "bin" / "dalfox"),
                    "/root/go/bin/dalfox"],
     },
     "jwt_tool": {
@@ -135,6 +157,9 @@ _TOOL_PATHS: dict = {
 }
 
 
+_GEM_TOOLS = {"whatweb", "wpscan"}
+
+
 def _find_tool(name: str) -> "str | None":
     """Return path to *name*, checking PATH then known absolute locations."""
     found = shutil.which(name)
@@ -143,7 +168,45 @@ def _find_tool(name: str) -> "str | None":
     for p in _TOOL_PATHS.get(name, {}).get(platform.system(), []):
         if Path(p).exists():
             return p
+    # Fallback: ask gem for its bin directory (covers versioned gem paths)
+    if name in _GEM_TOOLS:
+        gem = shutil.which("gem")
+        if gem:
+            try:
+                r = subprocess.run([gem, "environment", "gemdir"],
+                                   capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    candidate = Path(r.stdout.strip()) / "bin" / name
+                    if candidate.exists():
+                        return str(candidate)
+            except Exception:
+                pass
     return None
+
+
+_SECLISTS_BASES = [
+    "/usr/share/seclists",
+    "/opt/homebrew/share/seclists",
+    "/usr/share/wordlists/seclists",
+    "/opt/seclists",
+]
+
+
+def _find_wordlist(rel_path: str, cfg_override: str = "") -> str:
+    """Return an existing wordlist path, trying cfg override then seclists bases.
+
+    Returns the cfg_override if it exists, otherwise searches _SECLISTS_BASES
+    for rel_path.  Returns the original cfg_override (or rel_path) unchanged
+    if nothing is found, so callers that check Path.exists() still log correctly.
+    """
+    primary = cfg_override or rel_path
+    if Path(primary).exists():
+        return primary
+    for base in _SECLISTS_BASES:
+        candidate = Path(base) / rel_path
+        if candidate.exists():
+            return str(candidate)
+    return primary
 
 
 def _find_shcheck() -> "str | None":
@@ -1677,8 +1740,10 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
 
     vc.status(phase, "Recon", "running", "Directory discovery", 5, 10)
     gobuster = _find_tool("gobuster")
-    wordlist = cfg.get("gobuster_wordlist",
-                       "/usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt")
+    wordlist = _find_wordlist(
+        "Discovery/Web-Content/raft-large-directories.txt",
+        cfg.get("gobuster_wordlist", ""),
+    )
     out_f    = out.output_path(phase, "gobuster_" + target["hostname"])
     if gobuster and Path(wordlist).exists():
         cmd = [gobuster, "dir", "-u", url, "-w", wordlist, "-t", "30",
@@ -2501,10 +2566,14 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
         vc.log("[ffuf] ffuf not found — skipping", "WARNING")
         return
 
-    vhost_wl = cfg.get("ffuf_vhost_wordlist",
-                       "/usr/share/seclists/Discovery/DNS/namelist.txt")
-    param_wl = cfg.get("ffuf_param_wordlist",
-                       "/usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt")
+    vhost_wl = _find_wordlist(
+        "Discovery/DNS/namelist.txt",
+        cfg.get("ffuf_vhost_wordlist", ""),
+    )
+    param_wl = _find_wordlist(
+        "Discovery/Web-Content/burp-parameter-names.txt",
+        cfg.get("ffuf_param_wordlist", ""),
+    )
 
     ffuf_dir = out.root / "ffuf"
     ffuf_dir.mkdir(exist_ok=True)
