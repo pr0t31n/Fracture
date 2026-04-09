@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.4.3"
+VERSION = "1.4.4"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1925,31 +1925,40 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                     ww_found_sec_hdrs.add(pname)
                                     continue
 
-                                # Uncommon-Headers plugin — each string is an unknown header
+                                # Uncommon-Headers plugin — WhatWeb packs all uncommon
+                                # header names as a comma-separated list inside a single
+                                # string entry.  Split on commas first, then on ':' for
+                                # any items that carry a value, and emit one finding each.
                                 if pname == "Uncommon-Headers":
                                     for hdr_val in pdata.get("string", []):
-                                        _hv_parts = hdr_val.split(":", 1)
-                                        hdr_name  = _hv_parts[0].strip()
-                                        hdr_value = _hv_parts[1].strip() if len(_hv_parts) > 1 else ""
-                                        out.add_finding(
-                                            title=f"Unknown Header Identified: {hdr_name}",
-                                            url=url, port=target["port"], risk="INFO",
-                                            description=(
-                                                f"An uncommon or non-standard HTTP header "
-                                                f"'{hdr_name}' was observed in the response."
-                                                + (f" Value: {hdr_value}" if hdr_value else "")
-                                            ),
-                                            output=f"Header: {hdr_name}"
-                                                   + (f"\nValue: {hdr_value}" if hdr_value else ""),
-                                            sources="whatweb", service=target["scheme"],
-                                            output_file=str(ww_out),
-                                            owasp="A05:2025 Security Misconfiguration",
-                                            nist="CM-7",
-                                            remediation=(
-                                                "Review the header for necessity; "
-                                                "remove non-standard headers if not required."
-                                            ),
-                                        )
+                                        for _raw_item in hdr_val.split(","):
+                                            _raw_item = _raw_item.strip()
+                                            if not _raw_item:
+                                                continue
+                                            _hv_parts = _raw_item.split(":", 1)
+                                            hdr_name  = _hv_parts[0].strip()
+                                            hdr_value = _hv_parts[1].strip() if len(_hv_parts) > 1 else ""
+                                            if not hdr_name:
+                                                continue
+                                            out.add_finding(
+                                                title=f"Unknown Header Identified: {hdr_name}",
+                                                url=url, port=target["port"], risk="INFO",
+                                                description=(
+                                                    f"An uncommon or non-standard HTTP header "
+                                                    f"'{hdr_name}' was observed in the response."
+                                                    + (f" Value: {hdr_value}" if hdr_value else "")
+                                                ),
+                                                output=f"Header: {hdr_name}"
+                                                       + (f"\nValue: {hdr_value}" if hdr_value else ""),
+                                                sources="whatweb", service=target["scheme"],
+                                                output_file=str(ww_out),
+                                                owasp="A05:2025 Security Misconfiguration",
+                                                nist="CM-7",
+                                                remediation=(
+                                                    "Review the header for necessity; "
+                                                    "remove non-standard headers if not required."
+                                                ),
+                                            )
                                     continue
 
                                 versions = pdata.get("version", [])
