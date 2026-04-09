@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -2692,7 +2692,8 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             _TESTSSL_NOISE = re.compile(
                 r'Testing robust forward secrecy'
                 r'|User-agent:'
-                r'|Disallow:',
+                r'|Disallow:'
+                r'|not offered',   # cipher/protocol absent → never a finding
                 re.I,
             )
             _ok_filtered = "\n".join(
