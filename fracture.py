@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.5.4"
+VERSION = "1.5.7"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -547,7 +547,7 @@ _TEMPLATE_SYNTAX_RE = re.compile(
 )
 
 
-def _is_placeholder_secret(value: str) -> bool:
+def _is_placeholder_secret(value: str, key_name: str = "") -> bool:
     """Return True when the matched secret value is likely a template placeholder
     or code comment rather than a real credential.
 
@@ -563,6 +563,20 @@ def _is_placeholder_secret(value: str) -> bool:
     # All-uppercase alphanumeric with underscores → ENV_VAR_STYLE_PLACEHOLDER
     if re.match(r'^[A-Z][A-Z0-9_]{3,}$', v):
         return True
+    # Self-referential: value equals the key name (e.g. e.addedApiKey="addedApiKey")
+    # or value contains the full key name as a substring (case-insensitive)
+    if key_name:
+        k = key_name.strip().strip("\"'")
+        if v.lower() == k.lower():
+            return True
+        if k.lower() in v.lower() and len(v) <= len(k) + 10:
+            return True
+    # Readable camelCase/snake_case identifier — real secrets are not pronounceable
+    # phrases. Flag values that look like enum keys or event names.
+    if re.match(r'^[a-z][a-zA-Z0-9]*(?:[A-Z][a-zA-Z0-9]*){2,}$', v) and len(v) <= 40:
+        # camelCase with 3+ words and no digits run → likely an identifier, not a secret
+        if not re.search(r'\d{4,}', v):
+            return True
     return False
 
 
@@ -1826,7 +1840,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             f"[recon] Wildcard/catch-all detected (HTTP {wc_baseline['status']} "
             f"for all paths{'; redirect → ' + wc_baseline['location'] if wc_baseline.get('redirect') else ''}). "
             "Directory brute-forcing skipped; all path findings will be validated against baseline.",
-            "WARNING",
+            "INFO",
         )
         out.add_finding(
             title=f"Wildcard (*) Detected: {url}",
@@ -2244,7 +2258,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     )
     out_f    = out.output_path(phase, "gobuster_" + target["hostname"])
     if wc_baseline is not None:
-        vc.log("[recon] Skipping directory brute-force (wildcard detected)", "WARNING")
+        vc.log("[recon] Skipping directory brute-force (wildcard detected)", "INFO")
     elif gobuster and Path(wordlist).exists():
         cmd = [gobuster, "dir", "-u", url, "-w", wordlist, "-t", "30",
                "-q", "-k", "-o", str(out_f)]
@@ -2308,7 +2322,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     else:
         # gobuster: skip on wildcard (results unreliable)
         if wc_baseline is not None:
-            vc.log("[recon] Skipping file brute-force (wildcard detected)", "WARNING")
+            vc.log("[recon] Skipping file brute-force (wildcard detected)", "INFO")
         elif gobuster:
             gob_files_out = out.output_path(phase, "gobuster_files_" + target["hostname"])
             cmd = [gobuster, "dir", "-u", url, "-w", wordlist_files, "-t", "30",
@@ -2600,7 +2614,7 @@ def _phase_endpoint_tools(
         _same_host = (_ep_host == target["hostname"])
         if wc_baseline is not None and _same_host:
             ep_wc = wc_baseline
-            vc.log(f"[endpoint_tools] Parent wildcard — skipping brute-force for {ep_url}", "WARNING")
+            vc.log(f"[endpoint_tools] Parent wildcard — skipping brute-force for {ep_url}", "INFO")
         else:
             ep_wc = _detect_wildcard(ep_url, sess, timeout)
             if ep_wc is not None:
@@ -4043,23 +4057,28 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         try:
             r = sess.get(js_url, timeout=timeout)
             _js_out = _crawl_output_path(out.root, js_url)
-            _js_out.write_text(r.text[:30000], encoding="utf-8")
+            js_text = r.text
+            # Write full JS content (up to 2MB) so evidence files are not truncated
+            _js_out.write_text(js_text[:2_000_000], encoding="utf-8")
             for pat, secret_type in _SECRET_PATTERNS:
-                m = pat.search(r.text)
+                m = pat.search(js_text)
                 if m:
-                    if _is_placeholder_secret(m.group(2)):
+                    if _is_placeholder_secret(m.group(2), m.group(1)):
                         continue
+                    # Include surrounding context in the finding output
+                    col = m.start()
+                    context = js_text[max(0, col - 80):col + 200]
                     out.add_finding(
                         title=f"Credentials/Secret in JavaScript: {secret_type}",
                         url=js_url, port=target["port"], risk="HIGH",
                         description=f"A {secret_type} was found hardcoded in JavaScript: {js_url}",
-                        output=f"Match: {m.group(0)[:100]}",
+                        output=f"Match: {m.group(0)[:120]}\nContext (char {col}): ...{context}...",
                         sources="fracture-crawl", service=target["scheme"],
                         affected=js_url, output_file=str(_js_out),
                         owasp="A04:2025 Insecure Design", nist="IA-5",
                         remediation="Remove hardcoded secrets from JavaScript. Use server-side secrets management.",
                     )
-                    vc.log(f"[crawl] Secret in JS: {secret_type} at {js_url}", "SUCCESS")
+                    vc.log(f"[crawl] Secret in JS: {secret_type} at {js_url} (char {col})", "SUCCESS")
         except Exception:
             pass
 
@@ -4900,7 +4919,7 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
     _file_wc = _detect_wildcard(url, sess, timeout)
     if _file_wc is not None:
         vc.log("[files] Wildcard detected — all file findings will be validated against baseline",
-               "WARNING")
+               "INFO")
 
     for idx, (fpath, risk, fdesc) in enumerate(_SENSITIVE_FILES):
         vc.status(phase, "Sensitive Files", "running", fpath, idx, total)
