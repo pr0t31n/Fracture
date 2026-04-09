@@ -38,7 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.2.3"
+VERSION = "1.3.1"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1659,6 +1659,14 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     powered_by  = headers.get("X-Powered-By", "")
     all_text    = body + " ".join(f"{k}: {v}" for k, v in headers.items())
 
+    # Save initial HTTP probe response as evidence
+    probe_out = out.output_path(phase, "http_probe_" + target["hostname"])
+    probe_out.write_text(
+        "\n".join(f"{k}: {v}" for k, v in headers.items())
+        + f"\n\nHTTP {status_code}\n\n{body[:10000]}",
+        encoding="utf-8",
+    )
+
     detected_cms = [n for n, pats in _CMS_PATTERNS.items()
                     if any(p.search(all_text) for p in pats)]
 
@@ -1668,7 +1676,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             url=url, port=target["port"], risk="LOW",
             description=f"The Server response header discloses the web server: '{server_hdr}'.",
             output=f"Server: {server_hdr}", sources="fracture-recon",
-            service=target["scheme"],
+            service=target["scheme"], output_file=str(probe_out),
             owasp="A05:2025 Security Misconfiguration", nist="SI-2",
             remediation="Suppress or genericise the Server header.",
         )
@@ -1678,7 +1686,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             url=url, port=target["port"], risk="LOW",
             description=f"X-Powered-By reveals: '{powered_by}'.",
             output=f"X-Powered-By: {powered_by}", sources="fracture-recon",
-            service=target["scheme"],
+            service=target["scheme"], output_file=str(probe_out),
             owasp="A05:2025 Security Misconfiguration", nist="SI-2",
             remediation="Remove the X-Powered-By header.",
         )
@@ -1699,9 +1707,20 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             _deregister_proc(proc)
             out.log_command("whatweb", cmd, ww_out)
             if ww_out.exists():
-                _SKIP_WW = {"Script", "HTML", "Title", "Meta-Refresh", "IP",
-                            "Country", "Email", "Cookies", "Uncommon-Headers",
-                            "Open-Graph-Protocol", "HTML5", "Bootstrap", "jQuery"}
+                # Security header names (from _SECURITY_HEADERS, defined further in this
+                # module — resolved at call-time, not definition-time)
+                _SEC_HDR_NAMES = {h[0] for h in _SECURITY_HEADERS}
+                # Regex matching HTTP-header-style plugin names (e.g. X-Frame-Options, Via)
+                _HDR_NAME_RE = re.compile(r'^[A-Z][a-zA-Z]*(?:-[A-Za-z]+)+$')
+                # Plugins to skip entirely — noise or already handled by fracture-headers
+                _SKIP_WW = {
+                    "Script", "HTML", "Title", "Meta-Refresh", "IP", "Country",
+                    "Email", "Cookies", "Open-Graph-Protocol", "HTML5",
+                    "Bootstrap", "jQuery", "X-Powered-By", "Server",
+                }
+                # Track which security headers whatweb observed as present
+                ww_found_sec_hdrs: set = set()
+
                 for line in ww_out.read_text(encoding="utf-8", errors="replace").splitlines():
                     line = line.strip()
                     if not line:
@@ -1715,13 +1734,66 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             for pname, pdata in plugins.items():
                                 if pname in _SKIP_WW:
                                     continue
+
+                                # Known security header present — track and skip Tech finding
+                                if pname in _SEC_HDR_NAMES:
+                                    ww_found_sec_hdrs.add(pname)
+                                    continue
+
+                                # Uncommon-Headers plugin — each string is an unknown header
+                                if pname == "Uncommon-Headers":
+                                    for hdr_val in pdata.get("string", []):
+                                        hdr_name = hdr_val.split(":")[0].strip()
+                                        out.add_finding(
+                                            title=f"Unknown Header Identified: {hdr_name}",
+                                            url=url, port=target["port"], risk="INFO",
+                                            description=(
+                                                f"An uncommon or non-standard HTTP header "
+                                                f"'{hdr_name}' was observed in the response."
+                                            ),
+                                            output=f"Header: {hdr_val}",
+                                            sources="whatweb", service=target["scheme"],
+                                            output_file=str(ww_out),
+                                            owasp="A05:2025 Security Misconfiguration",
+                                            nist="CM-7",
+                                            remediation=(
+                                                "Review the header for necessity; "
+                                                "remove non-standard headers if not required."
+                                            ),
+                                        )
+                                    continue
+
                                 versions = pdata.get("version", [])
                                 version  = versions[0] if versions else ""
-                                title    = (f"Technology Identified: {pname} {version}".strip()
-                                            if version else f"Technology Identified: {pname}")
+
+                                # Header-like plugin name (not a known security header)
+                                if _HDR_NAME_RE.match(pname):
+                                    out.add_finding(
+                                        title=f"Unknown Header Identified: {pname}",
+                                        url=url, port=target["port"], risk="INFO",
+                                        description=(
+                                            f"An unrecognised HTTP header '{pname}' "
+                                            f"was observed in the response."
+                                            + (f" Value: {version}" if version else "")
+                                        ),
+                                        output=(f"Header: {pname}"
+                                                + (f"\nValue: {version}" if version else "")),
+                                        sources="whatweb", service=target["scheme"],
+                                        output_file=str(ww_out),
+                                        owasp="A05:2025 Security Misconfiguration",
+                                        nist="CM-7",
+                                        remediation=(
+                                            "Review the header for necessity; "
+                                            "remove non-standard headers if not required."
+                                        ),
+                                    )
+                                    continue
+
+                                # Standard technology finding
                                 _ww_versions.append((pname, version))
                                 out.add_finding(
-                                    title=title,
+                                    title=(f"Technology Identified: {pname} {version}".strip()
+                                           if version else f"Technology Identified: {pname}"),
                                     url=url, port=target["port"], risk="INFO",
                                     description=(
                                         f"whatweb identified {pname}"
@@ -1740,6 +1812,25 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                 )
                     except Exception:
                         pass
+
+                # Emit Missing Security Header findings for headers absent from whatweb output
+                for _hdr_name, _hdr_risk, _unused, _hdr_desc, _hdr_nist, _hdr_remed \
+                        in _SECURITY_HEADERS:
+                    if _hdr_name == "Strict-Transport-Security" and not target["is_https"]:
+                        continue
+                    if _hdr_name not in ww_found_sec_hdrs:
+                        out.add_finding(
+                            title=f"Missing Security Header: {_hdr_name}",
+                            url=url, port=target["port"], risk=_hdr_risk,
+                            description=_hdr_desc,
+                            output=f"Missing: {_hdr_name}",
+                            affected=_hdr_name,
+                            sources="whatweb", service=target["scheme"],
+                            output_file=str(ww_out),
+                            owasp="A05:2025 Security Misconfiguration",
+                            nist=_hdr_nist,
+                            remediation=_hdr_remed,
+                        )
         except Exception as e:
             out.log_error("whatweb", cmd, str(e))
     else:
@@ -1847,13 +1938,20 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     f"Administrative interface found at {apath} (HTTP {r.status_code}). "
                     f"Panel exists; authentication controls are enforced."
                 )
+                _admin_safe = apath.lstrip("/").replace("/", "_").replace(".", "_") or "root"
+                _admin_out  = out.output_path(phase, f"admin_{_admin_safe}")
+                _admin_out.write_text(
+                    f"GET {apath} HTTP/1.1\nHost: {target['hostname']}\n\n"
+                    f"HTTP {r.status_code}\n{r.text[:5000]}",
+                    encoding="utf-8",
+                )
                 out.add_finding(
                     title="Admin Panel Exposed",
                     url=url + apath, port=target["port"], risk=_admin_risk,
                     description=_admin_desc,
                     output=f"GET {apath} → {r.status_code}",
                     sources="fracture-recon", service=target["scheme"],
-                    affected=url + apath,
+                    affected=url + apath, output_file=str(_admin_out),
                     owasp="A05:2025 Security Misconfiguration", nist="AC-3",
                     remediation="Restrict admin interfaces by IP allowlist or VPN.",
                 )
@@ -1866,13 +1964,20 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         try:
             r = sess.get(url + cpath, timeout=timeout, allow_redirects=False)
             if r.status_code == 200 and cpath in ("/.git/HEAD", "/.env"):
+                _cp_safe = cpath.lstrip("/").replace("/", "_").replace(".", "_")
+                _cp_out  = out.output_path(phase, f"sensitive_path_{_cp_safe}")
+                _cp_out.write_text(
+                    f"GET {cpath} HTTP/1.1\nHost: {target['hostname']}\n\n"
+                    f"HTTP {r.status_code}\n{r.text[:5000]}",
+                    encoding="utf-8",
+                )
                 out.add_finding(
                     title=f"Sensitive Path Accessible: {cpath}",
                     url=url + cpath, port=target["port"], risk="CRITICAL",
                     description=f"The path {cpath} is publicly accessible.",
                     output=f"GET {cpath} → {r.status_code}\n{r.text[:500]}",
                     sources="fracture-recon", service=target["scheme"],
-                    affected=url + cpath,
+                    affected=url + cpath, output_file=str(_cp_out),
                     owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                     remediation=f"Block public access to {cpath}.",
                 )
@@ -1979,12 +2084,14 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     try:
         r = sess.get(url + "/", timeout=timeout)
         if re.search(r'Index of /|Directory listing|<title>Index of', r.text, re.I):
+            _dl_out = out.output_path(phase, "dir_listing_" + target["hostname"])
+            _dl_out.write_text(r.text[:10000], encoding="utf-8")
             out.add_finding(
                 title="Directory Listing Enabled",
                 url=url + "/", port=target["port"], risk="MEDIUM",
                 description="Directory listing is enabled, potentially exposing sensitive files.",
                 output=r.text[:500], sources="fracture-recon",
-                service=target["scheme"],
+                service=target["scheme"], output_file=str(_dl_out),
                 owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                 remediation="Disable directory listing (e.g. Options -Indexes for Apache).",
             )
@@ -2043,6 +2150,228 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
 
     vc.status(phase, "Recon", "complete", "Done", 10, 10)
     vc.log("[recon] Phase complete", "SUCCESS")
+
+
+# ─────────────────────────────────────────────
+# Endpoint tools helpers (used after recon + crawl)
+# ─────────────────────────────────────────────
+
+def _parse_gobuster_output(filepath: Path, base_url: str) -> list:
+    """Extract discovered URLs from a gobuster -q output file."""
+    urls  = []
+    base  = base_url.rstrip("/")
+    for line in filepath.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Redirect target takes priority: /path (Status: 301) [--> http://host/path/]
+        m = re.search(r'-->\s*(https?://[^\]\s]+)', line)
+        if m:
+            urls.append(m.group(1).rstrip("/\\"))
+            continue
+        # Otherwise extract the leading path token
+        m = re.match(r'(/\S+)', line)
+        if m:
+            urls.append(f"{base}{m.group(1)}")
+    return urls
+
+
+def _parse_feroxbuster_output(filepath: Path) -> list:
+    """Extract discovered URLs from a feroxbuster output file."""
+    urls = []
+    for line in filepath.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = re.search(r'(https?://\S+)', line.strip())
+        if m:
+            urls.append(m.group(1).rstrip("/\\"))
+    return urls
+
+
+def _capture_screenshot_to(ep_url: str, out_path: Path,
+                            target: dict, cfg: dict) -> bool:
+    """Take a headless screenshot of ep_url and save to out_path.
+    Returns True on success."""
+    if not _check_selenium():
+        return False
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        opts = Options()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--ignore-certificate-errors")
+        opts.add_argument("--window-size=1280,800")
+        opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+        chrome_bin = _find_chrome_binary()
+        if chrome_bin:
+            opts.binary_location = chrome_bin
+        hostname = target.get("hostname", "")
+        _ip      = target.get("ip")
+        if not _ip and hostname:
+            try:
+                _ip = socket.gethostbyname(hostname)
+            except Exception:
+                _ip = None
+        if hostname and _ip and _ip != hostname:
+            opts.add_argument(f"--host-resolver-rules=MAP {hostname} {_ip}")
+        svc    = _build_chrome_service()
+        driver = webdriver.Chrome(service=svc, options=opts)
+        try:
+            driver.set_page_load_timeout(15)
+            try:
+                driver.get(ep_url)
+            except Exception:
+                pass
+            total_h = driver.execute_script(
+                "return Math.max("
+                "  document.body.scrollHeight,"
+                "  document.documentElement.scrollHeight"
+                ")"
+            )
+            driver.set_window_size(1280, max(800, int(total_h)))
+            driver.save_screenshot(str(out_path))
+            return True
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+    except Exception:
+        return False
+
+
+def _phase_endpoint_tools(
+    discovered_urls: list, target: dict, cfg: dict, pm: ProgressManager,
+    out: OutputManager, sess: requests.Session,
+) -> None:
+    """Run screenshot, page crawl, and directory brute-force against each
+    endpoint discovered by recon/crawl phases.  Capped to avoid runaway scans.
+    """
+    if not discovered_urls:
+        return
+
+    base_url     = target["url"].rstrip("/")
+    timeout      = cfg.get("timeout", 10)
+    max_ep       = cfg.get("max_endpoint_scan", 15)
+    gobuster     = _find_tool("gobuster")
+    feroxbuster  = _find_tool("feroxbuster")
+    wordlist_dir = _find_wordlist(
+        "Discovery/Web-Content/raft-large-directories.txt",
+        cfg.get("gobuster_wordlist", ""),
+    )
+    wordlist_file = _find_wordlist("raft-large-files.txt")
+
+    # Deduplicate, exclude base URL, cap count
+    seen = {base_url}
+    endpoints: list = []
+    for u in discovered_urls:
+        u = u.rstrip("/")
+        if u and u not in seen:
+            seen.add(u)
+            endpoints.append(u)
+            if len(endpoints) >= max_ep:
+                break
+
+    if not endpoints:
+        return
+
+    vc.log(f"[endpoint_tools] Processing {len(endpoints)} discovered endpoint(s)", "INFO")
+    save_dir = out.root / "recon"
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx, ep_url in enumerate(endpoints):
+        ep_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', ep_url.replace("://", "_"))[:50]
+        vc.status("endpoint_tools", "Endpoint Tools", "running",
+                  f"Endpoint {idx + 1}/{len(endpoints)}", idx, len(endpoints))
+        vc.log(f"[endpoint_tools] {ep_url}", "INFO")
+
+        # ── Screenshot ──────────────────────────────────────────────────────
+        ep_shot = save_dir / f"screenshot_{ep_safe}.png"
+        if _capture_screenshot_to(ep_url, ep_shot, target, cfg):
+            out.add_finding(
+                title="Web Screenshot Captured",
+                url=ep_url, port=target["port"], risk="INFO",
+                description=f"A screenshot of discovered endpoint {ep_url} was captured.",
+                output=f"Saved: {ep_shot.name}",
+                sources="fracture-screenshot", service=target["scheme"],
+                output_file=str(ep_shot),
+                owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                remediation="Review screenshot for exposed sensitive content.",
+            )
+            vc.log(f"[endpoint_tools] Screenshot: {ep_shot.name}", "SUCCESS")
+
+        # ── Single-page crawl ────────────────────────────────────────────────
+        page_data = _crawl_page(ep_url, sess, timeout, base_url)
+        if not page_data.get("error"):
+            ep_crawl_out = out.output_path("crawl", f"crawl_ep_{ep_safe}")
+            ep_crawl_out.write_text(
+                json.dumps({
+                    "endpoint": ep_url,
+                    "links": page_data.get("links", [])[:200],
+                    "forms": page_data.get("forms", [])[:50],
+                }, indent=2),
+                encoding="utf-8",
+            )
+            for link in page_data.get("links", []):
+                if _INTERESTING_PATH_RE.search(link):
+                    out.add_finding(
+                        title="Interesting Endpoint Discovered",
+                        url=link, port=target["port"], risk="INFO",
+                        description=f"Potentially sensitive endpoint found while crawling {ep_url}: {link}",
+                        sources="fracture-crawl", service=target["scheme"],
+                        affected=link, output_file=str(ep_crawl_out),
+                        owasp="A04:2025 Insecure Design", nist="CM-7",
+                        remediation="Review this endpoint for access controls.",
+                    )
+
+        # ── Directory brute-force ────────────────────────────────────────────
+        if gobuster and Path(wordlist_dir).exists():
+            ep_gob = out.output_path("recon", f"gobuster_ep_{ep_safe}")
+            cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_dir,
+                   "-t", "20", "-q", "--no-error", "-o", str(ep_gob)]
+            vc.log(f"[endpoint_tools] gobuster on {ep_url}", "INFO")
+            try:
+                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                _register_proc(proc)
+                proc.communicate(timeout=180)
+                _deregister_proc(proc)
+                out.log_command("gobuster", cmd, ep_gob)
+            except Exception as e:
+                out.log_error("gobuster", cmd, str(e))
+
+        if gobuster and Path(wordlist_file).exists():
+            ep_gob_f = out.output_path("recon", f"gobuster_ep_files_{ep_safe}")
+            cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_file,
+                   "-t", "20", "-q", "--no-error", "-o", str(ep_gob_f)]
+            try:
+                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                _register_proc(proc)
+                proc.communicate(timeout=180)
+                _deregister_proc(proc)
+                out.log_command("gobuster", cmd, ep_gob_f)
+            except Exception as e:
+                out.log_error("gobuster", cmd, str(e))
+
+        if feroxbuster and Path(wordlist_dir).exists():
+            ep_fer = out.output_path("recon", f"feroxbuster_ep_{ep_safe}")
+            cmd = [feroxbuster, "--url", ep_url, "--wordlist", wordlist_dir,
+                   "--depth", "1", "--threads", "20", "--quiet",
+                   "--status-codes", "200,204,301,302,307,401,403",
+                   "--output", str(ep_fer), "--insecure", "--auto-tune"]
+            vc.log(f"[endpoint_tools] feroxbuster on {ep_url}", "INFO")
+            try:
+                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                _register_proc(proc)
+                proc.communicate(timeout=180)
+                _deregister_proc(proc)
+                out.log_command("feroxbuster", cmd, ep_fer)
+            except Exception as e:
+                out.log_error("feroxbuster", cmd, str(e))
+
+    vc.status("endpoint_tools", "Endpoint Tools", "complete", "Done",
+              len(endpoints), len(endpoints))
+    vc.log("[endpoint_tools] Phase complete", "SUCCESS")
 
 
 # ─────────────────────────────────────────────
@@ -2109,8 +2438,15 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             _deregister_proc(proc)
             out_f.write_text(stdout, encoding="utf-8")
             out.log_command("sslscan", cmd, out_f)
+            # Filter "not vulnerable" lines — sslscan names each check
+            # and then states the result; without this, the vulnerability
+            # name in the line triggers a false-positive match.
+            _sslscan_filtered = "\n".join(
+                ln for ln in stdout.splitlines()
+                if "not vulnerable" not in ln.lower()
+            )
             for ftitle, (pat, risk, cve) in _TLS_VULN_PATTERNS.items():
-                if pat.search(stdout):
+                if pat.search(_sslscan_filtered):
                     out.add_finding(
                         title=ftitle, url=target["url"], port=port,
                         risk=risk, description=f"TLS issue: {ftitle}",
@@ -3051,7 +3387,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                 url=link, port=target["port"], risk="INFO",
                 description=f"Potentially sensitive endpoint: {link}",
                 sources="fracture-crawl", service=target["scheme"],
-                affected=link,
+                affected=link, output_file=str(crawl_out),
                 owasp="A04:2025 Insecure Design", nist="CM-7",
                 remediation="Review this endpoint for access controls.",
             )
@@ -3060,6 +3396,9 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     for js_url in set(all_js):
         try:
             r = sess.get(js_url, timeout=timeout)
+            _js_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', js_url.replace("://", "_"))[:60]
+            _js_out  = out.output_path(phase, f"js_{_js_safe}")
+            _js_out.write_text(r.text[:30000], encoding="utf-8")
             for pat, secret_type in _SECRET_PATTERNS:
                 m = pat.search(r.text)
                 if m:
@@ -3071,7 +3410,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                         description=f"A {secret_type} was found hardcoded in JavaScript: {js_url}",
                         output=f"Match: {m.group(0)[:100]}",
                         sources="fracture-crawl", service=target["scheme"],
-                        affected=js_url,
+                        affected=js_url, output_file=str(_js_out),
                         owasp="A04:2025 Insecure Design", nist="IA-5",
                         remediation="Remove hardcoded secrets from JavaScript. Use server-side secrets management.",
                     )
@@ -3693,6 +4032,12 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
     forms   = crawl_data.get("forms", [])
     vc.status(phase, "Auth Bypass", "running", "Default credentials", 0, 4)
 
+    # Shared evidence log for this phase — all findings reference this file
+    auth_out = out.output_path(phase, "auth_bypass_" + target["hostname"])
+    auth_out.write_text(
+        f"# Auth Bypass Testing — {url}\n\n", encoding="utf-8"
+    )
+
     # Find login forms
     login_forms = [f for f in forms if re.search(r'login|signin|auth', f.get("action", ""), re.I)
                    or any(i.get("type") == "password" for i in f.get("inputs", []))]
@@ -3716,13 +4061,19 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                 r = sess.post(action, data=data, timeout=timeout, allow_redirects=True)
                 # Heuristic: check if we're no longer on the login page
                 if r.status_code in (200, 302) and not re.search(r'login|invalid|incorrect|failed|error', r.text, re.I):
+                    with auth_out.open("a", encoding="utf-8") as _af:
+                        _af.write(
+                            f"## Default Credentials Accepted\n"
+                            f"URL: {action}\nUsername: {uname}\nPassword: {pwd}\n"
+                            f"Response: {r.status_code}\n{r.text[:2000]}\n\n"
+                        )
                     out.add_finding(
                         title="Default Credentials Accepted",
                         url=action, port=target["port"], risk="CRITICAL",
                         description=f"Default credentials '{uname}'/'{pwd}' were accepted at {action}.",
                         output=f"Username: {uname}\nPassword: {pwd}\nResponse: {r.status_code}",
                         sources="fracture-auth-bypass", service=target["scheme"],
-                        affected=action,
+                        affected=action, output_file=str(auth_out),
                         owasp="A07:2025 Identification and Authentication Failures",
                         nist="IA-5",
                         remediation="Change default credentials. Enforce strong password policy.",
@@ -3741,13 +4092,19 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
             try:
                 r = sess.post(action, data=data, timeout=timeout, allow_redirects=True)
                 if r.status_code in (200, 302) and not re.search(r'login|invalid|incorrect|failed', r.text, re.I):
+                    with auth_out.open("a", encoding="utf-8") as _af:
+                        _af.write(
+                            f"## SQLi Login Bypass\n"
+                            f"URL: {action}\nPayload: {usr_pay}\n"
+                            f"Response: {r.status_code}\n{r.text[:2000]}\n\n"
+                        )
                     out.add_finding(
                         title="Authentication Bypass via SQL Injection",
                         url=action, port=target["port"], risk="CRITICAL",
                         description=f"Login form at {action} is vulnerable to SQL injection authentication bypass.",
                         output=f"Payload: {usr_pay}\nResponse: {r.status_code}",
                         sources="fracture-auth-bypass", service=target["scheme"],
-                        affected=action,
+                        affected=action, output_file=str(auth_out),
                         owasp="A07:2025 Identification and Authentication Failures",
                         nist="IA-5",
                         remediation="Use parameterised queries for login. Implement account lockout.",
@@ -3767,13 +4124,18 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
             if r.status_code == 200:
                 # Check if responses differ for valid vs invalid users
                 vc.log(f"[auth_bypass] Password reset endpoint found: {rpath}", "INFO")
+                with auth_out.open("a", encoding="utf-8") as _af:
+                    _af.write(
+                        f"## Password Reset Endpoint\n"
+                        f"Path: {rpath}\nResponse: {r.status_code}\n{r.text[:2000]}\n\n"
+                    )
                 out.add_finding(
                     title="Password Reset Endpoint Exposed",
                     url=url + rpath, port=target["port"], risk="INFO",
                     description=f"Password reset endpoint found at {rpath}. Test for account enumeration by submitting valid/invalid usernames.",
                     output=f"GET {rpath} → {r.status_code}",
                     sources="fracture-auth-bypass", service=target["scheme"],
-                    affected=url + rpath,
+                    affected=url + rpath, output_file=str(auth_out),
                     owasp="A07:2025 Identification and Authentication Failures",
                     nist="IA-5",
                     remediation="Ensure password reset returns a consistent message regardless of whether the email exists.",
@@ -3803,12 +4165,19 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                     test_sess.cookies.set(cookie.name, none_token)
                     r = test_sess.get(url, timeout=timeout)
                     if r.status_code == 200:
+                        with auth_out.open("a", encoding="utf-8") as _af:
+                            _af.write(
+                                f"## JWT None Algorithm Bypass\n"
+                                f"Cookie: {cookie.name}\nToken: {none_token[:80]}\n"
+                                f"Response: {r.status_code}\n{r.text[:2000]}\n\n"
+                            )
                         out.add_finding(
                             title="JWT None Algorithm Authentication Bypass",
                             url=url, port=target["port"], risk="CRITICAL",
                             description="The application accepted a JWT with 'none' algorithm, bypassing signature verification.",
                             output=f"Cookie: {cookie.name}\nToken: {none_token[:80]}",
                             sources="fracture-auth-bypass", service=target["scheme"],
+                            output_file=str(auth_out),
                             owasp="A07:2025 Identification and Authentication Failures",
                             nist="IA-5",
                             remediation="Explicitly reject JWTs with 'none' algorithm. Require a strong signing algorithm.",
@@ -4666,6 +5035,34 @@ def main() -> None:
             except Exception as e:
                 vc.error(f"Phase crawl error: {e}")
                 pm.set_phase_status("crawl", "error", detail=str(e))
+
+        # ── Phase 3c: endpoint tools ──
+        # Collect endpoints from recon output files + crawl links, then run
+        # screenshot / crawl / brute-force against each discovered endpoint.
+        _ep_discovered: list = []
+        _hostname = target["hostname"]
+        for _gob_name in [f"gobuster_{_hostname}", f"gobuster_files_{_hostname}"]:
+            _gob_path = out.output_path("recon", _gob_name)
+            if _gob_path.exists():
+                try:
+                    _ep_discovered.extend(
+                        _parse_gobuster_output(_gob_path, target["url"])
+                    )
+                except Exception:
+                    pass
+        for _fer_name in [f"feroxbuster_{_hostname}", f"feroxbuster_files_{_hostname}"]:
+            _fer_path = out.output_path("recon", _fer_name)
+            if _fer_path.exists():
+                try:
+                    _ep_discovered.extend(_parse_feroxbuster_output(_fer_path))
+                except Exception:
+                    pass
+        _ep_discovered.extend(crawl_data.get("links", []))
+        if _ep_discovered:
+            try:
+                _phase_endpoint_tools(_ep_discovered, target, cfg, pm, out, sess)
+            except Exception as e:
+                vc.error(f"Phase endpoint_tools error: {e}")
 
         # ── Phase 3b: jwt ──
         if not _skip("jwt"):

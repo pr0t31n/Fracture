@@ -439,6 +439,11 @@ _WORDLIST_URLS = [
         "/Discovery/Web-Content/raft-large-directories.txt",
         "raft-large-directories.txt",
     ),
+    (
+        "https://raw.githubusercontent.com/danielmiessler/SecLists/refs/heads/master"
+        "/Discovery/DNS/namelist.txt",
+        "namelist.txt",
+    ),
 ]
 
 
