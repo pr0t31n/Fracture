@@ -12,6 +12,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import urllib.request
 
 # ---------------------------------------------------------------------------
 # ANSI colours
@@ -295,6 +296,58 @@ def install_git():
 
 
 # ---------------------------------------------------------------------------
+# Wordlists
+# ---------------------------------------------------------------------------
+_WORDLIST_URLS = [
+    (
+        "https://raw.githubusercontent.com/danielmiessler/SecLists/refs/heads/master"
+        "/Discovery/Web-Content/burp-parameter-names.txt",
+        "burp-parameter-names.txt",
+    ),
+    (
+        "https://raw.githubusercontent.com/danielmiessler/SecLists/refs/heads/master"
+        "/Discovery/Web-Content/raft-large-files.txt",
+        "raft-large-files.txt",
+    ),
+    (
+        "https://raw.githubusercontent.com/danielmiessler/SecLists/refs/heads/master"
+        "/Discovery/Web-Content/raft-large-directories.txt",
+        "raft-large-directories.txt",
+    ),
+]
+
+
+def wordlists_dir():
+    if platform.system() == "Windows":
+        return r"C:\wordlists"
+    return "/usr/share/wordlists"
+
+
+def install_wordlists():
+    banner("Phase: wordlists")
+    dest_dir = wordlists_dir()
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except PermissionError:
+        error(f"Cannot create {dest_dir} — run as root/sudo.")
+        return
+    info(f"Wordlist directory: {dest_dir}")
+    for url, filename in _WORDLIST_URLS:
+        dest = os.path.join(dest_dir, filename)
+        if os.path.isfile(dest):
+            info(f"{filename:45s} already present — skipping")
+            continue
+        info(f"Downloading {filename} ...")
+        step(url)
+        try:
+            urllib.request.urlretrieve(url, dest)
+            size_kb = os.path.getsize(dest) // 1024
+            info(f"{filename:45s} saved ({size_kb} KB)")
+        except Exception as exc:
+            error(f"Failed to download {filename}: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Symlinks
 # ---------------------------------------------------------------------------
 APP_DIR  = "/Users/pr0t31n/Fracture"
@@ -366,6 +419,15 @@ def run_check():
         else:
             warn(f"{label:30s} {Y}NOT FOUND{W}")
 
+    print(f"\n{C}Wordlists ({wordlists_dir()}):{W}")
+    for _, filename in _WORDLIST_URLS:
+        dest = os.path.join(wordlists_dir(), filename)
+        if os.path.isfile(dest):
+            size_kb = os.path.getsize(dest) // 1024
+            info(f"{filename:45s} {G}PRESENT{W} ({size_kb} KB)")
+        else:
+            warn(f"{filename:45s} {Y}MISSING{W}")
+
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -377,7 +439,7 @@ def print_summary(skips):
     info(f"Symlinks    : fracture → {APP_FILE}")
     info(f"OS detected : {OS}")
     print()
-    phases = ["system", "pip", "go", "gems", "git"]
+    phases = ["system", "pip", "go", "gems", "git", "wordlists"]
     for p in phases:
         status = f"{Y}SKIPPED{W}" if p in skips else f"{G}DONE{W}"
         print(f"  {p:10s} {status}")
@@ -388,6 +450,7 @@ def print_summary(skips):
     warn("jwt_tool installed from git (/opt/jwt_tool) — available as /usr/local/bin/jwt_tool.")
     warn("searchsploit: installed via exploitdb package or git (/opt/exploitdb).")
     warn("feroxbuster: apt/brew only — install manually on dnf/other systems (cargo install feroxbuster).")
+    info(f"Wordlists  : installed to {wordlists_dir()}")
 
 
 # ---------------------------------------------------------------------------
@@ -395,12 +458,13 @@ def print_summary(skips):
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Fracture installer")
-    parser.add_argument("--skip-apt",    "--skip-system", dest="skip_system", action="store_true")
-    parser.add_argument("--skip-pip",    action="store_true")
-    parser.add_argument("--skip-go",     action="store_true")
-    parser.add_argument("--skip-gems",   action="store_true")
-    parser.add_argument("--skip-git",    action="store_true")
-    parser.add_argument("--check",       action="store_true", help="Verify installation only")
+    parser.add_argument("--skip-apt",       "--skip-system", dest="skip_system", action="store_true")
+    parser.add_argument("--skip-pip",       action="store_true")
+    parser.add_argument("--skip-go",        action="store_true")
+    parser.add_argument("--skip-gems",      action="store_true")
+    parser.add_argument("--skip-git",       action="store_true")
+    parser.add_argument("--skip-wordlists", action="store_true")
+    parser.add_argument("--check",          action="store_true", help="Verify installation only")
     args = parser.parse_args()
 
     banner("Fracture — Web App Pentest Orchestrator — Installer")
@@ -442,6 +506,12 @@ def main():
     else:
         skips.add("git")
         warn("Skipping git tools.")
+
+    if not args.skip_wordlists:
+        install_wordlists()
+    else:
+        skips.add("wordlists")
+        warn("Skipping wordlists.")
 
     install_symlinks()
     run_check()

@@ -38,7 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.1.1"
+VERSION = "1.2.1"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -168,45 +168,79 @@ def _find_tool(name: str) -> "str | None":
     for p in _TOOL_PATHS.get(name, {}).get(platform.system(), []):
         if Path(p).exists():
             return p
-    # Fallback: ask gem for its bin directory (covers versioned gem paths)
+    # Fallback: ask gem for its directories (covers versioned/user gem installs)
     if name in _GEM_TOOLS:
-        gem = shutil.which("gem")
-        if gem:
+        for gem in filter(None, [shutil.which("gem"), "/usr/local/bin/gem",
+                                  "/opt/homebrew/bin/gem", "/usr/bin/gem"]):
+            if not Path(gem).exists():
+                continue
             try:
-                r = subprocess.run([gem, "environment", "gemdir"],
-                                   capture_output=True, text=True, timeout=5)
-                if r.returncode == 0:
-                    candidate = Path(r.stdout.strip()) / "bin" / name
-                    if candidate.exists():
-                        return str(candidate)
+                env_out = subprocess.run([gem, "environment"],
+                                         capture_output=True, text=True, timeout=5)
+                if env_out.returncode == 0:
+                    in_gem_paths = False
+                    for line in env_out.stdout.splitlines():
+                        # EXECUTABLE DIRECTORY: /usr/local/bin
+                        if "EXECUTABLE DIRECTORY:" in line:
+                            exec_dir = line.split(":", 1)[1].strip()
+                            candidate = Path(exec_dir) / name
+                            if candidate.exists():
+                                return str(candidate)
+                            in_gem_paths = False
+                        # GEM PATHS: section — each indented line is a path
+                        elif "GEM PATHS:" in line:
+                            in_gem_paths = True
+                        elif in_gem_paths:
+                            gem_path = line.strip().lstrip("- ")
+                            if not gem_path or gem_path.startswith("-"):
+                                in_gem_paths = False
+                                continue
+                            candidate = Path(gem_path) / "bin" / name
+                            if candidate.exists():
+                                return str(candidate)
             except Exception:
                 pass
+            break  # only try the first usable gem binary found
     return None
 
 
+# Flat wordlist directory populated by fracture's install.py --wordlists phase.
+_WORDLISTS_DIR = (
+    Path("C:/wordlists") if platform.system() == "Windows"
+    else Path("/usr/share/wordlists")
+)
+
 _SECLISTS_BASES = [
     "/usr/share/seclists",
-    "/opt/homebrew/share/seclists",
+    "/usr/local/share/seclists",        # Intel Mac Homebrew
+    "/opt/homebrew/share/seclists",     # Apple Silicon Homebrew
     "/usr/share/wordlists/seclists",
     "/opt/seclists",
 ]
 
 
 def _find_wordlist(rel_path: str, cfg_override: str = "") -> str:
-    """Return an existing wordlist path, trying cfg override then seclists bases.
+    """Return an existing wordlist path.
 
-    Returns the cfg_override if it exists, otherwise searches _SECLISTS_BASES
-    for rel_path.  Returns the original cfg_override (or rel_path) unchanged
-    if nothing is found, so callers that check Path.exists() still log correctly.
+    Search order:
+      1. cfg_override (or rel_path) if it exists directly.
+      2. _WORDLISTS_DIR / basename(rel_path)  — flat dir installed by install.py.
+      3. Each _SECLISTS_BASES entry / rel_path — full seclists install.
+      4. Falls back to _WORDLISTS_DIR / basename so missing-path messages are
+         consistent and point to the canonical install location.
     """
     primary = cfg_override or rel_path
     if Path(primary).exists():
         return primary
+    basename = Path(rel_path).name
+    flat = _WORDLISTS_DIR / basename
+    if flat.exists():
+        return str(flat)
     for base in _SECLISTS_BASES:
         candidate = Path(base) / rel_path
         if candidate.exists():
             return str(candidate)
-    return primary
+    return str(flat)
 
 
 def _find_shcheck() -> "str | None":
@@ -362,6 +396,98 @@ def _normalize_finding_title(title: str) -> str:
     for pat, repl in _TITLE_NORM_SUBS:
         t = pat.sub(repl, t)
     return t
+
+
+# ─────────────────────────────────────────────
+# OWASP Top 10 2025 mapping
+# ─────────────────────────────────────────────
+_OWASP_TOP10: dict = {
+    "A01": ("A01:2025 - Broken Access Control",
+            "https://owasp.org/Top10/A01_2025-Broken_Access_Control/"),
+    "A02": ("A02:2025 - Cryptographic Failures",
+            "https://owasp.org/Top10/A02_2025-Cryptographic_Failures/"),
+    "A03": ("A03:2025 - Injection",
+            "https://owasp.org/Top10/A03_2025-Injection/"),
+    "A04": ("A04:2025 - Insecure Design",
+            "https://owasp.org/Top10/A04_2025-Insecure_Design/"),
+    "A05": ("A05:2025 - Security Misconfiguration",
+            "https://owasp.org/Top10/A05_2025-Security_Misconfiguration/"),
+    "A06": ("A06:2025 - Vulnerable and Outdated Components",
+            "https://owasp.org/Top10/A06_2025-Vulnerable_and_Outdated_Components/"),
+    "A07": ("A07:2025 - Identification and Authentication Failures",
+            "https://owasp.org/Top10/A07_2025-Identification_and_Authentication_Failures/"),
+    "A08": ("A08:2025 - Software and Data Integrity Failures",
+            "https://owasp.org/Top10/A08_2025-Software_and_Data_Integrity_Failures/"),
+    "A09": ("A09:2025 - Security Logging and Monitoring Failures",
+            "https://owasp.org/Top10/A09_2025-Security_Logging_and_Monitoring_Failures/"),
+    "A10": ("A10:2025 - Server-Side Request Forgery",
+            "https://owasp.org/Top10/A10_2025-Server-Side_Request_Forgery_%28SSRF%29/"),
+}
+
+
+def _owasp_auto(title: str) -> str:
+    """Return the OWASP Top 10 2025 A-code that best fits a finding title."""
+    t = (title or "").lower()
+    if any(k in t for k in ("ssrf", "server-side request forgery", "server side request forgery")):
+        return "A10"
+    if any(k in t for k in ("sql injection", "sqli", "command injection", "code injection",
+                             "ldap injection", "xpath injection", "xxe", "template injection",
+                             "xss", "cross-site scripting", "html injection", "log4j", "injection")):
+        return "A03"
+    if any(k in t for k in ("broken access", "access control", "idor", "bola", "privilege",
+                             "unauthorized", "path traversal", "directory traversal",
+                             "insecure direct object")):
+        return "A01"
+    if any(k in t for k in ("tls", "ssl", "cipher", "certificate", "heartbleed", "poodle",
+                             "beast", "crime", "drown", "logjam", "freak", "sweet32", "lucky13",
+                             "rc4", "null cipher", "export cipher", "deprecated protocol",
+                             "cryptograph", "weak cipher")):
+        return "A02"
+    if any(k in t for k in ("authentication", "session", "credential", "password", "login",
+                             "jwt", "brute force", "account lockout", "multi-factor", "mfa",
+                             "identification")):
+        return "A07"
+    if any(k in t for k in ("exploit", "searchsploit", "public exploit", "vulnerable", "outdated",
+                             "component", "technology identified", "web server identified",
+                             "technology stack")):
+        return "A06"
+    if any(k in t for k in ("deserialization", "integrity", "supply chain", "unsigned")):
+        return "A08"
+    if any(k in t for k in ("logging", "monitoring", "audit", "detection")):
+        return "A09"
+    if any(k in t for k in ("csrf", "cross-site request forgery", "insecure design")):
+        return "A04"
+    return "A05"
+
+
+def _owasp_resolve(owasp: str, title: str = "") -> "tuple[str, str]":
+    """Return (canonical_name, url) from an OWASP code/label, or auto-detect from title."""
+    m = re.match(r'A(\d+)', owasp or "", re.I)
+    if m:
+        key = f"A{int(m.group(1)):02d}"
+        entry = _OWASP_TOP10.get(key)
+        if entry:
+            return entry
+    key = _owasp_auto(title)
+    return _OWASP_TOP10.get(key, ("", ""))
+
+
+def _parse_software(text: str) -> "tuple[str, str]":
+    """Parse a software identifier into (name, version).
+
+    'Apache/2.4.41 (Ubuntu)' → ('Apache', '2.4.41')
+    'PHP/7.4.3'              → ('PHP', '7.4.3')
+    'nginx 1.18.0'           → ('nginx', '1.18.0')
+    'WordPress'              → ('WordPress', '')
+    """
+    text = re.sub(r'\s*\(.*?\)\s*', ' ', text).strip()
+    if '/' in text:
+        name, _, ver = text.partition('/')
+        return name.strip(), ver.strip()
+    m = re.match(r'^(.*?)\s+(\d[\d.\-a-zA-Z]*)$', text.strip())
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return text.strip(), ""
 
 
 # ─────────────────────────────────────────────
@@ -944,7 +1070,7 @@ class OutputManager:
         "title", "datetime", "ip", "port", "hostname", "risk", "command",
         "description", "output", "cves", "sources", "service", "output_file",
         "affected", "exploitdb", "metasploit", "exploit_details",
-        "owasp", "nist", "remediation",
+        "owasp", "owasp_url", "nist", "remediation",
     ]
 
     _findings_lock: threading.Lock = threading.Lock()
@@ -1067,6 +1193,7 @@ class OutputManager:
             hostname = url
             _svc     = service or "http"
 
+        _owasp_name, _owasp_url = _owasp_resolve(owasp, title)
         entry = {
             "title":          title,
             "datetime":       ts,
@@ -1085,7 +1212,8 @@ class OutputManager:
             "exploitdb":      False,
             "metasploit":     False,
             "exploit_details": [],
-            "owasp":          owasp or "",
+            "owasp":          _owasp_name or owasp or "",
+            "owasp_url":      _owasp_url or "",
             "nist":           nist or "",
             "remediation":    remediation or "",
         }
@@ -1620,16 +1748,17 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     searchsploit = _find_tool("searchsploit")
     if searchsploit:
         _ss_terms: list = []
+        _HAS_VER = re.compile(r'\d+\.\d+')
         if server_hdr:
-            # "Apache/2.4.41 (Ubuntu)" → "Apache 2.4.41"
-            _sv = server_hdr.split("(")[0].strip()
-            _ss_terms.append(_sv)
+            _sw_name, _sw_ver = _parse_software(server_hdr)
+            if _sw_ver and _HAS_VER.search(_sw_ver):
+                _ss_terms.append(f"{_sw_name} {_sw_ver}")
         if powered_by:
-            _ss_terms.append(powered_by.split("(")[0].strip())
-        for cms in set(detected_cms):
-            _ss_terms.append(cms)
+            _pw_name, _pw_ver = _parse_software(powered_by)
+            if _pw_ver and _HAS_VER.search(_pw_ver):
+                _ss_terms.append(f"{_pw_name} {_pw_ver}")
         for _pname, _pver in _ww_versions:
-            if _pver:
+            if _pver and _HAS_VER.search(_pver):
                 _ss_terms.append(f"{_pname} {_pver}")
         seen_ss: set = set()
         for term in _ss_terms[:5]:   # cap at 5 queries
@@ -1768,7 +1897,10 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         except Exception as e:
             out.log_error("gobuster", cmd, str(e))
     else:
-        vc.log("[recon] gobuster not available — probing top paths", "WARNING")
+        if gobuster:
+            vc.log(f"[recon] gobuster found but wordlist missing: {wordlist}", "WARNING")
+        else:
+            vc.log("[recon] gobuster not found — probing top paths", "WARNING")
         found = []
         for mpath in _TOP_200_PATHS:
             try:
@@ -1802,6 +1934,44 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             out.log_error("feroxbuster", cmd, str(e))
     elif feroxbuster:
         vc.log(f"[recon] feroxbuster found but wordlist missing: {wordlist}", "WARNING")
+
+    # Second pass — raft-large-files.txt (finds files alongside directories)
+    vc.status(phase, "Recon", "running", "File discovery", 6, 10)
+    wordlist_files = _find_wordlist("raft-large-files.txt")
+    if Path(wordlist_files).exists():
+        if gobuster:
+            gob_files_out = out.output_path(phase, "gobuster_files_" + target["hostname"])
+            cmd = [gobuster, "dir", "-u", url, "-w", wordlist_files, "-t", "30",
+                   "-q", "--no-error", "-o", str(gob_files_out)]
+            vc.log("[recon] Running gobuster (files) ...", "INFO")
+            try:
+                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                _register_proc(proc)
+                proc.communicate(timeout=300)
+                _deregister_proc(proc)
+                out.log_command("gobuster", cmd, gob_files_out)
+            except Exception as e:
+                out.log_error("gobuster", cmd, str(e))
+        if feroxbuster:
+            fer_files_out = out.output_path(phase, "feroxbuster_files_" + target["hostname"])
+            cmd = [
+                feroxbuster, "--url", url, "--wordlist", wordlist_files,
+                "--depth", "2", "--threads", "30", "--quiet",
+                "--status-codes", "200,204,301,302,307,401,403",
+                "--output", str(fer_files_out), "--insecure",
+                "--auto-tune",
+            ]
+            vc.log("[recon] Running feroxbuster (files) ...", "INFO")
+            try:
+                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                _register_proc(proc)
+                proc.communicate(timeout=300)
+                _deregister_proc(proc)
+                out.log_command("feroxbuster", cmd, fer_files_out)
+            except Exception as e:
+                out.log_error("feroxbuster", cmd, str(e))
+    else:
+        vc.log(f"[recon] file wordlist missing: {wordlist_files} — skipping files pass", "WARNING")
 
     vc.status(phase, "Recon", "running", "Directory listing check", 7, 10)
     try:
@@ -1966,15 +2136,41 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             _deregister_proc(proc)
             out_f.write_text(stdout, encoding="utf-8")
             out.log_command("testssl.sh", cmd, out_f)
+            # Filter out (OK) lines before pattern matching to avoid false positives
+            _ok_filtered = "\n".join(
+                ln for ln in stdout.splitlines() if "(OK)" not in ln
+            )
             for ftitle, (pat, risk, cve) in _TLS_VULN_PATTERNS.items():
-                if pat.search(stdout):
+                if pat.search(_ok_filtered):
                     out.add_finding(
                         title=ftitle, url=target["url"], port=port,
                         risk=risk, description=f"TLS issue: {ftitle}",
                         cves=cve, sources="testssl.sh", service="https",
                         output_file=str(out_f),
-                        owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                        owasp="A02", nist="SC-8",
                         remediation="Disable weak protocols. Enable TLS 1.2/1.3 only.",
+                    )
+            # Detect missing security headers reported by testssl
+            _TESTSSL_HDR_RISK = {
+                "Strict-Transport-Security": "MEDIUM",
+                "Content-Security-Policy":   "MEDIUM",
+                "X-Frame-Options":           "MEDIUM",
+                "X-Content-Type-Options":    "LOW",
+                "Referrer-Policy":           "LOW",
+                "Permissions-Policy":        "LOW",
+            }
+            for _hdr, _hr in _TESTSSL_HDR_RISK.items():
+                if re.search(rf'{re.escape(_hdr)}\s+not offered', stdout, re.I):
+                    out.add_finding(
+                        title=f"Missing Security Header: {_hdr}",
+                        url=target["url"], port=port, risk=_hr,
+                        description=f"The security header '{_hdr}' is not present.",
+                        output=f"Missing: {_hdr}",
+                        affected=_hdr,
+                        sources="testssl.sh", service="https",
+                        output_file=str(out_f),
+                        owasp="A05", nist="SC-8",
+                        remediation=f"Add the '{_hdr}' HTTP response header.",
                     )
         except Exception as e:
             out.log_error("testssl.sh", cmd, str(e))
@@ -2092,16 +2288,18 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Security Headers", "running", "Security header check", 1, 5)
 
     is_https = target["is_https"]
-    for hdr_name, risk, title, desc, nist_ctrl, remed in _SECURITY_HEADERS:
+    for hdr_name, risk, _unused_title, desc, nist_ctrl, remed in _SECURITY_HEADERS:
         if hdr_name == "Strict-Transport-Security" and not is_https:
             continue
         if hdr_name not in headers:
             out.add_finding(
-                title=title, url=url, port=target["port"], risk=risk,
+                title=f"Missing Security Header: {hdr_name}",
+                url=url, port=target["port"], risk=risk,
                 description=desc, sources="fracture-headers",
                 service=target["scheme"], output_file=str(out_f),
-                owasp="A05:2025 Security Misconfiguration",
-                nist=nist_ctrl, remediation=remed,
+                owasp="A05", nist=nist_ctrl, remediation=remed,
+                output=f"Missing: {hdr_name}",
+                affected=hdr_name,
             )
 
     vc.status(phase, "Security Headers", "running", "CORS check", 2, 5)
