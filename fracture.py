@@ -38,7 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1453,7 +1453,7 @@ def _normalize_url(base: str, href: str) -> "str | None":
         p      = urllib.parse.urlparse(joined)
         if p.scheme not in ("http", "https"):
             return None
-        return joined
+        return joined.rstrip("/") if not p.path or p.path == "/" else joined
     except Exception:
         return None
 
@@ -1716,7 +1716,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _SKIP_WW = {
                     "Script", "HTML", "Title", "Meta-Refresh", "IP", "Country",
                     "Email", "Cookies", "Open-Graph-Protocol", "HTML5",
-                    "Bootstrap", "jQuery", "X-Powered-By", "Server",
+                    "Bootstrap", "jQuery", "X-Powered-By", "Server", "HTTPServer",
                 }
                 # Track which security headers whatweb observed as present
                 ww_found_sec_hdrs: set = set()
@@ -1743,15 +1743,19 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                 # Uncommon-Headers plugin — each string is an unknown header
                                 if pname == "Uncommon-Headers":
                                     for hdr_val in pdata.get("string", []):
-                                        hdr_name = hdr_val.split(":")[0].strip()
+                                        _hv_parts = hdr_val.split(":", 1)
+                                        hdr_name  = _hv_parts[0].strip()
+                                        hdr_value = _hv_parts[1].strip() if len(_hv_parts) > 1 else ""
                                         out.add_finding(
                                             title=f"Unknown Header Identified: {hdr_name}",
                                             url=url, port=target["port"], risk="INFO",
                                             description=(
                                                 f"An uncommon or non-standard HTTP header "
                                                 f"'{hdr_name}' was observed in the response."
+                                                + (f" Value: {hdr_value}" if hdr_value else "")
                                             ),
-                                            output=f"Header: {hdr_val}",
+                                            output=f"Header: {hdr_name}"
+                                                   + (f"\nValue: {hdr_value}" if hdr_value else ""),
                                             sources="whatweb", service=target["scheme"],
                                             output_file=str(ww_out),
                                             owasp="A05:2025 Security Misconfiguration",
@@ -1904,7 +1908,10 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 out_f.write_text(r.text, encoding="utf-8")
                 vc.log(f"[recon] Found {rpath} ({len(r.text)} bytes)", "SUCCESS")
                 if rpath == "/robots.txt":
-                    disallowed = re.findall(r'(?i)disallow:\s*(\S+)', r.text)
+                    _raw_disallowed = re.findall(r'(?i)disallow:\s*(\S+)', r.text)
+                    # Skip catch-all entries (/, /*, *) — not specific sensitive paths
+                    disallowed = [p for p in _raw_disallowed
+                                  if p not in ("/", "/*", "*")]
                     if disallowed:
                         out.add_finding(
                             title="Sensitive Paths Disclosed in robots.txt",
@@ -1993,13 +2000,15 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     out_f    = out.output_path(phase, "gobuster_" + target["hostname"])
     if gobuster and Path(wordlist).exists():
         cmd = [gobuster, "dir", "-u", url, "-w", wordlist, "-t", "30",
-               "-q", "--no-error", "-o", str(out_f)]
+               "-q", "-k", "--wildcard-force", "-o", str(out_f)]
         vc.log("[recon] Running gobuster ...", "INFO")
         try:
-            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             _register_proc(proc)
-            proc.communicate(timeout=300)
+            _, gob_err = proc.communicate(timeout=300)
             _deregister_proc(proc)
+            if gob_err:
+                vc.log(f"[recon] gobuster stderr: {gob_err[:500]}", "WARNING")
             out.log_command("gobuster", cmd, out_f)
         except Exception as e:
             out.log_error("gobuster", cmd, str(e))
@@ -2049,13 +2058,15 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         if gobuster:
             gob_files_out = out.output_path(phase, "gobuster_files_" + target["hostname"])
             cmd = [gobuster, "dir", "-u", url, "-w", wordlist_files, "-t", "30",
-                   "-q", "--no-error", "-o", str(gob_files_out)]
+                   "-q", "-k", "--wildcard-force", "-o", str(gob_files_out)]
             vc.log("[recon] Running gobuster (files) ...", "INFO")
             try:
-                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 _register_proc(proc)
-                proc.communicate(timeout=300)
+                _, gob_err = proc.communicate(timeout=300)
                 _deregister_proc(proc)
+                if gob_err:
+                    vc.log(f"[recon] gobuster (files) stderr: {gob_err[:500]}", "WARNING")
                 out.log_command("gobuster", cmd, gob_files_out)
             except Exception as e:
                 out.log_error("gobuster", cmd, str(e))
@@ -2329,13 +2340,15 @@ def _phase_endpoint_tools(
         if gobuster and Path(wordlist_dir).exists():
             ep_gob = out.output_path("recon", f"gobuster_ep_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_dir,
-                   "-t", "20", "-q", "--no-error", "-o", str(ep_gob)]
+                   "-t", "20", "-q", "-k", "--wildcard-force", "-o", str(ep_gob)]
             vc.log(f"[endpoint_tools] gobuster on {ep_url}", "INFO")
             try:
-                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 _register_proc(proc)
-                proc.communicate(timeout=180)
+                _, gob_err = proc.communicate(timeout=180)
                 _deregister_proc(proc)
+                if gob_err:
+                    vc.log(f"[endpoint_tools] gobuster stderr: {gob_err[:500]}", "WARNING")
                 out.log_command("gobuster", cmd, ep_gob)
             except Exception as e:
                 out.log_error("gobuster", cmd, str(e))
@@ -2343,12 +2356,14 @@ def _phase_endpoint_tools(
         if gobuster and Path(wordlist_file).exists():
             ep_gob_f = out.output_path("recon", f"gobuster_ep_files_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_file,
-                   "-t", "20", "-q", "--no-error", "-o", str(ep_gob_f)]
+                   "-t", "20", "-q", "-k", "--wildcard-force", "-o", str(ep_gob_f)]
             try:
-                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 _register_proc(proc)
-                proc.communicate(timeout=180)
+                _, gob_err = proc.communicate(timeout=180)
                 _deregister_proc(proc)
+                if gob_err:
+                    vc.log(f"[endpoint_tools] gobuster (files) stderr: {gob_err[:500]}", "WARNING")
                 out.log_command("gobuster", cmd, ep_gob_f)
             except Exception as e:
                 out.log_error("gobuster", cmd, str(e))
@@ -2438,12 +2453,15 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             _deregister_proc(proc)
             out_f.write_text(stdout, encoding="utf-8")
             out.log_command("sslscan", cmd, out_f)
-            # Filter "not vulnerable" lines — sslscan names each check
-            # and then states the result; without this, the vulnerability
-            # name in the line triggers a false-positive match.
+            # Filter "not vulnerable" lines and bare section headers.
+            # sslscan emits lines like "  Heartbleed:" (header only, no result)
+            # followed by per-protocol result lines. The header line survives a
+            # "not vulnerable" filter and falsely matches heartbleed patterns.
+            _SSL_SECTION_HDR = re.compile(r'^\s+[\w ,()/-]+:\s*$')
             _sslscan_filtered = "\n".join(
                 ln for ln in stdout.splitlines()
                 if "not vulnerable" not in ln.lower()
+                and not _SSL_SECTION_HDR.match(ln)
             )
             for ftitle, (pat, risk, cve) in _TLS_VULN_PATTERNS.items():
                 if pat.search(_sslscan_filtered):
@@ -2474,9 +2492,17 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             _deregister_proc(proc)
             out_f.write_text(stdout, encoding="utf-8")
             out.log_command("testssl.sh", cmd, out_f)
-            # Filter out (OK) lines before pattern matching to avoid false positives
+            # Filter out (OK) lines, noise lines, and embedded HTTP content
+            # that can cause false-positive pattern matches.
+            _TESTSSL_NOISE = re.compile(
+                r'Testing robust forward secrecy'
+                r'|User-agent:'
+                r'|Disallow:',
+                re.I,
+            )
             _ok_filtered = "\n".join(
-                ln for ln in stdout.splitlines() if "(OK)" not in ln
+                ln for ln in stdout.splitlines()
+                if "(OK)" not in ln and not _TESTSSL_NOISE.search(ln)
             )
             for ftitle, (pat, risk, cve) in _TLS_VULN_PATTERNS.items():
                 if pat.search(_ok_filtered):
@@ -2496,6 +2522,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 "X-Content-Type-Options":    "LOW",
                 "Referrer-Policy":           "LOW",
                 "Permissions-Policy":        "LOW",
+                "X-XSS-Protection":          "LOW",
             }
             for _hdr, _hr in _TESTSSL_HDR_RISK.items():
                 if re.search(rf'{re.escape(_hdr)}\s+not offered', stdout, re.I):
@@ -2574,6 +2601,9 @@ _SECURITY_HEADERS = [
     ("Permissions-Policy",        "LOW",    "Missing Permissions-Policy Header",
      "Without Permissions-Policy, browser features may be accessible unintentionally.",
      "CM-7",  "Add: Permissions-Policy: geolocation=(), camera=(), microphone=()"),
+    ("X-XSS-Protection",          "LOW",    "Missing X-XSS-Protection Header",
+     "Without X-XSS-Protection, older browsers lack an extra XSS filter hint.",
+     "SI-10", "Add: X-XSS-Protection: 1; mode=block"),
 ]
 
 
@@ -3352,9 +3382,10 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
 
     while queue_urls and page_count < max_pages:
         current_url, depth = queue_urls.pop(0)
-        if current_url in visited:
+        _norm_cur = current_url.rstrip("/")
+        if _norm_cur in visited:
             continue
-        visited.add(current_url)
+        visited.add(_norm_cur)
         page_count += 1
         vc.status(phase, "Crawl", "running", f"Page {page_count}", page_count, max_pages)
         data = _crawl_page(current_url, sess, timeout, url)
@@ -3365,7 +3396,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         all_links.extend(data["links"])
         if depth < max_depth:
             for link in data["links"]:
-                if link not in visited and _same_origin(url, link):
+                if link.rstrip("/") not in visited and _same_origin(url, link):
                     queue_urls.append((link, depth + 1))
 
     vc.log(f"[crawl] Visited {page_count} pages, {len(all_forms)} forms, {len(all_js)} JS files", "INFO")
@@ -4301,8 +4332,11 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
     nuclei = _find_tool("nuclei")
     if nuclei and not fast:
         nuc_out = out.output_path(phase, "nuclei_" + target["hostname"])
-        cmd     = [nuclei, "-u", url, "-severity", "critical,high,medium",
-                   "-silent", "-json", "-o", str(nuc_out)]
+        _nuc_templates_dir = "/opt/nuclei-templates"
+        cmd = [nuclei, "-u", url, "-s", "critical,high,medium",
+               "-silent", "-jsonl", "-no-interactsh", "-o", str(nuc_out)]
+        if Path(_nuc_templates_dir).is_dir():
+            cmd += ["-t", _nuc_templates_dir]
         vc.log("[vulnscan] Running nuclei ...", "INFO")
         try:
             proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -4488,9 +4522,10 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
 
     while queue_urls and page_count < max_pages:
         current_url, depth = queue_urls.pop(0)
-        if current_url in visited:
+        _norm_cur = current_url.rstrip("/")
+        if _norm_cur in visited:
             continue
-        visited.add(current_url)
+        visited.add(_norm_cur)
         page_count += 1
         data = _crawl_page(current_url, auth_sess, timeout, url)
         if data["error"]:
@@ -4499,7 +4534,7 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
         auth_links.extend(data["links"])
         if depth < max_depth:
             for link in data["links"]:
-                if link not in visited and _same_origin(url, link):
+                if link.rstrip("/") not in visited and _same_origin(url, link):
                     queue_urls.append((link, depth + 1))
 
     vc.log(f"[auth_recon] Authenticated crawl: {page_count} pages", "INFO")
@@ -4890,10 +4925,13 @@ def main() -> None:
         ))
 
     # Determine target URLs
-    target_url  = cfg.get("target_url", "")
-    target_urls = cfg.get("target_urls", [])
+    target_url  = cfg.get("target_url", "").rstrip("/")
+    target_urls = [u.rstrip("/") for u in cfg.get("target_urls", []) if u]
     if target_url:
         target_urls = [target_url] + [u for u in target_urls if u != target_url]
+    # Deduplicate while preserving order
+    _seen_urls: set = set()
+    target_urls = [u for u in target_urls if u not in _seen_urls and not _seen_urls.add(u)]
     if not target_urls:
         vc.log("No target URL specified. Use --url or set target_url in settings.", "ERROR")
         sys.exit(1)
