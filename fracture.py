@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.4.4"
+VERSION = "1.4.5"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1929,7 +1929,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                 # header names as a comma-separated list inside a single
                                 # string entry.  Split on commas first, then on ':' for
                                 # any items that carry a value, and emit one finding each.
-                                if pname == "Uncommon-Headers":
+                                if pname in ("UncommonHeaders", "Uncommon-Headers"):
                                     for hdr_val in pdata.get("string", []):
                                         for _raw_item in hdr_val.split(","):
                                             _raw_item = _raw_item.strip()
@@ -4540,38 +4540,44 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
     if nuclei and not fast:
         nuc_out = out.output_path(phase, "nuclei_" + target["hostname"])
         _nuc_templates_dir = "/opt/nuclei-templates"
+        # Use -json (JSONL output to stdout); capture stdout directly so the
+        # output file is always written even when nuclei finds nothing.
+        # stderr is captured and logged so flag errors are visible.
         cmd = [nuclei, "-u", url, "-s", "critical,high,medium",
-               "-silent", "-jsonl", "-no-interactsh", "-o", str(nuc_out)]
+               "-silent", "-json", "-no-interactsh"]
         if Path(_nuc_templates_dir).is_dir():
             cmd += ["-t", _nuc_templates_dir]
         vc.log("[vulnscan] Running nuclei ...", "INFO")
         try:
-            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             _register_proc(proc)
-            proc.communicate(timeout=timeout)
+            nuc_stdout, nuc_stderr = proc.communicate(timeout=timeout)
             _deregister_proc(proc)
+            if nuc_stderr:
+                vc.log(f"[vulnscan] nuclei stderr: {nuc_stderr[:500]}", "WARNING")
+            # Always write the output file (may be empty if no findings)
+            nuc_out.write_text(nuc_stdout, encoding="utf-8")
             out.log_command("nuclei", cmd, nuc_out)
-            if nuc_out.exists():
-                for line in nuc_out.read_text(encoding="utf-8").splitlines():
-                    try:
-                        item    = json.loads(line)
-                        sev     = _NUCLEI_SEVERITY_MAP.get(item.get("info", {}).get("severity", "info"), "INFO")
-                        ntitle  = item.get("info", {}).get("name", "Nuclei Finding")
-                        matched = item.get("matched-at", url)
-                        desc    = item.get("info", {}).get("description", "")
-                        cves    = ",".join(item.get("info", {}).get("classification", {}).get("cve-id", []))
-                        out.add_finding(
-                            title=f"Nuclei: {ntitle}",
-                            url=matched, port=target["port"], risk=sev,
-                            description=desc, sources="nuclei",
-                            service=target["scheme"], output_file=str(nuc_out),
-                            cves=cves, affected=matched,
-                            owasp="A06:2025 Vulnerable and Outdated Components",
-                            nist="SI-2",
-                            remediation="Apply vendor patches and update affected components.",
-                        )
-                    except Exception:
-                        pass
+            for line in nuc_stdout.splitlines():
+                try:
+                    item    = json.loads(line)
+                    sev     = _NUCLEI_SEVERITY_MAP.get(item.get("info", {}).get("severity", "info"), "INFO")
+                    ntitle  = item.get("info", {}).get("name", "Nuclei Finding")
+                    matched = item.get("matched-at", url)
+                    desc    = item.get("info", {}).get("description", "")
+                    cves    = ",".join(item.get("info", {}).get("classification", {}).get("cve-id", []))
+                    out.add_finding(
+                        title=f"Nuclei: {ntitle}",
+                        url=matched, port=target["port"], risk=sev,
+                        description=desc, sources="nuclei",
+                        service=target["scheme"], output_file=str(nuc_out),
+                        cves=cves, affected=matched,
+                        owasp="A06:2025 Vulnerable and Outdated Components",
+                        nist="SI-2",
+                        remediation="Apply vendor patches and update affected components.",
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             out.log_error("nuclei", cmd, str(e))
     else:
