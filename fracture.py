@@ -38,7 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1706,10 +1706,20 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 # HTTP 200 with a body identical to the catch-all 404 → false positive
                 if r.status_code == 200 and _is_catchall_response(r, _admin_baseline):
                     continue
+                # HTTP 200: panel accessible without authentication (CWE-306) → HIGH
+                # HTTP 401/403/redirect: panel exists but access controls are enforced → MEDIUM
+                _admin_risk = "HIGH" if r.status_code == 200 else "MEDIUM"
+                _admin_desc = (
+                    f"Administrative interface accessible without authentication at {apath} "
+                    f"(HTTP {r.status_code}). CWE-306 (Missing Authentication for Critical Function)."
+                    if r.status_code == 200 else
+                    f"Administrative interface found at {apath} (HTTP {r.status_code}). "
+                    f"Panel exists; authentication controls are enforced."
+                )
                 out.add_finding(
                     title="Admin Panel Exposed",
-                    url=url + apath, port=target["port"], risk="MEDIUM",
-                    description=f"Administrative interface found at {apath} (HTTP {r.status_code}).",
+                    url=url + apath, port=target["port"], risk=_admin_risk,
+                    description=_admin_desc,
                     output=f"GET {apath} → {r.status_code}",
                     sources="fracture-recon", service=target["scheme"],
                     affected=url + apath,
@@ -1868,24 +1878,37 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
 # ─────────────────────────────────────────────
 _TLS_VULN_PATTERNS = {
     # Aligned with Scattershot3 finding titles for cross-tool deduplication
+    # Risk levels based on NVD CVSS scores and pentest industry consensus.
     "Deprecated Protocol Enabled: SSLv2":   (re.compile(r'SSLv2\s+enabled|Accepted\s+SSLv2', re.I),   "CRITICAL", "CVE-2016-0800"),
     "Deprecated Protocol Enabled: SSLv3":   (re.compile(r'SSLv3\s+enabled|Accepted\s+SSLv3', re.I),   "HIGH",     "CVE-2014-3566"),
-    "Deprecated Protocol Enabled: TLSv1.0": (re.compile(r'TLSv1\.0\s+enabled|Accepted\s+TLSv1\b', re.I), "HIGH", ""),
-    "Deprecated Protocol Enabled: TLSv1.1": (re.compile(r'TLSv1\.1\s+enabled|Accepted\s+TLSv1\.1', re.I), "HIGH", ""),
-    "Weak Cipher Identified: RC4":          (re.compile(r'\bRC4\b', re.I),          "HIGH",     "CVE-2013-2566"),
+    # TLSv1.0: MEDIUM — BEAST (CVE-2011-3389, CVSS 4.3) is largely mitigated by browser 1/n-1 splitting;
+    # non-trivially exploitable in practice. PCI DSS prohibits it post-2018. CWE-326.
+    "Deprecated Protocol Enabled: TLSv1.0": (re.compile(r'TLSv1\.0\s+enabled|Accepted\s+TLSv1\b', re.I), "MEDIUM", "CVE-2011-3389"),
+    # TLSv1.1: MEDIUM — deprecated per RFC 8996 (2021); no forward secrecy; SHA-1 integrity.
+    # No single exploited CVE but formally deprecated and prohibited by PCI DSS. CWE-326.
+    "Deprecated Protocol Enabled: TLSv1.1": (re.compile(r'TLSv1\.1\s+enabled|Accepted\s+TLSv1\.1', re.I), "MEDIUM", ""),
+    # RC4: MEDIUM — statistical bias (CVE-2013-2566 CVSS 4.3); Bar Mitzvah attack (CVE-2015-2808 CVSS 4.3).
+    # RFC 7465 prohibits RC4 in TLS. CWE-327.
+    "Weak Cipher Identified: RC4":          (re.compile(r'\bRC4\b', re.I),          "MEDIUM",   "CVE-2013-2566, CVE-2015-2808"),
     "Weak Cipher Identified: NULL":         (re.compile(r'NULL\s+Cipher|NULL-', re.I), "CRITICAL", ""),
-    "Weak Cipher Identified: EXPORT":       (re.compile(r'\bEXPORT\b', re.I),       "HIGH",     "CVE-2015-0204"),
-    "Weak Cipher Identified: DES":          (re.compile(r'\bDES\b(?!-CBC3)', re.I), "HIGH",     ""),
+    # EXPORT: MEDIUM — FREAK attack (CVE-2015-0204 CVSS 4.3); requires active MITM. CWE-326.
+    "Weak Cipher Identified: EXPORT":       (re.compile(r'\bEXPORT\b', re.I),       "MEDIUM",   "CVE-2015-0204"),
+    # DES: MEDIUM — SWEET32 birthday attack on 64-bit block ciphers (CVE-2016-2183). CWE-326.
+    "Weak Cipher Identified: DES":          (re.compile(r'\bDES\b(?!-CBC3)', re.I), "MEDIUM",   "CVE-2016-2183"),
     "Heartbleed (CVE-2014-0160) Vulnerability Detected":
                                             (re.compile(r'heartbleed|VULNERABLE.*heartbleed', re.I), "CRITICAL", "CVE-2014-0160"),
     "SSL/TLS Vulnerability: POODLE":        (re.compile(r'POODLE|VULNERABLE.*poodle', re.I),  "HIGH",   "CVE-2014-3566"),
     "SSL/TLS Vulnerability: BEAST":         (re.compile(r'BEAST|VULNERABLE.*beast', re.I),    "MEDIUM", "CVE-2011-3389"),
     "SSL/TLS Vulnerability: CRIME":         (re.compile(r'CRIME|VULNERABLE.*crime', re.I),    "HIGH",   "CVE-2012-4929"),
+    # DROWN: HIGH — cross-protocol Bleichenbacher oracle via SSLv2 decrypts TLS sessions
+    # (CVE-2016-0800 CVSS v3 5.9 MEDIUM; pentest consensus HIGH given C:H impact). CWE-310.
     "SSL/TLS Vulnerability: DROWN":         (re.compile(r'DROWN|VULNERABLE.*drown', re.I),    "HIGH",   "CVE-2016-0800"),
     "SSL/TLS Vulnerability: LOGJAM":        (re.compile(r'LOGJAM|VULNERABLE.*logjam', re.I),  "HIGH",   "CVE-2015-4000"),
-    "SSL/TLS Vulnerability: FREAK":         (re.compile(r'FREAK|VULNERABLE.*freak', re.I),    "HIGH",   "CVE-2015-0204"),
+    "SSL/TLS Vulnerability: FREAK":         (re.compile(r'FREAK|VULNERABLE.*freak', re.I),    "MEDIUM", "CVE-2015-0204"),
     "SSL/TLS Vulnerability: SWEET32":       (re.compile(r'SWEET32|3DES.*cipher|DES-CBC3', re.I), "MEDIUM", "CVE-2016-2183"),
     "SSL/TLS Vulnerability: LUCKY13":       (re.compile(r'LUCKY13|lucky13', re.I),            "MEDIUM", "CVE-2013-0169"),
+    # Self-Signed: MEDIUM — eliminates PKI trust chain, enabling MITM; requires attacker positioning.
+    # CWE-295 (Improper Certificate Validation), CWE-296.
     "SSL/TLS Certificate: Self-Signed":     (re.compile(r'self.signed|Self signed', re.I),    "MEDIUM", ""),
     "SSL/TLS Certificate: Expired":         (re.compile(r'expired|NOT after.*passed', re.I),  "HIGH",   ""),
 }
@@ -2000,8 +2023,8 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
 # ─────────────────────────────────────────────
 _SECURITY_HEADERS = [
     ("Strict-Transport-Security", "HIGH",   "Missing HSTS Header",
-     "Without HSTS, browsers may connect over plain HTTP enabling downgrade attacks.",
-     "AC-17", "Add: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload"),
+     "Without HSTS, browsers may connect over plain HTTP enabling SSL-stripping downgrade attacks (RFC 6797). CWE-523, CWE-319.",
+     "SC-8", "Add: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload"),
     ("Content-Security-Policy",   "MEDIUM", "Missing Content-Security-Policy Header",
      "Without CSP, the application is susceptible to XSS attacks.",
      "SI-10", "Implement a Content-Security-Policy to restrict resource loading."),
@@ -2995,7 +3018,10 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
                         url=url, port=port, risk="CRITICAL",
                         description=(
                             "The server accepted a JWT with 'alg': 'none' and an empty "
-                            "signature, bypassing cryptographic validation entirely."
+                            "signature, bypassing cryptographic validation entirely. "
+                            "An attacker can forge arbitrary token claims with no credentials. "
+                            "CWE-347 (Improper Verification of Cryptographic Signature). "
+                            "CVSS 9.8 CRITICAL (CVE-2015-9235)."
                         ),
                         output=(
                             f"Original alg: {alg}\n"
@@ -3003,6 +3029,7 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
                             f"Forged (none) response: HTTP {r_none.status_code}"
                         ),
                         sources="fracture-jwt", service=target["scheme"],
+                        cves="CVE-2015-9235, CVE-2016-10555",
                         owasp="A07:2025 Identification and Authentication Failures", nist="IA-5",
                         remediation=(
                             "Explicitly reject tokens specifying 'alg': 'none'. "
@@ -3039,9 +3066,14 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
                 out.add_finding(
                     title="JWT Vulnerability Confirmed by jwt_tool",
                     url=url, port=port, risk="CRITICAL",
-                    description="jwt_tool confirmed a JWT algorithm confusion vulnerability.",
+                    description=(
+                        "jwt_tool confirmed a JWT algorithm confusion vulnerability. "
+                        "CWE-347 (Improper Verification of Cryptographic Signature). "
+                        "CVSS 9.8 CRITICAL (CVE-2015-9235)."
+                    ),
                     output=stdout_jt[:2000], sources="jwt_tool",
                     service=target["scheme"], output_file=str(jt_out),
+                    cves="CVE-2015-9235, CVE-2016-10555",
                     owasp="A07:2025 Identification and Authentication Failures", nist="IA-5",
                     remediation=(
                         "Validate algorithm server-side. Reject 'none' and weak HMAC "
@@ -3594,39 +3626,51 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
 # ─────────────────────────────────────────────
 _SENSITIVE_FILES: list = [
     # (path, risk, description)
-    ("/.git/HEAD",              "CRITICAL", "Git repository HEAD file exposed"),
-    ("/.git/config",            "CRITICAL", "Git repository config exposed"),
-    ("/.git/COMMIT_EDITMSG",    "CRITICAL", "Git repository commit message exposed"),
-    ("/.env",                   "CRITICAL", ".env environment file exposed"),
-    ("/.env.local",             "CRITICAL", ".env.local environment file exposed"),
-    ("/.env.production",        "CRITICAL", ".env.production environment file exposed"),
-    ("/wp-config.php",          "HIGH",     "WordPress config file exposed"),
-    ("/config.php",             "HIGH",     "PHP config file exposed"),
-    ("/configuration.php",      "HIGH",     "PHP configuration file exposed"),
-    ("/settings.py",            "HIGH",     "Python settings file exposed"),
-    ("/database.yml",           "HIGH",     "Database configuration file exposed"),
-    ("/index.php.bak",          "HIGH",     "PHP backup file exposed"),
-    ("/index.php~",             "HIGH",     "PHP backup file exposed"),
-    ("/site.tar.gz",            "HIGH",     "Site archive exposed"),
-    ("/backup.zip",             "HIGH",     "Backup archive exposed"),
-    ("/db.sql",                 "HIGH",     "SQL dump exposed"),
-    ("/dump.sql",               "HIGH",     "SQL dump exposed"),
-    ("/.htpasswd",              "MEDIUM",   ".htpasswd credentials file exposed"),
-    ("/.htaccess",              "MEDIUM",   ".htaccess file exposed"),
-    ("/phpinfo.php",            "MEDIUM",   "PHP info page exposed"),
-    ("/info.php",               "MEDIUM",   "PHP info page exposed"),
-    ("/test.php",               "MEDIUM",   "PHP test page exposed"),
-    ("/server-status",          "MEDIUM",   "Apache server-status exposed"),
-    ("/server-info",            "MEDIUM",   "Apache server-info exposed"),
-    ("/composer.json",          "LOW",      "composer.json exposed (dependency info)"),
-    ("/package.json",           "LOW",      "package.json exposed (dependency info)"),
-    ("/requirements.txt",       "LOW",      "requirements.txt exposed (dependency info)"),
-    ("/crossdomain.xml",        "LOW",      "crossdomain.xml exposed"),
-    ("/clientaccesspolicy.xml", "LOW",      "clientaccesspolicy.xml exposed"),
-    ("/.DS_Store",              "LOW",      ".DS_Store file exposed"),
-    ("/web.config",             "HIGH",     "web.config configuration exposed"),
-    ("/Dockerfile",             "LOW",      "Dockerfile exposed"),
-    ("/docker-compose.yml",     "LOW",      "docker-compose.yml exposed"),
+    # Risk levels calibrated to OWASP WSTG OTG-CONFIG-004 and Tenable/Acunetix guidance.
+    # CWE-312 (Cleartext Storage), CWE-530 (Exposure of Backup File), CWE-200 (Info Disclosure).
+
+    # CRITICAL — direct credential or source code exposure providing immediate data-layer access
+    ("/.git/HEAD",              "CRITICAL", "Git repository HEAD file exposed — full source code reconstruction possible via git partial clone. CWE-312."),
+    ("/.git/config",            "CRITICAL", "Git repository config exposed — may reveal remote URLs with embedded credentials. CWE-312."),
+    ("/.git/COMMIT_EDITMSG",    "CRITICAL", "Git repository commit message exposed — confirms version control access. CWE-312."),
+    ("/.env",                   "CRITICAL", ".env environment file exposed — contains database credentials, API keys, and secrets. CWE-312, CWE-522."),
+    ("/.env.local",             "CRITICAL", ".env.local environment file exposed — contains environment-specific secrets. CWE-312, CWE-522."),
+    ("/.env.production",        "CRITICAL", ".env.production environment file exposed — production secrets and credentials. CWE-312, CWE-522."),
+    ("/wp-config.php",          "CRITICAL", "WordPress config file exposed — contains database credentials and AUTH_KEYs. CWE-312, CWE-522."),
+    ("/settings.py",            "CRITICAL", "Django/Python settings file exposed — contains SECRET_KEY, database passwords, and API keys. CWE-312, CWE-522."),
+    ("/database.yml",           "CRITICAL", "Rails database config exposed — contains production database host, username, and password. CWE-312, CWE-522."),
+    ("/db.sql",                 "CRITICAL", "SQL database dump exposed — complete database contents including users, hashes, and PII. CWE-312, CWE-530."),
+    ("/dump.sql",               "CRITICAL", "SQL database dump exposed — complete database contents including users, hashes, and PII. CWE-312, CWE-530."),
+    ("/site.tar.gz",            "CRITICAL", "Site archive exposed — full application source code with embedded credentials. CWE-530, CWE-312."),
+    ("/backup.zip",             "CRITICAL", "Backup archive exposed — application source code and config files with credentials. CWE-530, CWE-312."),
+    # web.config: CRITICAL — machineKey exposure enables ASP.NET ViewState RCE; connection strings expose DB creds. CWE-13.
+    ("/web.config",             "CRITICAL", "IIS web.config exposed — may contain database connection strings, machineKey (enables ViewState RCE), and API keys. CWE-13, CWE-312."),
+
+    # HIGH — credential hash exposure or significant reconnaissance enabling further exploitation
+    ("/config.php",             "HIGH",     "PHP config file exposed — likely contains database credentials. CWE-312."),
+    ("/configuration.php",      "HIGH",     "PHP configuration file exposed — may contain database credentials. CWE-312."),
+    ("/index.php.bak",          "HIGH",     "PHP source backup exposed — unprocessed source code visible. CWE-530."),
+    ("/index.php~",             "HIGH",     "PHP editor backup exposed — unprocessed source code visible. CWE-530."),
+    # .htpasswd: HIGH — contains HTTP Basic Auth hashes (MD5crypt readily crackable). CWE-522.
+    ("/.htpasswd",              "HIGH",     ".htpasswd file exposed — contains HTTP Basic Auth password hashes, subject to offline cracking. CWE-522, CWE-200."),
+
+    # MEDIUM — configuration reconnaissance or indirect attack enablement
+    ("/.htaccess",              "MEDIUM",   ".htaccess file exposed — reveals access control rules and rewrite logic. CWE-200."),
+    ("/phpinfo.php",            "MEDIUM",   "PHP info page exposed — discloses PHP version, loaded modules, server paths, and environment variables. CWE-200."),
+    ("/info.php",               "MEDIUM",   "PHP info page exposed — discloses PHP version, loaded modules, server paths, and environment variables. CWE-200."),
+    ("/test.php",               "MEDIUM",   "PHP test page exposed — may disclose configuration or provide unintended functionality. CWE-200."),
+    ("/server-status",          "MEDIUM",   "Apache server-status exposed — discloses active requests, client IPs, and internal paths. CWE-200."),
+    ("/server-info",            "MEDIUM",   "Apache server-info exposed — discloses module configuration and directives. CWE-200."),
+    ("/docker-compose.yml",     "MEDIUM",   "docker-compose.yml exposed — discloses service topology, image versions, and potentially hardcoded credentials. CWE-200."),
+
+    # LOW — dependency or infrastructure metadata with reconnaissance value only
+    ("/composer.json",          "LOW",      "composer.json exposed — discloses PHP dependency versions for targeted CVE research. CWE-200."),
+    ("/package.json",           "LOW",      "package.json exposed — discloses Node.js dependency versions for targeted CVE research. CWE-200."),
+    ("/requirements.txt",       "LOW",      "requirements.txt exposed — discloses Python dependency versions for targeted CVE research. CWE-200."),
+    ("/crossdomain.xml",        "LOW",      "crossdomain.xml exposed — Flash/PDF cross-domain policy may permit unintended access. CWE-942."),
+    ("/clientaccesspolicy.xml", "LOW",      "clientaccesspolicy.xml exposed — Silverlight cross-domain policy file. CWE-200."),
+    ("/.DS_Store",              "LOW",      ".DS_Store file exposed — macOS metadata reveals directory structure. CWE-200."),
+    ("/Dockerfile",             "LOW",      "Dockerfile exposed — discloses base image, build steps, and environment configuration. CWE-200."),
 ]
 
 
