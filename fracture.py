@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.4.5"
+VERSION = "1.4.8"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1895,6 +1895,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 # Security header names (from _SECURITY_HEADERS, defined further in this
                 # module — resolved at call-time, not definition-time)
                 _SEC_HDR_NAMES = {h[0] for h in _SECURITY_HEADERS}
+                # Case-folded set for matching against headers reported by WhatWeb
+                # (HTTP header names are case-insensitive per RFC 7230)
+                _SEC_HDR_LOWER = {h.lower() for h in _SEC_HDR_NAMES}
                 # Regex matching HTTP-header-style plugin names (e.g. X-Frame-Options, Via)
                 _HDR_NAME_RE = re.compile(r'^[A-Z][a-zA-Z]*(?:-[A-Za-z]+)+$')
                 # Plugins to skip entirely — noise or already handled by fracture-headers
@@ -1939,6 +1942,15 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                             hdr_name  = _hv_parts[0].strip()
                                             hdr_value = _hv_parts[1].strip() if len(_hv_parts) > 1 else ""
                                             if not hdr_name:
+                                                continue
+                                            # If this is a known security header, track it as
+                                            # present and suppress the "Unknown Header" finding —
+                                            # the Missing Security Header loop handles it instead.
+                                            if hdr_name.lower() in _SEC_HDR_LOWER:
+                                                ww_found_sec_hdrs.add(
+                                                    next(h for h in _SEC_HDR_NAMES
+                                                         if h.lower() == hdr_name.lower())
+                                                )
                                                 continue
                                             out.add_finding(
                                                 title=f"Unknown Header Identified: {hdr_name}",
@@ -2702,7 +2714,8 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 r'Testing robust forward secrecy'
                 r'|User-agent:'
                 r'|Disallow:'
-                r'|not offered',   # cipher/protocol absent → never a finding
+                r'|not offered'    # cipher/protocol absent → never a finding
+                r'|make sure you don.t use this certificate',  # DROWN advisory continuation line
                 re.I,
             )
             _ok_filtered = "\n".join(
@@ -2776,6 +2789,40 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     sources="fracture-tls-socket", service="https",
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                     remediation="Configure TLS 1.2/1.3 only.",
+                )
+        except Exception:
+            pass
+        # Certificate trust check — detects self-signed and expired certs
+        # even when sslscan/testssl are absent.
+        try:
+            ctx_v = _ssl.create_default_context()
+            with ctx_v.wrap_socket(
+                socket.create_connection((hostname, port), timeout=10),
+                server_hostname=hostname,
+            ) as _sv:
+                pass  # verified OK — no cert finding needed
+        except _ssl.SSLCertVerificationError as _e:
+            _em = str(_e).lower()
+            if "self signed" in _em or "unable to get local issuer" in _em:
+                out.add_finding(
+                    title="SSL/TLS Certificate: Self-Signed",
+                    url=target["url"], port=port, risk="MEDIUM",
+                    description=(
+                        "The server presents a self-signed certificate. No trusted CA has "
+                        "vouched for its authenticity, enabling trivial MITM attacks. CWE-295."
+                    ),
+                    sources="fracture-tls-socket", service="https",
+                    owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                    remediation="Replace the self-signed certificate with one issued by a trusted CA.",
+                )
+            elif "expired" in _em or "has expired" in _em:
+                out.add_finding(
+                    title="SSL/TLS Certificate: Expired",
+                    url=target["url"], port=port, risk="HIGH",
+                    description="The TLS certificate has expired. Clients may reject the connection.",
+                    sources="fracture-tls-socket", service="https",
+                    owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                    remediation="Renew the TLS certificate before its expiry date.",
                 )
         except Exception:
             pass
@@ -4554,7 +4601,23 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
             nuc_stdout, nuc_stderr = proc.communicate(timeout=timeout)
             _deregister_proc(proc)
             if nuc_stderr:
-                vc.log(f"[vulnscan] nuclei stderr: {nuc_stderr[:500]}", "WARNING")
+                # Strip ANSI escape sequences nuclei emits to a terminal
+                _nuc_clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', nuc_stderr).strip()
+                # Suppress known non-fatal startup noise (cloud provider key
+                # loading, update checks) — these don't affect scan results.
+                _NUC_NONFATAL = re.compile(
+                    r'failed to load provider keys'
+                    r'|update check'
+                    r'|nuclei cloud'
+                    r'|cannot unmarshal.*sources\.Provider',
+                    re.I,
+                )
+                _nuc_warn = "\n".join(
+                    ln for ln in _nuc_clean.splitlines()
+                    if ln.strip() and not _NUC_NONFATAL.search(ln)
+                )
+                if _nuc_warn:
+                    vc.log(f"[vulnscan] nuclei stderr: {_nuc_warn[:500]}", "WARNING")
             # Always write the output file (may be empty if no findings)
             nuc_out.write_text(nuc_stdout, encoding="utf-8")
             out.log_command("nuclei", cmd, nuc_out)
