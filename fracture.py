@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -2088,7 +2088,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     for rpath in ["/robots.txt", "/sitemap.xml"]:
         try:
             r = sess.get(url + rpath, timeout=timeout)
-            if r.status_code == 200 and len(r.text) > 10:
+            if r.status_code == 200 and len(r.text) > 10 \
+                    and not _is_wildcard_match(r, wc_baseline):
                 out_f = out.output_path(phase, rpath.lstrip("/").replace(".", "_"))
                 out_f.write_text(r.text, encoding="utf-8")
                 vc.log(f"[recon] Found {rpath} ({len(r.text)} bytes)", "SUCCESS")
@@ -2154,7 +2155,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     for cpath in _COMMON_PATHS:
         try:
             r = sess.get(url + cpath, timeout=timeout, allow_redirects=False)
-            if r.status_code == 200 and cpath in ("/.git/HEAD", "/.env"):
+            if r.status_code == 200 and cpath in ("/.git/HEAD", "/.env") \
+                    and not _is_wildcard_match(r, wc_baseline):
                 _cp_safe = cpath.lstrip("/").replace("/", "_").replace(".", "_")
                 _cp_out  = out.output_path(phase, f"sensitive_path_{_cp_safe}")
                 _cp_out.write_text(
