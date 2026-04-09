@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.5.0"
+VERSION = "1.5.3"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1828,6 +1828,21 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             "Directory brute-forcing skipped; all path findings will be validated against baseline.",
             "WARNING",
         )
+        out.add_finding(
+            title=f"Wildcard (*) Detected: {url}",
+            url=url, port=target["port"], risk="INFO",
+            description=(
+                f"A wildcard/catch-all response was detected at {url} — the server returns "
+                f"HTTP {wc_baseline['status']} for all unknown paths"
+                + (f", redirecting to {wc_baseline['location']}" if wc_baseline.get("redirect") else "")
+                + ". Directory brute-forcing with gobuster is unreliable on this host; "
+                "feroxbuster will still run as it handles wildcards natively."
+            ),
+            output=f"Wildcard: HTTP {wc_baseline['status']} for all paths",
+            sources="fracture-recon", service=target["scheme"],
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation="",
+        )
 
     try:
         resp        = sess.get(url, timeout=timeout, allow_redirects=True)
@@ -2238,9 +2253,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         if found:
             out_f.write_text("\n".join(found), encoding="utf-8")
 
-    # feroxbuster — recursive directory discovery (supplements gobuster)
+    # feroxbuster — recursive directory discovery; runs even on wildcard hosts
     feroxbuster = _find_tool("feroxbuster")
-    if wc_baseline is None and feroxbuster and Path(wordlist).exists():
+    if feroxbuster and Path(wordlist).exists():
         fer_out = out.output_path(phase, "feroxbuster_" + target["hostname"])
         cmd = [
             feroxbuster, "--url", url, "--wordlist", wordlist,
@@ -2258,16 +2273,20 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             out.log_command("feroxbuster", cmd, fer_out)
         except Exception as e:
             out.log_error("feroxbuster", cmd, str(e))
-    elif feroxbuster and wc_baseline is None:
+    elif feroxbuster:
         vc.log(f"[recon] feroxbuster found but wordlist missing: {wordlist}", "WARNING")
 
     # Second pass — raft-large-files.txt (finds files alongside directories)
     vc.status(phase, "Recon", "running", "File discovery", 6, 10)
     wordlist_files = _find_wordlist("raft-large-files.txt")
-    if wc_baseline is not None:
-        vc.log("[recon] Skipping file brute-force (wildcard detected)", "WARNING")
-    elif Path(wordlist_files).exists():
-        if gobuster:
+    _wf_exists = Path(wordlist_files).exists()
+    if not _wf_exists:
+        vc.log(f"[recon] file wordlist missing: {wordlist_files} — skipping files pass", "WARNING")
+    else:
+        # gobuster: skip on wildcard (results unreliable)
+        if wc_baseline is not None:
+            vc.log("[recon] Skipping file brute-force (wildcard detected)", "WARNING")
+        elif gobuster:
             gob_files_out = out.output_path(phase, "gobuster_files_" + target["hostname"])
             cmd = [gobuster, "dir", "-u", url, "-w", wordlist_files, "-t", "30",
                    "-q", "-k", "-o", str(gob_files_out)]
@@ -2282,6 +2301,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 out.log_command("gobuster", cmd, gob_files_out)
             except Exception as e:
                 out.log_error("gobuster", cmd, str(e))
+        # feroxbuster files: always run (handles wildcards natively)
         if feroxbuster:
             fer_files_out = out.output_path(phase, "feroxbuster_files_" + target["hostname"])
             cmd = [
@@ -2300,8 +2320,6 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 out.log_command("feroxbuster", cmd, fer_files_out)
             except Exception as e:
                 out.log_error("feroxbuster", cmd, str(e))
-    else:
-        vc.log(f"[recon] file wordlist missing: {wordlist_files} — skipping files pass", "WARNING")
 
     vc.status(phase, "Recon", "running", "Directory listing check", 7, 10)
     try:
@@ -2373,6 +2391,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
 
     vc.status(phase, "Recon", "complete", "Done", 10, 10)
     vc.log("[recon] Phase complete", "SUCCESS")
+    return wc_baseline
 
 
 # ─────────────────────────────────────────────
@@ -2467,6 +2486,7 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
 def _phase_endpoint_tools(
     discovered_urls: list, target: dict, cfg: dict, pm: ProgressManager,
     out: OutputManager, sess: requests.Session,
+    wc_baseline=None,
 ) -> None:
     """Run screenshot, page crawl, and directory brute-force against each
     endpoint discovered by recon/crawl phases.  Capped to avoid runaway scans.
@@ -2549,11 +2569,21 @@ def _phase_endpoint_tools(
                     )
 
         # ── Directory brute-force ────────────────────────────────────────────
-        # Probe the endpoint itself for wildcard behaviour before brute-forcing
-        ep_wc = _detect_wildcard(ep_url, sess, timeout)
-        if ep_wc is not None:
-            vc.log(f"[endpoint_tools] Wildcard detected on {ep_url} — skipping brute-force", "WARNING")
-        elif gobuster and Path(wordlist_dir).exists():
+        # Inherit the parent wildcard only when this endpoint is on the same
+        # hostname as the target.  A different subdomain (e.g. admin.example.com
+        # discovered via crawl while scanning example.com) must be tested
+        # independently — it is a distinct host and may not be a wildcard.
+        _ep_host = urllib.parse.urlparse(ep_url).hostname or ""
+        _same_host = (_ep_host == target["hostname"])
+        if wc_baseline is not None and _same_host:
+            ep_wc = wc_baseline
+            vc.log(f"[endpoint_tools] Parent wildcard — skipping brute-force for {ep_url}", "WARNING")
+        else:
+            ep_wc = _detect_wildcard(ep_url, sess, timeout)
+            if ep_wc is not None:
+                vc.log(f"[endpoint_tools] Wildcard detected on {ep_url} — skipping brute-force", "WARNING")
+
+        if ep_wc is None and gobuster and Path(wordlist_dir).exists():
             ep_gob = out.output_path("recon", f"gobuster_ep_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_dir,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob)]
@@ -2584,7 +2614,8 @@ def _phase_endpoint_tools(
             except Exception as e:
                 out.log_error("gobuster", cmd, str(e))
 
-        if ep_wc is None and feroxbuster and Path(wordlist_dir).exists():
+        # feroxbuster: always run — handles wildcards natively
+        if feroxbuster and Path(wordlist_dir).exists():
             ep_fer = out.output_path("recon", f"feroxbuster_ep_{ep_safe}")
             cmd = [feroxbuster, "--url", ep_url, "--wordlist", wordlist_dir,
                    "--depth", "1", "--threads", "20", "--quiet",
@@ -3902,6 +3933,29 @@ def _crawl_page(page_url: str, sess: requests.Session,
     return result
 
 
+def _crawl_output_path(root: Path, url: str) -> Path:
+    """Return a directory-preserving path for a crawled resource.
+
+    Structure: <root>/crawl/<hostname>/<scheme>/<url-path>
+    e.g. https://10.10.240.1/internal/philosophy/admin.php
+         → <root>/crawl/10.10.240.1/https/internal/philosophy/admin.php
+    """
+    parsed   = urllib.parse.urlparse(url)
+    hostname = re.sub(r'[^a-zA-Z0-9._-]', '_', parsed.hostname or "unknown")
+    scheme   = parsed.scheme or "http"
+    raw_parts = [p for p in parsed.path.split("/") if p]
+    safe_parts: list = []
+    for part in raw_parts:
+        safe = re.sub(r'[^\w.\-]', '_', part)
+        if safe and safe not in (".", ".."):
+            safe_parts.append(safe[:200])
+    if not safe_parts:
+        safe_parts = ["index"]
+    dest = root / "crawl" / hostname / scheme / Path(*safe_parts)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
 def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                  out: OutputManager, sess: requests.Session) -> dict:
     phase     = "crawl"
@@ -3965,8 +4019,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     for js_url in set(all_js):
         try:
             r = sess.get(js_url, timeout=timeout)
-            _js_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', js_url.replace("://", "_"))[:60]
-            _js_out  = out.output_path(phase, f"js_{_js_safe}")
+            _js_out = _crawl_output_path(out.root, js_url)
             _js_out.write_text(r.text[:30000], encoding="utf-8")
             for pat, secret_type in _SECRET_PATTERNS:
                 m = pat.search(r.text)
@@ -5554,10 +5607,11 @@ def main() -> None:
             return False
 
         # ── Phase 0: recon ──
+        wc_baseline = None
         if not _skip("recon"):
             pm.set_phase_status("recon", "running", "HTTP Recon")
             try:
-                _phase_recon(target, cfg, pm, out, sess)
+                wc_baseline = _phase_recon(target, cfg, pm, out, sess)
                 pm.set_phase_status("recon", "complete", "HTTP Recon")
             except Exception as e:
                 vc.error(f"Phase recon error: {e}")
@@ -5660,7 +5714,7 @@ def main() -> None:
         _ep_discovered.extend(crawl_data.get("links", []))
         if _ep_discovered:
             try:
-                _phase_endpoint_tools(_ep_discovered, target, cfg, pm, out, sess)
+                _phase_endpoint_tools(_ep_discovered, target, cfg, pm, out, sess, wc_baseline=wc_baseline)
             except Exception as e:
                 vc.error(f"Phase endpoint_tools error: {e}")
 
