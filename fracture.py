@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.5.3"
+VERSION = "1.5.4"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1867,6 +1867,29 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         encoding="utf-8",
     )
 
+    # Check probe response for missing security headers.
+    # Risk and format match shcheck so findings merge when both tools run.
+    _HSTS_HDR = "Strict-Transport-Security"
+    for _hdr_name, _, _, _hdr_desc, _hdr_nist, _hdr_remed in _SECURITY_HEADERS:
+        if _hdr_name == _HSTS_HDR and not target["is_https"]:
+            continue
+        if _hdr_name not in headers:
+            out.add_finding(
+                title=f"Missing Security Header: {_hdr_name}",
+                url=url, port=target["port"],
+                risk="MEDIUM" if _hdr_name == _HSTS_HDR else "LOW",
+                description=(
+                    f"The HTTP security header '{_hdr_name}' is absent from the "
+                    f"response at {url}."
+                ),
+                output=f"Missing: {_hdr_name}",
+                affected=_hdr_name,
+                sources="fracture-recon", service=target["scheme"],
+                output_file=str(probe_out),
+                owasp="A05:2025 Security Misconfiguration", nist=_hdr_nist,
+                remediation=_hdr_remed,
+            )
+
     detected_cms = [n for n, pats in _CMS_PATTERNS.items()
                     if any(p.search(all_text) for p in pats)]
 
@@ -2908,28 +2931,28 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         owasp="A02", nist="SC-8",
                         remediation="Disable weak protocols. Enable TLS 1.2/1.3 only.",
                     )
-            # Detect missing security headers reported by testssl
-            _TESTSSL_HDR_RISK = {
-                "Strict-Transport-Security": "MEDIUM",
-                "Content-Security-Policy":   "MEDIUM",
-                "X-Frame-Options":           "MEDIUM",
-                "X-Content-Type-Options":    "LOW",
-                "Referrer-Policy":           "LOW",
-                "Permissions-Policy":        "LOW",
-                "X-XSS-Protection":          "LOW",
-            }
-            for _hdr, _hr in _TESTSSL_HDR_RISK.items():
-                if re.search(rf'{re.escape(_hdr)}\s+not offered', stdout, re.I):
+            # Detect missing security headers reported by testssl.
+            # Checked against the full _SECURITY_HEADERS list; risk and format
+            # aligned with shcheck findings so duplicates merge rather than stack.
+            _HSTS_HDR = "Strict-Transport-Security"
+            for _hdr_name, _, _, _hdr_desc, _hdr_nist, _hdr_remed in _SECURITY_HEADERS:
+                if _hdr_name == _HSTS_HDR and not target["is_https"]:
+                    continue
+                if re.search(rf'{re.escape(_hdr_name)}\s+not offered', stdout, re.I):
                     out.add_finding(
-                        title=f"Missing Security Header: {_hdr}",
-                        url=target["url"], port=port, risk=_hr,
-                        description=f"The security header '{_hdr}' is not present.",
-                        output=f"Missing: {_hdr}",
-                        affected=_hdr,
+                        title=f"Missing Security Header: {_hdr_name}",
+                        url=target["url"], port=port,
+                        risk="MEDIUM" if _hdr_name == _HSTS_HDR else "LOW",
+                        description=(
+                            f"The HTTP security header '{_hdr_name}' is absent from the "
+                            f"response at {target['url']}."
+                        ),
+                        output=f"Missing: {_hdr_name}",
+                        affected=_hdr_name,
                         sources="testssl.sh", service="https",
                         output_file=str(out_f),
-                        owasp="A05", nist="SC-8",
-                        remediation=f"Add the '{_hdr}' HTTP response header.",
+                        owasp="A05:2025 Security Misconfiguration", nist=_hdr_nist,
+                        remediation=_hdr_remed,
                     )
             # ── Certificate text extraction from testssl output ──────────────
             _ts_cert_subject = None
