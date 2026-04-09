@@ -29,6 +29,9 @@ import socket
 import threading
 import signal
 import getpass
+import difflib
+import secrets
+import statistics
 import tempfile
 import time
 import hashlib
@@ -38,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -309,43 +312,213 @@ _TITLE_NORM_SUBS = [
 # Generic-404 / catch-all baseline helpers
 # ─────────────────────────────────────────────
 
-def _get_404_baseline(base_url: str, sess: "requests.Session",
-                      timeout: int = 10) -> tuple:
-    """Fetch a random path guaranteed not to exist, return (status, body_hash, body_len).
+# ── Wildcard / catch-all detection ───────────────────────────────────────────
+#
+# Strategy: send 3 probes to randomly-generated paths that cannot plausibly
+# exist on the target.  If all probes agree on status code AND their normalised
+# bodies are structurally similar, the server is treating every path as valid
+# (wildcard / catch-all behaviour).
+#
+# Two layers of similarity are checked:
+#   • body-length ratio — size difference relative to the larger body
+#   • word-count ratio  — same idea on token count
+#   • SequenceMatcher ratio — structural diff on the first 8 KB (after stripping
+#     the injected probe path so reflection doesn't fool the comparison)
+#
+# At least 2 of the 3 signals must exceed their thresholds before a wildcard is
+# declared.  The returned baseline dict is consumed by _is_wildcard_match() to
+# filter individual URLs found by crawl, admin-panel detection, etc.
 
-    Used to detect catch-all / wildcard 404 handlers that return HTTP 200 for
-    every request.  Comparing a candidate response against this baseline avoids
-    false-positive "Sensitive File Exposed" and "Admin Panel Exposed" findings.
+_WC_LEN_TOLERANCE    = 0.08   # 8 % body-length difference
+_WC_WORD_TOLERANCE   = 0.10   # 10 % word-count difference
+_WC_SIMILARITY_RATIO = 0.88   # difflib SequenceMatcher ratio threshold
+_WC_SAMPLE_SIZE      = 8192   # bytes fed to SequenceMatcher (cap for O(n²))
+
+
+def _wc_body_fp(text: str, probe_paths: "list[str]") -> dict:
+    """Return a multi-signal fingerprint of *text* after stripping injected probe paths."""
+    norm = text
+    for p in probe_paths:
+        if not p:
+            continue
+        # Strip bare path and URL-encoded variant so reflection doesn't skew comparison
+        norm = norm.replace(p, "__WC_PROBE__")
+        norm = norm.replace(urllib.parse.quote(p), "__WC_PROBE__")
+        norm = norm.replace(urllib.parse.quote(p, safe=""), "__WC_PROBE__")
+    sample = norm[:_WC_SAMPLE_SIZE]
+    return {
+        "hash":   hashlib.md5(sample.encode("utf-8", errors="replace")).hexdigest(),
+        "words":  len(norm.split()),
+        "lines":  norm.count("\n") + 1,
+        "length": len(text),
+        "sample": sample,
+    }
+
+
+def _detect_wildcard(base_url: str, sess: "requests.Session",
+                     timeout: int = 10) -> "dict | None":
+    """Probe *base_url* with three random paths to detect catch-all/wildcard behaviour.
+
+    Returns a baseline dict when wildcard is confirmed, or None when the server
+    responds normally (404/410 for nonexistent paths, or probe responses differ).
+
+    The returned dict is passed to _is_wildcard_match() to classify responses
+    from crawl, admin-panel detection, file-exposure, and brute-force phases.
+    When a wildcard is confirmed, directory brute-forcers (gobuster/feroxbuster)
+    are skipped entirely since every path would appear to exist.
     """
-    probe = f"/_fracture_baseline_{int(time.time())}_notfound.html"
-    try:
-        import requests as _requests
-        r = sess.get(base_url.rstrip("/") + probe, timeout=timeout,
-                     allow_redirects=False)
-        body_hash = hashlib.md5(r.text[:8192].encode("utf-8", errors="replace")).hexdigest()
-        return (r.status_code, body_hash, len(r.text))
-    except Exception:
-        return (404, None, 0)
+    base = base_url.rstrip("/")
+
+    # Three probes with different shapes to defeat path-aware logic and caches
+    probe_paths = [
+        f"/{secrets.token_hex(12)}-notfound",
+        f"/nonexistent-{secrets.token_hex(8)}/deep/{secrets.token_hex(6)}.html",
+        f"/{secrets.token_hex(14)}.php",
+    ]
+
+    responses: list = []
+    for path in probe_paths:
+        try:
+            r = sess.get(base + path, timeout=timeout, allow_redirects=False)
+            responses.append((path, r))
+        except Exception:
+            pass  # network error on one probe is not conclusive
+
+    if len(responses) < 2:
+        return None  # not enough data to determine
+
+    # All available probes must agree on status code
+    statuses = [r.status_code for _, r in responses]
+    if len(set(statuses)) != 1:
+        return None  # probes disagree → not a uniform wildcard
+
+    status = statuses[0]
+
+    # Legitimate 404/410 → clean server → not a wildcard
+    if status in (404, 410):
+        return None
+
+    # Redirect wildcard: every unknown path redirects to the same Location
+    if status in (301, 302, 303, 307, 308):
+        locations = [r.headers.get("Location", "") for _, r in responses]
+        if len(set(locations)) == 1 and locations[0]:
+            return {
+                "status":      status,
+                "location":    locations[0],
+                "body_len":    0.0,
+                "word_count":  0.0,
+                "line_count":  0.0,
+                "body_hash":   "",
+                "sample":      "",
+                "probe_paths": probe_paths,
+                "redirect":    True,
+            }
+        return None  # redirects differ → not uniform
+
+    # For 200/403/other: compare body fingerprints across probes
+    fps = [_wc_body_fp(r.text, probe_paths) for _, r in responses]
+
+    def _ratio_ok(a: float, b: float, tol: float) -> bool:
+        mx = max(a, b, 1)
+        return abs(a - b) / mx < tol
+
+    votes = 0
+
+    # Signal 1 — body length ratio (first two probes)
+    if _ratio_ok(fps[0]["length"], fps[1]["length"], _WC_LEN_TOLERANCE):
+        votes += 1
+
+    # Signal 2 — word count ratio
+    if _ratio_ok(fps[0]["words"], fps[1]["words"], _WC_WORD_TOLERANCE):
+        votes += 1
+
+    # Signal 3 — structural similarity via SequenceMatcher
+    sm_ratio = difflib.SequenceMatcher(
+        None, fps[0]["sample"], fps[1]["sample"], autojunk=True
+    ).ratio()
+    if sm_ratio >= _WC_SIMILARITY_RATIO:
+        votes += 1
+
+    if votes < 2:
+        return None  # probes differ enough — not a wildcard
+
+    # Wildcard confirmed.  Build a representative baseline from the available probes.
+    lengths = [f["length"] for f in fps]
+    words   = [f["words"]  for f in fps]
+    lines   = [f["lines"]  for f in fps]
+    med_len = statistics.median(lengths)
+    # Use the probe closest to the median length as the representative sample
+    rep_idx = min(range(len(fps)), key=lambda i: abs(fps[i]["length"] - med_len))
+
+    return {
+        "status":      status,
+        "location":    None,
+        "body_len":    med_len,
+        "word_count":  statistics.median(words),
+        "line_count":  statistics.median(lines),
+        "body_hash":   fps[rep_idx]["hash"],
+        "sample":      fps[rep_idx]["sample"],
+        "probe_paths": probe_paths,
+        "redirect":    False,
+    }
 
 
-def _is_catchall_response(r: "requests.Response", baseline: tuple) -> bool:
-    """Return True when *r* looks identical to the catch-all baseline response.
+def _is_wildcard_match(r: "requests.Response",
+                       baseline: "dict | None") -> bool:
+    """Return True when *r* matches the wildcard baseline (i.e. is a false positive).
 
-    Criteria (any one sufficient):
-    - Same MD5 body hash as the baseline (exact duplicate).
-    - Body length within 3% of baseline length (when baseline body > 200 bytes).
+    Called by admin-panel detection, file-exposure checks, crawl endpoint
+    validation, and any other module that needs to confirm a URL is genuinely
+    distinct from the server's catch-all response.
+
+    Intentionally conservative: requires 2 of 3 independent signals to agree
+    before discarding a candidate, to avoid silencing real findings.
     """
-    _status, base_hash, base_len = baseline
-    if base_hash is None:
+    if baseline is None:
         return False
-    body_hash = hashlib.md5(r.text[:8192].encode("utf-8", errors="replace")).hexdigest()
-    if body_hash == base_hash:
+
+    if r.status_code != baseline["status"]:
+        return False
+
+    # Redirect wildcard: same Location header = same catch-all redirect
+    if baseline.get("redirect"):
+        return r.headers.get("Location", "") == baseline["location"]
+
+    probe_paths = baseline.get("probe_paths", [])
+    fp = _wc_body_fp(r.text, probe_paths)
+
+    # Fast path: normalised hash is identical
+    if fp["hash"] == baseline["body_hash"]:
         return True
-    if base_len > 200:
-        diff = abs(len(r.text) - base_len)
-        if diff / base_len < 0.03:
-            return True
-    return False
+
+    def _ratio_ok(a: float, b: float, tol: float) -> bool:
+        mx = max(a, b, 1)
+        return abs(a - b) / mx < tol
+
+    votes = 0
+
+    bl = baseline["body_len"]
+    if bl > 0:
+        if _ratio_ok(fp["length"], bl, _WC_LEN_TOLERANCE):
+            votes += 1
+    elif fp["length"] < 50:
+        votes += 1  # both effectively empty
+
+    bw = baseline["word_count"]
+    if bw > 0:
+        if _ratio_ok(fp["words"], bw, _WC_WORD_TOLERANCE):
+            votes += 1
+    elif fp["words"] < 5:
+        votes += 1
+
+    if baseline["sample"]:
+        sm_ratio = difflib.SequenceMatcher(
+            None, fp["sample"], baseline["sample"], autojunk=True
+        ).ratio()
+        if sm_ratio >= _WC_SIMILARITY_RATIO:
+            votes += 1
+
+    return votes >= 2
 
 
 # ─────────────────────────────────────────────
@@ -1644,6 +1817,18 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     phase   = "recon"
     vc.status(phase, "Recon", "running", "HTTP probe", 0, 10)
 
+    # Wildcard detection — run before any path-based checks so brute-forcers
+    # can be skipped and individual URL findings can be validated.
+    vc.status(phase, "Recon", "running", "Wildcard probe", 0, 10)
+    wc_baseline = _detect_wildcard(url, sess, timeout)
+    if wc_baseline is not None:
+        vc.log(
+            f"[recon] Wildcard/catch-all detected (HTTP {wc_baseline['status']} "
+            f"for all paths{'; redirect → ' + wc_baseline['location'] if wc_baseline.get('redirect') else ''}). "
+            "Directory brute-forcing skipped; all path findings will be validated against baseline.",
+            "WARNING",
+        )
+
     try:
         resp        = sess.get(url, timeout=timeout, allow_redirects=True)
         status_code = resp.status_code
@@ -1927,13 +2112,12 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             pass
 
     vc.status(phase, "Recon", "running", "Admin panel detection", 3, 10)
-    _admin_baseline = _get_404_baseline(url, sess, timeout)
     for apath in _ADMIN_PATHS:
         try:
             r = sess.get(url + apath, timeout=timeout, allow_redirects=False)
             if r.status_code in (200, 301, 302, 401, 403):
-                # HTTP 200 with a body identical to the catch-all 404 → false positive
-                if r.status_code == 200 and _is_catchall_response(r, _admin_baseline):
+                # Wildcard baseline check: skip if response matches the catch-all pattern
+                if _is_wildcard_match(r, wc_baseline):
                     continue
                 # HTTP 200: panel accessible without authentication (CWE-306) → HIGH
                 # HTTP 401/403/redirect: panel exists but access controls are enforced → MEDIUM
@@ -1998,7 +2182,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         cfg.get("gobuster_wordlist", ""),
     )
     out_f    = out.output_path(phase, "gobuster_" + target["hostname"])
-    if gobuster and Path(wordlist).exists():
+    if wc_baseline is not None:
+        vc.log("[recon] Skipping directory brute-force (wildcard detected)", "WARNING")
+    elif gobuster and Path(wordlist).exists():
         cmd = [gobuster, "dir", "-u", url, "-w", wordlist, "-t", "30",
                "-q", "-k", "-o", str(out_f)]
         vc.log("[recon] Running gobuster ...", "INFO")
@@ -2022,7 +2208,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             try:
                 r = sess.get(url + mpath, timeout=timeout, allow_redirects=False)
                 if r.status_code in (200, 301, 302, 403):
-                    found.append(f"{mpath} [{r.status_code}]")
+                    if not _is_wildcard_match(r, wc_baseline):
+                        found.append(f"{mpath} [{r.status_code}]")
             except Exception:
                 pass
         if found:
@@ -2030,7 +2217,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
 
     # feroxbuster — recursive directory discovery (supplements gobuster)
     feroxbuster = _find_tool("feroxbuster")
-    if feroxbuster and Path(wordlist).exists():
+    if wc_baseline is None and feroxbuster and Path(wordlist).exists():
         fer_out = out.output_path(phase, "feroxbuster_" + target["hostname"])
         cmd = [
             feroxbuster, "--url", url, "--wordlist", wordlist,
@@ -2048,13 +2235,15 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             out.log_command("feroxbuster", cmd, fer_out)
         except Exception as e:
             out.log_error("feroxbuster", cmd, str(e))
-    elif feroxbuster:
+    elif feroxbuster and wc_baseline is None:
         vc.log(f"[recon] feroxbuster found but wordlist missing: {wordlist}", "WARNING")
 
     # Second pass — raft-large-files.txt (finds files alongside directories)
     vc.status(phase, "Recon", "running", "File discovery", 6, 10)
     wordlist_files = _find_wordlist("raft-large-files.txt")
-    if Path(wordlist_files).exists():
+    if wc_baseline is not None:
+        vc.log("[recon] Skipping file brute-force (wildcard detected)", "WARNING")
+    elif Path(wordlist_files).exists():
         if gobuster:
             gob_files_out = out.output_path(phase, "gobuster_files_" + target["hostname"])
             cmd = [gobuster, "dir", "-u", url, "-w", wordlist_files, "-t", "30",
@@ -2337,7 +2526,11 @@ def _phase_endpoint_tools(
                     )
 
         # ── Directory brute-force ────────────────────────────────────────────
-        if gobuster and Path(wordlist_dir).exists():
+        # Probe the endpoint itself for wildcard behaviour before brute-forcing
+        ep_wc = _detect_wildcard(ep_url, sess, timeout)
+        if ep_wc is not None:
+            vc.log(f"[endpoint_tools] Wildcard detected on {ep_url} — skipping brute-force", "WARNING")
+        elif gobuster and Path(wordlist_dir).exists():
             ep_gob = out.output_path("recon", f"gobuster_ep_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_dir,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob)]
@@ -2353,7 +2546,7 @@ def _phase_endpoint_tools(
             except Exception as e:
                 out.log_error("gobuster", cmd, str(e))
 
-        if gobuster and Path(wordlist_file).exists():
+        if ep_wc is None and gobuster and Path(wordlist_file).exists():
             ep_gob_f = out.output_path("recon", f"gobuster_ep_files_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_file,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob_f)]
@@ -2368,7 +2561,7 @@ def _phase_endpoint_tools(
             except Exception as e:
                 out.log_error("gobuster", cmd, str(e))
 
-        if feroxbuster and Path(wordlist_dir).exists():
+        if ep_wc is None and feroxbuster and Path(wordlist_dir).exists():
             ep_fer = out.output_path("recon", f"feroxbuster_ep_{ep_safe}")
             cmd = [feroxbuster, "--url", ep_url, "--wordlist", wordlist_dir,
                    "--depth", "1", "--threads", "20", "--quiet",
@@ -4282,17 +4475,19 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
     total   = len(_SENSITIVE_FILES)
     vc.status(phase, "Sensitive Files", "running", "Probing", 0, total)
 
-    # Fetch a known-absent path to build a catch-all baseline; skip files whose
-    # response is identical to the baseline (wildcard 404 handler on some servers).
-    _file_baseline = _get_404_baseline(url, sess, timeout)
+    # Detect wildcard/catch-all before probing; skip files that match the baseline.
+    _file_wc = _detect_wildcard(url, sess, timeout)
+    if _file_wc is not None:
+        vc.log("[files] Wildcard detected — all file findings will be validated against baseline",
+               "WARNING")
 
     for idx, (fpath, risk, fdesc) in enumerate(_SENSITIVE_FILES):
         vc.status(phase, "Sensitive Files", "running", fpath, idx, total)
         try:
             r = sess.get(url + fpath, timeout=timeout, allow_redirects=False)
             if r.status_code == 200 and len(r.text) > 5:
-                if _is_catchall_response(r, _file_baseline):
-                    continue   # same body as the 404 baseline — generic handler
+                if _is_wildcard_match(r, _file_wc):
+                    continue   # matches catch-all baseline — not a real file
                 out_f = out.output_path(phase, "file_" + fpath.replace("/", "_").lstrip("_"))
                 out_f.write_text(r.text[:10000], encoding="utf-8")
                 out.add_finding(
