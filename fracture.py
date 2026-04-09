@@ -2000,7 +2000,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     out_f    = out.output_path(phase, "gobuster_" + target["hostname"])
     if gobuster and Path(wordlist).exists():
         cmd = [gobuster, "dir", "-u", url, "-w", wordlist, "-t", "30",
-               "-q", "-k", "--wildcard", "-o", str(out_f)]
+               "-q", "-k", "-o", str(out_f)]
         vc.log("[recon] Running gobuster ...", "INFO")
         try:
             proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -2058,7 +2058,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         if gobuster:
             gob_files_out = out.output_path(phase, "gobuster_files_" + target["hostname"])
             cmd = [gobuster, "dir", "-u", url, "-w", wordlist_files, "-t", "30",
-                   "-q", "-k", "--wildcard", "-o", str(gob_files_out)]
+                   "-q", "-k", "-o", str(gob_files_out)]
             vc.log("[recon] Running gobuster (files) ...", "INFO")
             try:
                 proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -2340,7 +2340,7 @@ def _phase_endpoint_tools(
         if gobuster and Path(wordlist_dir).exists():
             ep_gob = out.output_path("recon", f"gobuster_ep_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_dir,
-                   "-t", "20", "-q", "-k", "--wildcard", "-o", str(ep_gob)]
+                   "-t", "20", "-q", "-k", "-o", str(ep_gob)]
             vc.log(f"[endpoint_tools] gobuster on {ep_url}", "INFO")
             try:
                 proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -2356,7 +2356,7 @@ def _phase_endpoint_tools(
         if gobuster and Path(wordlist_file).exists():
             ep_gob_f = out.output_path("recon", f"gobuster_ep_files_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_file,
-                   "-t", "20", "-q", "-k", "--wildcard", "-o", str(ep_gob_f)]
+                   "-t", "20", "-q", "-k", "-o", str(ep_gob_f)]
             try:
                 proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 _register_proc(proc)
