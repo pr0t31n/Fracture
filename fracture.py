@@ -38,7 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.2.1"
+VERSION = "1.2.3"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -205,8 +205,10 @@ def _find_tool(name: str) -> "str | None":
 
 
 # Flat wordlist directory populated by fracture's install.py --wordlists phase.
+# macOS: /usr/share is SIP-protected; use /usr/local/share/wordlists instead.
 _WORDLISTS_DIR = (
-    Path("C:/wordlists") if platform.system() == "Windows"
+    Path("C:/wordlists")               if platform.system() == "Windows"
+    else Path("/usr/local/share/wordlists") if platform.system() == "Darwin"
     else Path("/usr/share/wordlists")
 )
 

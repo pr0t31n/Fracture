@@ -69,10 +69,31 @@ def get_sudo_user():
     return os.environ.get("SUDO_USER", "")
 
 
+def require_root():
+    """Ensure the installer runs with root/admin privileges.
+
+    On Unix: re-executes the script under sudo if not already root.
+    On Windows: checks for Administrator rights and exits with guidance.
+    """
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            if not ctypes.windll.shell32.IsUserAnAdmin():
+                error("This installer requires Administrator privileges.")
+                error("Right-click the terminal and choose 'Run as administrator'.")
+                sys.exit(1)
+        except Exception:
+            warn("Could not verify Windows admin status — continuing.")
+        return
+    if not is_root():
+        warn("Installer requires root privileges. Re-running with sudo ...")
+        os.execvp("sudo", ["sudo", sys.executable] + sys.argv)
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
-def run(cmd, check=True, capture=False, env=None):
+def run(cmd, check=True, capture=False, env=None, cwd=None):
     step(" ".join(cmd) if isinstance(cmd, list) else cmd)
     kwargs = dict(check=check)
     if capture:
@@ -80,6 +101,8 @@ def run(cmd, check=True, capture=False, env=None):
         kwargs["text"] = True
     if env:
         kwargs["env"] = env
+    if cwd:
+        kwargs["cwd"] = cwd
     return subprocess.run(cmd, **kwargs)
 
 
@@ -225,10 +248,112 @@ def install_go():
 
 
 # ---------------------------------------------------------------------------
-# Ruby gems
+# Ruby gems / git-based Ruby tools
 # ---------------------------------------------------------------------------
+def _bundler():
+    """Return path to a bundler binary, preferring Homebrew Ruby (>= 3.0) on macOS."""
+    # Homebrew Ruby installs a modern bundler separately from the system Ruby
+    brew_bundles = [
+        "/opt/homebrew/opt/ruby/bin/bundle",   # Apple Silicon
+        "/usr/local/opt/ruby/bin/bundle",       # Intel
+    ]
+    for p in brew_bundles:
+        if os.path.isfile(p):
+            return p
+    # rbenv shim for the real (non-root) user
+    sudo_user = get_sudo_user()
+    if sudo_user:
+        for home in [f"/Users/{sudo_user}", f"/home/{sudo_user}"]:
+            rbenv_bundle = os.path.join(home, ".rbenv", "shims", "bundle")
+            if os.path.isfile(rbenv_bundle):
+                return rbenv_bundle
+    return shutil.which("bundle") or shutil.which("bundler")
+
+
+def _bundle_install(dest, without=None):
+    """Run bundle install in *dest*, as SUDO_USER when running as root.
+
+    Running bundler as root corrupts gem paths for regular users and triggers
+    Bundler's own warning.  We also chown the clone directory to the real user
+    first so Bundler can write Gemfile.lock.
+
+    ``without`` — if set (e.g. ``"test"``), runs
+    ``bundle config set --local without <without>`` before ``bundle install``
+    using the modern Bundler 4.x API (the old ``--without`` flag was removed).
+
+    Gemfile.lock is deleted before install to prevent Bundler from
+    auto-downgrading to the version pinned in the lockfile (e.g. 1.17.2),
+    which crashes on Ruby 3.2+ due to the removed ``String#untaint`` method.
+    """
+    bundler = _bundler()
+    if not bundler:
+        warn(f"No bundler found — run manually: cd {dest} && bundle install")
+        warn("Install Homebrew Ruby first: brew install ruby")
+        return
+
+    # Remove Gemfile.lock so Bundler uses the current (modern) version
+    # rather than auto-installing the obsolete version pinned in the lockfile.
+    gemfile_lock = os.path.join(dest, "Gemfile.lock")
+    if os.path.isfile(gemfile_lock):
+        info("Removing Gemfile.lock to prevent bundler version downgrade")
+        os.remove(gemfile_lock)
+
+    sudo_user = get_sudo_user()
+    # Only sudo-drop when SUDO_USER is set to a real (non-root) user name.
+    use_sudo = is_root() and bool(sudo_user) and sudo_user != "root"
+
+    if use_sudo:
+        run(["chown", "-R", sudo_user, dest], check=False)
+
+    def _run(args):
+        if use_sudo:
+            run(["sudo", "-u", sudo_user, bundler] + args, check=False, cwd=dest)
+        else:
+            run([bundler] + args, check=False, cwd=dest)
+
+    # Bundler 4.x removed the --without flag; use bundle config instead.
+    if without:
+        _run(["config", "set", "--local", "without", without])
+
+    _run(["install"])
+
+
+def _install_whatweb_git():
+    """Clone WhatWeb from GitHub into /opt/whatweb and symlink."""
+    info("Installing whatweb via git ...")
+    git_clone_or_update("https://github.com/urbanadventurer/WhatWeb.git", "/opt/whatweb")
+    whatweb_bin = "/opt/whatweb/whatweb"
+    if not os.path.isfile(whatweb_bin):
+        warn("WhatWeb entry point not found in /opt/whatweb — check the clone.")
+        return
+    os.chmod(whatweb_bin, 0o755)
+    symlink_force(whatweb_bin, "/usr/local/bin/whatweb")
+    info("whatweb symlinked to /usr/local/bin/whatweb")
+    _bundle_install("/opt/whatweb")
+
+
+def _install_wpscan_git():
+    """Clone WPScan from GitHub into /opt/wpscan and symlink."""
+    info("Installing wpscan via git ...")
+    git_clone_or_update("https://github.com/wpscanteam/wpscan.git", "/opt/wpscan")
+    wpscan_bin = "/opt/wpscan/bin/wpscan"
+    if not os.path.isfile(wpscan_bin):
+        warn("WPScan binary not found at /opt/wpscan/bin/wpscan — check the clone.")
+        return
+    os.chmod(wpscan_bin, 0o755)
+    symlink_force(wpscan_bin, "/usr/local/bin/wpscan")
+    info("wpscan symlinked to /usr/local/bin/wpscan")
+    _bundle_install("/opt/wpscan", without="test")
+
+
 def install_gems():
-    banner("Phase: Ruby gems")
+    banner("Phase: Ruby tools")
+    if OS == "macos":
+        # macOS ships Ruby 2.6 which can't satisfy modern gem requirements.
+        # Install whatweb and wpscan from source via git instead.
+        _install_whatweb_git()
+        _install_wpscan_git()
+        return
     gem = shutil.which("gem")
     if not gem:
         warn("gem not found — skipping Ruby gem installation.")
@@ -320,16 +445,25 @@ _WORDLIST_URLS = [
 def wordlists_dir():
     if platform.system() == "Windows":
         return r"C:\wordlists"
+    if platform.system() == "Darwin":
+        # /usr/share is SIP-protected on macOS even as root
+        return "/usr/local/share/wordlists"
     return "/usr/share/wordlists"
 
 
 def install_wordlists():
     banner("Phase: wordlists")
     dest_dir = wordlists_dir()
-    try:
-        os.makedirs(dest_dir, exist_ok=True)
-    except PermissionError:
-        error(f"Cannot create {dest_dir} — run as root/sudo.")
+    if not os.path.isdir(dest_dir):
+        info(f"Creating wordlist directory: {dest_dir}")
+        if is_root():
+            os.makedirs(dest_dir, exist_ok=True)
+        else:
+            # Belt-and-suspenders: use sudo in case we somehow lack write access
+            run(["sudo", "mkdir", "-p", dest_dir], check=False)
+            run(["sudo", "chmod", "755", dest_dir], check=False)
+    if not os.path.isdir(dest_dir):
+        error(f"Could not create {dest_dir} — wordlist installation aborted.")
         return
     info(f"Wordlist directory: {dest_dir}")
     for url, filename in _WORDLIST_URLS:
@@ -413,6 +547,8 @@ def run_check():
         ("/opt/jwt_tool",          "jwt_tool"),
         ("/opt/exploitdb",         "exploitdb (searchsploit)"),
         ("/opt/nuclei-templates",  "nuclei-templates"),
+        ("/opt/whatweb",           "whatweb (macOS git install)"),
+        ("/opt/wpscan",            "wpscan  (macOS git install)"),
     ]:
         if os.path.isdir(path):
             info(f"{label:30s} {G}PRESENT{W} ({path})")
@@ -450,6 +586,9 @@ def print_summary(skips):
     warn("jwt_tool installed from git (/opt/jwt_tool) — available as /usr/local/bin/jwt_tool.")
     warn("searchsploit: installed via exploitdb package or git (/opt/exploitdb).")
     warn("feroxbuster: apt/brew only — install manually on dnf/other systems (cargo install feroxbuster).")
+    if OS == "macos":
+        warn("whatweb: installed from git (/opt/whatweb) — requires bundler (gem install bundler).")
+        warn("wpscan:  installed from git (/opt/wpscan)  — requires bundler (gem install bundler).")
     info(f"Wordlists  : installed to {wordlists_dir()}")
 
 
@@ -467,9 +606,12 @@ def main():
     parser.add_argument("--check",          action="store_true", help="Verify installation only")
     args = parser.parse_args()
 
+    require_root()
+
     banner("Fracture — Web App Pentest Orchestrator — Installer")
     info(f"Detected OS : {OS}")
     info(f"Python      : {sys.executable}")
+    info(f"Running as  : {'root' if is_root() else os.environ.get('USER','?')}")
 
     if args.check:
         run_check()
