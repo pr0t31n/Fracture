@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1497,6 +1497,13 @@ class OutputManager:
         tmp.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         tmp.replace(self.summary_json)
 
+    def save_structure_map(self, sm: dict) -> None:
+        """Write structure_map.json to project root."""
+        out_path = self.root / "structure_map.json"
+        tmp = out_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(sm, indent=2), encoding="utf-8")
+        tmp.replace(out_path)
+
 
 # ─────────────────────────────────────────────
 # Banner
@@ -2680,6 +2687,80 @@ def _parse_feroxbuster_output(filepath: Path) -> list:
         if m:
             urls.append(m.group(1).rstrip("/\\"))
     return urls
+
+
+def _parse_gobuster_status(filepath: Path, base_url: str) -> "list[tuple[str,int]]":
+    """Extract (url, status_code) pairs from a gobuster -q output file."""
+    results = []
+    base = base_url.rstrip("/")
+    for line in filepath.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m_code = re.search(r'\(Status:\s*(\d+)\)', line)
+        code = int(m_code.group(1)) if m_code else 200
+        m_path = re.match(r'(/\S*)', line)
+        if m_path:
+            path = m_path.group(1).split()[0]  # strip any trailing junk
+            results.append((f"{base}{path}", code))
+    return results
+
+
+def _parse_feroxbuster_status(filepath: Path) -> "list[tuple[str,int]]":
+    """Extract (url, status_code) pairs from a feroxbuster output file."""
+    results = []
+    for line in filepath.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Feroxbuster quiet format: "200  GET  ... http://host/path"
+        m = re.match(r'^(\d{3})\s+\w+\s+.*?(https?://\S+)', line)
+        if m:
+            code = int(m.group(1))
+            url  = m.group(2).rstrip("/\\")
+            results.append((url, code))
+        else:
+            m2 = re.search(r'(https?://\S+)', line)
+            if m2:
+                results.append((m2.group(1).rstrip("/\\"), 200))
+    return results
+
+
+def _sm_permissive_rank(code: int) -> int:
+    """Return sort key for status codes: lower = more permissive/accessible."""
+    if 200 <= code < 300:
+        return code               # 200 best, 201-299 next
+    if 300 <= code < 400:
+        return 400 + (code - 300) # redirects: 400-499 slot
+    if code == 401:
+        return 600
+    if code == 403:
+        return 601
+    if 400 <= code < 500:
+        return 602 + (code - 400)
+    if 500 <= code < 600:
+        return 700 + (code - 500)
+    return 999
+
+
+def _sm_record(sm: dict, raw_url: str, status_code: int, source: str,
+               auth_user: str = "") -> None:
+    """Record a URL observation into the structure map dict."""
+    try:
+        parsed = urllib.parse.urlparse(raw_url)
+        path = parsed.path or "/"
+    except Exception:
+        path = raw_url
+    path = path.rstrip("/") or "/"
+    if path not in sm:
+        sm[path] = {"status_codes": [], "sources": [], "auth_users": []}
+    entry = sm[path]
+    if status_code and status_code not in entry["status_codes"]:
+        entry["status_codes"].append(status_code)
+    if source and source not in entry["sources"]:
+        entry["sources"].append(source)
+    if auth_user and auth_user not in entry["auth_users"]:
+        entry["auth_users"].append(auth_user)
 
 
 def _capture_screenshot_to(ep_url: str, out_path: Path,
@@ -5746,6 +5827,161 @@ def _print_banner() -> None:
     _tprint(f"{Fore.CYAN}  OWASP Top 10 2025 Coverage: A01–A10{Style.RESET_ALL}\n")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Structure map builder
+# Aggregates all discovered paths from recon output files + crawl/auth_recon
+# data and writes structure_map.json for the Crucible Structure tab.
+# ─────────────────────────────────────────────────────────────────────────────
+def _build_structure_map(
+    target: dict,
+    out: "OutputManager",
+    cfg: dict,
+    sess: "requests.Session",
+    auth_sess: "requests.Session | None",
+    crawl_data: dict,
+    auth_recon_data: dict,
+) -> dict:
+    """Build and return a structure_map dict, then save it via out.save_structure_map()."""
+    sm: dict = {}                  # path → {status_codes, sources, auth_users}
+    unauth_paths: set = set()      # paths confirmed accessible without auth
+    timeout = min(cfg.get("timeout", 10), 8)
+    base_url = target["url"].rstrip("/")
+    auth_username = (cfg.get("auth") or {}).get("username", "")
+
+    # ── 1. Parse recon tool output files (unauthenticated) ────────────────────
+    host = target["hostname"]
+    _recon_files = [
+        (f"gobuster_{host}",        "gobuster",        "gob"),
+        (f"gobuster_files_{host}",  "gobuster-files",  "gob"),
+    ]
+    for fname, source, ftype in _recon_files:
+        fpath = out.output_path("recon", fname)
+        if fpath.exists():
+            try:
+                for url, code in _parse_gobuster_status(fpath, base_url):
+                    _sm_record(sm, url, code, source)
+            except Exception:
+                pass
+
+    _fer_files = [
+        (f"feroxbuster_{host}",        "feroxbuster"),
+        (f"feroxbuster_files_{host}",  "feroxbuster-files"),
+    ]
+    for fname, source in _fer_files:
+        fpath = out.output_path("recon", fname)
+        if fpath.exists():
+            try:
+                for url, code in _parse_feroxbuster_status(fpath):
+                    _sm_record(sm, url, code, source)
+            except Exception:
+                pass
+
+    # Also parse any endpoint-level gobuster/feroxbuster files
+    recon_dir = out.root / "recon"
+    for fpath in recon_dir.glob("gobuster_ep_*"):
+        try:
+            for url, code in _parse_gobuster_status(fpath, base_url):
+                _sm_record(sm, url, code, "gobuster-ep")
+        except Exception:
+            pass
+    for fpath in recon_dir.glob("feroxbuster_ep_*"):
+        try:
+            for url, code in _parse_feroxbuster_status(fpath):
+                _sm_record(sm, url, code, "feroxbuster-ep")
+        except Exception:
+            pass
+
+    # Track all recon-discovered paths as unauthenticated
+    for path in list(sm.keys()):
+        unauth_paths.add(path)
+
+    # ── 2. Unauthenticated crawl links ────────────────────────────────────────
+    for link in set(crawl_data.get("links", [])):
+        try:
+            parsed = urllib.parse.urlparse(link)
+            path = parsed.path.rstrip("/") or "/"
+        except Exception:
+            continue
+        if path not in sm:
+            # Probe for status code — lightweight HEAD request
+            try:
+                r = sess.head(link, timeout=timeout, allow_redirects=True, verify=False)
+                code = r.status_code
+            except Exception:
+                code = 200  # crawl followed this link, assume accessible
+            _sm_record(sm, link, code, "crawl")
+        else:
+            _sm_record(sm, link, 0, "crawl")
+        unauth_paths.add(path)
+
+    # ── 3. Authenticated paths (auth_recon) ───────────────────────────────────
+    auth_links = list(set(auth_recon_data.get("links", [])))
+    # Cap probing at 150 paths to avoid excessive latency
+    _probe_cap = 150
+    _probed = 0
+    for link in auth_links:
+        try:
+            parsed = urllib.parse.urlparse(link)
+            path = parsed.path.rstrip("/") or "/"
+        except Exception:
+            continue
+        auth_user = auth_username
+
+        # Get authenticated status code
+        auth_code = 0
+        if auth_sess and _probed < _probe_cap:
+            try:
+                r = auth_sess.head(link, timeout=timeout, allow_redirects=True, verify=False)
+                auth_code = r.status_code
+                _probed += 1
+            except Exception:
+                auth_code = 200  # authenticated crawl reached it
+
+        _sm_record(sm, link, auth_code or 200, "auth_recon", auth_user)
+
+        # If not already known as unauthenticated, probe with unauth session
+        if path not in unauth_paths and _probed < _probe_cap:
+            try:
+                r = sess.head(link, timeout=timeout, allow_redirects=True, verify=False)
+                unauth_code = r.status_code
+                _probed += 1
+            except Exception:
+                unauth_code = 403
+            # Record the unauth status so max_status logic works correctly
+            _sm_record(sm, link, unauth_code, "auth_recon")
+            if unauth_code < 400:
+                unauth_paths.add(path)
+
+    # ── 4. Finalize: compute max_status and auth_only ─────────────────────────
+    finalized: dict = {}
+    for path, entry in sm.items():
+        codes = [c for c in entry["status_codes"] if c > 0]
+        max_status = min(codes, key=_sm_permissive_rank) if codes else None
+        # auth_only: path has auth_users AND was never seen without authentication
+        auth_only = bool(entry["auth_users"]) and (path not in unauth_paths)
+
+        finalized[path] = {
+            "max_status":   max_status,
+            "status_codes": codes,
+            "auth_only":    auth_only,
+            "auth_users":   entry["auth_users"],
+            "sources":      entry["sources"],
+        }
+
+    result = {
+        "base_url":    base_url,
+        "generated":   datetime.now().isoformat(),
+        "total_paths": len(finalized),
+        "paths":       finalized,
+    }
+    try:
+        out.save_structure_map(result)
+        vc.log(f"[structure_map] Saved {len(finalized)} paths to structure_map.json", "INFO")
+    except Exception as e:
+        vc.error(f"[structure_map] Failed to save: {e}")
+    return result
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -6152,6 +6388,15 @@ def main() -> None:
                 except Exception as e:
                     vc.error(f"Phase cross_user error: {e}")
                     pm.set_phase_status("cross_user", "error", detail=str(e))
+
+        # ── Build structure map ──
+        try:
+            _build_structure_map(
+                target, out, cfg, sess, auth_sess,
+                crawl_data, auth_recon_data,
+            )
+        except Exception as e:
+            vc.error(f"Structure map error: {e}")
 
         # Write summary
         try:
