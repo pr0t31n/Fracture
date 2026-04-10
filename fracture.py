@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.5.7"
+VERSION = "1.6.0"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1564,46 +1564,228 @@ def _make_session(cfg: dict) -> requests.Session:
 
 
 def _build_auth_session(cfg: dict, auth_key: str = "auth") -> "requests.Session | None":
-    """Return an authenticated session or None if auth not enabled."""
+    """Return an authenticated session or None if auth not enabled.
+
+    Supported auth_method values:
+        form_login          – POST form credentials → session cookie
+        basic               – HTTP Basic Authentication
+        digest              – HTTP Digest Authentication
+        ntlm                – NTLM (Windows) Authentication (requires requests-ntlm)
+        bearer              – Authorization: Bearer <token>
+        session_cookie      – Pre-captured session cookie string
+        token_login         – POST credentials → JSON token → Authorization header
+        oauth2_client_creds – OAuth2 client_credentials grant → Bearer token
+        apikey_header       – Custom header API key
+        apikey_cookie       – Cookie-based API key
+        header_creds        – Arbitrary custom request headers
+        kerberos            – Kerberos/SPNEGO (requires requests-kerberos)
+    """
     auth = cfg.get(auth_key, {})
     if not auth.get("enabled"):
         return None
+
     sess = _make_session(cfg)
-    token = auth.get("auth_token", "")
-    if token:
-        ttype = auth.get("token_type", "Bearer")
-        sess.headers["Authorization"] = f"{ttype} {token}"
+    timeout = cfg.get("timeout", 10)
+
+    method   = auth.get("auth_method", auth.get("auth_type", "form_login"))
+    username = auth.get("username", "")
+    password = auth.get("password", "")
+
+    # ── form_login ─────────────────────────────────────────────────────────────
+    if method == "form_login":
+        login_url = auth.get("login_url", "")
+        if not login_url:
+            return sess
+        login_mode = auth.get("login_mode", "fields")
+        if login_mode == "json":
+            raw = auth.get("login_data", "")
+            try:
+                body = json.loads(raw) if raw else {}
+            except Exception:
+                body = {}
+            try:
+                sess.post(login_url, json=body, timeout=timeout, allow_redirects=True)
+            except Exception:
+                pass
+        else:
+            ufield = auth.get("login_username_field", "username")
+            pfield = auth.get("login_password_field", "password")
+            body = {ufield: username, pfield: password}
+            if login_mode == "merge":
+                raw = auth.get("login_data", "")
+                try:
+                    extra = json.loads(raw) if raw else {}
+                except Exception:
+                    extra = {}
+                for k, v in extra.items():
+                    body.setdefault(k, v)
+            try:
+                sess.post(login_url, data=body, timeout=timeout, allow_redirects=True)
+            except Exception:
+                pass
         return sess
-    cookie = auth.get("session_cookie", "")
-    if cookie:
-        for pair in cookie.split(";"):
+
+    # ── basic ───────────────────────────────────────────────────────────────────
+    if method == "basic":
+        sess.auth = (username, password)
+        return sess
+
+    # ── digest ──────────────────────────────────────────────────────────────────
+    if method == "digest":
+        try:
+            from requests.auth import HTTPDigestAuth
+            sess.auth = HTTPDigestAuth(username, password)
+        except ImportError:
+            pass
+        return sess
+
+    # ── ntlm ────────────────────────────────────────────────────────────────────
+    if method == "ntlm":
+        try:
+            from requests_ntlm import HttpNtlmAuth
+            domain = auth.get("domain", "")
+            ntlm_user = f"{domain}\\{username}" if domain else username
+            sess.auth = HttpNtlmAuth(ntlm_user, password)
+        except ImportError:
+            pass
+        return sess
+
+    # ── bearer ──────────────────────────────────────────────────────────────────
+    if method == "bearer":
+        token = auth.get("auth_token", "")
+        ttype = auth.get("token_type", "Bearer")
+        if token:
+            sess.headers["Authorization"] = f"{ttype} {token}"
+        return sess
+
+    # ── session_cookie ──────────────────────────────────────────────────────────
+    if method == "session_cookie":
+        cookie_str = auth.get("session_cookie", "")
+        for pair in cookie_str.split(";"):
             pair = pair.strip()
             if "=" in pair:
                 k, v = pair.split("=", 1)
                 sess.cookies.set(k.strip(), v.strip())
         return sess
-    auth_type  = auth.get("auth_type", "form")
-    login_url  = auth.get("login_url", "")
-    username   = auth.get("username", "")
-    password   = auth.get("password", "")
-    if auth_type == "form" and login_url and username:
-        login_data_str = auth.get("login_data", "")
-        if login_data_str:
+
+    # ── token_login ─────────────────────────────────────────────────────────────
+    if method == "token_login":
+        login_url = auth.get("login_url", "")
+        if not login_url:
+            return sess
+        login_mode = auth.get("login_mode", "fields")
+        if login_mode == "json":
+            raw = auth.get("login_data", "")
             try:
-                login_data = json.loads(login_data_str)
+                body = json.loads(raw) if raw else {}
             except Exception:
-                login_data = dict(p.split("=", 1) for p in login_data_str.split("&") if "=" in p)
+                body = {}
         else:
-            login_data = {"username": username, "password": password}
+            ufield = auth.get("login_username_field", "username")
+            pfield = auth.get("login_password_field", "password")
+            body = {ufield: username, pfield: password}
+            if login_mode == "merge":
+                raw = auth.get("login_data", "")
+                try:
+                    extra = json.loads(raw) if raw else {}
+                except Exception:
+                    extra = {}
+                for k, v in extra.items():
+                    body.setdefault(k, v)
         try:
-            sess.post(login_url, data=login_data, timeout=cfg.get("timeout", 10), allow_redirects=True)
+            resp = sess.post(login_url, json=body, timeout=timeout, allow_redirects=True)
+            data = resp.json()
+            token_field = auth.get("token_response_field", "token")
+            token = _nested_get(data, token_field) or ""
+            if token:
+                ttype = auth.get("token_type", "Bearer")
+                sess.headers["Authorization"] = f"{ttype} {token}"
         except Exception:
             pass
         return sess
-    if auth_type == "basic" and username:
-        sess.auth = (username, password)
+
+    # ── oauth2_client_creds ─────────────────────────────────────────────────────
+    if method == "oauth2_client_creds":
+        token_url = auth.get("oauth_token_url", "")
+        if not token_url:
+            return sess
+        client_id     = auth.get("oauth_client_id", "")
+        client_secret = auth.get("oauth_client_secret", "")
+        scope         = auth.get("oauth_scope", "")
+        payload = {"grant_type": "client_credentials"}
+        if client_id:
+            payload["client_id"] = client_id
+        if client_secret:
+            payload["client_secret"] = client_secret
+        if scope:
+            payload["scope"] = scope
+        try:
+            r = sess.post(token_url, data=payload, timeout=timeout)
+            token = r.json().get("access_token", "")
+            if token:
+                sess.headers["Authorization"] = f"Bearer {token}"
+        except Exception:
+            pass
         return sess
+
+    # ── apikey_header ───────────────────────────────────────────────────────────
+    if method == "apikey_header":
+        header_name = auth.get("api_key_header", "X-API-Key")
+        api_key     = auth.get("api_key_value", auth.get("auth_token", ""))
+        if header_name and api_key:
+            sess.headers[header_name] = api_key
+        return sess
+
+    # ── apikey_cookie ───────────────────────────────────────────────────────────
+    if method == "apikey_cookie":
+        cookie_name = auth.get("api_key_cookie_name", "api_key")
+        api_key     = auth.get("api_key_value", auth.get("auth_token", ""))
+        if cookie_name and api_key:
+            sess.cookies.set(cookie_name, api_key)
+        return sess
+
+    # ── header_creds ────────────────────────────────────────────────────────────
+    if method == "header_creds":
+        custom = auth.get("custom_headers", {})
+        if isinstance(custom, str):
+            try:
+                custom = json.loads(custom)
+            except Exception:
+                custom = {}
+        for k, v in custom.items():
+            sess.headers[k] = v
+        return sess
+
+    # ── kerberos ─────────────────────────────────────────────────────────────────
+    if method == "kerberos":
+        try:
+            from requests_kerberos import HTTPKerberosAuth, OPTIONAL
+            sess.auth = HTTPKerberosAuth(mutual_authentication=OPTIONAL)
+        except ImportError:
+            pass
+        return sess
+
+    # ── legacy aliases ───────────────────────────────────────────────────────────
+    if method == "form":
+        # redirect old "form" to form_login
+        auth["auth_method"] = "form_login"
+        return _build_auth_session(cfg, auth_key)
+    if method == "token":
+        auth["auth_method"] = "bearer"
+        return _build_auth_session(cfg, auth_key)
+
     return sess
+
+
+def _nested_get(d: dict, dotpath: str):
+    """Safely retrieve a value from a nested dict using dot notation."""
+    keys = dotpath.split(".")
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(k)
+    return cur
 
 
 # ─────────────────────────────────────────────
@@ -1679,13 +1861,39 @@ DEFAULT_SETTINGS: dict = {
             "session": False, "csrf": False, "cross_user": False,
         },
         "auth": {
-            "enabled": False, "username": "", "password": "",
-            "auth_type": "form", "login_url": "", "login_data": "",
-            "auth_token": "", "token_type": "Bearer", "session_cookie": "",
+            "enabled": False,
+            "auth_method": "form_login",
+            # Universal credential fields
+            "username": "", "password": "",
+            # Form/token login
+            "login_url": "", "login_mode": "fields",
+            "login_username_field": "username", "login_password_field": "password",
+            "login_data": "",
+            # Token / bearer
+            "auth_token": "", "token_type": "Bearer",
+            "token_response_field": "token",
+            # OAuth2
+            "oauth_token_url": "", "oauth_client_id": "", "oauth_client_secret": "",
+            "oauth_scope": "",
+            # API key
+            "api_key_header": "X-API-Key", "api_key_cookie_name": "api_key",
+            "api_key_value": "",
+            # Cookie / NTLM / Kerberos
+            "session_cookie": "", "domain": "",
+            # Custom headers
+            "custom_headers": {},
         },
         "auth2": {
-            "enabled": False, "username": "", "password": "",
-            "auth_token": "", "session_cookie": "",
+            "enabled": False,
+            "auth_method": "form_login",
+            "username": "", "password": "",
+            "login_url": "", "login_mode": "fields",
+            "login_username_field": "username", "login_password_field": "password",
+            "login_data": "",
+            "auth_token": "", "token_type": "Bearer",
+            "token_response_field": "token",
+            "session_cookie": "", "domain": "",
+            "custom_headers": {},
         },
         "sqlmap_timeout":   300,
         "nuclei_timeout":   600,
@@ -1757,11 +1965,20 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--no-vulnscan",   action="store_true", help="Skip nuclei vulnscan")
     parser.add_argument("--no-auth",       action="store_true", help="Skip all authenticated phases")
     parser.add_argument("--list-phases",   action="store_true", help="Print phases and exit")
-    parser.add_argument("--username",      metavar="USER", help="Auth username")
-    parser.add_argument("--password",      metavar="PASS", help="Auth password")
-    parser.add_argument("--auth-type",     metavar="TYPE", default="form", help="Auth type: form/basic/token")
-    parser.add_argument("--login-url",     metavar="URL",  help="Login endpoint URL")
-    parser.add_argument("--auth-token",    metavar="TOKEN", help="Bearer/API token")
+    parser.add_argument("--username",      metavar="USER",  help="Auth username")
+    parser.add_argument("--password",      metavar="PASS",  help="Auth password")
+    parser.add_argument("--auth-method",   metavar="METHOD", default=None,
+                        choices=["form_login","basic","digest","ntlm","bearer",
+                                 "session_cookie","token_login","oauth2_client_creds",
+                                 "apikey_header","apikey_cookie","header_creds","kerberos"],
+                        help="Authentication method")
+    parser.add_argument("--auth-type",     metavar="TYPE",  default=None,
+                        help="Legacy alias for --auth-method (form/basic/token)")
+    parser.add_argument("--login-url",     metavar="URL",   help="Login endpoint URL")
+    parser.add_argument("--auth-token",    metavar="TOKEN", help="Bearer / API token value")
+    parser.add_argument("--token-type",    metavar="TYPE",  default=None, help="Token scheme (default: Bearer)")
+    parser.add_argument("--session-cookie",metavar="COOKIE",help="Pre-captured session cookie string")
+    parser.add_argument("--domain",        metavar="DOMAIN",help="Windows domain for NTLM auth")
     parser.add_argument("--threads",       type=int, default=None, help="Number of threads")
     parser.add_argument("--timeout",       type=int, default=None, help="Request timeout in seconds")
     return parser.parse_args()
@@ -5561,16 +5778,34 @@ def main() -> None:
             cfg["phases"][auth_phase] = False
 
     # CLI auth overrides
+    _auth_method = args.auth_method or (
+        {"form": "form_login", "basic": "basic", "token": "bearer"}.get(args.auth_type or "", None)
+    )
     if args.username:
-        cfg["auth"]["enabled"]   = True
-        cfg["auth"]["username"]  = args.username
-        cfg["auth"]["password"]  = args.password or ""
-        cfg["auth"]["auth_type"] = args.auth_type or "form"
+        cfg["auth"]["enabled"]      = True
+        cfg["auth"]["username"]     = args.username
+        cfg["auth"]["password"]     = args.password or ""
+        if _auth_method:
+            cfg["auth"]["auth_method"] = _auth_method
     if args.login_url:
         cfg["auth"]["login_url"] = args.login_url
     if args.auth_token:
-        cfg["auth"]["enabled"]    = True
-        cfg["auth"]["auth_token"] = args.auth_token
+        cfg["auth"]["enabled"]      = True
+        cfg["auth"]["auth_token"]   = args.auth_token
+        cfg["auth"]["api_key_value"] = args.auth_token
+        if not _auth_method:
+            cfg["auth"]["auth_method"] = "bearer"
+    if args.token_type:
+        cfg["auth"]["token_type"] = args.token_type
+    if args.session_cookie:
+        cfg["auth"]["enabled"]         = True
+        cfg["auth"]["session_cookie"]  = args.session_cookie
+        if not _auth_method:
+            cfg["auth"]["auth_method"] = "session_cookie"
+    if args.domain:
+        cfg["auth"]["domain"] = args.domain
+    if _auth_method and not args.username and not args.auth_token:
+        cfg["auth"]["auth_method"] = _auth_method
 
     # Auto-compute structured project path from engagement fields if not explicitly set
     if not cfg.get("project"):
