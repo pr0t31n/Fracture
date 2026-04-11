@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1564,45 +1564,324 @@ def _make_session(cfg: dict) -> requests.Session:
 
 
 def _build_auth_session(cfg: dict, auth_key: str = "auth") -> "requests.Session | None":
-    """Return an authenticated session or None if auth not enabled."""
+    """
+    Return an authenticated requests.Session for the given cfg/auth_key, or None if disabled.
+    Supports all 20 auth methods from Fracture testConnection.py.
+    """
     auth = cfg.get(auth_key, {})
     if not auth.get("enabled"):
         return None
-    sess = _make_session(cfg)
-    token = auth.get("auth_token", "")
-    if token:
-        ttype = auth.get("token_type", "Bearer")
-        sess.headers["Authorization"] = f"{ttype} {token}"
-        return sess
-    cookie = auth.get("session_cookie", "")
-    if cookie:
-        for pair in cookie.split(";"):
-            pair = pair.strip()
-            if "=" in pair:
-                k, v = pair.split("=", 1)
-                sess.cookies.set(k.strip(), v.strip())
-        return sess
-    auth_type  = auth.get("auth_type", "form")
-    login_url  = auth.get("login_url", "")
-    username   = auth.get("username", "")
-    password   = auth.get("password", "")
-    if auth_type == "form" and login_url and username:
-        login_data_str = auth.get("login_data", "")
-        if login_data_str:
-            try:
-                login_data = json.loads(login_data_str)
-            except Exception:
-                login_data = dict(p.split("=", 1) for p in login_data_str.split("&") if "=" in p)
-        else:
-            login_data = {"username": username, "password": password}
+    sess    = _make_session(cfg)
+    timeout = cfg.get("timeout", 10)
+    method  = (auth.get("method") or auth.get("auth_type") or "form_login").strip().lower()
+
+    # ── CSRF prefetch helper (used by form_login / totp_mfa) ─────────────────
+    def _csrf_prefetch(url: str) -> "tuple[str, dict]":
+        """GET login page; return (form_action_url, hidden_input_fields)."""
+        import re
+        from urllib.parse import urljoin
         try:
-            sess.post(login_url, data=login_data, timeout=cfg.get("timeout", 10), allow_redirects=True)
+            r    = sess.get(url, timeout=timeout)
+            html = r.text
         except Exception:
-            pass
-        return sess
-    if auth_type == "basic" and username:
-        sess.auth = (username, password)
-        return sess
+            return "", {}
+        hidden: dict = {}
+        form_action  = ""
+        for form_m in re.finditer(r"(?s)<form[^>]*>(.+?)</form>", html, re.IGNORECASE):
+            form_tag  = form_m.group(0)
+            form_body = form_m.group(1)
+            if not re.search(r'<input[^>]+type=["\']?password["\']?', form_body, re.IGNORECASE):
+                continue
+            act_m = re.search(r'\baction=["\']([^"\']*)["\']', form_tag, re.IGNORECASE)
+            if act_m:
+                raw = act_m.group(1).strip()
+                if raw:
+                    form_action = urljoin(url, raw)
+            for inp in re.finditer(r"<input[^>]+>", form_body, re.IGNORECASE):
+                tag = inp.group(0)
+                t_m = re.search(r'\btype=["\']?(\w+)["\']?', tag, re.IGNORECASE)
+                if not t_m or t_m.group(1).lower() != "hidden":
+                    continue
+                n_m = re.search(r'\bname=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+                v_m = re.search(r'\bvalue=["\']([^"\']*)["\']', tag, re.IGNORECASE)
+                if n_m:
+                    hidden[n_m.group(1)] = v_m.group(1) if v_m else ""
+            break
+        return form_action, hidden
+
+    # ── Login POST helper ─────────────────────────────────────────────────────
+    def _login_post() -> "tuple[requests.Response | None, str]":
+        """CSRF prefetch + POST credentials to resolved form action. Returns (resp, post_url)."""
+        base_url   = auth.get("login_url", "")
+        if not base_url:
+            return None, ""
+        login_mode = auth.get("login_mode", "fields")
+        uf = auth.get("login_username_field", "username")
+        pf = auth.get("login_password_field", "password")
+        u  = auth.get("username", "")
+        p  = auth.get("password", "")
+        form_action, hidden = _csrf_prefetch(base_url)
+        post_url = form_action if form_action else base_url
+        if login_mode == "fields":
+            data: dict = dict(hidden)
+            if u: data[uf] = u
+            if p: data[pf] = p
+        elif login_mode == "json":
+            raw = auth.get("login_data", "{}")
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            except Exception:
+                data = {}
+        else:  # "merge"
+            raw = auth.get("login_data", "{}")
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            except Exception:
+                data = {}
+            if u and uf not in data: data[uf] = u
+            if p and pf not in data: data[pf] = p
+            for k, v in hidden.items():
+                if k not in data: data[k] = v
+        ct = auth.get("login_content_type", "application/x-www-form-urlencoded")
+        try:
+            if "json" in ct:
+                return sess.post(post_url, json=data, timeout=timeout, allow_redirects=True), post_url
+            return sess.post(post_url, data=data, timeout=timeout, allow_redirects=True), post_url
+        except Exception:
+            return None, post_url
+
+    # ── Form Login ────────────────────────────────────────────────────────────
+    if method in ("form_login", "form"):
+        _login_post()  # session cookies captured automatically
+
+    # ── HTTP Basic ────────────────────────────────────────────────────────────
+    elif method == "basic":
+        user = auth.get("username", "")
+        pw   = auth.get("password", "")
+        if user:
+            sess.auth = (user, pw)
+
+    # ── HTTP Digest ───────────────────────────────────────────────────────────
+    elif method == "digest":
+        from requests.auth import HTTPDigestAuth
+        user = auth.get("username", "")
+        pw   = auth.get("password", "")
+        if user:
+            sess.auth = HTTPDigestAuth(user, pw)
+
+    # ── NTLM ─────────────────────────────────────────────────────────────────
+    elif method == "ntlm":
+        user   = auth.get("username", "")
+        pw     = auth.get("password", "")
+        domain = auth.get("domain", "")
+        if user:
+            try:
+                from requests_ntlm import HttpNtlmAuth  # type: ignore[import]
+                ntlm_user = f"{domain}\\{user}" if domain else user
+                sess.auth = HttpNtlmAuth(ntlm_user, pw)
+            except ImportError:
+                vc.err("[auth] NTLM requires: pip install requests-ntlm")
+
+    # ── NTLMv2 + Channel Binding Token ────────────────────────────────────────
+    elif method == "ntlm_v2":
+        user   = auth.get("username", "")
+        pw     = auth.get("password", "")
+        domain = auth.get("domain", "").rstrip("\\").strip()
+        if user:
+            try:
+                from requests_ntlm import HttpNtlmAuth  # type: ignore[import]
+                ntlm_user = f"{domain}\\{user}" if domain else user
+                try:
+                    sess.auth = HttpNtlmAuth(ntlm_user, pw, send_cbt=True)
+                except TypeError:
+                    sess.auth = HttpNtlmAuth(ntlm_user, pw)
+            except ImportError:
+                vc.err("[auth] NTLMv2 requires: pip install requests-ntlm")
+
+    # ── Bearer Token ─────────────────────────────────────────────────────────
+    elif method in ("bearer", "token"):
+        token = auth.get("auth_token", "").strip()
+        if token:
+            tt = auth.get("token_type", "Bearer").strip()
+            sess.headers["Authorization"] = f"{tt} {token}"
+
+    # ── Session Cookie ────────────────────────────────────────────────────────
+    elif method == "session_cookie":
+        raw = auth.get("session_cookie", "").strip()
+        for part in raw.split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            if "=" in part:
+                k, _, v = part.partition("=")
+                sess.cookies.set(k.strip(), v.strip())
+            else:
+                sess.cookies.set(part, "")
+
+    # ── Token Login ───────────────────────────────────────────────────────────
+    elif method == "token_login":
+        resp, _url = _login_post()
+        if resp is not None:
+            try:
+                body = resp.json()
+                token_path = auth.get("login_token_path", "token")
+                tok: object = body
+                for part in token_path.split("."):
+                    tok = tok.get(part) if isinstance(tok, dict) else None
+                if not tok or not isinstance(tok, str):
+                    for k in ("token", "access_token", "jwt", "id_token", "auth_token"):
+                        if k in body:
+                            tok = body[k]
+                            break
+                if tok and isinstance(tok, str):
+                    tt = auth.get("token_type", "Bearer").strip()
+                    sess.headers["Authorization"] = f"{tt} {tok}"
+            except Exception:
+                pass
+
+    # ── OAuth2 Client Credentials ─────────────────────────────────────────────
+    elif method == "oauth2_client_creds":
+        token_url     = auth.get("oauth_token_url", "")
+        client_id     = auth.get("oauth_client_id", "")
+        client_secret = auth.get("oauth_client_secret", "")
+        scope         = auth.get("oauth_scope", "")
+        if token_url and client_id:
+            client_auth_method = auth.get("client_auth_method", "body").strip().lower()
+            data: dict = {"grant_type": "client_credentials"}
+            req_kwargs: dict = {"timeout": timeout}
+            if client_auth_method == "basic":
+                req_kwargs["auth"] = (client_id, client_secret)
+            else:
+                data["client_id"]     = client_id
+                data["client_secret"] = client_secret
+            if scope:
+                data["scope"] = scope
+            try:
+                resp = sess.post(token_url, data=data, **req_kwargs)
+                body = resp.json()
+                access_token = body.get("access_token", "")
+                if access_token:
+                    tt = body.get("token_type", "Bearer")
+                    sess.headers["Authorization"] = f"{tt} {access_token}"
+            except Exception as exc:
+                vc.err(f"[auth] OAuth2 client_credentials failed: {exc}")
+
+    # ── OAuth 1.0a ────────────────────────────────────────────────────────────
+    elif method == "oauth1a":
+        consumer_key    = auth.get("oauth1_consumer_key", "").strip()
+        consumer_secret = auth.get("oauth1_consumer_secret", "").strip()
+        access_token    = auth.get("oauth1_access_token", "").strip()
+        token_secret    = auth.get("oauth1_token_secret", "").strip()
+        if consumer_key:
+            try:
+                from requests_oauthlib import OAuth1  # type: ignore[import]
+                sess.auth = OAuth1(consumer_key, consumer_secret,
+                                   access_token or None, token_secret or None)
+            except ImportError:
+                vc.err("[auth] OAuth1a requires: pip install requests-oauthlib")
+
+    # ── SAML 2.0 Assertion POST ───────────────────────────────────────────────
+    elif method == "saml_assertion":
+        acs_url     = auth.get("saml_acs_url", "").strip()
+        assertion   = auth.get("saml_assertion", "").strip()
+        relay_state = auth.get("saml_relay_state", "")
+        if acs_url and assertion:
+            try:
+                data = {"SAMLResponse": assertion}
+                if relay_state:
+                    data["RelayState"] = relay_state
+                sess.post(acs_url, data=data, timeout=timeout, allow_redirects=True)
+            except Exception as exc:
+                vc.err(f"[auth] SAML assertion POST failed: {exc}")
+
+    # ── OIDC id_token ─────────────────────────────────────────────────────────
+    elif method == "oidc_token":
+        id_token = auth.get("oidc_id_token", "").strip()
+        if id_token:
+            sess.headers["Authorization"] = f"Bearer {id_token}"
+
+    # ── mTLS — mutual TLS client certificate ──────────────────────────────────
+    elif method == "mtls":
+        import os as _os
+        cert_path = auth.get("mtls_cert", "").strip()
+        key_path  = auth.get("mtls_key", "").strip()
+        ca_bundle = auth.get("mtls_ca_bundle", "").strip()
+        if cert_path and key_path:
+            if _os.path.isfile(cert_path) and _os.path.isfile(key_path):
+                sess.cert = (cert_path, key_path)
+                if ca_bundle and _os.path.isfile(ca_bundle):
+                    sess.verify = ca_bundle
+            else:
+                vc.err(f"[auth] mTLS cert/key file not found: {cert_path}, {key_path}")
+
+    # ── TOTP/HOTP MFA — form login + second factor ────────────────────────────
+    elif method == "totp_mfa":
+        resp, _url = _login_post()
+        if resp is not None:
+            mfa_url     = auth.get("totp_mfa_url", "").strip()
+            totp_secret = auth.get("totp_secret", "").strip()
+            mfa_field   = auth.get("totp_field", "otp")
+            if mfa_url and totp_secret:
+                try:
+                    import hmac as _hmac, hashlib as _hl, struct as _struct
+                    import time as _time, base64 as _b64
+
+                    def _totp(secret: str, digits: int = 6, period: int = 30) -> str:
+                        key = _b64.b32decode(secret.upper().replace(" ", ""))
+                        t   = int(_time.time()) // period
+                        h   = _hmac.new(key, _struct.pack(">Q", t), _hl.sha1).digest()
+                        off = h[-1] & 0x0F
+                        code = (_struct.unpack(">I", h[off:off+4])[0] & 0x7FFFFFFF) % (10 ** digits)
+                        return str(code).zfill(digits)
+
+                    sess.post(mfa_url, data={mfa_field: _totp(totp_secret)}, timeout=timeout)
+                except Exception as exc:
+                    vc.err(f"[auth] TOTP MFA step failed: {exc}")
+
+    # ── WebAuthn probe (detection/awareness only — no scriptable flow) ─────────
+    elif method == "webauthn_probe":
+        pass
+
+    # ── API Key in Header ─────────────────────────────────────────────────────
+    elif method == "apikey_header":
+        key    = auth.get("api_key", "").strip()
+        header = auth.get("api_key_header", "X-API-Key")
+        if key and header:
+            sess.headers[header] = key
+
+    # ── API Key in Cookie ─────────────────────────────────────────────────────
+    elif method == "apikey_cookie":
+        key         = auth.get("api_key", "").strip()
+        cookie_name = auth.get("api_key_cookie", "api_key")
+        if key:
+            sess.cookies.set(cookie_name, key)
+
+    # ── Custom Credential Headers ─────────────────────────────────────────────
+    elif method == "header_creds":
+        hdrs = auth.get("custom_headers", {})
+        if isinstance(hdrs, dict):
+            sess.headers.update(hdrs)
+
+    # ── Kerberos / SPNEGO ─────────────────────────────────────────────────────
+    elif method == "kerberos":
+        try:
+            from requests_kerberos import HTTPKerberosAuth, OPTIONAL  # type: ignore[import]
+            sess.auth = HTTPKerberosAuth(mutual_authentication=OPTIONAL)
+        except ImportError:
+            vc.err("[auth] Kerberos requires: pip install requests-kerberos")
+
+    # ── Kerberos S4U2Proxy Delegation ─────────────────────────────────────────
+    elif method == "kerberos_delegation":
+        try:
+            from requests_kerberos import HTTPKerberosAuth, REQUIRED  # type: ignore[import]
+            impersonate = auth.get("kerberos_impersonate", "")
+            kw: dict = {"mutual_authentication": REQUIRED, "delegate": True}
+            if impersonate:
+                kw["principal"] = impersonate
+            sess.auth = HTTPKerberosAuth(**kw)
+        except ImportError:
+            vc.err("[auth] Kerberos delegation requires: pip install requests-kerberos")
+
     return sess
 
 
@@ -1680,13 +1959,80 @@ DEFAULT_SETTINGS: dict = {
             "session": False, "csrf": False, "cross_user": False,
         },
         "auth": {
-            "enabled": False, "username": "", "password": "",
-            "auth_type": "form", "login_url": "", "login_data": "",
-            "auth_token": "", "token_type": "Bearer", "session_cookie": "",
+            "enabled":                 False,
+            "method":                  "form_login",   # form_login|basic|digest|ntlm|ntlm_v2|bearer|session_cookie|token_login|oauth2_client_creds|oauth1a|saml_assertion|oidc_token|mtls|totp_mfa|webauthn_probe|apikey_header|apikey_cookie|header_creds|kerberos|kerberos_delegation
+            "auth_type":               "",             # legacy alias for method
+            "username":                "",
+            "password":                "",
+            "domain":                  "",             # NTLM/NTLMv2 domain
+            "auth_token":              "",             # bearer / token
+            "token_type":              "Bearer",
+            "session_cookie":          "",             # pre-captured cookie string
+            # Login endpoint (form_login / token_login / totp_mfa)
+            "login_url":               "",
+            "login_data":              "",             # raw JSON body override (login_mode=json)
+            "login_mode":              "fields",       # fields|json|merge
+            "login_content_type":      "application/x-www-form-urlencoded",
+            "login_username_field":    "username",
+            "login_password_field":    "password",
+            "login_token_path":        "token",        # dot-path into JSON response (token_login)
+            # OAuth2 Client Credentials
+            "oauth_token_url":         "",
+            "oauth_client_id":         "",
+            "oauth_client_secret":     "",
+            "oauth_scope":             "",
+            "client_auth_method":      "body",         # body|basic (RFC 6749 §2.3.1)
+            # OAuth 1.0a
+            "oauth1_consumer_key":     "",
+            "oauth1_consumer_secret":  "",
+            "oauth1_access_token":     "",
+            "oauth1_token_secret":     "",
+            # SAML 2.0
+            "saml_acs_url":            "",
+            "saml_assertion":          "",             # base64-encoded SAMLResponse
+            "saml_relay_state":        "",
+            # OIDC
+            "oidc_id_token":           "",
+            # mTLS
+            "mtls_cert":               "",             # path to PEM certificate
+            "mtls_key":                "",             # path to PEM private key
+            "mtls_ca_bundle":          "",             # optional CA bundle path
+            # TOTP/HOTP MFA
+            "totp_mfa_url":            "",             # second-factor POST endpoint
+            "totp_secret":             "",             # base32 TOTP secret
+            "totp_field":              "otp",
+            # API Key
+            "api_key":                 "",
+            "api_key_header":          "X-API-Key",   # apikey_header method
+            "api_key_cookie":          "api_key",     # apikey_cookie method
+            # Custom headers
+            "custom_headers":          {},             # header_creds method
+            # Kerberos
+            "kerberos_impersonate":    "",             # S4U2Proxy principal
+            # WebAuthn
+            "webauthn_probe_url":      "",
         },
         "auth2": {
-            "enabled": False, "username": "", "password": "",
-            "auth_token": "", "session_cookie": "",
+            "enabled":                 False,
+            "method":                  "form_login",
+            "auth_type":               "",
+            "username":                "",
+            "password":                "",
+            "domain":                  "",
+            "auth_token":              "",
+            "token_type":              "Bearer",
+            "session_cookie":          "",
+            "login_url":               "",
+            "login_data":              "",
+            "login_mode":              "fields",
+            "login_content_type":      "application/x-www-form-urlencoded",
+            "login_username_field":    "username",
+            "login_password_field":    "password",
+            "login_token_path":        "token",
+            "api_key":                 "",
+            "api_key_header":          "X-API-Key",
+            "api_key_cookie":          "api_key",
+            "custom_headers":          {},
         },
         "sqlmap_timeout":   300,
         "nuclei_timeout":   600,

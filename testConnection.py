@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "1.7.0"
+VERSION = "1.7.2"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -59,6 +59,7 @@ AUTH_METHODS: dict[str, str] = {
     "header_creds":         "Custom Credential Headers  (static key-value pairs)",
     "kerberos":             "Kerberos / SPNEGO Negotiate  (domain Kerberos ticket)",
     "kerberos_delegation":  "Kerberos S4U2Proxy  — constrained delegation / impersonation",
+    "proxy_header":         "Proxy / Gateway Auth Header  — inject header set by upstream auth proxy",
 }
 
 
@@ -79,16 +80,68 @@ def _make_session(verify_ssl: bool = False, proxy: str = "") -> requests.Session
     return sess
 
 
+def _csrf_prefetch(
+    sess: "requests.Session",
+    login_url: str,
+    timeout: int,
+) -> "tuple[str, dict]":
+    """
+    GET login_url; return (form_action_url, hidden_input_fields).
+
+    Locates the first <form> that contains a password input, extracts its
+    action URL (resolved relative to login_url) and all hidden <input> values
+    (CSRF tokens, nonce fields, etc.).  Returns ("", {}) on any error so
+    callers fall back to the original login_url with no extra fields.
+    """
+    import re
+    from urllib.parse import urljoin
+    try:
+        r = sess.get(login_url, timeout=timeout)
+        html = r.text
+    except Exception:
+        return "", {}
+    hidden: dict = {}
+    form_action = ""
+    for form_m in re.finditer(r"(?s)<form[^>]*>(.+?)</form>", html, re.IGNORECASE):
+        form_tag  = form_m.group(0)
+        form_body = form_m.group(1)
+        if not re.search(r'<input[^>]+type=["\']?password["\']?', form_body, re.IGNORECASE):
+            continue
+        act_m = re.search(r'\baction=["\']([^"\']*)["\']', form_tag, re.IGNORECASE)
+        if act_m:
+            raw = act_m.group(1).strip()
+            if raw:
+                form_action = urljoin(login_url, raw)
+        for inp in re.finditer(r"<input[^>]+>", form_body, re.IGNORECASE):
+            tag = inp.group(0)
+            t_m = re.search(r'\btype=["\']?(\w+)["\']?', tag, re.IGNORECASE)
+            if not t_m or t_m.group(1).lower() != "hidden":
+                continue
+            n_m = re.search(r'\bname=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+            v_m = re.search(r'\bvalue=["\']([^"\']*)["\']', tag, re.IGNORECASE)
+            if n_m:
+                hidden[n_m.group(1)] = v_m.group(1) if v_m else ""
+        break  # use first form containing a password field
+    return form_action, hidden
+
+
 def _login_post(
     sess: requests.Session,
     auth: dict,
     timeout: int,
     allow_redirects: bool = True,
-) -> "requests.Response | None":
-    """POST to login_url, building the body according to login_mode."""
+) -> "tuple[requests.Response | None, str]":
+    """
+    GET the login page (CSRF prefetch + form action detection), then POST
+    credentials to the resolved endpoint.
+
+    Returns (response_or_None, actual_post_url).  The actual_post_url may
+    differ from login_url when the HTML form's action attribute points to a
+    different endpoint (common in MVC frameworks).
+    """
     url = auth.get("login_url", "")
     if not url:
-        return None
+        return None, ""
 
     login_mode = auth.get("login_mode", "fields")
     uf = auth.get("login_username_field", "username")
@@ -96,15 +149,19 @@ def _login_post(
     u  = auth.get("username", "")
     p  = auth.get("password", "")
 
+    # Prefetch login page: resolve form action URL + collect hidden/CSRF fields
+    form_action, hidden = _csrf_prefetch(sess, url, timeout)
+    post_url = form_action if form_action else url
+
     if login_mode == "fields":
-        # Body built entirely from the credential field values
-        data: dict = {}
+        # Start with hidden fields (CSRF tokens etc.), then overlay credentials
+        data: dict = dict(hidden)
         if u:
             data[uf] = u
         if p:
             data[pf] = p
     elif login_mode == "json":
-        # Use the raw JSON body as-is; no credential injection
+        # Use the raw JSON body as-is; no credential or CSRF injection
         raw = auth.get("login_data", "{}")
         try:
             data = json.loads(raw) if isinstance(raw, str) else dict(raw)
@@ -121,16 +178,19 @@ def _login_post(
             data[uf] = u
         if p and pf not in data:
             data[pf] = p
+        for k, v in hidden.items():
+            if k not in data:
+                data[k] = v
 
     ct = auth.get("login_content_type", "application/json")
     try:
         if "json" in ct:
-            return sess.post(url, json=data, timeout=timeout,
-                             allow_redirects=allow_redirects)
-        return sess.post(url, data=data, timeout=timeout,
-                         allow_redirects=allow_redirects)
+            return sess.post(post_url, json=data, timeout=timeout,
+                             allow_redirects=allow_redirects), post_url
+        return sess.post(post_url, data=data, timeout=timeout,
+                         allow_redirects=allow_redirects), post_url
     except Exception:
-        return None  # caller handles
+        return None, post_url  # caller handles
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,22 +217,28 @@ def build_auth_session(
         login_url = auth.get("login_url", "")
         if not login_url:
             return sess, "ERROR: login_url is required for form_login"
-        resp = _login_post(sess, auth, timeout)
+        resp, post_url = _login_post(sess, auth, timeout)
         if resp is None:
-            return sess, f"ERROR: POST to {login_url} failed (network/timeout)"
+            return sess, f"ERROR: POST to {post_url or login_url} failed (network/timeout)"
         if not resp.ok:
+            if resp.status_code == 405:
+                return sess, (
+                    f"ERROR: POST {post_url} → HTTP 405 Method Not Allowed — "
+                    "this URL only accepts GET; check the HTML form action attribute "
+                    "for the correct submission endpoint"
+                )
             return sess, (
-                f"ERROR: POST {login_url} → HTTP {resp.status_code} — "
+                f"ERROR: POST {post_url} → HTTP {resp.status_code} — "
                 "login rejected (check credentials and login URL)"
             )
         n = len(sess.cookies)
         sc = resp.status_code
         if n == 0:
             return sess, (
-                f"WARNING: POST {login_url} → HTTP {sc} — "
+                f"WARNING: POST {post_url} → HTTP {sc} — "
                 "login accepted but no session cookies returned"
             )
-        return sess, f"POST {login_url} → HTTP {sc}, {n} cookie(s) stored"
+        return sess, f"POST {post_url} → HTTP {sc}, {n} cookie(s) stored"
 
     # ── HTTP Basic ────────────────────────────────────────────────────────────
     elif method == "basic":
@@ -243,19 +309,19 @@ def build_auth_session(
         login_url = auth.get("login_url", "")
         if not login_url:
             return sess, "ERROR: login_url is required for token_login"
-        resp = _login_post(sess, auth, timeout)
+        resp, post_url = _login_post(sess, auth, timeout)
         if resp is None:
-            return sess, f"ERROR: POST to {login_url} failed (network/timeout)"
+            return sess, f"ERROR: POST to {post_url or login_url} failed (network/timeout)"
         if not resp.ok:
             return sess, (
-                f"ERROR: POST {login_url} → HTTP {resp.status_code} — "
+                f"ERROR: POST {post_url} → HTTP {resp.status_code} — "
                 "login rejected (check credentials and login URL)"
             )
         try:
             body = resp.json()
         except Exception:
             return sess, (
-                f"ERROR: POST {login_url} → HTTP {resp.status_code} — "
+                f"ERROR: POST {post_url} → HTTP {resp.status_code} — "
                 "response is not JSON; cannot extract token"
             )
         # Traverse dot-path (e.g. "data.access_token")
@@ -274,11 +340,11 @@ def build_auth_session(
             tt = auth.get("token_type", "Bearer").strip()
             sess.headers["Authorization"] = f"{tt} {token}"
             return sess, (
-                f"POST {login_url} → HTTP {resp.status_code}; "
+                f"POST {post_url} → HTTP {resp.status_code}; "
                 f"token extracted via path='{token_path}'"
             )
         return sess, (
-            f"ERROR: POST {login_url} → HTTP {resp.status_code}; "
+            f"ERROR: POST {post_url} → HTTP {resp.status_code}; "
             f"no token found at path='{token_path}' — "
             "check Token Path in Response"
         )
@@ -486,24 +552,30 @@ def build_auth_session(
         mfa_field   = auth.get("totp_field", "otp")
         if not login_url:
             return sess, "ERROR: login_url is required for totp_mfa"
-        # Step 1: regular form login
-        resp = _login_post(sess, auth, timeout)
+        # Step 1: regular form login (with CSRF prefetch)
+        resp, post_url = _login_post(sess, auth, timeout)
         if resp is None:
-            return sess, f"ERROR: POST to {login_url} failed (network/timeout)"
+            return sess, f"ERROR: POST to {post_url or login_url} failed (network/timeout)"
         if not resp.ok:
+            if resp.status_code == 405:
+                return sess, (
+                    f"ERROR: POST {post_url} → HTTP 405 Method Not Allowed — "
+                    "this URL only accepts GET; check the HTML form action attribute "
+                    "for the correct submission endpoint"
+                )
             return sess, (
-                f"ERROR: POST {login_url} → HTTP {resp.status_code} — "
+                f"ERROR: POST {post_url} → HTTP {resp.status_code} — "
                 "primary login rejected"
             )
         # Step 2: TOTP second factor
         if not mfa_url:
             return sess, (
-                f"POST {login_url} → HTTP {resp.status_code} (primary OK); "
+                f"POST {post_url} → HTTP {resp.status_code} (primary OK); "
                 "no totp_mfa_url provided — skipping MFA step"
             )
         if not totp_secret:
             return sess, (
-                f"POST {login_url} → HTTP {resp.status_code} (primary OK); "
+                f"POST {post_url} → HTTP {resp.status_code} (primary OK); "
                 "no totp_secret provided — cannot generate OTP"
             )
         try:
@@ -530,7 +602,7 @@ def build_auth_session(
                     "second factor rejected (check totp_secret / totp_field)"
                 )
             return sess, (
-                f"POST {login_url} → HTTP {resp.status_code}; "
+                f"POST {post_url} → HTTP {resp.status_code}; "
                 f"MFA POST {mfa_url} → HTTP {mfa_resp.status_code} (OTP accepted)"
             )
         except Exception as exc:
@@ -563,6 +635,15 @@ def build_auth_session(
         if indicators:
             return sess, f"WebAuthn support detected: {'; '.join(indicators)}"
         return sess, "WebAuthn probe complete — no WebAuthn indicators found on target"
+
+    # ── Proxy / Gateway Auth Header ───────────────────────────────────────────
+    elif method == "proxy_header":
+        hdr_name  = auth.get("proxy_header_name", "X-Remote-User").strip()
+        hdr_value = auth.get("proxy_header_value", "").strip()
+        if not hdr_value:
+            return sess, f"WARNING: no proxy_header_value provided for header '{hdr_name}'"
+        sess.headers[hdr_name] = hdr_value
+        return sess, f"Proxy auth header set: {hdr_name}: {hdr_value}"
 
     return sess, f"WARNING: unknown auth method '{method}'"
 
@@ -729,6 +810,44 @@ def test_connection(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# AuthProbe integration
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_probe(url: str, timeout: int, proxy: str, verify_ssl: bool) -> dict:
+    """Run AuthProbe against the URL and return its result dict."""
+    try:
+        import sys as _sys
+        _ap_path = "/opt/pr0t31n/AuthProbe"
+        if _ap_path not in _sys.path:
+            _sys.path.insert(0, _ap_path)
+        from authprobe import AuthProbe  # type: ignore[import]
+        ap = AuthProbe(timeout=timeout, proxy=proxy, verify_ssl=verify_ssl)
+        return ap.probe(url)
+    except ImportError:
+        return {"error": "AuthProbe not available at /opt/pr0t31n/AuthProbe"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def _print_probe_result(result: dict) -> None:
+    print(f"\n[AuthProbe] URL type  : {result.get('url_type','?')} "
+          f"(confidence {result.get('url_type_confidence',0)}%)")
+    sw = result.get("software", [])
+    if sw:
+        for s in sw:
+            print(f"[AuthProbe] Software  : {s['name']} (conf {s.get('confidence',0)}%)")
+    methods = result.get("auth_methods", [])
+    if methods:
+        print("[AuthProbe] Auth methods detected:")
+        for m in methods:
+            print(f"  • {m['method']:<25} confidence={m.get('confidence',0)}% — {m.get('reason','')}")
+    recs = result.get("recommendations", [])
+    if recs:
+        print(f"[AuthProbe] Recommendation: {recs[0]}")
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -748,6 +867,8 @@ def main() -> None:
 
     # Target / method
     ap.add_argument("--url",          metavar="URL",    help="Target web application URL to test")
+    ap.add_argument("--probe",        action="store_true",
+                    help="Run AuthProbe to auto-detect auth method for the URL")
     ap.add_argument("--auth-method",  metavar="METHOD",
                     choices=list(AUTH_METHODS.keys()), help="Auth method")
 
@@ -829,6 +950,12 @@ def main() -> None:
                     help="Header name for apikey_header (default: X-API-Key)")
     ap.add_argument("--api-key-cookie", metavar="NAME",
                     help="Cookie name for apikey_cookie")
+
+    # Proxy / gateway auth header
+    ap.add_argument("--proxy-header-name",  metavar="HDR",   default="X-Remote-User",
+                    help="Proxy auth header name (default: X-Remote-User)")
+    ap.add_argument("--proxy-header-value", metavar="VALUE",
+                    help="Value to inject into the proxy auth header")
 
     # Connection
     ap.add_argument("--timeout",      type=int, default=10,
@@ -926,6 +1053,8 @@ def main() -> None:
     if args.api_key:                  auth["api_key"]                = args.api_key
     if args.api_key_header:           auth["api_key_header"]         = args.api_key_header
     if args.api_key_cookie:           auth["api_key_cookie"]         = args.api_key_cookie
+    if args.proxy_header_name:        auth["proxy_header_name"]      = args.proxy_header_name
+    if args.proxy_header_value:       auth["proxy_header_value"]     = args.proxy_header_value
     if args.no_verify:                verify_ssl                     = False
 
     if not url:
@@ -934,6 +1063,20 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # ── AuthProbe ────────────────────────────────────────────────────────────
+    if args.probe:
+        probe_result = run_probe(url, timeout, proxy, verify_ssl)
+        if args.output_json:
+            print(json.dumps({"probe": probe_result}))
+            sys.exit(0)
+        _print_probe_result(probe_result)
+        if not auth.get("method"):
+            methods = probe_result.get("auth_methods", [])
+            if methods:
+                suggested = methods[0]["method"]
+                auth["method"] = suggested
+                print(f"[AuthProbe] Using suggested method: {suggested}\n")
 
     if not auth.get("method"):
         auth["method"] = "form_login"
