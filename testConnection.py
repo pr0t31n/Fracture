@@ -36,21 +36,29 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 
 AUTH_METHODS: dict[str, str] = {
-    "form_login":          "Form Login  — POST credentials → session cookies (most web apps)",
-    "basic":               "HTTP Basic Auth  (Authorization: Basic …)",
-    "digest":              "HTTP Digest Auth  (challenge-response)",
-    "ntlm":                "NTLM / Windows Integrated Auth  (Active Directory)",
-    "bearer":              "Bearer Token  (Authorization: Bearer …)",
-    "session_cookie":      "Session Cookie  — pre-captured cookie string",
-    "token_login":         "Token Login  — POST credentials → JSON token → Bearer header",
-    "oauth2_client_creds": "OAuth2 Client Credentials  (machine-to-machine, RFC 6749 §4.4)",
-    "apikey_header":       "API Key in Header  (custom header name)",
-    "apikey_cookie":       "API Key / Token in Cookie  (cookie-based key injection)",
-    "header_creds":        "Custom Credential Headers  (static key-value pairs)",
-    "kerberos":            "Kerberos / SPNEGO Negotiate  (domain Kerberos ticket)",
+    "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
+    "basic":                "HTTP Basic Auth  (Authorization: Basic …)",
+    "digest":               "HTTP Digest Auth  (challenge-response)",
+    "ntlm":                 "NTLM / Windows Integrated Auth  (Active Directory)",
+    "ntlm_v2":              "NTLMv2 + Channel Binding Token  (EPA / extended protection for auth)",
+    "bearer":               "Bearer Token  (Authorization: Bearer …)",
+    "session_cookie":       "Session Cookie  — pre-captured cookie string",
+    "token_login":          "Token Login  — POST credentials → JSON token → Bearer header",
+    "oauth2_client_creds":  "OAuth2 Client Credentials  (machine-to-machine, RFC 6749 §4.4)",
+    "oauth1a":              "OAuth 1.0a  — HMAC-SHA1 signed request (consumer key + access token)",
+    "saml_assertion":       "SAML 2.0  — POST pre-captured SAMLResponse to ACS URL",
+    "oidc_token":           "OIDC  — pre-obtained id_token as Bearer + userinfo endpoint probe",
+    "mtls":                 "mTLS  — mutual TLS with client certificate and private key",
+    "totp_mfa":             "TOTP/HOTP MFA  — form login followed by TOTP second-factor step",
+    "webauthn_probe":       "WebAuthn/FIDO2  — probe server for WebAuthn support (detection only)",
+    "apikey_header":        "API Key in Header  (custom header name)",
+    "apikey_cookie":        "API Key / Token in Cookie  (cookie-based key injection)",
+    "header_creds":         "Custom Credential Headers  (static key-value pairs)",
+    "kerberos":             "Kerberos / SPNEGO Negotiate  (domain Kerberos ticket)",
+    "kerberos_delegation":  "Kerberos S4U2Proxy  — constrained delegation / impersonation",
 }
 
 
@@ -75,6 +83,7 @@ def _login_post(
     sess: requests.Session,
     auth: dict,
     timeout: int,
+    allow_redirects: bool = True,
 ) -> "requests.Response | None":
     """POST to login_url, building the body according to login_mode."""
     url = auth.get("login_url", "")
@@ -116,8 +125,10 @@ def _login_post(
     ct = auth.get("login_content_type", "application/json")
     try:
         if "json" in ct:
-            return sess.post(url, json=data, timeout=timeout)
-        return sess.post(url, data=data, timeout=timeout)
+            return sess.post(url, json=data, timeout=timeout,
+                             allow_redirects=allow_redirects)
+        return sess.post(url, data=data, timeout=timeout,
+                         allow_redirects=allow_redirects)
     except Exception:
         return None  # caller handles
 
@@ -193,6 +204,7 @@ def build_auth_session(
             from requests_ntlm import HttpNtlmAuth  # type: ignore[import]
         except ImportError:
             return sess, "ERROR: NTLM auth requires: pip install requests-ntlm"
+        domain = domain.rstrip("\\").strip()
         ntlm_user = f"{domain}\\{user}" if domain else user
         sess.auth = HttpNtlmAuth(ntlm_user, pw)
         return sess, f"NTLM: {ntlm_user}"
@@ -202,7 +214,7 @@ def build_auth_session(
         token = auth.get("auth_token", "").strip()
         if not token:
             return sess, "WARNING: no token provided for Bearer auth"
-        tt = auth.get("token_type", "Bearer")
+        tt = auth.get("token_type", "Bearer").strip()
         sess.headers["Authorization"] = f"{tt} {token}"
         return sess, f"Authorization: {tt} ***"
 
@@ -257,8 +269,9 @@ def build_auth_session(
                 if k in body:
                     token = body[k]
                     break
-        if token and isinstance(token, str):
-            tt = auth.get("token_type", "Bearer")
+        if token is not None and token != "":
+            token = str(token)
+            tt = auth.get("token_type", "Bearer").strip()
             sess.headers["Authorization"] = f"{tt} {token}"
             return sess, (
                 f"POST {login_url} → HTTP {resp.status_code}; "
@@ -280,15 +293,20 @@ def build_auth_session(
             return sess, "ERROR: oauth_token_url is required"
         if not client_id:
             return sess, "ERROR: oauth_client_id is required"
-        data: dict = {
-            "grant_type":    "client_credentials",
-            "client_id":     client_id,
-            "client_secret": client_secret,
-        }
+        client_auth_method = auth.get("client_auth_method", "body").strip().lower()
+        data: dict = {"grant_type": "client_credentials"}
+        req_kwargs: dict = {"timeout": timeout}
+        if client_auth_method == "basic":
+            # RFC 6749 §2.3.1: credentials in HTTP Basic auth header
+            req_kwargs["auth"] = (client_id, client_secret)
+        else:
+            # "body" (default): credentials as POST body fields
+            data["client_id"]     = client_id
+            data["client_secret"] = client_secret
         if scope:
             data["scope"] = scope
         try:
-            resp = sess.post(token_url, data=data, timeout=timeout)
+            resp = sess.post(token_url, data=data, **req_kwargs)
         except requests.exceptions.RequestException as exc:
             return sess, f"ERROR: OAuth2 token request failed: {exc}"
         if not resp.ok:
@@ -349,6 +367,203 @@ def build_auth_session(
         sess.auth = HTTPKerberosAuth(mutual_authentication=OPTIONAL)
         return sess, "Kerberos SPNEGO auth configured"
 
+    # ── Kerberos S4U2Proxy Delegation ─────────────────────────────────────────
+    elif method == "kerberos_delegation":
+        try:
+            from requests_kerberos import HTTPKerberosAuth, REQUIRED  # type: ignore[import]
+        except ImportError:
+            return sess, "ERROR: Kerberos delegation requires: pip install requests-kerberos"
+        impersonate = auth.get("kerberos_impersonate", "")
+        kwargs: dict = {"mutual_authentication": REQUIRED, "delegate": True}
+        if impersonate:
+            kwargs["principal"] = impersonate
+        sess.auth = HTTPKerberosAuth(**kwargs)
+        detail = f"Kerberos delegation configured (impersonate={impersonate})" if impersonate \
+            else "Kerberos S4U2Proxy delegation configured"
+        return sess, detail
+
+    # ── NTLMv2 + Channel Binding Token ───────────────────────────────────────
+    elif method == "ntlm_v2":
+        user   = auth.get("username", "")
+        pw     = auth.get("password", "")
+        domain = auth.get("domain", "").rstrip("\\").strip()
+        if not user:
+            return sess, "ERROR: username is required for ntlm_v2"
+        try:
+            from requests_ntlm import HttpNtlmAuth  # type: ignore[import]
+        except ImportError:
+            return sess, "ERROR: NTLMv2 requires: pip install requests-ntlm"
+        ntlm_user = f"{domain}\\{user}" if domain else user
+        # send_cbt=True enables channel binding tokens (EPA) — NTLMv2 protection
+        try:
+            sess.auth = HttpNtlmAuth(ntlm_user, pw, send_cbt=True)
+        except TypeError:
+            # Older versions of requests-ntlm do not support send_cbt
+            sess.auth = HttpNtlmAuth(ntlm_user, pw)
+            return sess, f"NTLMv2 (send_cbt not supported by installed requests-ntlm): {ntlm_user}"
+        return sess, f"NTLMv2 + channel binding: {ntlm_user}"
+
+    # ── OAuth 1.0a ────────────────────────────────────────────────────────────
+    elif method == "oauth1a":
+        consumer_key    = auth.get("oauth1_consumer_key", "").strip()
+        consumer_secret = auth.get("oauth1_consumer_secret", "").strip()
+        access_token    = auth.get("oauth1_access_token", "").strip()
+        token_secret    = auth.get("oauth1_token_secret", "").strip()
+        if not consumer_key:
+            return sess, "ERROR: oauth1_consumer_key is required for oauth1a"
+        try:
+            from requests_oauthlib import OAuth1  # type: ignore[import]
+        except ImportError:
+            return sess, "ERROR: OAuth 1.0a requires: pip install requests-oauthlib"
+        sess.auth = OAuth1(consumer_key, consumer_secret,
+                           access_token or None, token_secret or None)
+        return sess, f"OAuth 1.0a configured (consumer={consumer_key})"
+
+    # ── SAML 2.0 Assertion POST ───────────────────────────────────────────────
+    elif method == "saml_assertion":
+        acs_url   = auth.get("saml_acs_url", "").strip()
+        assertion = auth.get("saml_assertion", "").strip()
+        relay_state = auth.get("saml_relay_state", "")
+        if not acs_url:
+            return sess, "ERROR: saml_acs_url is required for saml_assertion"
+        if not assertion:
+            return sess, "ERROR: saml_assertion (base64-encoded SAMLResponse) is required"
+        try:
+            data = {"SAMLResponse": assertion}
+            if relay_state:
+                data["RelayState"] = relay_state
+            resp = sess.post(acs_url, data=data, timeout=timeout, allow_redirects=True)
+            if resp.status_code in (401, 403):
+                return sess, (
+                    f"ERROR: SAML POST to {acs_url} → HTTP {resp.status_code} — "
+                    "assertion rejected"
+                )
+            return sess, f"SAML assertion posted to {acs_url} → HTTP {resp.status_code}"
+        except Exception as exc:
+            return sess, f"ERROR: SAML POST failed: {exc}"
+
+    # ── OIDC id_token ─────────────────────────────────────────────────────────
+    elif method == "oidc_token":
+        id_token  = auth.get("oidc_id_token", "").strip()
+        userinfo  = auth.get("oidc_userinfo_url", "").strip()
+        if not id_token:
+            return sess, "ERROR: oidc_id_token is required for oidc_token"
+        sess.headers["Authorization"] = f"Bearer {id_token}"
+        if not userinfo:
+            return sess, "OIDC id_token set as Bearer (no userinfo_url provided)"
+        try:
+            r = sess.get(userinfo, timeout=timeout)
+            if r.status_code == 401:
+                return sess, f"ERROR: OIDC userinfo {userinfo} → HTTP 401 — token rejected"
+            return sess, f"OIDC id_token valid — userinfo {userinfo} → HTTP {r.status_code}"
+        except Exception as exc:
+            return sess, f"OIDC id_token set; userinfo probe failed: {exc}"
+
+    # ── mTLS — mutual TLS client certificate ─────────────────────────────────
+    elif method == "mtls":
+        cert_path = auth.get("mtls_cert", "").strip()
+        key_path  = auth.get("mtls_key", "").strip()
+        ca_bundle = auth.get("mtls_ca_bundle", "").strip()
+        if not cert_path:
+            return sess, "ERROR: mtls_cert (path to PEM certificate) is required"
+        if not key_path:
+            return sess, "ERROR: mtls_key (path to PEM private key) is required"
+        import os
+        if not os.path.isfile(cert_path):
+            return sess, f"ERROR: mtls_cert file not found: {cert_path}"
+        if not os.path.isfile(key_path):
+            return sess, f"ERROR: mtls_key file not found: {key_path}"
+        sess.cert  = (cert_path, key_path)
+        if ca_bundle and os.path.isfile(ca_bundle):
+            sess.verify = ca_bundle
+        return sess, f"mTLS client cert configured: {cert_path}"
+
+    # ── TOTP/HOTP MFA  (form login + second factor) ───────────────────────────
+    elif method == "totp_mfa":
+        login_url   = auth.get("login_url", "")
+        mfa_url     = auth.get("totp_mfa_url", "").strip()
+        totp_secret = auth.get("totp_secret", "").strip()
+        mfa_field   = auth.get("totp_field", "otp")
+        if not login_url:
+            return sess, "ERROR: login_url is required for totp_mfa"
+        # Step 1: regular form login
+        resp = _login_post(sess, auth, timeout)
+        if resp is None:
+            return sess, f"ERROR: POST to {login_url} failed (network/timeout)"
+        if not resp.ok:
+            return sess, (
+                f"ERROR: POST {login_url} → HTTP {resp.status_code} — "
+                "primary login rejected"
+            )
+        # Step 2: TOTP second factor
+        if not mfa_url:
+            return sess, (
+                f"POST {login_url} → HTTP {resp.status_code} (primary OK); "
+                "no totp_mfa_url provided — skipping MFA step"
+            )
+        if not totp_secret:
+            return sess, (
+                f"POST {login_url} → HTTP {resp.status_code} (primary OK); "
+                "no totp_secret provided — cannot generate OTP"
+            )
+        try:
+            import hmac as _hmac
+            import hashlib as _hl
+            import struct as _struct
+            import time as _time
+            import base64 as _b64
+
+            def _totp(secret: str, digits: int = 6, period: int = 30) -> str:
+                key = _b64.b32decode(secret.upper().replace(" ", ""))
+                t   = int(_time.time()) // period
+                msg = _struct.pack(">Q", t)
+                h   = _hmac.new(key, msg, _hl.sha1).digest()
+                off = h[-1] & 0x0F
+                code = (_struct.unpack(">I", h[off:off+4])[0] & 0x7FFFFFFF) % (10 ** digits)
+                return str(code).zfill(digits)
+
+            otp = _totp(totp_secret)
+            mfa_resp = sess.post(mfa_url, data={mfa_field: otp}, timeout=timeout)
+            if not mfa_resp.ok:
+                return sess, (
+                    f"ERROR: MFA POST {mfa_url} → HTTP {mfa_resp.status_code} — "
+                    "second factor rejected (check totp_secret / totp_field)"
+                )
+            return sess, (
+                f"POST {login_url} → HTTP {resp.status_code}; "
+                f"MFA POST {mfa_url} → HTTP {mfa_resp.status_code} (OTP accepted)"
+            )
+        except Exception as exc:
+            return sess, f"ERROR: TOTP MFA step failed: {exc}"
+
+    # ── WebAuthn / FIDO2 probe (detection only) ───────────────────────────────
+    elif method == "webauthn_probe":
+        # Full WebAuthn flows require a browser + hardware authenticator.
+        # This method probes for WebAuthn support indicators on the target URL.
+        probe_url = auth.get("webauthn_probe_url", "").strip()
+        try:
+            r = sess.get(probe_url, timeout=timeout) if probe_url else None
+        except Exception:
+            r = None
+        indicators = []
+        if r is not None:
+            body = r.text
+            if "webauthn" in body.lower() or "fido" in body.lower():
+                indicators.append("WebAuthn/FIDO keywords in page body")
+            if "/.well-known/webauthn" in body or "PublicKeyCredential" in body:
+                indicators.append("WebAuthn API reference detected")
+            ct = r.headers.get("Content-Type", "")
+            if "json" in ct:
+                try:
+                    j = r.json()
+                    if any(k in str(j).lower() for k in ("challenge", "rpid", "allowcredentials")):
+                        indicators.append("WebAuthn challenge structure in JSON response")
+                except Exception:
+                    pass
+        if indicators:
+            return sess, f"WebAuthn support detected: {'; '.join(indicators)}"
+        return sess, "WebAuthn probe complete — no WebAuthn indicators found on target"
+
     return sess, f"WARNING: unknown auth method '{method}'"
 
 
@@ -383,7 +598,7 @@ def test_connection(
     auth_method = (auth.get("method") or auth.get("auth_type") or "form_login").strip().lower()
 
     # ── Login-based methods: POST result is the definitive answer ─────────────
-    if auth_method in ("form_login", "token_login"):
+    if auth_method in ("form_login", "token_login", "totp_mfa", "saml_assertion"):
         failed = auth_info.startswith("ERROR:")
         return {
             "success":     not failed,
@@ -401,60 +616,59 @@ def test_connection(
             "auth_info":   auth_info,
         }
 
-    # ── session_cookie / kerberos: probe with GET then HEAD ───────────────────
-    if auth_method in ("session_cookie", "kerberos"):
-        for http_method in ("GET", "HEAD"):
-            try:
-                resp = sess.request(http_method, url, timeout=timeout)
-                sc = resp.status_code
-                if sc == 401:
-                    return {
-                        "success":     False,
-                        "message":     "Authentication failed — HTTP 401 Unauthorized",
-                        "status_code": sc,
-                        "auth_info":   auth_info,
-                    }
-                if sc == 403:
-                    return {
-                        "success":     False,
-                        "message":     "HTTP 403 Forbidden — credentials accepted but access denied",
-                        "status_code": sc,
-                        "auth_info":   auth_info,
-                    }
+    # ── session_cookie / kerberos / kerberos_delegation: probe with GET ─────
+    if auth_method in ("session_cookie", "kerberos", "kerberos_delegation"):
+        try:
+            resp = sess.request("GET", url, timeout=timeout)
+            sc = resp.status_code
+            if sc == 401:
                 return {
-                    "success":     True,
-                    "message":     f"Connection successful — HTTP {sc}",
+                    "success":     False,
+                    "message":     "Authentication failed — HTTP 401 Unauthorized",
                     "status_code": sc,
                     "auth_info":   auth_info,
                 }
-            except requests.exceptions.SSLError as exc:
+            if sc == 403:
                 return {
                     "success":     False,
-                    "message":     f"SSL error: {exc} — try enabling 'verify_ssl: false'",
-                    "status_code": None,
+                    "message":     "HTTP 403 Forbidden — credentials accepted but access denied",
+                    "status_code": sc,
                     "auth_info":   auth_info,
                 }
-            except requests.exceptions.ConnectionError as exc:
-                return {
-                    "success":     False,
-                    "message":     f"Connection error: {exc}",
-                    "status_code": None,
-                    "auth_info":   auth_info,
-                }
-            except requests.exceptions.Timeout:
-                return {
-                    "success":     False,
-                    "message":     f"Request timed out after {timeout}s",
-                    "status_code": None,
-                    "auth_info":   auth_info,
-                }
-            except Exception as exc:
-                return {
-                    "success":     False,
-                    "message":     f"Request failed: {exc}",
-                    "status_code": None,
-                    "auth_info":   auth_info,
-                }
+            return {
+                "success":     True,
+                "message":     f"Connection successful — HTTP {sc}",
+                "status_code": sc,
+                "auth_info":   auth_info,
+            }
+        except requests.exceptions.SSLError as exc:
+            return {
+                "success":     False,
+                "message":     f"SSL error: {exc} — try enabling 'verify_ssl: false'",
+                "status_code": None,
+                "auth_info":   auth_info,
+            }
+        except requests.exceptions.ConnectionError as exc:
+            return {
+                "success":     False,
+                "message":     f"Connection error: {exc}",
+                "status_code": None,
+                "auth_info":   auth_info,
+            }
+        except requests.exceptions.Timeout:
+            return {
+                "success":     False,
+                "message":     f"Request timed out after {timeout}s",
+                "status_code": None,
+                "auth_info":   auth_info,
+            }
+        except Exception as exc:
+            return {
+                "success":     False,
+                "message":     f"Request failed: {exc}",
+                "status_code": None,
+                "auth_info":   auth_info,
+            }
 
     # ── All other methods: probe URL with GET then HEAD ───────────────────────
     last_exc: str = ""
@@ -572,6 +786,42 @@ def main() -> None:
     ap.add_argument("--oauth-client-id",     metavar="ID")
     ap.add_argument("--oauth-client-secret", metavar="SECRET")
     ap.add_argument("--oauth-scope",         metavar="SCOPE")
+    ap.add_argument("--oauth-client-auth",   metavar="METHOD", choices=["body", "basic"],
+                    default="body", help="OAuth2 client auth method: body (default) or basic")
+
+    # OAuth 1.0a
+    ap.add_argument("--oauth1-consumer-key",    metavar="KEY",    help="OAuth 1.0a consumer key")
+    ap.add_argument("--oauth1-consumer-secret", metavar="SECRET", help="OAuth 1.0a consumer secret")
+    ap.add_argument("--oauth1-access-token",    metavar="TOKEN",  help="OAuth 1.0a access token")
+    ap.add_argument("--oauth1-token-secret",    metavar="SECRET", help="OAuth 1.0a token secret")
+
+    # SAML
+    ap.add_argument("--saml-acs-url",    metavar="URL",      help="SAML ACS (AssertionConsumerService) URL")
+    ap.add_argument("--saml-assertion",  metavar="BASE64",   help="Base64-encoded SAMLResponse assertion")
+    ap.add_argument("--saml-relay-state",metavar="VALUE",    help="SAML RelayState (optional)")
+
+    # OIDC
+    ap.add_argument("--oidc-id-token",    metavar="TOKEN",   help="Pre-obtained OIDC id_token")
+    ap.add_argument("--oidc-userinfo-url",metavar="URL",     help="OIDC userinfo endpoint URL")
+
+    # mTLS
+    ap.add_argument("--mtls-cert",      metavar="FILE",  help="PEM client certificate file (mTLS)")
+    ap.add_argument("--mtls-key",       metavar="FILE",  help="PEM private key file (mTLS)")
+    ap.add_argument("--mtls-ca-bundle", metavar="FILE",  help="PEM CA bundle for server verification (mTLS)")
+
+    # TOTP MFA
+    ap.add_argument("--totp-secret",    metavar="SECRET", help="Base32 TOTP secret for MFA")
+    ap.add_argument("--totp-mfa-url",   metavar="URL",    help="URL to POST the TOTP OTP code")
+    ap.add_argument("--totp-field",     metavar="FIELD",  default="otp",
+                    help="Form field name for OTP submission (default: otp)")
+
+    # WebAuthn probe
+    ap.add_argument("--webauthn-probe-url", metavar="URL",
+                    help="URL to probe for WebAuthn/FIDO2 support indicators")
+
+    # Kerberos delegation
+    ap.add_argument("--kerberos-impersonate", metavar="PRINCIPAL",
+                    help="Service principal to impersonate (Kerberos S4U2Proxy delegation)")
 
     # API key
     ap.add_argument("--api-key",        metavar="KEY",  help="API key value")
@@ -651,14 +901,32 @@ def main() -> None:
     if args.login_password_field:  auth["login_password_field"]  = args.login_password_field
     if args.login_mode:            auth["login_mode"]            = args.login_mode
     if args.login_token_path:      auth["login_token_path"]      = args.login_token_path
-    if args.oauth_token_url:       auth["oauth_token_url"]       = args.oauth_token_url
-    if args.oauth_client_id:       auth["oauth_client_id"]       = args.oauth_client_id
-    if args.oauth_client_secret:   auth["oauth_client_secret"]   = args.oauth_client_secret
-    if args.oauth_scope:           auth["oauth_scope"]           = args.oauth_scope
-    if args.api_key:               auth["api_key"]               = args.api_key
-    if args.api_key_header:        auth["api_key_header"]        = args.api_key_header
-    if args.api_key_cookie:        auth["api_key_cookie"]        = args.api_key_cookie
-    if args.no_verify:             verify_ssl                    = False
+    if args.oauth_token_url:          auth["oauth_token_url"]        = args.oauth_token_url
+    if args.oauth_client_id:          auth["oauth_client_id"]        = args.oauth_client_id
+    if args.oauth_client_secret:      auth["oauth_client_secret"]    = args.oauth_client_secret
+    if args.oauth_scope:              auth["oauth_scope"]             = args.oauth_scope
+    if args.oauth_client_auth:        auth["client_auth_method"]     = args.oauth_client_auth
+    if args.oauth1_consumer_key:      auth["oauth1_consumer_key"]    = args.oauth1_consumer_key
+    if args.oauth1_consumer_secret:   auth["oauth1_consumer_secret"] = args.oauth1_consumer_secret
+    if args.oauth1_access_token:      auth["oauth1_access_token"]    = args.oauth1_access_token
+    if args.oauth1_token_secret:      auth["oauth1_token_secret"]    = args.oauth1_token_secret
+    if args.saml_acs_url:             auth["saml_acs_url"]           = args.saml_acs_url
+    if args.saml_assertion:           auth["saml_assertion"]         = args.saml_assertion
+    if args.saml_relay_state:         auth["saml_relay_state"]       = args.saml_relay_state
+    if args.oidc_id_token:            auth["oidc_id_token"]          = args.oidc_id_token
+    if args.oidc_userinfo_url:        auth["oidc_userinfo_url"]      = args.oidc_userinfo_url
+    if args.mtls_cert:                auth["mtls_cert"]              = args.mtls_cert
+    if args.mtls_key:                 auth["mtls_key"]               = args.mtls_key
+    if args.mtls_ca_bundle:           auth["mtls_ca_bundle"]         = args.mtls_ca_bundle
+    if args.totp_secret:              auth["totp_secret"]            = args.totp_secret
+    if args.totp_mfa_url:             auth["totp_mfa_url"]           = args.totp_mfa_url
+    if args.totp_field:               auth["totp_field"]             = args.totp_field
+    if args.webauthn_probe_url:       auth["webauthn_probe_url"]     = args.webauthn_probe_url
+    if args.kerberos_impersonate:     auth["kerberos_impersonate"]   = args.kerberos_impersonate
+    if args.api_key:                  auth["api_key"]                = args.api_key
+    if args.api_key_header:           auth["api_key_header"]         = args.api_key_header
+    if args.api_key_cookie:           auth["api_key_cookie"]         = args.api_key_cookie
+    if args.no_verify:                verify_ssl                     = False
 
     if not url:
         print(

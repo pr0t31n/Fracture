@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.7.0"
+VERSION = "1.6.0"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1497,13 +1497,6 @@ class OutputManager:
         tmp.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         tmp.replace(self.summary_json)
 
-    def save_structure_map(self, sm: dict) -> None:
-        """Write structure_map.json to project root."""
-        out_path = self.root / "structure_map.json"
-        tmp = out_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(sm, indent=2), encoding="utf-8")
-        tmp.replace(out_path)
-
 
 # ─────────────────────────────────────────────
 # Banner
@@ -1571,228 +1564,46 @@ def _make_session(cfg: dict) -> requests.Session:
 
 
 def _build_auth_session(cfg: dict, auth_key: str = "auth") -> "requests.Session | None":
-    """Return an authenticated session or None if auth not enabled.
-
-    Supported auth_method values:
-        form_login          – POST form credentials → session cookie
-        basic               – HTTP Basic Authentication
-        digest              – HTTP Digest Authentication
-        ntlm                – NTLM (Windows) Authentication (requires requests-ntlm)
-        bearer              – Authorization: Bearer <token>
-        session_cookie      – Pre-captured session cookie string
-        token_login         – POST credentials → JSON token → Authorization header
-        oauth2_client_creds – OAuth2 client_credentials grant → Bearer token
-        apikey_header       – Custom header API key
-        apikey_cookie       – Cookie-based API key
-        header_creds        – Arbitrary custom request headers
-        kerberos            – Kerberos/SPNEGO (requires requests-kerberos)
-    """
+    """Return an authenticated session or None if auth not enabled."""
     auth = cfg.get(auth_key, {})
     if not auth.get("enabled"):
         return None
-
     sess = _make_session(cfg)
-    timeout = cfg.get("timeout", 10)
-
-    method   = auth.get("auth_method", auth.get("auth_type", "form_login"))
-    username = auth.get("username", "")
-    password = auth.get("password", "")
-
-    # ── form_login ─────────────────────────────────────────────────────────────
-    if method == "form_login":
-        login_url = auth.get("login_url", "")
-        if not login_url:
-            return sess
-        login_mode = auth.get("login_mode", "fields")
-        if login_mode == "json":
-            raw = auth.get("login_data", "")
-            try:
-                body = json.loads(raw) if raw else {}
-            except Exception:
-                body = {}
-            try:
-                sess.post(login_url, json=body, timeout=timeout, allow_redirects=True)
-            except Exception:
-                pass
-        else:
-            ufield = auth.get("login_username_field", "username")
-            pfield = auth.get("login_password_field", "password")
-            body = {ufield: username, pfield: password}
-            if login_mode == "merge":
-                raw = auth.get("login_data", "")
-                try:
-                    extra = json.loads(raw) if raw else {}
-                except Exception:
-                    extra = {}
-                for k, v in extra.items():
-                    body.setdefault(k, v)
-            try:
-                sess.post(login_url, data=body, timeout=timeout, allow_redirects=True)
-            except Exception:
-                pass
-        return sess
-
-    # ── basic ───────────────────────────────────────────────────────────────────
-    if method == "basic":
-        sess.auth = (username, password)
-        return sess
-
-    # ── digest ──────────────────────────────────────────────────────────────────
-    if method == "digest":
-        try:
-            from requests.auth import HTTPDigestAuth
-            sess.auth = HTTPDigestAuth(username, password)
-        except ImportError:
-            pass
-        return sess
-
-    # ── ntlm ────────────────────────────────────────────────────────────────────
-    if method == "ntlm":
-        try:
-            from requests_ntlm import HttpNtlmAuth
-            domain = auth.get("domain", "")
-            ntlm_user = f"{domain}\\{username}" if domain else username
-            sess.auth = HttpNtlmAuth(ntlm_user, password)
-        except ImportError:
-            pass
-        return sess
-
-    # ── bearer ──────────────────────────────────────────────────────────────────
-    if method == "bearer":
-        token = auth.get("auth_token", "")
+    token = auth.get("auth_token", "")
+    if token:
         ttype = auth.get("token_type", "Bearer")
-        if token:
-            sess.headers["Authorization"] = f"{ttype} {token}"
+        sess.headers["Authorization"] = f"{ttype} {token}"
         return sess
-
-    # ── session_cookie ──────────────────────────────────────────────────────────
-    if method == "session_cookie":
-        cookie_str = auth.get("session_cookie", "")
-        for pair in cookie_str.split(";"):
+    cookie = auth.get("session_cookie", "")
+    if cookie:
+        for pair in cookie.split(";"):
             pair = pair.strip()
             if "=" in pair:
                 k, v = pair.split("=", 1)
                 sess.cookies.set(k.strip(), v.strip())
         return sess
-
-    # ── token_login ─────────────────────────────────────────────────────────────
-    if method == "token_login":
-        login_url = auth.get("login_url", "")
-        if not login_url:
-            return sess
-        login_mode = auth.get("login_mode", "fields")
-        if login_mode == "json":
-            raw = auth.get("login_data", "")
+    auth_type  = auth.get("auth_type", "form")
+    login_url  = auth.get("login_url", "")
+    username   = auth.get("username", "")
+    password   = auth.get("password", "")
+    if auth_type == "form" and login_url and username:
+        login_data_str = auth.get("login_data", "")
+        if login_data_str:
             try:
-                body = json.loads(raw) if raw else {}
+                login_data = json.loads(login_data_str)
             except Exception:
-                body = {}
+                login_data = dict(p.split("=", 1) for p in login_data_str.split("&") if "=" in p)
         else:
-            ufield = auth.get("login_username_field", "username")
-            pfield = auth.get("login_password_field", "password")
-            body = {ufield: username, pfield: password}
-            if login_mode == "merge":
-                raw = auth.get("login_data", "")
-                try:
-                    extra = json.loads(raw) if raw else {}
-                except Exception:
-                    extra = {}
-                for k, v in extra.items():
-                    body.setdefault(k, v)
+            login_data = {"username": username, "password": password}
         try:
-            resp = sess.post(login_url, json=body, timeout=timeout, allow_redirects=True)
-            data = resp.json()
-            token_field = auth.get("token_response_field", "token")
-            token = _nested_get(data, token_field) or ""
-            if token:
-                ttype = auth.get("token_type", "Bearer")
-                sess.headers["Authorization"] = f"{ttype} {token}"
+            sess.post(login_url, data=login_data, timeout=cfg.get("timeout", 10), allow_redirects=True)
         except Exception:
             pass
         return sess
-
-    # ── oauth2_client_creds ─────────────────────────────────────────────────────
-    if method == "oauth2_client_creds":
-        token_url = auth.get("oauth_token_url", "")
-        if not token_url:
-            return sess
-        client_id     = auth.get("oauth_client_id", "")
-        client_secret = auth.get("oauth_client_secret", "")
-        scope         = auth.get("oauth_scope", "")
-        payload = {"grant_type": "client_credentials"}
-        if client_id:
-            payload["client_id"] = client_id
-        if client_secret:
-            payload["client_secret"] = client_secret
-        if scope:
-            payload["scope"] = scope
-        try:
-            r = sess.post(token_url, data=payload, timeout=timeout)
-            token = r.json().get("access_token", "")
-            if token:
-                sess.headers["Authorization"] = f"Bearer {token}"
-        except Exception:
-            pass
+    if auth_type == "basic" and username:
+        sess.auth = (username, password)
         return sess
-
-    # ── apikey_header ───────────────────────────────────────────────────────────
-    if method == "apikey_header":
-        header_name = auth.get("api_key_header", "X-API-Key")
-        api_key     = auth.get("api_key_value", auth.get("auth_token", ""))
-        if header_name and api_key:
-            sess.headers[header_name] = api_key
-        return sess
-
-    # ── apikey_cookie ───────────────────────────────────────────────────────────
-    if method == "apikey_cookie":
-        cookie_name = auth.get("api_key_cookie_name", "api_key")
-        api_key     = auth.get("api_key_value", auth.get("auth_token", ""))
-        if cookie_name and api_key:
-            sess.cookies.set(cookie_name, api_key)
-        return sess
-
-    # ── header_creds ────────────────────────────────────────────────────────────
-    if method == "header_creds":
-        custom = auth.get("custom_headers", {})
-        if isinstance(custom, str):
-            try:
-                custom = json.loads(custom)
-            except Exception:
-                custom = {}
-        for k, v in custom.items():
-            sess.headers[k] = v
-        return sess
-
-    # ── kerberos ─────────────────────────────────────────────────────────────────
-    if method == "kerberos":
-        try:
-            from requests_kerberos import HTTPKerberosAuth, OPTIONAL
-            sess.auth = HTTPKerberosAuth(mutual_authentication=OPTIONAL)
-        except ImportError:
-            pass
-        return sess
-
-    # ── legacy aliases ───────────────────────────────────────────────────────────
-    if method == "form":
-        # redirect old "form" to form_login
-        auth["auth_method"] = "form_login"
-        return _build_auth_session(cfg, auth_key)
-    if method == "token":
-        auth["auth_method"] = "bearer"
-        return _build_auth_session(cfg, auth_key)
-
     return sess
-
-
-def _nested_get(d: dict, dotpath: str):
-    """Safely retrieve a value from a nested dict using dot notation."""
-    keys = dotpath.split(".")
-    cur = d
-    for k in keys:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(k)
-    return cur
 
 
 # ─────────────────────────────────────────────
@@ -1860,47 +1671,22 @@ DEFAULT_SETTINGS: dict = {
         "verify_ssl":       False,
         "phases": {
             "recon": True, "screenshot": True, "webfiles": True,
-            "tls": True, "headers": True, "shcheck": True,
+            "tls": True, "subdomain_takeover": True, "headers": True, "shcheck": True,
             "ffuf": True, "crawl": True, "jwt": True,
-            "injection": True, "traversal": True, "ssrf": True,
+            "injection": True, "traversal": True, "business_logic": True, "ssrf": True,
             "auth_bypass": True, "files": True, "vulnscan": True,
-            "graphql": False, "auth_recon": False, "authorization": False,
+            "graphql": False, "logging_monitoring": True, "account_lockout": True,
+            "auth_recon": False, "authorization": False,
             "session": False, "csrf": False, "cross_user": False,
         },
         "auth": {
-            "enabled": False,
-            "auth_method": "form_login",
-            # Universal credential fields
-            "username": "", "password": "",
-            # Form/token login
-            "login_url": "", "login_mode": "fields",
-            "login_username_field": "username", "login_password_field": "password",
-            "login_data": "",
-            # Token / bearer
-            "auth_token": "", "token_type": "Bearer",
-            "token_response_field": "token",
-            # OAuth2
-            "oauth_token_url": "", "oauth_client_id": "", "oauth_client_secret": "",
-            "oauth_scope": "",
-            # API key
-            "api_key_header": "X-API-Key", "api_key_cookie_name": "api_key",
-            "api_key_value": "",
-            # Cookie / NTLM / Kerberos
-            "session_cookie": "", "domain": "",
-            # Custom headers
-            "custom_headers": {},
+            "enabled": False, "username": "", "password": "",
+            "auth_type": "form", "login_url": "", "login_data": "",
+            "auth_token": "", "token_type": "Bearer", "session_cookie": "",
         },
         "auth2": {
-            "enabled": False,
-            "auth_method": "form_login",
-            "username": "", "password": "",
-            "login_url": "", "login_mode": "fields",
-            "login_username_field": "username", "login_password_field": "password",
-            "login_data": "",
-            "auth_token": "", "token_type": "Bearer",
-            "token_response_field": "token",
-            "session_cookie": "", "domain": "",
-            "custom_headers": {},
+            "enabled": False, "username": "", "password": "",
+            "auth_token": "", "session_cookie": "",
         },
         "sqlmap_timeout":   300,
         "nuclei_timeout":   600,
@@ -1940,15 +1726,19 @@ def _load_settings(path: str) -> dict:
 PHASE_LIST = [
     ("recon",         "Phase 0:  HTTP probe, fingerprinting, directory discovery"),
     ("tls",           "Phase 1:  TLS/SSL cipher and certificate analysis"),
+    ("subdomain_takeover", "Phase 1b: Subdomain takeover — dangling CNAME, AXFR zone transfer"),
     ("headers",       "Phase 2:  Security header inspection"),
     ("crawl",         "Phase 3:  Crawl, form extraction, JS secret hunting"),
     ("injection",     "Phase 4:  SQLi, XSS, SSTI, CMDi, CRLF, XXE"),
     ("traversal",     "Phase 5:  Path traversal / LFI"),
+    ("business_logic", "Phase 5b: Business logic — workflow, race conditions, TOCTOU, value tampering"),
     ("ssrf",          "Phase 6:  Server-Side Request Forgery"),
     ("auth_bypass",   "Phase 7:  Authentication bypass / default creds"),
     ("files",         "Phase 8:  Sensitive file exposure"),
     ("vulnscan",      "Phase 9:  Nuclei + Nikto vulnerability scan"),
     ("graphql",       "Phase 10: GraphQL endpoint detection and introspection"),
+    ("logging_monitoring", "Phase 10b: Security logging/monitoring failures — actuator exposure, verbose errors"),
+    ("account_lockout",   "Phase 7b: Account lockout and brute-force protection testing"),
     ("auth_recon",    "Phase 11: Authenticated endpoint enumeration (requires auth)"),
     ("authorization", "Phase 12: IDOR / privilege escalation testing (requires auth)"),
     ("session",       "Phase 13: Session management analysis (requires auth)"),
@@ -1972,20 +1762,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--no-vulnscan",   action="store_true", help="Skip nuclei vulnscan")
     parser.add_argument("--no-auth",       action="store_true", help="Skip all authenticated phases")
     parser.add_argument("--list-phases",   action="store_true", help="Print phases and exit")
-    parser.add_argument("--username",      metavar="USER",  help="Auth username")
-    parser.add_argument("--password",      metavar="PASS",  help="Auth password")
-    parser.add_argument("--auth-method",   metavar="METHOD", default=None,
-                        choices=["form_login","basic","digest","ntlm","bearer",
-                                 "session_cookie","token_login","oauth2_client_creds",
-                                 "apikey_header","apikey_cookie","header_creds","kerberos"],
-                        help="Authentication method")
-    parser.add_argument("--auth-type",     metavar="TYPE",  default=None,
-                        help="Legacy alias for --auth-method (form/basic/token)")
-    parser.add_argument("--login-url",     metavar="URL",   help="Login endpoint URL")
-    parser.add_argument("--auth-token",    metavar="TOKEN", help="Bearer / API token value")
-    parser.add_argument("--token-type",    metavar="TYPE",  default=None, help="Token scheme (default: Bearer)")
-    parser.add_argument("--session-cookie",metavar="COOKIE",help="Pre-captured session cookie string")
-    parser.add_argument("--domain",        metavar="DOMAIN",help="Windows domain for NTLM auth")
+    parser.add_argument("--username",      metavar="USER", help="Auth username")
+    parser.add_argument("--password",      metavar="PASS", help="Auth password")
+    parser.add_argument("--auth-type",     metavar="TYPE", default="form", help="Auth type: form/basic/token")
+    parser.add_argument("--login-url",     metavar="URL",  help="Login endpoint URL")
+    parser.add_argument("--auth-token",    metavar="TOKEN", help="Bearer/API token")
     parser.add_argument("--threads",       type=int, default=None, help="Number of threads")
     parser.add_argument("--timeout",       type=int, default=None, help="Request timeout in seconds")
     return parser.parse_args()
@@ -2687,80 +2468,6 @@ def _parse_feroxbuster_output(filepath: Path) -> list:
         if m:
             urls.append(m.group(1).rstrip("/\\"))
     return urls
-
-
-def _parse_gobuster_status(filepath: Path, base_url: str) -> "list[tuple[str,int]]":
-    """Extract (url, status_code) pairs from a gobuster -q output file."""
-    results = []
-    base = base_url.rstrip("/")
-    for line in filepath.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        m_code = re.search(r'\(Status:\s*(\d+)\)', line)
-        code = int(m_code.group(1)) if m_code else 200
-        m_path = re.match(r'(/\S*)', line)
-        if m_path:
-            path = m_path.group(1).split()[0]  # strip any trailing junk
-            results.append((f"{base}{path}", code))
-    return results
-
-
-def _parse_feroxbuster_status(filepath: Path) -> "list[tuple[str,int]]":
-    """Extract (url, status_code) pairs from a feroxbuster output file."""
-    results = []
-    for line in filepath.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # Feroxbuster quiet format: "200  GET  ... http://host/path"
-        m = re.match(r'^(\d{3})\s+\w+\s+.*?(https?://\S+)', line)
-        if m:
-            code = int(m.group(1))
-            url  = m.group(2).rstrip("/\\")
-            results.append((url, code))
-        else:
-            m2 = re.search(r'(https?://\S+)', line)
-            if m2:
-                results.append((m2.group(1).rstrip("/\\"), 200))
-    return results
-
-
-def _sm_permissive_rank(code: int) -> int:
-    """Return sort key for status codes: lower = more permissive/accessible."""
-    if 200 <= code < 300:
-        return code               # 200 best, 201-299 next
-    if 300 <= code < 400:
-        return 400 + (code - 300) # redirects: 400-499 slot
-    if code == 401:
-        return 600
-    if code == 403:
-        return 601
-    if 400 <= code < 500:
-        return 602 + (code - 400)
-    if 500 <= code < 600:
-        return 700 + (code - 500)
-    return 999
-
-
-def _sm_record(sm: dict, raw_url: str, status_code: int, source: str,
-               auth_user: str = "") -> None:
-    """Record a URL observation into the structure map dict."""
-    try:
-        parsed = urllib.parse.urlparse(raw_url)
-        path = parsed.path or "/"
-    except Exception:
-        path = raw_url
-    path = path.rstrip("/") or "/"
-    if path not in sm:
-        sm[path] = {"status_codes": [], "sources": [], "auth_users": []}
-    entry = sm[path]
-    if status_code and status_code not in entry["status_codes"]:
-        entry["status_codes"].append(status_code)
-    if source and source not in entry["sources"]:
-        entry["sources"].append(source)
-    if auth_user and auth_user not in entry["auth_users"]:
-        entry["auth_users"].append(auth_user)
 
 
 def _capture_screenshot_to(ep_url: str, out_path: Path,
@@ -3484,6 +3191,167 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
 
 
 # ─────────────────────────────────────────────
+# Phase 1b: Subdomain Takeover
+# ─────────────────────────────────────────────
+
+# Known dangling CNAME fingerprints (service → response pattern)
+_TAKEOVER_FINGERPRINTS = [
+    ("GitHub Pages",       re.compile(r"there isn't a github pages site here|"
+                                       r"for root urls .* we recommend", re.I)),
+    ("Heroku",             re.compile(r"no such app|heroku.*application error|"
+                                       r"there's nothing here, yet", re.I)),
+    ("Fastly",             re.compile(r"fastly error.*unknown domain", re.I)),
+    ("Pantheon",           re.compile(r"the gods are wise.*there is no such site|"
+                                       r"404 error unknown site", re.I)),
+    ("Shopify",            re.compile(r"sorry, this shop is currently unavailable|"
+                                       r"only a shop owner can do that", re.I)),
+    ("Azure / Microsoft",  re.compile(r"this azure web app is unavailable|"
+                                       r"domain.*not yet registered|"
+                                       r"windows azure error|azure.*not configured", re.I)),
+    ("AWS S3",             re.compile(r"nosuchbucket|the specified bucket does not exist|"
+                                       r"bucket you are attempting to access must be addressed", re.I)),
+    ("Tumblr",             re.compile(r"there's nothing here|"
+                                       r"whatever you were looking for doesn't currently exist", re.I)),
+    ("Zendesk",            re.compile(r"help center closed|"
+                                       r"this help center no longer exists", re.I)),
+    ("Cargo",              re.compile(r"if you're moving your domain away from cargo|"
+                                       r"cargocollective.com", re.I)),
+    ("WP Engine",          re.compile(r"the site you were looking for.*couldn't be found", re.I)),
+    ("Unbounce",           re.compile(r"the requested url was not found on this server.*unbounce", re.I)),
+    ("Webflow",            re.compile(r"page not found.*webflow|"
+                                       r"this page is not available", re.I)),
+    ("Surge.sh",           re.compile(r"project not found.*surge", re.I)),
+    ("BigCartel",          re.compile(r"bohoo.*page not found.*bigcartel", re.I)),
+]
+
+
+def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
+                               out: OutputManager, sess: requests.Session) -> None:
+    """Phase 1b: Subdomain takeover — dangling CNAME and AXFR detection."""
+    phase   = "subdomain_takeover"
+    url     = target["url"]
+    host    = target["hostname"]
+    timeout = cfg.get("timeout", 10)
+
+    vc.status(phase, "Subdomain Takeover", "running", "CNAME dangling check", 0, 2)
+
+    # 1. Check if host has a CNAME pointing to an unclaimed service
+    import dns.resolver  # type: ignore[import]  # dnspython
+    cname_target = None
+    try:
+        answers = dns.resolver.resolve(host, "CNAME")
+        if answers:
+            cname_target = str(answers[0].target).rstrip(".")
+    except Exception:
+        pass
+
+    if cname_target:
+        # Try to reach the CNAME target directly
+        try:
+            r = sess.get(f"https://{cname_target}", timeout=timeout,
+                         headers={"Host": host}, allow_redirects=True)
+            for service, pattern in _TAKEOVER_FINGERPRINTS:
+                if pattern.search(r.text):
+                    out.add_finding(
+                        title=f"Subdomain Takeover — Dangling CNAME ({service})",
+                        url=url, port=target["port"], risk="HIGH",
+                        description=(
+                            f"The hostname '{host}' has a CNAME record pointing to "
+                            f"'{cname_target}' but the target service ({service}) "
+                            f"shows an unclaimed/available page. An attacker may be "
+                            f"able to register this resource and serve malicious content."
+                        ),
+                        output=(
+                            f"CNAME: {host} → {cname_target}\n"
+                            f"Service: {service}\n"
+                            f"Response excerpt: {r.text[:500]}"
+                        ),
+                        sources="fracture-subdomain-takeover", service=target["scheme"],
+                        affected=url,
+                        owasp="A05:2025 Security Misconfiguration", nist="CM-8",
+                        remediation=(
+                            "Remove the dangling DNS CNAME record or claim the resource "
+                            f"at {cname_target} immediately. Monitor all DNS CNAMEs "
+                            "that point to third-party services."
+                        ),
+                    )
+                    vc.log(f"[subdomain_takeover] Dangling CNAME ({service}): {host} → {cname_target}", "SUCCESS")
+                    break
+        except Exception:
+            pass
+    elif not cname_target:
+        # No CNAME — check A/AAAA record resolves to a responsive host
+        try:
+            r = sess.get(url, timeout=timeout, allow_redirects=True)
+            for service, pattern in _TAKEOVER_FINGERPRINTS:
+                if pattern.search(r.text):
+                    out.add_finding(
+                        title=f"Subdomain Takeover Indicator ({service})",
+                        url=url, port=target["port"], risk="MEDIUM",
+                        description=(
+                            f"The response from '{host}' matches a known takeover "
+                            f"fingerprint for {service}. The DNS may have been "
+                            f"recently updated but the service resource is unclaimed."
+                        ),
+                        output=f"Service: {service}\nResponse: {r.text[:500]}",
+                        sources="fracture-subdomain-takeover", service=target["scheme"],
+                        affected=url,
+                        owasp="A05:2025 Security Misconfiguration", nist="CM-8",
+                        remediation=(
+                            "Verify DNS records for this host and claim the associated "
+                            "service resource if applicable."
+                        ),
+                    )
+                    break
+        except Exception:
+            pass
+
+    # 2. DNS zone transfer (AXFR) check
+    vc.status(phase, "Subdomain Takeover", "running", "AXFR check", 1, 2)
+    try:
+        import dns.zone  # type: ignore[import]
+        import dns.query  # type: ignore[import]
+        # Get nameservers for the domain
+        ns_answers = dns.resolver.resolve(host, "NS")
+        for ns_rdata in ns_answers:
+            ns_host = str(ns_rdata.target).rstrip(".")
+            try:
+                zone = dns.zone.from_xfr(dns.query.xfr(ns_host, host, timeout=5))
+                if zone:
+                    # AXFR succeeded — huge finding
+                    names = [str(n) for n in zone.nodes.keys()][:20]
+                    out.add_finding(
+                        title="DNS Zone Transfer (AXFR) Permitted",
+                        url=url, port=target["port"], risk="HIGH",
+                        description=(
+                            f"DNS zone transfer (AXFR) was permitted by nameserver "
+                            f"'{ns_host}' for domain '{host}'. This exposes the complete "
+                            f"DNS zone including all subdomains, internal names, and IPs."
+                        ),
+                        output=(
+                            f"Nameserver: {ns_host}\n"
+                            f"Records ({len(names)} shown): {', '.join(names)}"
+                        ),
+                        sources="fracture-subdomain-takeover", service="dns",
+                        affected=host,
+                        owasp="A05:2025 Security Misconfiguration", nist="SC-5",
+                        remediation=(
+                            "Restrict AXFR to authorised nameservers and monitoring hosts only. "
+                            "Configure the nameserver ACL to deny zone transfers from unknown IPs."
+                        ),
+                    )
+                    vc.log(f"[subdomain_takeover] AXFR permitted: {ns_host} → {host}", "SUCCESS")
+                    break
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    vc.status(phase, "Subdomain Takeover", "complete", "Done", 2, 2)
+    vc.log("[subdomain_takeover] Phase complete", "SUCCESS")
+
+
+# ─────────────────────────────────────────────
 # Phase 2: Headers
 # ─────────────────────────────────────────────
 _SECURITY_HEADERS = [
@@ -3508,6 +3376,18 @@ _SECURITY_HEADERS = [
     ("X-XSS-Protection",          "LOW",    "Missing X-XSS-Protection Header",
      "Without X-XSS-Protection, older browsers lack an extra XSS filter hint.",
      "SI-10", "Add: X-XSS-Protection: 1; mode=block"),
+    ("Cross-Origin-Opener-Policy", "MEDIUM", "Missing Cross-Origin-Opener-Policy (COOP) Header",
+     "Without COOP, malicious pages can access window references to your site, enabling "
+     "Spectre-style side-channel leaks and cross-window scripting.",
+     "SC-8", "Add: Cross-Origin-Opener-Policy: same-origin"),
+    ("Cross-Origin-Resource-Policy", "MEDIUM", "Missing Cross-Origin-Resource-Policy (CORP) Header",
+     "Without CORP, other origins can load your resources (images, scripts), enabling "
+     "Spectre cross-site leaks and hotlinking of sensitive assets.",
+     "AC-4", "Add: Cross-Origin-Resource-Policy: same-origin (or same-site for CDN resources)"),
+    ("Cross-Origin-Embedder-Policy", "LOW", "Missing Cross-Origin-Embedder-Policy (COEP) Header",
+     "Without COEP, cross-origin isolation cannot be enabled, blocking access to "
+     "SharedArrayBuffer and high-precision timers needed for Spectre mitigation.",
+     "SC-8", "Add: Cross-Origin-Embedder-Policy: require-corp"),
 ]
 
 
@@ -3635,6 +3515,46 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 owasp="A05:2025 Security Misconfiguration", nist="SC-23",
                 remediation="Add SameSite=Lax or SameSite=Strict to all cookies.",
             )
+
+    # Expect-CT — deprecated in Chrome 113+ but worth flagging if misconfigured
+    vc.status(phase, "Security Headers", "running", "Expect-CT check", 4, 5)
+    expect_ct = headers.get("Expect-CT", "")
+    if expect_ct and "enforce" in expect_ct.lower() and "max-age=0" in expect_ct:
+        out.add_finding(
+            title="Misconfigured Expect-CT Header (max-age=0 with enforce)",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                "The Expect-CT header is present with 'enforce' and 'max-age=0'. "
+                "This combination causes the browser to enforce CT but immediately "
+                "expire the policy, which is a misconfiguration."
+            ),
+            output=f"Expect-CT: {expect_ct}",
+            sources="fracture-headers", service=target["scheme"],
+            output_file=str(out_f),
+            owasp="A05:2025 Security Misconfiguration", nist="SC-8",
+            remediation=(
+                "Remove Expect-CT (deprecated in Chrome 113+) or set max-age to "
+                "a positive value. Modern Certificate Transparency is enforced by browsers natively."
+            ),
+        )
+
+    # Origin-Agent-Cluster header (opt-in to process isolation)
+    oac = headers.get("Origin-Agent-Cluster", "")
+    if not oac:
+        out.add_finding(
+            title="Missing Origin-Agent-Cluster Header",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                "The Origin-Agent-Cluster header is not set. This header hints "
+                "browsers to isolate the origin in its own agent cluster, strengthening "
+                "process isolation against Spectre-style side-channel attacks."
+            ),
+            output="Missing: Origin-Agent-Cluster",
+            sources="fracture-headers", service=target["scheme"],
+            output_file=str(out_f),
+            owasp="A05:2025 Security Misconfiguration", nist="SC-8",
+            remediation="Add: Origin-Agent-Cluster: ?1",
+        )
 
     vc.status(phase, "Security Headers", "complete", "Done", 5, 5)
     vc.log("[headers] Phase complete", "SUCCESS")
@@ -4903,6 +4823,215 @@ def _phase_traversal(target: dict, cfg: dict, pm: ProgressManager,
 
 
 # ─────────────────────────────────────────────
+# Phase 5b: Business Logic
+# ─────────────────────────────────────────────
+_BL_NUMERIC_FIELDS = re.compile(
+    r'qty|quantity|amount|price|cost|total|count|number|num|value|'
+    r'discount|coupon|fee|rate|balance|credit|debit|units|items', re.I
+)
+_BL_WORKFLOW_URL = re.compile(
+    r'checkout|confirm|payment|pay|order|purchase|cart|complete|'
+    r'transfer|send|submit|process|finalize|done|success|approve|step\d', re.I
+)
+
+
+def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
+                          out: OutputManager, sess: requests.Session,
+                          crawl_data: dict) -> None:
+    phase   = "business_logic"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    forms   = crawl_data.get("forms", [])
+    links   = crawl_data.get("links", [])
+    threads = min(cfg.get("threads", 10), 10)
+
+    vc.status(phase, "Business Logic", "running", "Negative value injection", 0, 4)
+
+    # 1. Negative / zero value injection into numeric form fields
+    for form in forms[:30]:
+        action = form.get("action", url)
+        method = form.get("method", "GET").upper()
+        inputs = form.get("inputs", [])
+        num_fields = [
+            i for i in inputs if i.get("name") and
+            _BL_NUMERIC_FIELDS.search(i.get("name", "") + i.get("id", ""))
+        ]
+        if not num_fields:
+            continue
+        for test_val, label in [("-1", "negative"), ("0", "zero"), ("-9999", "large negative")]:
+            data = {i["name"]: i.get("value", "test") for i in inputs if i.get("name")}
+            for nf in num_fields:
+                data[nf["name"]] = test_val
+            try:
+                r = (sess.post(action, data=data, timeout=timeout, allow_redirects=True)
+                     if method == "POST"
+                     else sess.get(action, params=data, timeout=timeout, allow_redirects=True))
+                if r and r.status_code in (200, 201, 302) and not re.search(
+                        r'error|invalid|not.allowed|rejected|negative|zero', r.text, re.I):
+                    field_names = ", ".join(nf["name"] for nf in num_fields)
+                    out.add_finding(
+                        title="Business Logic — Numeric Field Accepts Negative/Zero Value",
+                        url=action, port=target["port"], risk="HIGH",
+                        description=(
+                            f"Form at {action} accepted a {label} value ({test_val}) for "
+                            f"numeric field(s): {field_names}. This may allow manipulation "
+                            f"of quantities, prices, or financial values."
+                        ),
+                        output=f"Field(s): {field_names}\nTest value: {test_val}\nHTTP {r.status_code}",
+                        sources="fracture-business-logic", service=target["scheme"],
+                        affected=action,
+                        owasp="A04:2025 Insecure Design", nist="AC-3",
+                        remediation=(
+                            "Validate all numeric inputs server-side. Reject zero, "
+                            "negative, and implausibly large values. Apply range checks."
+                        ),
+                    )
+                    vc.log(f"[business_logic] Negative value accepted: {action} field={nf['name']}", "SUCCESS")
+                    break
+            except Exception:
+                pass
+
+    # 2. Workflow step skipping — access late-stage pages without prior steps
+    vc.status(phase, "Business Logic", "running", "Workflow skip detection", 1, 4)
+    workflow_links = [lnk for lnk in links if _BL_WORKFLOW_URL.search(lnk)]
+    for lnk in workflow_links[:20]:
+        try:
+            bare = requests.Session()
+            bare.headers.update(sess.headers)
+            bare.verify = False
+            r = bare.get(lnk, timeout=timeout, allow_redirects=False)
+            if r and r.status_code in (200, 201):
+                out.add_finding(
+                    title="Business Logic — Workflow Step Directly Accessible",
+                    url=lnk, port=target["port"], risk="HIGH",
+                    description=(
+                        f"Late-stage workflow page '{lnk}' returned HTTP {r.status_code} "
+                        f"when accessed directly with a fresh (unauthenticated) session. "
+                        f"This may allow skipping payment, verification, or approval steps."
+                    ),
+                    output=f"URL: {lnk}\nHTTP {r.status_code} (unauthenticated fresh session)",
+                    sources="fracture-business-logic", service=target["scheme"],
+                    affected=lnk,
+                    owasp="A04:2025 Insecure Design", nist="AC-3",
+                    remediation=(
+                        "Enforce server-side state machine validation. Confirm all prior "
+                        "workflow steps are complete before processing late-stage requests."
+                    ),
+                )
+                vc.log(f"[business_logic] Workflow skip: {lnk}", "SUCCESS")
+        except Exception:
+            pass
+
+    # 3. Race condition — concurrent duplicate submission on workflow forms
+    vc.status(phase, "Business Logic", "running", "Race condition testing", 2, 4)
+    workflow_forms = [
+        f for f in forms if _BL_WORKFLOW_URL.search(
+            f.get("action", "") + " ".join(
+                i.get("name", "") for i in f.get("inputs", [])
+            )
+        )
+    ]
+    for form in workflow_forms[:5]:
+        action = form.get("action", url)
+        method = form.get("method", "GET").upper()
+        inputs = form.get("inputs", [])
+        data   = {i["name"]: i.get("value", "test") for i in inputs if i.get("name")}
+        results: list = []
+
+        def _race_req(_idx, _action=action, _method=method, _data=data):
+            try:
+                r = (sess.post(_action, data=_data, timeout=timeout)
+                     if _method == "POST"
+                     else sess.get(_action, params=_data, timeout=timeout))
+                if r:
+                    results.append(r.status_code)
+            except Exception:
+                pass
+
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            list(pool.map(_race_req, range(threads)))
+
+        successes = [s for s in results if s in (200, 201)]
+        if len(successes) > 1:
+            out.add_finding(
+                title="Business Logic — Potential Race Condition (Duplicate Submission)",
+                url=action, port=target["port"], risk="HIGH",
+                description=(
+                    f"Sending {len(results)} concurrent requests to {action} yielded "
+                    f"{len(successes)} successful responses. This may indicate a race "
+                    f"condition allowing duplicate operations such as double-spend, "
+                    f"coupon reuse, or duplicate order creation."
+                ),
+                output=(
+                    f"URL: {action}\nConcurrent requests: {len(results)}\n"
+                    f"Successful responses: {len(successes)}"
+                ),
+                sources="fracture-business-logic", service=target["scheme"],
+                affected=action,
+                owasp="A04:2025 Insecure Design", nist="SC-5",
+                remediation=(
+                    "Use idempotency keys for transaction-forming requests. "
+                    "Apply database-level locks or atomic check-and-set operations. "
+                    "Add per-session duplicate detection with short TTL deduplication."
+                ),
+            )
+            vc.log(f"[business_logic] Race condition: {action} ({len(successes)}/{len(results)} success)", "SUCCESS")
+
+    # 4. Hidden price / discount field tampering
+    vc.status(phase, "Business Logic", "running", "Parameter tampering", 3, 4)
+    for form in forms[:30]:
+        action = form.get("action", url)
+        method = form.get("method", "GET").upper()
+        inputs = form.get("inputs", [])
+        hidden_price = [
+            i for i in inputs if i.get("name")
+            and i.get("type", "").lower() in ("hidden", "")
+            and _BL_NUMERIC_FIELDS.search(i.get("name", "") + i.get("id", ""))
+        ]
+        if not hidden_price:
+            continue
+        for hf in hidden_price:
+            orig_val = str(hf.get("value", ""))
+            if not orig_val or not re.match(r'^\d[\d.]*$', orig_val):
+                continue
+            try:
+                tamper = {i["name"]: i.get("value", "test") for i in inputs if i.get("name")}
+                tamper[hf["name"]] = "0.01"
+                r = (sess.post(action, data=tamper, timeout=timeout, allow_redirects=True)
+                     if method == "POST"
+                     else sess.get(action, params=tamper, timeout=timeout, allow_redirects=True))
+                if r and r.status_code in (200, 201, 302):
+                    out.add_finding(
+                        title="Business Logic — Hidden Price/Value Field Tampering",
+                        url=action, port=target["port"], risk="HIGH",
+                        description=(
+                            f"Hidden field '{hf['name']}' in form at {action} was "
+                            f"tampered from '{orig_val}' to '0.01' and the server accepted "
+                            f"the submission (HTTP {r.status_code}). Server-side price "
+                            f"recalculation may be absent."
+                        ),
+                        output=(
+                            f"Field: {hf['name']}\nOriginal: {orig_val}\n"
+                            f"Tampered: 0.01\nHTTP {r.status_code}"
+                        ),
+                        sources="fracture-business-logic", service=target["scheme"],
+                        affected=action,
+                        owasp="A04:2025 Insecure Design", nist="AC-3",
+                        remediation=(
+                            "Never trust client-submitted prices or discounts. Store all "
+                            "financial values server-side and recalculate totals from "
+                            "authoritative data before processing any transaction."
+                        ),
+                    )
+                    vc.log(f"[business_logic] Price tamper accepted: {action} field={hf['name']}", "SUCCESS")
+            except Exception:
+                pass
+
+    vc.status(phase, "Business Logic", "complete", "Done", 4, 4)
+    vc.log("[business_logic] Phase complete", "SUCCESS")
+
+
+# ─────────────────────────────────────────────
 # Phase 6: SSRF
 # ─────────────────────────────────────────────
 _SSRF_PARAMS = {"url", "redirect", "webhook", "callback", "next", "return",
@@ -5818,6 +5947,262 @@ def _phase_cross_user(target: dict, cfg: dict, pm: ProgressManager,
     vc.log("[cross_user] Phase complete", "SUCCESS")
 
 
+# ─────────────────────────────────────────────
+# Phase 10b: Logging & Monitoring (OWASP A09)
+# ─────────────────────────────────────────────
+_LOG_ENDPOINT_PATTERNS = re.compile(
+    r'/admin|/debug|/trace|/log|/monitor|/status|/health|/actuator|/metrics|'
+    r'/info|/env|/config|/console|/shell|/management|/api-docs|/swagger', re.I
+)
+_STACK_TRACE_RE = re.compile(
+    r'Traceback|stack.?trace|Exception in|at com\.|at org\.|at java\.|'
+    r'StackTrace|Internal Server Error|sqlstate|SQLSTATE|ORA-\d|mysql_', re.I
+)
+_DEBUG_HEADER_RE = re.compile(r'X-Debug|X-Trace|X-Request-Id|X-Powered-By', re.I)
+
+
+def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
+                               out: OutputManager, sess: requests.Session,
+                               crawl_data: dict) -> None:
+    """Phase 10b: Security Logging & Monitoring Failures — OWASP A09:2025."""
+    phase   = "logging_monitoring"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    links   = crawl_data.get("links", [])
+
+    vc.status(phase, "Logging & Monitoring", "running", "Probing admin/debug endpoints", 0, 4)
+
+    # 1. Exposed admin/debug/monitoring endpoints
+    probe_paths = [
+        "/actuator", "/actuator/env", "/actuator/heapdump", "/actuator/mappings",
+        "/actuator/metrics", "/actuator/logfile", "/actuator/httptrace",
+        "/debug", "/trace", "/.env", "/config",
+        "/admin/logs", "/logs", "/log", "/error-log",
+        "/server-status", "/server-info",
+    ]
+    for path in probe_paths:
+        probe_url = url.rstrip("/") + path
+        try:
+            r = sess.get(probe_url, timeout=timeout, allow_redirects=False)
+            if r and r.status_code == 200:
+                out.add_finding(
+                    title=f"Exposed Admin/Debug Endpoint: {path}",
+                    url=probe_url, port=target["port"], risk="HIGH",
+                    description=(
+                        f"The endpoint '{path}' returned HTTP 200 without authentication. "
+                        f"Exposed diagnostic endpoints can reveal environment variables, "
+                        f"heap dumps, log files, and configuration data."
+                    ),
+                    output=f"GET {probe_url} → HTTP {r.status_code}\n{r.text[:500]}",
+                    sources="fracture-logging", service=target["scheme"],
+                    affected=probe_url,
+                    owasp="A09:2025 Security Logging and Monitoring Failures", nist="AU-9",
+                    remediation=(
+                        "Restrict admin/actuator endpoints to localhost or protected networks. "
+                        "Require authentication for all diagnostic endpoints."
+                    ),
+                )
+                vc.log(f"[logging_monitoring] Exposed endpoint: {probe_url}", "SUCCESS")
+        except Exception:
+            pass
+
+    # 2. Error message verbosity — trigger errors and check for stack traces
+    vc.status(phase, "Logging & Monitoring", "running", "Error verbosity check", 1, 4)
+    error_triggers = [
+        url + "/'",          # SQL char
+        url + "/nonexistent_fracture_path_xyz_12345",
+        url + "?" + "fracture_test_param=<script>",
+        url + "/admin",
+    ]
+    for eu in error_triggers:
+        try:
+            r = sess.get(eu, timeout=timeout, allow_redirects=True)
+            if r and r.status_code in (500, 503) and _STACK_TRACE_RE.search(r.text):
+                out.add_finding(
+                    title="Verbose Error Messages — Stack Trace Disclosed",
+                    url=eu, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"The server returned a verbose error at {eu} (HTTP {r.status_code}) "
+                        f"containing stack trace or database error details. This leaks "
+                        f"implementation details that aid attackers."
+                    ),
+                    output=f"GET {eu} → HTTP {r.status_code}\n{r.text[:1000]}",
+                    sources="fracture-logging", service=target["scheme"],
+                    affected=eu,
+                    owasp="A09:2025 Security Logging and Monitoring Failures", nist="AU-3",
+                    remediation=(
+                        "Configure production error pages to display generic messages only. "
+                        "Log detailed errors server-side, never expose them to clients."
+                    ),
+                )
+                vc.log(f"[logging_monitoring] Stack trace: {eu}", "SUCCESS")
+        except Exception:
+            pass
+
+    # 3. Debug headers in responses
+    vc.status(phase, "Logging & Monitoring", "running", "Debug header check", 2, 4)
+    try:
+        r = sess.get(url, timeout=timeout)
+        if r:
+            debug_hdrs = [h for h in r.headers if _DEBUG_HEADER_RE.search(h)]
+            if debug_hdrs:
+                out.add_finding(
+                    title="Debug / Trace Headers Exposed in Response",
+                    url=url, port=target["port"], risk="LOW",
+                    description=(
+                        f"Response headers include diagnostic or debug headers: "
+                        f"{', '.join(debug_hdrs)}. These reveal implementation details."
+                    ),
+                    output=f"Headers: {', '.join(f'{h}: {r.headers[h]}' for h in debug_hdrs)}",
+                    sources="fracture-logging", service=target["scheme"],
+                    affected=url,
+                    owasp="A09:2025 Security Logging and Monitoring Failures", nist="AU-3",
+                    remediation=(
+                        "Remove or restrict debug/trace response headers in production. "
+                        "Use X-Request-Id only if not echoing internal trace IDs."
+                    ),
+                )
+    except Exception:
+        pass
+
+    # 4. Insufficient logging probe — check if repeated failed auth attempts are detected
+    vc.status(phase, "Logging & Monitoring", "running", "Auth logging probe", 3, 4)
+    login_url = cfg.get("auth", {}).get("login_url", "")
+    if login_url:
+        fail_responses = []
+        for _ in range(5):
+            try:
+                r = sess.post(login_url, json={"username": "fracture_logging_probe",
+                                               "password": "wrong_password_xyz"}, timeout=timeout)
+                fail_responses.append(r.status_code)
+            except Exception:
+                pass
+        if len(fail_responses) == 5 and all(s in (200, 302, 401) for s in fail_responses):
+            # All 5 failed logins were accepted without lockout indication
+            out.add_finding(
+                title="Insufficient Auth Failure Logging / No Brute-Force Detection",
+                url=login_url, port=target["port"], risk="MEDIUM",
+                description=(
+                    f"Five consecutive failed login attempts to {login_url} were accepted "
+                    f"without triggering a lockout, rate limit, or captcha response. "
+                    f"Insufficient logging may mean brute-force attempts go undetected."
+                ),
+                output=(
+                    f"5 failed logins to {login_url}\n"
+                    f"Status codes: {fail_responses}"
+                ),
+                sources="fracture-logging", service=target["scheme"],
+                affected=login_url,
+                owasp="A09:2025 Security Logging and Monitoring Failures", nist="AU-12",
+                remediation=(
+                    "Implement brute-force detection and account lockout after N failed attempts. "
+                    "Log all authentication failures with IP, timestamp, and username. "
+                    "Alert on anomalous login failure patterns."
+                ),
+            )
+            vc.log(f"[logging_monitoring] No brute-force protection: {login_url}", "SUCCESS")
+
+    vc.status(phase, "Logging & Monitoring", "complete", "Done", 4, 4)
+    vc.log("[logging_monitoring] Phase complete", "SUCCESS")
+
+
+# ─────────────────────────────────────────────
+# Phase 7b: Account Lockout (alongside auth_bypass)
+# ─────────────────────────────────────────────
+_LOCKOUT_USERNAME_FIELDS = re.compile(r'user|email|login|name|account', re.I)
+_LOCKOUT_PASSWORD_FIELDS = re.compile(r'pass|pwd|secret|credential', re.I)
+
+
+def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
+                            out: OutputManager, sess: requests.Session,
+                            crawl_data: dict) -> None:
+    """Phase 7b: Account lockout and brute-force protection testing."""
+    phase   = "account_lockout"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    forms   = crawl_data.get("forms", [])
+
+    vc.status(phase, "Account Lockout", "running", "Identifying login forms", 0, 3)
+
+    # Identify login forms
+    login_forms = []
+    for form in forms:
+        inputs = form.get("inputs", [])
+        has_user = any(_LOCKOUT_USERNAME_FIELDS.search(i.get("name", "") + i.get("type", ""))
+                       for i in inputs)
+        has_pass = any(i.get("type", "").lower() == "password" or
+                       _LOCKOUT_PASSWORD_FIELDS.search(i.get("name", ""))
+                       for i in inputs)
+        if has_user and has_pass:
+            login_forms.append(form)
+
+    # Also try configured login URL
+    login_url = cfg.get("auth", {}).get("login_url", "")
+    if login_url and not login_forms:
+        login_forms = [{"action": login_url, "method": "POST",
+                        "inputs": [{"name": "username"}, {"name": "password", "type": "password"}]}]
+
+    vc.status(phase, "Account Lockout", "running", "Brute-force simulation", 1, 3)
+    for form in login_forms[:3]:
+        action = form.get("action", url)
+        method = form.get("method", "POST").upper()
+        inputs = form.get("inputs", [])
+
+        user_field = next(
+            (i["name"] for i in inputs if _LOCKOUT_USERNAME_FIELDS.search(
+                i.get("name", "") + i.get("type", ""))), "username"
+        )
+        pass_field = next(
+            (i["name"] for i in inputs
+             if i.get("type", "").lower() == "password" or
+             _LOCKOUT_PASSWORD_FIELDS.search(i.get("name", ""))), "password"
+        )
+
+        status_codes: list = []
+        for attempt in range(10):
+            data = {user_field: "fracture_test_user", pass_field: f"wrong_pass_{attempt}"}
+            try:
+                r = (sess.post(action, data=data, timeout=timeout, allow_redirects=True)
+                     if method == "POST"
+                     else sess.get(action, params=data, timeout=timeout))
+                status_codes.append(r.status_code)
+                # Check for lockout/captcha indicators
+                if re.search(r'locked|captcha|too many|rate.limit|try.again.later|'
+                             r'account.*disabled|temporarily.*unavail', r.text, re.I):
+                    vc.log(f"[account_lockout] Lockout triggered after {attempt+1} attempts", "INFO")
+                    break
+            except Exception:
+                pass
+
+        if len(status_codes) >= 10:
+            # All 10 requests succeeded without lockout
+            out.add_finding(
+                title="Missing Account Lockout / Brute-Force Protection",
+                url=action, port=target["port"], risk="HIGH",
+                description=(
+                    f"Ten consecutive failed login attempts to {action} completed without "
+                    f"triggering account lockout, CAPTCHA, or rate limiting. "
+                    f"This allows online brute-force and credential stuffing attacks."
+                ),
+                output=(
+                    f"Form: {action}\nAttempts: 10\n"
+                    f"Status codes: {status_codes[:10]}"
+                ),
+                sources="fracture-account-lockout", service=target["scheme"],
+                affected=action,
+                owasp="A07:2025 Identification and Authentication Failures", nist="AC-7",
+                remediation=(
+                    "Implement progressive account lockout (e.g. lock after 5 failures). "
+                    "Add CAPTCHA or TOTP for suspicious login patterns. "
+                    "Apply IP-based and user-based rate limiting on authentication endpoints."
+                ),
+            )
+            vc.log(f"[account_lockout] No lockout: {action} ({len(status_codes)} attempts)", "SUCCESS")
+
+    vc.status(phase, "Account Lockout", "complete", "Done", 3, 3)
+    vc.log("[account_lockout] Phase complete", "SUCCESS")
+
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -5825,161 +6210,6 @@ def _print_banner() -> None:
     _tprint(f"{Fore.RED}{_BANNER}{Style.RESET_ALL}")
     _tprint(f"{Fore.CYAN}  Fracture v{VERSION} — Web Application Penetration Testing Orchestrator{Style.RESET_ALL}")
     _tprint(f"{Fore.CYAN}  OWASP Top 10 2025 Coverage: A01–A10{Style.RESET_ALL}\n")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Structure map builder
-# Aggregates all discovered paths from recon output files + crawl/auth_recon
-# data and writes structure_map.json for the Crucible Structure tab.
-# ─────────────────────────────────────────────────────────────────────────────
-def _build_structure_map(
-    target: dict,
-    out: "OutputManager",
-    cfg: dict,
-    sess: "requests.Session",
-    auth_sess: "requests.Session | None",
-    crawl_data: dict,
-    auth_recon_data: dict,
-) -> dict:
-    """Build and return a structure_map dict, then save it via out.save_structure_map()."""
-    sm: dict = {}                  # path → {status_codes, sources, auth_users}
-    unauth_paths: set = set()      # paths confirmed accessible without auth
-    timeout = min(cfg.get("timeout", 10), 8)
-    base_url = target["url"].rstrip("/")
-    auth_username = (cfg.get("auth") or {}).get("username", "")
-
-    # ── 1. Parse recon tool output files (unauthenticated) ────────────────────
-    host = target["hostname"]
-    _recon_files = [
-        (f"gobuster_{host}",        "gobuster",        "gob"),
-        (f"gobuster_files_{host}",  "gobuster-files",  "gob"),
-    ]
-    for fname, source, ftype in _recon_files:
-        fpath = out.output_path("recon", fname)
-        if fpath.exists():
-            try:
-                for url, code in _parse_gobuster_status(fpath, base_url):
-                    _sm_record(sm, url, code, source)
-            except Exception:
-                pass
-
-    _fer_files = [
-        (f"feroxbuster_{host}",        "feroxbuster"),
-        (f"feroxbuster_files_{host}",  "feroxbuster-files"),
-    ]
-    for fname, source in _fer_files:
-        fpath = out.output_path("recon", fname)
-        if fpath.exists():
-            try:
-                for url, code in _parse_feroxbuster_status(fpath):
-                    _sm_record(sm, url, code, source)
-            except Exception:
-                pass
-
-    # Also parse any endpoint-level gobuster/feroxbuster files
-    recon_dir = out.root / "recon"
-    for fpath in recon_dir.glob("gobuster_ep_*"):
-        try:
-            for url, code in _parse_gobuster_status(fpath, base_url):
-                _sm_record(sm, url, code, "gobuster-ep")
-        except Exception:
-            pass
-    for fpath in recon_dir.glob("feroxbuster_ep_*"):
-        try:
-            for url, code in _parse_feroxbuster_status(fpath):
-                _sm_record(sm, url, code, "feroxbuster-ep")
-        except Exception:
-            pass
-
-    # Track all recon-discovered paths as unauthenticated
-    for path in list(sm.keys()):
-        unauth_paths.add(path)
-
-    # ── 2. Unauthenticated crawl links ────────────────────────────────────────
-    for link in set(crawl_data.get("links", [])):
-        try:
-            parsed = urllib.parse.urlparse(link)
-            path = parsed.path.rstrip("/") or "/"
-        except Exception:
-            continue
-        if path not in sm:
-            # Probe for status code — lightweight HEAD request
-            try:
-                r = sess.head(link, timeout=timeout, allow_redirects=True, verify=False)
-                code = r.status_code
-            except Exception:
-                code = 200  # crawl followed this link, assume accessible
-            _sm_record(sm, link, code, "crawl")
-        else:
-            _sm_record(sm, link, 0, "crawl")
-        unauth_paths.add(path)
-
-    # ── 3. Authenticated paths (auth_recon) ───────────────────────────────────
-    auth_links = list(set(auth_recon_data.get("links", [])))
-    # Cap probing at 150 paths to avoid excessive latency
-    _probe_cap = 150
-    _probed = 0
-    for link in auth_links:
-        try:
-            parsed = urllib.parse.urlparse(link)
-            path = parsed.path.rstrip("/") or "/"
-        except Exception:
-            continue
-        auth_user = auth_username
-
-        # Get authenticated status code
-        auth_code = 0
-        if auth_sess and _probed < _probe_cap:
-            try:
-                r = auth_sess.head(link, timeout=timeout, allow_redirects=True, verify=False)
-                auth_code = r.status_code
-                _probed += 1
-            except Exception:
-                auth_code = 200  # authenticated crawl reached it
-
-        _sm_record(sm, link, auth_code or 200, "auth_recon", auth_user)
-
-        # If not already known as unauthenticated, probe with unauth session
-        if path not in unauth_paths and _probed < _probe_cap:
-            try:
-                r = sess.head(link, timeout=timeout, allow_redirects=True, verify=False)
-                unauth_code = r.status_code
-                _probed += 1
-            except Exception:
-                unauth_code = 403
-            # Record the unauth status so max_status logic works correctly
-            _sm_record(sm, link, unauth_code, "auth_recon")
-            if unauth_code < 400:
-                unauth_paths.add(path)
-
-    # ── 4. Finalize: compute max_status and auth_only ─────────────────────────
-    finalized: dict = {}
-    for path, entry in sm.items():
-        codes = [c for c in entry["status_codes"] if c > 0]
-        max_status = min(codes, key=_sm_permissive_rank) if codes else None
-        # auth_only: path has auth_users AND was never seen without authentication
-        auth_only = bool(entry["auth_users"]) and (path not in unauth_paths)
-
-        finalized[path] = {
-            "max_status":   max_status,
-            "status_codes": codes,
-            "auth_only":    auth_only,
-            "auth_users":   entry["auth_users"],
-            "sources":      entry["sources"],
-        }
-
-    result = {
-        "base_url":    base_url,
-        "generated":   datetime.now().isoformat(),
-        "total_paths": len(finalized),
-        "paths":       finalized,
-    }
-    try:
-        out.save_structure_map(result)
-        vc.log(f"[structure_map] Saved {len(finalized)} paths to structure_map.json", "INFO")
-    except Exception as e:
-        vc.error(f"[structure_map] Failed to save: {e}")
-    return result
 
 
 def main() -> None:
@@ -6014,34 +6244,16 @@ def main() -> None:
             cfg["phases"][auth_phase] = False
 
     # CLI auth overrides
-    _auth_method = args.auth_method or (
-        {"form": "form_login", "basic": "basic", "token": "bearer"}.get(args.auth_type or "", None)
-    )
     if args.username:
-        cfg["auth"]["enabled"]      = True
-        cfg["auth"]["username"]     = args.username
-        cfg["auth"]["password"]     = args.password or ""
-        if _auth_method:
-            cfg["auth"]["auth_method"] = _auth_method
+        cfg["auth"]["enabled"]   = True
+        cfg["auth"]["username"]  = args.username
+        cfg["auth"]["password"]  = args.password or ""
+        cfg["auth"]["auth_type"] = args.auth_type or "form"
     if args.login_url:
         cfg["auth"]["login_url"] = args.login_url
     if args.auth_token:
-        cfg["auth"]["enabled"]      = True
-        cfg["auth"]["auth_token"]   = args.auth_token
-        cfg["auth"]["api_key_value"] = args.auth_token
-        if not _auth_method:
-            cfg["auth"]["auth_method"] = "bearer"
-    if args.token_type:
-        cfg["auth"]["token_type"] = args.token_type
-    if args.session_cookie:
-        cfg["auth"]["enabled"]         = True
-        cfg["auth"]["session_cookie"]  = args.session_cookie
-        if not _auth_method:
-            cfg["auth"]["auth_method"] = "session_cookie"
-    if args.domain:
-        cfg["auth"]["domain"] = args.domain
-    if _auth_method and not args.username and not args.auth_token:
-        cfg["auth"]["auth_method"] = _auth_method
+        cfg["auth"]["enabled"]    = True
+        cfg["auth"]["auth_token"] = args.auth_token
 
     # Auto-compute structured project path from engagement fields if not explicitly set
     if not cfg.get("project"):
@@ -6160,6 +6372,16 @@ def main() -> None:
                 vc.error(f"Phase tls error: {e}")
                 pm.set_phase_status("tls", "error", detail=str(e))
 
+        # ── Phase 1b: subdomain_takeover ──
+        if not _skip("subdomain_takeover"):
+            pm.set_phase_status("subdomain_takeover", "running", "Subdomain Takeover")
+            try:
+                _phase_subdomain_takeover(target, cfg, pm, out, sess)
+                pm.set_phase_status("subdomain_takeover", "complete", "Subdomain Takeover")
+            except Exception as e:
+                vc.error(f"Phase subdomain_takeover error: {e}")
+                pm.set_phase_status("subdomain_takeover", "error", detail=str(e))
+
         # ── Phase 2: headers ──
         if not _skip("headers"):
             pm.set_phase_status("headers", "running", "Security Headers")
@@ -6261,6 +6483,16 @@ def main() -> None:
                 vc.error(f"Phase traversal error: {e}")
                 pm.set_phase_status("traversal", "error", detail=str(e))
 
+        # ── Phase 5b: business_logic ──
+        if not _skip("business_logic"):
+            pm.set_phase_status("business_logic", "running", "Business Logic")
+            try:
+                _phase_business_logic(target, cfg, pm, out, sess, crawl_data)
+                pm.set_phase_status("business_logic", "complete", "Business Logic")
+            except Exception as e:
+                vc.error(f"Phase business_logic error: {e}")
+                pm.set_phase_status("business_logic", "error", detail=str(e))
+
         # ── Phase 6: ssrf ──
         if not _skip("ssrf"):
             pm.set_phase_status("ssrf", "running", "SSRF Testing")
@@ -6280,6 +6512,16 @@ def main() -> None:
             except Exception as e:
                 vc.error(f"Phase auth_bypass error: {e}")
                 pm.set_phase_status("auth_bypass", "error", detail=str(e))
+
+        # ── Phase 7b: account_lockout ──
+        if not _skip("account_lockout"):
+            pm.set_phase_status("account_lockout", "running", "Account Lockout")
+            try:
+                _phase_account_lockout(target, cfg, pm, out, sess, crawl_data)
+                pm.set_phase_status("account_lockout", "complete", "Account Lockout")
+            except Exception as e:
+                vc.error(f"Phase account_lockout error: {e}")
+                pm.set_phase_status("account_lockout", "error", detail=str(e))
 
         # ── Phase 8: files ──
         if not _skip("files"):
@@ -6310,6 +6552,16 @@ def main() -> None:
             except Exception as e:
                 vc.error(f"Phase graphql error: {e}")
                 pm.set_phase_status("graphql", "error", detail=str(e))
+
+        # ── Phase 10b: logging_monitoring ──
+        if not _skip("logging_monitoring"):
+            pm.set_phase_status("logging_monitoring", "running", "Logging & Monitoring")
+            try:
+                _phase_logging_monitoring(target, cfg, pm, out, sess, crawl_data)
+                pm.set_phase_status("logging_monitoring", "complete", "Logging & Monitoring")
+            except Exception as e:
+                vc.error(f"Phase logging_monitoring error: {e}")
+                pm.set_phase_status("logging_monitoring", "error", detail=str(e))
 
         # ── Authenticated phases ──
         effective_auth = auth_sess or sess
@@ -6388,15 +6640,6 @@ def main() -> None:
                 except Exception as e:
                     vc.error(f"Phase cross_user error: {e}")
                     pm.set_phase_status("cross_user", "error", detail=str(e))
-
-        # ── Build structure map ──
-        try:
-            _build_structure_map(
-                target, out, cfg, sess, auth_sess,
-                crawl_data, auth_recon_data,
-            )
-        except Exception as e:
-            vc.error(f"Structure map error: {e}")
 
         # Write summary
         try:
