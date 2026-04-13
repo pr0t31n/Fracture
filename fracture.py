@@ -28,7 +28,9 @@ import csv
 import socket
 import threading
 import signal
+import atexit
 import getpass
+import copy
 import difflib
 import secrets
 import statistics
@@ -41,7 +43,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.8.0"
+VERSION = "2.1.0"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1546,6 +1548,18 @@ signal.signal(signal.SIGINT,  _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
 
 
+def _atexit_kill_procs() -> None:
+    with _procs_lock:
+        for p in list(_active_procs):
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+
+atexit.register(_atexit_kill_procs)
+
+
 # ─────────────────────────────────────────────
 # Shared HTTP session factory
 # ─────────────────────────────────────────────
@@ -1705,6 +1719,31 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth") -> "requests.Session 
             tt = auth.get("token_type", "Bearer").strip()
             sess.headers["Authorization"] = f"{tt} {token}"
 
+    # ── JWT Bearer ────────────────────────────────────────────────────────────
+    elif method == "jwt_bearer":
+        token = auth.get("auth_token", "").strip()
+        if token:
+            sess.headers["Authorization"] = f"Bearer {token}"
+        else:
+            # No pre-issued token — POST credentials to obtain JWT (same as token_login)
+            resp, _url = _login_post()
+            if resp is not None:
+                try:
+                    body = resp.json()
+                    token_path = auth.get("login_token_path", "access_token")
+                    tok: object = body
+                    for part in token_path.split("."):
+                        tok = tok.get(part) if isinstance(tok, dict) else None
+                    if not tok or not isinstance(tok, str):
+                        for key in ("access_token", "token", "jwt", "id_token", "auth_token"):
+                            if isinstance(body, dict) and key in body:
+                                tok = body[key]
+                                break
+                    if tok and isinstance(tok, str):
+                        sess.headers["Authorization"] = f"Bearer {tok}"
+                except Exception:
+                    pass
+
     # ── Session Cookie ────────────────────────────────────────────────────────
     elif method == "session_cookie":
         raw = auth.get("session_cookie", "").strip()
@@ -1785,18 +1824,21 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth") -> "requests.Session 
         acs_url     = auth.get("saml_acs_url", "").strip()
         assertion   = auth.get("saml_assertion", "").strip()
         relay_state = auth.get("saml_relay_state", "")
-        if acs_url and assertion:
-            try:
-                data = {"SAMLResponse": assertion}
-                if relay_state:
-                    data["RelayState"] = relay_state
-                sess.post(acs_url, data=data, timeout=timeout, allow_redirects=True)
-            except Exception as exc:
-                vc.err(f"[auth] SAML assertion POST failed: {exc}")
+        if assertion:
+            if acs_url:
+                try:
+                    data = {"SAMLResponse": assertion}
+                    if relay_state:
+                        data["RelayState"] = relay_state
+                    sess.post(acs_url, data=data, timeout=timeout, allow_redirects=True)
+                except Exception as exc:
+                    vc.err(f"[auth] SAML assertion POST failed: {exc}")
+            else:
+                sess.headers["Authorization"] = f"SAML {assertion}"
 
     # ── OIDC id_token ─────────────────────────────────────────────────────────
     elif method == "oidc_token":
-        id_token = auth.get("oidc_id_token", "").strip()
+        id_token = (auth.get("oidc_id_token") or auth.get("auth_token") or "").strip()
         if id_token:
             sess.headers["Authorization"] = f"Bearer {id_token}"
 
@@ -1813,34 +1855,53 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth") -> "requests.Session 
                     sess.verify = ca_bundle
             else:
                 vc.err(f"[auth] mTLS cert/key file not found: {cert_path}, {key_path}")
+        else:
+            client_id = auth.get("username", "").strip()
+            if client_id:
+                sess.headers["X-Client-Cert"] = client_id
 
     # ── TOTP/HOTP MFA — form login + second factor ────────────────────────────
     elif method == "totp_mfa":
-        resp, _url = _login_post()
-        if resp is not None:
-            mfa_url     = auth.get("totp_mfa_url", "").strip()
-            totp_secret = auth.get("totp_secret", "").strip()
-            mfa_field   = auth.get("totp_field", "otp")
-            if mfa_url and totp_secret:
+        totp_secret = auth.get("totp_secret", "").strip()
+        mfa_field   = auth.get("totp_field", "otp")
+        mfa_url     = auth.get("totp_mfa_url", "").strip()
+
+        def _totp(secret: str, digits: int = 6, period: int = 30) -> str:
+            import hmac as _hmac, hashlib as _hl, struct as _struct
+            import time as _time, base64 as _b64
+            key = _b64.b32decode(secret.upper().replace(" ", ""))
+            t   = int(_time.time()) // period
+            h   = _hmac.new(key, _struct.pack(">Q", t), _hl.sha1).digest()
+            off = h[-1] & 0x0F
+            code = (_struct.unpack(">I", h[off:off+4])[0] & 0x7FFFFFFF) % (10 ** digits)
+            return str(code).zfill(digits)
+
+        if totp_secret and not mfa_url:
+            # Single-step login: submit credentials + OTP together
+            for lu in _login_urls():
                 try:
-                    import hmac as _hmac, hashlib as _hl, struct as _struct
-                    import time as _time, base64 as _b64
-
-                    def _totp(secret: str, digits: int = 6, period: int = 30) -> str:
-                        key = _b64.b32decode(secret.upper().replace(" ", ""))
-                        t   = int(_time.time()) // period
-                        h   = _hmac.new(key, _struct.pack(">Q", t), _hl.sha1).digest()
-                        off = h[-1] & 0x0F
-                        code = (_struct.unpack(">I", h[off:off+4])[0] & 0x7FFFFFFF) % (10 ** digits)
-                        return str(code).zfill(digits)
-
+                    otp = _totp(totp_secret)
+                    data = {
+                        auth.get("login_username_field", "username"): auth.get("username", ""),
+                        auth.get("login_password_field", "password"): auth.get("password", ""),
+                        mfa_field: otp,
+                    }
+                    r = sess.post(lu, data=data, timeout=timeout, allow_redirects=True)
+                    if r.status_code not in (401, 403):
+                        break
+                except Exception as exc:
+                    vc.err(f"[auth] TOTP single-step login failed: {exc}")
+        else:
+            resp, _url = _login_post()
+            if resp is not None and mfa_url and totp_secret:
+                try:
                     sess.post(mfa_url, data={mfa_field: _totp(totp_secret)}, timeout=timeout)
                 except Exception as exc:
                     vc.err(f"[auth] TOTP MFA step failed: {exc}")
 
-    # ── WebAuthn probe (detection/awareness only — no scriptable flow) ─────────
+    # ── WebAuthn probe ────────────────────────────────────────────────────────
     elif method == "webauthn_probe":
-        pass
+        sess.headers["X-WebAuthn-Token"] = "1"
 
     # ── API Key in Header ─────────────────────────────────────────────────────
     elif method == "apikey_header":
@@ -1861,6 +1922,13 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth") -> "requests.Session 
         hdrs = auth.get("custom_headers", {})
         if isinstance(hdrs, dict):
             sess.headers.update(hdrs)
+
+    # ── Proxy Header / Trusted Forwarding ────────────────────────────────────
+    elif method == "proxy_header":
+        hname = auth.get("proxy_header", auth.get("proxy_header_name", "X-Forwarded-User"))
+        hval  = auth.get("proxy_header_value", auth.get("username", ""))
+        if hname and hval:
+            sess.headers[hname] = hval
 
     # ── Kerberos / SPNEGO ─────────────────────────────────────────────────────
     elif method == "kerberos":
@@ -1959,6 +2027,7 @@ DEFAULT_SETTINGS: dict = {
             "session": False, "csrf": False, "cross_user": False,
             "open_redirect": True, "deserialization": True,
             "file_upload_info": True, "mass_assignment": True,
+            "access_matrix":   False,  # Phase 20: multi-credential access matrix
         },
         "auth": {
             "enabled":                 False,
@@ -2036,6 +2105,7 @@ DEFAULT_SETTINGS: dict = {
             "api_key_cookie":          "api_key",
             "custom_headers":          {},
         },
+        "auth_matrix": [],   # list of {role, username, password} for access matrix
         "sqlmap_timeout":   300,
         "nuclei_timeout":   600,
         "crawl_depth":      3,
@@ -2096,6 +2166,7 @@ PHASE_LIST = [
     ("deserialization", "Phase 17: Insecure deserialization detection"),
     ("file_upload_info","Phase 18: File upload endpoint detection (informational)"),
     ("mass_assignment", "Phase 19: Mass assignment / privilege escalation testing"),
+    ("access_matrix",  "Phase 20: Multi-credential access matrix (BFLA / unauthenticated access)"),
 ]
 
 
@@ -3908,6 +3979,63 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             remediation="Add: Origin-Agent-Cluster: ?1",
         )
 
+    # ── TRACE method detection (XST) ─────────────────────────────────────────
+    try:
+        _tr = sess.request("TRACE", url, timeout=timeout, allow_redirects=False)
+        if _tr.status_code < 500 and (
+            "TRACE" in (_tr.text or "").upper()[:500]
+            or _tr.status_code in (200, 204)
+        ):
+            out.add_finding(
+                title="HTTP TRACE Method Enabled (Cross-Site Tracing)",
+                url=url, port=target["port"], risk="LOW",
+                description=(
+                    "The HTTP TRACE method is enabled. TRACE echoes back the request "
+                    "body, which can be leveraged in Cross-Site Tracing (XST) attacks "
+                    "to steal cookie or auth header values via client-side script "
+                    "when combined with other XSS vectors."
+                ),
+                output=f"TRACE {url} → HTTP {_tr.status_code}",
+                sources="fracture-headers", service=target["scheme"],
+                owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                remediation="Disable the TRACE HTTP method on all web servers. In Apache: TraceEnable off. In Nginx: if ($request_method = TRACE) { return 405; }",
+            )
+            vc.log("[headers] TRACE method enabled", "WARNING")
+    except Exception:
+        pass
+
+    # ── Debug mode detection ──────────────────────────────────────────────────
+    _debug_body_re = re.compile(
+        r'DEBUG\s*=\s*True|app\.debug\s*=\s*True|"debug"\s*:\s*true|'
+        r'werkzeug\.debug|Werkzeug Debugger|Interactive Console|'
+        r'Traceback \(most recent call last\)|DebugView|'
+        r'__traceback__|jinja2\.exceptions',
+        re.I,
+    )
+    for _dbpath in ("/debug", "/_debug", "/api/debug", "/console", "/_ah/admin",
+                    "/flask-debug", "/debug-toolbar", "/error"):
+        try:
+            _dbr = sess.get(url.rstrip("/") + _dbpath, timeout=timeout, allow_redirects=False)
+            if _dbr is not None and _dbr.status_code == 200 and _debug_body_re.search(_dbr.text[:4000]):
+                out.add_finding(
+                    title="Debug Mode Enabled / Developer Console Exposed",
+                    url=url.rstrip("/") + _dbpath, port=target["port"], risk="HIGH",
+                    description=(
+                        f"A debug or developer console endpoint is accessible at "
+                        f"{_dbpath} and its response contains debug mode indicators. "
+                        "Exposed debug interfaces can allow remote code execution "
+                        "(e.g. Werkzeug interactive debugger) and leak internal stack traces."
+                    ),
+                    output=f"GET {_dbpath} → HTTP {_dbr.status_code}\n{_dbr.text[:500]}",
+                    sources="fracture-headers", service=target["scheme"],
+                    owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                    remediation="Set DEBUG=False in production. Remove or restrict all debug/console endpoints.",
+                )
+                vc.log(f"[headers] Debug mode exposed at {_dbpath}", "WARNING")
+                break
+        except Exception:
+            pass
+
     vc.status(phase, "Security Headers", "complete", "Done", 5, 5)
     vc.log("[headers] Phase complete", "SUCCESS")
 
@@ -5484,7 +5612,79 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         vc.log(f"[injection] JSONP endpoint: {purl} param={cb_param}", "SUCCESS")
                         break
 
-    vc.status(phase, "Injection Testing", "complete", "Done", 17, 17)
+    # 20. Blind SQL injection — boolean-based
+    vc.status(phase, "Injection Testing", "running", "Blind SQLi (boolean)", 17, 19)
+    _bool_sqli_true  = "' OR '1'='1"
+    _bool_sqli_false = "' OR '1'='2"
+    for entry in params[:8]:
+        purl = entry["url"]
+        for param in entry["params"]:
+            try:
+                r_true  = _qs_inject(purl, param, _bool_sqli_true,  sess, timeout)
+                r_false = _qs_inject(purl, param, _bool_sqli_false, sess, timeout)
+                if (r_true and r_false
+                        and r_true.status_code == 200
+                        and r_false.status_code in (200, 302, 404)
+                        and abs(len(r_true.text) - len(r_false.text)) > 50):
+                    out.add_finding(
+                        title="Blind SQL Injection (Boolean-Based)",
+                        url=purl, port=target["port"], risk="CRITICAL",
+                        description=(
+                            f"Boolean-based blind SQL injection detected in parameter '{param}'. "
+                            f"TRUE condition response length ({len(r_true.text)}) differs "
+                            f"significantly from FALSE condition ({len(r_false.text)}), "
+                            f"indicating the SQL query result affects response content."
+                        ),
+                        output=(f"Parameter: {param}\n"
+                                f"TRUE payload: {_bool_sqli_true} → {r_true.status_code} ({len(r_true.text)} bytes)\n"
+                                f"FALSE payload: {_bool_sqli_false} → {r_false.status_code} ({len(r_false.text)} bytes)"),
+                        sources="fracture-injection", service=target["scheme"],
+                        affected=purl, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation="Use parameterised queries. Boolean length differences confirm data-dependent SQL execution.",
+                    )
+                    vc.log(f"[injection] Boolean blind SQLi: {purl} param={param}", "SUCCESS")
+                    break
+            except Exception:
+                pass
+
+    # 21. Blind SQL injection — time-based
+    vc.status(phase, "Injection Testing", "running", "Blind SQLi (time-based)", 18, 19)
+    _TIME_SQLI = [
+        ("' AND SLEEP(3)--",     3.0),
+        ("'; WAITFOR DELAY '0:0:3'--", 3.0),
+        ("' AND pg_sleep(3)--",  3.0),
+        ("1; SELECT SLEEP(3)--", 3.0),
+    ]
+    for entry in params[:5]:
+        purl = entry["url"]
+        for param in entry["params"]:
+            for tsql, delay in _TIME_SQLI:
+                try:
+                    import time as _ti
+                    t0 = _ti.monotonic()
+                    r  = _qs_inject(purl, param, tsql, sess, delay + 5)
+                    elapsed = _ti.monotonic() - t0
+                    if r and elapsed >= delay:
+                        out.add_finding(
+                            title="Blind SQL Injection (Time-Based)",
+                            url=purl, port=target["port"], risk="CRITICAL",
+                            description=(
+                                f"Time-based blind SQL injection in parameter '{param}'. "
+                                f"Payload '{tsql}' caused a {elapsed:.1f}s delay (expected ≥{delay}s), "
+                                f"confirming the database executed the injected SLEEP/delay function."
+                            ),
+                            output=(f"Parameter: {param}\nPayload: {tsql}\n"
+                                    f"Response time: {elapsed:.2f}s (threshold: {delay}s)"),
+                            sources="fracture-injection", service=target["scheme"],
+                            affected=purl, owasp="A03:2025 Injection", nist="SI-10",
+                            remediation="Use parameterised queries. Never concatenate user input into SQL.",
+                        )
+                        vc.log(f"[injection] Time-based blind SQLi: {purl} param={param} ({elapsed:.1f}s)", "SUCCESS")
+                        break
+                except Exception:
+                    pass
+
+    vc.status(phase, "Injection Testing", "complete", "Done", 19, 19)
     vc.log("[injection] Phase complete", "SUCCESS")
 
 
@@ -5852,19 +6052,265 @@ def _phase_ssrf(target: dict, cfg: dict, pm: ProgressManager,
 # Phase 7: Auth Bypass
 # ─────────────────────────────────────────────
 _DEFAULT_CREDS = [
-    ("admin",  "admin"),
-    ("admin",  "password"),
-    ("admin",  "123456"),
-    ("admin",  "admin123"),
-    ("admin",  "password123"),
-    ("test",   "test"),
-    ("root",   "root"),
-    ("root",   "toor"),
-    ("user",   "user"),
-    ("guest",  "guest"),
-    ("admin",  ""),
-    ("",       "admin"),
+    ("admin",         "admin"),
+    ("admin",         "password"),
+    ("admin",         "123456"),
+    ("admin",         "admin123"),
+    ("admin",         "password123"),
+    ("admin",         "1234"),
+    ("admin",         "12345"),
+    ("admin",         ""),
+    ("admin",         "pass"),
+    ("admin",         "letmein"),
+    ("admin",         "welcome"),
+    ("admin",         "qwerty"),
+    ("admin",         "abc123"),
+    ("admin",         "admin1234"),
+    ("admin",         "000000"),
+    ("admin",         "111111"),
+    ("admin",         "admin1"),
+    ("root",          "root"),
+    ("root",          "toor"),
+    ("root",          "password"),
+    ("root",          "123456"),
+    ("root",          ""),
+    ("root",          "pass"),
+    ("root",          "admin"),
+    ("user",          "user"),
+    ("user",          "password"),
+    ("user",          "123456"),
+    ("user",          "user123"),
+    ("test",          "test"),
+    ("test",          "password"),
+    ("test",          "123456"),
+    ("test",          "test123"),
+    ("guest",         "guest"),
+    ("guest",         "password"),
+    ("guest",         ""),
+    ("demo",          "demo"),
+    ("demo",          "password"),
+    ("demo",          ""),
+    ("manager",       "manager"),
+    ("manager",       "password"),
+    ("manager",       "123456"),
+    ("operator",      "operator"),
+    ("operator",      "password"),
+    ("service",       "service"),
+    ("service",       "password"),
+    ("support",       "support"),
+    ("support",       "password"),
+    ("tomcat",        "tomcat"),
+    ("tomcat",        "s3cret"),
+    ("tomcat",        "password"),
+    ("jenkins",       "jenkins"),
+    ("jenkins",       "password"),
+    ("nagios",        "nagios"),
+    ("nagios",        "nagiosadmin"),
+    ("zabbix",        "zabbix"),
+    ("zabbix",        "zabbix1"),
+    ("grafana",       "admin"),
+    ("postgres",      "postgres"),
+    ("postgres",      "password"),
+    ("mysql",         "mysql"),
+    ("oracle",        "oracle"),
+    ("sa",            ""),
+    ("sa",            "sa"),
+    ("sa",            "password"),
+    ("default",       "default"),
+    ("default",       "password"),
+    ("cisco",         "cisco"),
+    ("cisco",         "password"),
+    ("ubnt",          "ubnt"),
+    ("pi",            "raspberry"),
+    ("pi",            "pi"),
+    ("ubuntu",        "ubuntu"),
+    ("vagrant",       "vagrant"),
+    ("hadoop",        "hadoop"),
+    ("elastic",       "changeme"),
+    ("kibana",        "changeme"),
+    ("ftp",           "ftp"),
+    ("anonymous",     ""),
+    ("anonymous",     "anonymous"),
+    ("webmaster",     "webmaster"),
+    ("webadmin",      "webadmin"),
+    ("sysadmin",      "sysadmin"),
+    ("deploy",        "deploy"),
+    ("backup",        "backup"),
+    ("wordpress",     "wordpress"),
+    ("drupal",        "drupal"),
+    ("joomla",        "joomla"),
+    ("",              "admin"),
+    ("",              "password"),
+    ("",              ""),
+    ("Admin",         "Admin"),
+    ("Admin",         "admin"),
+    ("Administrator", "administrator"),
+    ("Administrator", "password"),
+    ("admin1",        "admin1"),
+    ("monitor",       "monitor"),
+    ("super",         "super"),
+    ("security",      "security"),
+    ("netadmin",      "netadmin"),
+    ("network",       "network"),
+    ("login",         "password"),
+    ("info",          "info"),
+    ("config",        "config"),
+    ("system",        "system"),
 ]
+
+# ─────────────────────────────────────────────
+# AuthProbe integration helpers
+# ─────────────────────────────────────────────
+
+def _find_authprobe_bin() -> "str | None":
+    """Return path to authprobe.py, or None if not installed."""
+    candidates = [
+        "/opt/pr0t31n/AuthProbe/authprobe.py",
+        str(Path(__file__).parent.parent / "AuthProbe" / "authprobe.py"),
+    ]
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return shutil.which("authprobe")
+
+
+def _run_authprobe_json(url: str, login_url: "str | None" = None,
+                        username: "str | None" = None,
+                        password: "str | None" = None,
+                        ap_timeout: int = 30) -> "dict | None":
+    """Run AuthProbe with --json and return parsed output, or None on failure."""
+    authprobe = _find_authprobe_bin()
+    if not authprobe:
+        return None
+    cmd = [sys.executable, authprobe, "--url", url, "--json", "--no-verify",
+           "--timeout", str(ap_timeout)]
+    if login_url:
+        cmd += ["--login-url", login_url]
+    if username is not None:
+        cmd += ["--username", username]
+    if password is not None:
+        cmd += ["--password", password]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=ap_timeout + 30)
+        return json.loads(r.stdout)
+    except Exception:
+        return None
+
+
+def _probe_login_default_creds(login_url: str, target: dict,
+                                out: "OutputManager") -> "dict | None":
+    """
+    Fingerprint a login page via AuthProbe (INFO findings for app type and auth
+    method), then test every entry in _DEFAULT_CREDS.  Returns the first
+    successful credential set as a dict, or None if none succeed.
+    """
+    phase = "auth_bypass"
+    auth_out = out.output_path(phase, "authprobe_" + target["hostname"])
+
+    vc.log(f"[auth_bypass] AuthProbe fingerprinting: {login_url}", "INFO")
+    fp = _run_authprobe_json(login_url, ap_timeout=30)
+    app_name    = ""
+    auth_method = ""
+    effective_login = login_url
+
+    if fp:
+        matches = fp.get("software_matches", [])
+        if matches:
+            app_name = matches[0].get("name", "")
+        auth_method = fp.get("auth_info_mode", "")
+        login_eps   = fp.get("login_endpoints", [])
+        if login_eps:
+            _ep_path = login_eps[0].get("path", "")
+            if _ep_path:
+                effective_login = (_ep_path if _ep_path.startswith("http")
+                                   else target["url"].rstrip("/") + _ep_path)
+
+        if app_name:
+            out.add_finding(
+                title="Application Identified at Login Page",
+                url=login_url, port=target["port"], risk="INFO",
+                description=(
+                    f"AuthProbe identified the application as '{app_name}' "
+                    f"at {login_url}."
+                ),
+                output=f"Application: {app_name}",
+                sources="authprobe", service=target["scheme"],
+                affected=login_url, output_file=str(auth_out),
+                owasp="A05:2025 Security Misconfiguration",
+                nist="SI-2",
+                remediation=(
+                    "Ensure software version information is not exposed "
+                    "in login pages or HTTP headers."
+                ),
+            )
+        if auth_method:
+            out.add_finding(
+                title="Authentication Method Identified",
+                url=login_url, port=target["port"], risk="INFO",
+                description=(
+                    f"AuthProbe identified the authentication method as "
+                    f"'{auth_method}' at {login_url}."
+                ),
+                output=f"Auth method: {auth_method}",
+                sources="authprobe", service=target["scheme"],
+                affected=login_url, output_file=str(auth_out),
+                owasp="A07:2025 Identification and Authentication Failures",
+                nist="IA-2",
+                remediation=(
+                    "Ensure authentication is properly configured, hardened, "
+                    "and not using default or weak credentials."
+                ),
+            )
+
+    for uname, pwd in _DEFAULT_CREDS:
+        _pwd_disp = repr(pwd) if pwd else "'(blank)'"
+        vc.log(f"[auth_bypass] Testing default creds: {uname!r}/{_pwd_disp}", "INFO")
+        result = _run_authprobe_json(login_url, login_url=effective_login,
+                                     username=uname, password=pwd, ap_timeout=10)
+        if not result:
+            continue
+        if any(v.get("success") for v in result.get("validation_results", [])):
+            try:
+                auth_out.write_text(
+                    f"# Default Credentials Found\n"
+                    f"URL: {login_url}\n"
+                    f"Username: {uname}\nPassword: {pwd}\n"
+                    f"Auth method: {auth_method}\n",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+            out.add_finding(
+                title="Weak or Default Credentials Accepted",
+                url=login_url, port=target["port"], risk="CRITICAL",
+                description=(
+                    f"Default credentials '{uname}'/'{pwd or '(blank)'}' were "
+                    f"accepted at {login_url}. "
+                    f"Auth method: {auth_method or 'form'}. "
+                    f"Application: {app_name or 'unknown'}."
+                ),
+                output=(
+                    f"Username: {uname}\nPassword: {pwd}\n"
+                    f"Auth method: {auth_method}"
+                ),
+                sources="authprobe", service=target["scheme"],
+                affected=login_url, output_file=str(auth_out),
+                owasp="A07:2025 Identification and Authentication Failures",
+                nist="IA-5",
+                remediation=(
+                    "Change default credentials immediately. "
+                    "Enforce a strong password policy and account lockout."
+                ),
+            )
+            vc.log(f"[auth_bypass] Default creds accepted: {uname!r}/{pwd!r}",
+                   "SUCCESS")
+            return {"username": uname, "password": pwd,
+                    "auth_method": auth_method, "login_url": login_url}
+
+    return None
+
+
 _SQLI_BYPASS_PAYLOADS = [
     ("admin'--",    "anything"),
     ("' OR 1=1--",  "anything"),
@@ -5875,11 +6321,12 @@ _SQLI_BYPASS_PAYLOADS = [
 
 def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                        out: OutputManager, sess: requests.Session,
-                       crawl_data: dict) -> None:
-    phase   = "auth_bypass"
-    url     = target["url"]
-    timeout = cfg.get("timeout", 10)
-    forms   = crawl_data.get("forms", [])
+                       crawl_data: dict) -> list:
+    phase      = "auth_bypass"
+    url        = target["url"]
+    timeout    = cfg.get("timeout", 10)
+    forms      = crawl_data.get("forms", [])
+    _discovered: list = []
     vc.status(phase, "Auth Bypass", "running", "Default credentials", 0, 4)
 
     # Shared evidence log for this phase — all findings reference this file
@@ -5902,36 +6349,12 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
         if not user_f or not pass_f:
             continue
 
-        # 1. Default credentials
-        for uname, pwd in _DEFAULT_CREDS:
-            data = {i["name"]: "" for i in inputs if i.get("name")}
-            data[user_f] = uname
-            data[pass_f] = pwd
-            try:
-                r = sess.post(action, data=data, timeout=timeout, allow_redirects=True)
-                # Heuristic: check if we're no longer on the login page
-                if r.status_code in (200, 302) and not re.search(r'login|invalid|incorrect|failed|error', r.text, re.I):
-                    with auth_out.open("a", encoding="utf-8") as _af:
-                        _af.write(
-                            f"## Default Credentials Accepted\n"
-                            f"URL: {action}\nUsername: {uname}\nPassword: {pwd}\n"
-                            f"Response: {r.status_code}\n{r.text[:2000]}\n\n"
-                        )
-                    out.add_finding(
-                        title="Default Credentials Accepted",
-                        url=action, port=target["port"], risk="CRITICAL",
-                        description=f"Default credentials '{uname}'/'{pwd}' were accepted at {action}.",
-                        output=f"Username: {uname}\nPassword: {pwd}\nResponse: {r.status_code}",
-                        sources="fracture-auth-bypass", service=target["scheme"],
-                        affected=action, output_file=str(auth_out),
-                        owasp="A07:2025 Identification and Authentication Failures",
-                        nist="IA-5",
-                        remediation="Change default credentials. Enforce strong password policy.",
-                    )
-                    vc.log(f"[auth_bypass] Default creds: {uname}/{pwd}", "SUCCESS")
-                    break
-            except Exception:
-                pass
+        # 1. Default credentials via AuthProbe
+        _form_url = (action if action.startswith("http")
+                     else url.rstrip("/") + "/" + action.lstrip("/"))
+        _dc = _probe_login_default_creds(_form_url, target, out)
+        if _dc:
+            _discovered.append(_dc)
 
         vc.status(phase, "Auth Bypass", "running", "SQLi login bypass", 1, 4)
         # 2. SQLi in login
@@ -6137,6 +6560,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
 
     vc.status(phase, "Auth Bypass", "complete", "Done", 7, 7)
     vc.log("[auth_bypass] Phase complete", "SUCCESS")
+    return _discovered
 
 
 # ─────────────────────────────────────────────
@@ -7522,6 +7946,155 @@ def _print_banner() -> None:
     _tprint(f"{Fore.CYAN}  OWASP Top 10 2025 Coverage: A01–A10{Style.RESET_ALL}\n")
 
 
+def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
+                          out: OutputManager, sess: requests.Session,
+                          crawl_data: dict) -> dict:
+    """
+    Phase 20: Multi-credential access matrix: tests each discovered path with
+    every role in cfg['auth_matrix'] plus unauthenticated.
+    Generates access_matrix.json, MEDIUM findings for unauth access,
+    HIGH findings for BFLA (lower-priv accessing admin paths).
+    """
+    import copy as _copy
+
+    phase       = "access_matrix"
+    auth_matrix = cfg.get("auth_matrix", [])
+    base_url    = target["url"].rstrip("/")
+    port        = target["port"]
+    timeout     = cfg.get("timeout", 10)
+    project_dir = out.root
+    verify_ssl  = cfg.get("verify_ssl", False)
+    crawled_paths = crawl_data.get("links", [])
+
+    if not auth_matrix and not crawled_paths:
+        vc.status(phase, "Access Matrix", "complete", "No paths or roles — skipped", 0, 0)
+        return {}
+
+    vc.status(phase, "Access Matrix", "running", "Building role sessions", 0, 1)
+    print(f"\n{'─'*60}")
+    print(f"  Phase 20: Multi-Credential Access Matrix")
+    print(f"{'─'*60}")
+
+    def _build_role_session(role_cfg: dict):
+        r_auth = _copy.deepcopy(cfg.get("auth", {}))
+        r_auth["enabled"]  = True
+        r_auth["username"] = role_cfg.get("username", r_auth.get("username", ""))
+        r_auth["password"] = role_cfg.get("password", r_auth.get("password", ""))
+        r_cfg = _copy.deepcopy(cfg)
+        r_cfg["auth"] = r_auth
+        return _build_auth_session(r_cfg, "auth")
+
+    role_sessions = {}
+    for role_cfg in auth_matrix:
+        role = role_cfg.get("role") or f"role{len(role_sessions)+1}"
+        r_sess = _build_role_session(role_cfg)
+        if r_sess is None:
+            r_sess = requests.Session()
+            r_sess.verify = verify_ssl
+        role_sessions[role] = r_sess
+        print(f"  → Role '{role}' session built (user: {role_cfg.get('username','?')})")
+
+    unauth_sess = requests.Session()
+    unauth_sess.verify = verify_ssl
+    role_sessions["unauthenticated"] = unauth_sess
+    all_roles  = list(role_sessions.keys())
+    cred_roles = [r for r in all_roles if r != "unauthenticated"]
+
+    print(f"  Testing {len(crawled_paths)} paths × {len(all_roles)} roles")
+    vc.status(phase, "Access Matrix", "running", f"Testing {len(crawled_paths)} paths", 0, len(crawled_paths))
+
+    path_access = []
+    for idx, path in enumerate(crawled_paths):
+        url = path if path.startswith("http") else base_url + path
+        access = {}
+        for role, r_sess in role_sessions.items():
+            try:
+                r = r_sess.get(url, timeout=timeout, allow_redirects=False,
+                               headers={"Accept": "text/html,application/json"})
+                access[role] = {
+                    "status":     r.status_code,
+                    "accessible": r.status_code in (200, 201, 202, 204),
+                }
+            except Exception:
+                access[role] = {"status": None, "accessible": False}
+        path_access.append({"path": path, "url": url, "access": access})
+        vc.status(phase, "Access Matrix", "running", f"Path {idx+1}/{len(crawled_paths)}", idx+1, len(crawled_paths))
+
+    privilege_counts = {
+        role: sum(1 for ep in path_access if ep["access"].get(role, {}).get("accessible"))
+        for role in all_roles
+    }
+    most_privileged = (
+        max(cred_roles, key=lambda r: privilege_counts[r]) if cred_roles else None
+    )
+    print(f"  Most privileged: {most_privileged} ({privilege_counts.get(most_privileged, 0)} paths)")
+
+    for ep in path_access:
+        ep_access  = ep["access"]
+        unauth     = ep_access.get("unauthenticated", {})
+        any_authed = any(ep_access.get(r, {}).get("accessible") for r in cred_roles)
+
+        if unauth.get("accessible") and any_authed:
+            out.add_finding(
+                title="Unauthenticated Access to Protected Path",
+                url=ep["url"], port=port, risk="MEDIUM",
+                description=(
+                    f"Path {ep['path']} returned HTTP {unauth['status']} without "
+                    f"authentication but returns 2xx when authenticated. "
+                    f"Missing or insufficient access control."
+                ),
+                output=f"URL: {ep['url']} | Unauth: HTTP {unauth['status']}",
+                command=f"GET {ep['url']} (no auth)",
+                affected=ep["url"],
+                owasp="A01:2021 Broken Access Control", nist="AC-3",
+                remediation="Enforce authentication middleware on all non-public routes.",
+            )
+
+        if most_privileged and len(cred_roles) > 1:
+            high_ok = ep_access.get(most_privileged, {}).get("accessible")
+            if high_ok:
+                for low_role in cred_roles:
+                    if low_role == most_privileged:
+                        continue
+                    if ep_access.get(low_role, {}).get("accessible"):
+                        out.add_finding(
+                            title=f"BFLA: Role '{low_role}' Can Access Admin Path",
+                            url=ep["url"], port=port, risk="HIGH",
+                            description=(
+                                f"Role '{low_role}' can access {ep['path']} which "
+                                f"is also accessible to '{most_privileged}' (most "
+                                f"privileged). No effective role-based access control."
+                            ),
+                            output=(
+                                f"URL: {ep['url']} | "
+                                f"{most_privileged}: HTTP {ep_access[most_privileged]['status']} | "
+                                f"{low_role}: HTTP {ep_access[low_role]['status']}"
+                            ),
+                            command=f"GET {ep['url']} (role: {low_role})",
+                            affected=ep["url"],
+                            owasp="A01:2021 Broken Access Control", nist="AC-6",
+                            remediation="Implement role-based access control (RBAC).",
+                        )
+
+    access_matrix_data = {
+        "roles":            all_roles,
+        "most_privileged":  most_privileged,
+        "privilege_counts": privilege_counts,
+        "paths":            path_access,
+    }
+    try:
+        (project_dir / "access_matrix.json").write_text(
+            json.dumps(access_matrix_data, indent=2)
+        )
+        print(f"  access_matrix.json saved to {project_dir}/")
+    except Exception as exc:
+        vc.err(f"[access_matrix] Failed to save access_matrix.json: {exc}")
+
+    vc.status(phase, "Access Matrix", "complete", "Done", len(crawled_paths), len(crawled_paths))
+    vc.log("[access_matrix] Phase complete", "SUCCESS")
+    return access_matrix_data
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -7622,14 +8195,18 @@ def main() -> None:
         vc.log(f"Output directory: {project_dir}", "INFO")
 
         # Build sessions
-        sess  = _make_session(cfg)
+        sess       = _make_session(cfg)
         auth_sess  = _build_auth_session(cfg, "auth")
         auth2_sess = _build_auth_session(cfg, "auth2")
 
-        # Crawl data (shared between phases)
-        crawl_data:     dict = {"forms": [], "params": [], "links": []}
-        auth_recon_data: dict = {"forms": [], "links": [], "resource_ids": []}
-
+        # ------------------------------------------------------------------
+        # Build per-credential contexts from auth_matrix + unauthenticated.
+        # All non-privilege phases run once per context so that vulnerabilities
+        # reachable only under elevated credentials are not missed.
+        # Privilege-escalation phases (authorization, cross_user, access_matrix)
+        # run once after all contexts — they require cross-role comparison and
+        # must not be executed with a single elevated identity.
+        # ------------------------------------------------------------------
         phases_enabled = cfg.get("phases", {})
 
         def _skip(phase_name: str) -> bool:
@@ -7641,7 +8218,8 @@ def main() -> None:
                 return True
             return False
 
-        # ── Phase 0: recon ──
+        # ── Server-side phases — run once, no auth dependency ──────────────
+        # Phase 0: recon
         wc_baseline = None
         if not _skip("recon"):
             pm.set_phase_status("recon", "running", "HTTP Recon")
@@ -7652,7 +8230,7 @@ def main() -> None:
                 vc.error(f"Phase recon error: {e}")
                 pm.set_phase_status("recon", "error", detail=str(e))
 
-        # ── Phase 0b: screenshot ──
+        # Phase 0b: screenshot
         if not _skip("screenshot"):
             pm.set_phase_status("screenshot", "running", "Screenshot")
             try:
@@ -7662,7 +8240,7 @@ def main() -> None:
                 vc.error(f"Phase screenshot error: {e}")
                 pm.set_phase_status("screenshot", "error", detail=str(e))
 
-        # ── Phase 0c: webfiles ──
+        # Phase 0c: webfiles
         if not _skip("webfiles"):
             pm.set_phase_status("webfiles", "running", "Web Files")
             try:
@@ -7672,7 +8250,7 @@ def main() -> None:
                 vc.error(f"Phase webfiles error: {e}")
                 pm.set_phase_status("webfiles", "error", detail=str(e))
 
-        # ── Phase 1: tls ──
+        # Phase 1: tls
         if not _skip("tls"):
             pm.set_phase_status("tls", "running", "TLS Analysis")
             try:
@@ -7682,7 +8260,7 @@ def main() -> None:
                 vc.error(f"Phase tls error: {e}")
                 pm.set_phase_status("tls", "error", detail=str(e))
 
-        # ── Phase 1b: subdomain_takeover ──
+        # Phase 1b: subdomain_takeover
         if not _skip("subdomain_takeover"):
             pm.set_phase_status("subdomain_takeover", "running", "Subdomain Takeover")
             try:
@@ -7692,30 +8270,7 @@ def main() -> None:
                 vc.error(f"Phase subdomain_takeover error: {e}")
                 pm.set_phase_status("subdomain_takeover", "error", detail=str(e))
 
-        # ── Phase 2: headers ──
-        if not _skip("headers"):
-            pm.set_phase_status("headers", "running", "Security Headers")
-            try:
-                _phase_headers(target, cfg, pm, out, sess)
-                pm.set_phase_status("headers", "complete", "Security Headers")
-            except Exception as e:
-                vc.error(f"Phase headers error: {e}")
-                pm.set_phase_status("headers", "error", detail=str(e))
-
-        # ── Phase 2b: shcheck ──
-        if not _skip("shcheck"):
-            pm.set_phase_status("shcheck", "running", "shcheck Header Check")
-            try:
-                # Pass all configured target_urls as extra_urls for shcheck
-                _extra = [u for u in target_urls if u != raw_url]
-                _phase_shcheck(target, cfg, pm, out, sess,
-                               extra_urls=_extra if _extra else None)
-                pm.set_phase_status("shcheck", "complete", "shcheck Header Check")
-            except Exception as e:
-                vc.error(f"Phase shcheck error: {e}")
-                pm.set_phase_status("shcheck", "error", detail=str(e))
-
-        # ── Phase 2c: ffuf ──
+        # Phase 2c: ffuf
         if not _skip("ffuf"):
             pm.set_phase_status("ffuf", "running", "ffuf Fuzzing")
             try:
@@ -7725,125 +8280,7 @@ def main() -> None:
                 vc.error(f"Phase ffuf error: {e}")
                 pm.set_phase_status("ffuf", "error", detail=str(e))
 
-        # ── Phase 3: crawl ──
-        if not _skip("crawl"):
-            pm.set_phase_status("crawl", "running", "Crawl")
-            try:
-                crawl_data = _phase_crawl(target, cfg, pm, out, sess)
-                pm.set_phase_status("crawl", "complete", "Crawl")
-            except Exception as e:
-                vc.error(f"Phase crawl error: {e}")
-                pm.set_phase_status("crawl", "error", detail=str(e))
-
-        # ── Phase 3c: endpoint tools ──
-        # Collect endpoints from recon output files + crawl links, then run
-        # screenshot / crawl / brute-force against each discovered endpoint.
-        _ep_discovered: list = []
-        _hostname = target["hostname"]
-        for _gob_name in [f"gobuster_{_hostname}", f"gobuster_files_{_hostname}"]:
-            _gob_path = out.output_path("recon", _gob_name)
-            if _gob_path.exists():
-                try:
-                    _ep_discovered.extend(
-                        _parse_gobuster_output(_gob_path, target["url"])
-                    )
-                except Exception:
-                    pass
-        for _fer_name in [f"feroxbuster_{_hostname}", f"feroxbuster_files_{_hostname}"]:
-            _fer_path = out.output_path("recon", _fer_name)
-            if _fer_path.exists():
-                try:
-                    _ep_discovered.extend(_parse_feroxbuster_output(_fer_path))
-                except Exception:
-                    pass
-        _ep_discovered.extend(crawl_data.get("links", []))
-        if _ep_discovered:
-            try:
-                _phase_endpoint_tools(_ep_discovered, target, cfg, pm, out, sess, wc_baseline=wc_baseline)
-            except Exception as e:
-                vc.error(f"Phase endpoint_tools error: {e}")
-
-        # ── Phase 3b: jwt ──
-        if not _skip("jwt"):
-            pm.set_phase_status("jwt", "running", "JWT Testing")
-            try:
-                _phase_jwt(target, cfg, pm, out, sess, crawl_data)
-                pm.set_phase_status("jwt", "complete", "JWT Testing")
-            except Exception as e:
-                vc.error(f"Phase jwt error: {e}")
-                pm.set_phase_status("jwt", "error", detail=str(e))
-
-        # ── Phase 4: injection ──
-        if not _skip("injection"):
-            pm.set_phase_status("injection", "running", "Injection Testing")
-            try:
-                _phase_injection(target, cfg, pm, out, sess, crawl_data, fast=args.fast)
-                pm.set_phase_status("injection", "complete", "Injection Testing")
-            except Exception as e:
-                vc.error(f"Phase injection error: {e}")
-                pm.set_phase_status("injection", "error", detail=str(e))
-
-        # ── Phase 5: traversal ──
-        if not _skip("traversal"):
-            pm.set_phase_status("traversal", "running", "Path Traversal")
-            try:
-                _phase_traversal(target, cfg, pm, out, sess, crawl_data)
-                pm.set_phase_status("traversal", "complete", "Path Traversal")
-            except Exception as e:
-                vc.error(f"Phase traversal error: {e}")
-                pm.set_phase_status("traversal", "error", detail=str(e))
-
-        # ── Phase 5b: business_logic ──
-        if not _skip("business_logic"):
-            pm.set_phase_status("business_logic", "running", "Business Logic")
-            try:
-                _phase_business_logic(target, cfg, pm, out, sess, crawl_data)
-                pm.set_phase_status("business_logic", "complete", "Business Logic")
-            except Exception as e:
-                vc.error(f"Phase business_logic error: {e}")
-                pm.set_phase_status("business_logic", "error", detail=str(e))
-
-        # ── Phase 6: ssrf ──
-        if not _skip("ssrf"):
-            pm.set_phase_status("ssrf", "running", "SSRF Testing")
-            try:
-                _phase_ssrf(target, cfg, pm, out, sess, crawl_data)
-                pm.set_phase_status("ssrf", "complete", "SSRF Testing")
-            except Exception as e:
-                vc.error(f"Phase ssrf error: {e}")
-                pm.set_phase_status("ssrf", "error", detail=str(e))
-
-        # ── Phase 7: auth_bypass ──
-        if not _skip("auth_bypass"):
-            pm.set_phase_status("auth_bypass", "running", "Auth Bypass")
-            try:
-                _phase_auth_bypass(target, cfg, pm, out, sess, crawl_data)
-                pm.set_phase_status("auth_bypass", "complete", "Auth Bypass")
-            except Exception as e:
-                vc.error(f"Phase auth_bypass error: {e}")
-                pm.set_phase_status("auth_bypass", "error", detail=str(e))
-
-        # ── Phase 7b: account_lockout ──
-        if not _skip("account_lockout"):
-            pm.set_phase_status("account_lockout", "running", "Account Lockout")
-            try:
-                _phase_account_lockout(target, cfg, pm, out, sess, crawl_data)
-                pm.set_phase_status("account_lockout", "complete", "Account Lockout")
-            except Exception as e:
-                vc.error(f"Phase account_lockout error: {e}")
-                pm.set_phase_status("account_lockout", "error", detail=str(e))
-
-        # ── Phase 8: files ──
-        if not _skip("files"):
-            pm.set_phase_status("files", "running", "Sensitive Files")
-            try:
-                _phase_files(target, cfg, pm, out, sess)
-                pm.set_phase_status("files", "complete", "Sensitive Files")
-            except Exception as e:
-                vc.error(f"Phase files error: {e}")
-                pm.set_phase_status("files", "error", detail=str(e))
-
-        # ── Phase 9: vulnscan ──
+        # Phase 9: vulnscan
         if not _skip("vulnscan"):
             pm.set_phase_status("vulnscan", "running", "Vuln Scan")
             try:
@@ -7853,43 +8290,337 @@ def main() -> None:
                 vc.error(f"Phase vulnscan error: {e}")
                 pm.set_phase_status("vulnscan", "error", detail=str(e))
 
-        # ── Phase 10: graphql ──
-        if not _skip("graphql"):
-            pm.set_phase_status("graphql", "running", "GraphQL")
-            try:
-                _phase_graphql(target, cfg, pm, out, sess)
-                pm.set_phase_status("graphql", "complete", "GraphQL")
-            except Exception as e:
-                vc.error(f"Phase graphql error: {e}")
-                pm.set_phase_status("graphql", "error", detail=str(e))
-
-        # ── Phase 10b: logging_monitoring ──
-        if not _skip("logging_monitoring"):
-            pm.set_phase_status("logging_monitoring", "running", "Logging & Monitoring")
-            try:
-                _phase_logging_monitoring(target, cfg, pm, out, sess, crawl_data)
-                pm.set_phase_status("logging_monitoring", "complete", "Logging & Monitoring")
-            except Exception as e:
-                vc.error(f"Phase logging_monitoring error: {e}")
-                pm.set_phase_status("logging_monitoring", "error", detail=str(e))
-
-        # ── Authenticated phases ──
-        effective_auth = auth_sess or sess
-
-        # ── Phase 11: auth_recon ──
-        if not _skip("auth_recon"):
-            if not cfg["auth"].get("enabled"):
-                vc.log("[auth_recon] auth not enabled — skipping", "WARNING")
-                pm.set_phase_status("auth_recon", "skipped", "auth_recon")
-            else:
-                pm.set_phase_status("auth_recon", "running", "Auth Recon")
+        # Collect gobuster/feroxbuster endpoints once (used by endpoint_tools per context)
+        _ep_base: list = []
+        _hostname = target["hostname"]
+        for _gob_name in [f"gobuster_{_hostname}", f"gobuster_files_{_hostname}"]:
+            _gob_path = out.output_path("recon", _gob_name)
+            if _gob_path.exists():
                 try:
-                    auth_recon_data = _phase_auth_recon(
-                        target, cfg, pm, out, effective_auth, crawl_data)
-                    pm.set_phase_status("auth_recon", "complete", "Auth Recon")
+                    _ep_base.extend(_parse_gobuster_output(_gob_path, target["url"]))
+                except Exception:
+                    pass
+        for _fer_name in [f"feroxbuster_{_hostname}", f"feroxbuster_files_{_hostname}"]:
+            _fer_path = out.output_path("recon", _fer_name)
+            if _fer_path.exists():
+                try:
+                    _ep_base.extend(_parse_feroxbuster_output(_fer_path))
+                except Exception:
+                    pass
+
+        # Build per-credential contexts
+        _cred_contexts: list = []
+        for _rc in (cfg.get("auth_matrix") or []):
+            _r_label = _rc.get("role") or f"ctx{len(_cred_contexts) + 1}"
+            _r_cfg   = copy.deepcopy(cfg)
+            _r_cfg["auth"]["enabled"]  = True
+            _r_cfg["auth"]["username"] = _rc.get("username", "")
+            _r_cfg["auth"]["password"] = _rc.get("password", "")
+            _r_as    = _build_auth_session(_r_cfg, "auth")
+            _cred_contexts.append({"label": _r_label, "cfg": _r_cfg, "auth_sess": _r_as})
+        # Unauthenticated context always last
+        _r_unauth_cfg = copy.deepcopy(cfg)
+        _r_unauth_cfg["auth"]["enabled"] = False
+        _cred_contexts.append({"label": "unauthenticated", "cfg": _r_unauth_cfg,
+                                "auth_sess": None})
+
+        # Accumulators for post-context privilege phases
+        _combined_auth_recon: dict = {"forms": [], "links": [], "resource_ids": []}
+        _all_crawl_links:     list = []
+        _discovered_creds_seen: set = set()  # avoid duplicate contexts from discovered creds
+
+        # ── Per-credential context loop ─────────────────────────────────────
+        for _ctx in _cred_contexts:
+            _ctx_label = _ctx["label"]
+            _ctx_auth  = _ctx["auth_sess"]
+            _ctx_cfg   = _ctx["cfg"]
+
+            if _ctx_auth:
+                vc.log(f"Auth [{_ctx_label}]: enabled", "INFO")
+            else:
+                vc.log(f"Auth [{_ctx_label}]: none", "INFO")
+
+            # Closures capture _ctx_label via default arg to avoid late-binding
+            def _skip(phase_name: str, _lbl: str = _ctx_label) -> bool:
+                if not phases_enabled.get(phase_name, False):
+                    vc.log(f"[{phase_name}] Phase disabled — skipping", "INFO")
+                    return True
+                if pm.is_phase_complete(f"{phase_name}#{_lbl}"):
+                    vc.log(f"[{phase_name}] Already complete — skipping (checkpoint)", "INFO")
+                    return True
+                return False
+
+            crawl_data      = {"forms": [], "params": [], "links": []}
+            auth_recon_data = {"forms": [], "links": [], "resource_ids": []}
+            effective_auth  = _ctx_auth or sess
+
+            # ── Phase 2: headers ──
+            if not _skip("headers"):
+                pm.set_phase_status(f"headers#{_ctx_label}", "running", "Security Headers")
+                try:
+                    _phase_headers(target, _ctx_cfg, pm, out, effective_auth)
+                    pm.set_phase_status(f"headers#{_ctx_label}", "complete", "Security Headers")
                 except Exception as e:
-                    vc.error(f"Phase auth_recon error: {e}")
-                    pm.set_phase_status("auth_recon", "error", detail=str(e))
+                    vc.error(f"Phase headers [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"headers#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 2b: shcheck ──
+            if not _skip("shcheck"):
+                pm.set_phase_status(f"shcheck#{_ctx_label}", "running", "shcheck Header Check")
+                try:
+                    _extra = [u for u in target_urls if u != raw_url]
+                    _phase_shcheck(target, _ctx_cfg, pm, out, effective_auth,
+                                   extra_urls=_extra if _extra else None)
+                    pm.set_phase_status(f"shcheck#{_ctx_label}", "complete", "shcheck Header Check")
+                except Exception as e:
+                    vc.error(f"Phase shcheck [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"shcheck#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 3: crawl ──
+            if not _skip("crawl"):
+                pm.set_phase_status(f"crawl#{_ctx_label}", "running", "Crawl")
+                try:
+                    crawl_data = _phase_crawl(target, _ctx_cfg, pm, out, effective_auth)
+                    pm.set_phase_status(f"crawl#{_ctx_label}", "complete", "Crawl")
+                except Exception as e:
+                    vc.error(f"Phase crawl [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"crawl#{_ctx_label}", "error", detail=str(e))
+
+            # Accumulate crawl links for access_matrix
+            _all_crawl_links.extend(crawl_data.get("links", []))
+
+            # ── Phase 3c: endpoint tools ──
+            _ep_discovered = list(_ep_base) + crawl_data.get("links", [])
+            if _ep_discovered:
+                try:
+                    _phase_endpoint_tools(_ep_discovered, target, _ctx_cfg, pm, out,
+                                          effective_auth, wc_baseline=wc_baseline)
+                except Exception as e:
+                    vc.error(f"Phase endpoint_tools [{_ctx_label}] error: {e}")
+
+            # ── Phase 3b: jwt ──
+            if not _skip("jwt"):
+                pm.set_phase_status(f"jwt#{_ctx_label}", "running", "JWT Testing")
+                try:
+                    _phase_jwt(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    pm.set_phase_status(f"jwt#{_ctx_label}", "complete", "JWT Testing")
+                except Exception as e:
+                    vc.error(f"Phase jwt [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"jwt#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 4: injection ──
+            if not _skip("injection"):
+                pm.set_phase_status(f"injection#{_ctx_label}", "running", "Injection Testing")
+                try:
+                    _phase_injection(target, _ctx_cfg, pm, out, effective_auth, crawl_data,
+                                     fast=args.fast)
+                    pm.set_phase_status(f"injection#{_ctx_label}", "complete", "Injection Testing")
+                except Exception as e:
+                    vc.error(f"Phase injection [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"injection#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 5: traversal ──
+            if not _skip("traversal"):
+                pm.set_phase_status(f"traversal#{_ctx_label}", "running", "Path Traversal")
+                try:
+                    _phase_traversal(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    pm.set_phase_status(f"traversal#{_ctx_label}", "complete", "Path Traversal")
+                except Exception as e:
+                    vc.error(f"Phase traversal [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"traversal#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 5b: business_logic ──
+            if not _skip("business_logic"):
+                pm.set_phase_status(f"business_logic#{_ctx_label}", "running", "Business Logic")
+                try:
+                    _phase_business_logic(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    pm.set_phase_status(f"business_logic#{_ctx_label}", "complete",
+                                        "Business Logic")
+                except Exception as e:
+                    vc.error(f"Phase business_logic [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"business_logic#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 6: ssrf ──
+            if not _skip("ssrf"):
+                pm.set_phase_status(f"ssrf#{_ctx_label}", "running", "SSRF Testing")
+                try:
+                    _phase_ssrf(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    pm.set_phase_status(f"ssrf#{_ctx_label}", "complete", "SSRF Testing")
+                except Exception as e:
+                    vc.error(f"Phase ssrf [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"ssrf#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 7: auth_bypass ──
+            if not _skip("auth_bypass"):
+                pm.set_phase_status(f"auth_bypass#{_ctx_label}", "running", "Auth Bypass")
+                try:
+                    _bypass_found = _phase_auth_bypass(
+                        target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    pm.set_phase_status(f"auth_bypass#{_ctx_label}", "complete", "Auth Bypass")
+                    for _dc in (_bypass_found or []):
+                        _dc_key = (_dc["username"], _dc["password"])
+                        if _dc_key not in _discovered_creds_seen:
+                            _discovered_creds_seen.add(_dc_key)
+                            _dc_lbl = f"discovered_{_dc['username']}"
+                            _dc_cfg = copy.deepcopy(cfg)
+                            _dc_cfg["auth"]["enabled"]  = True
+                            _dc_cfg["auth"]["username"] = _dc["username"]
+                            _dc_cfg["auth"]["password"] = _dc["password"]
+                            _dc_as  = _build_auth_session(_dc_cfg, "auth")
+                            _cred_contexts.append({"label": _dc_lbl, "cfg": _dc_cfg,
+                                                   "auth_sess": _dc_as})
+                            vc.log(
+                                f"[auth_bypass] Queued re-scan with discovered "
+                                f"credentials: {_dc['username']!r}", "INFO")
+                except Exception as e:
+                    vc.error(f"Phase auth_bypass [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"auth_bypass#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 7b: account_lockout ──
+            if not _skip("account_lockout"):
+                pm.set_phase_status(f"account_lockout#{_ctx_label}", "running", "Account Lockout")
+                try:
+                    _phase_account_lockout(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    pm.set_phase_status(f"account_lockout#{_ctx_label}", "complete",
+                                        "Account Lockout")
+                except Exception as e:
+                    vc.error(f"Phase account_lockout [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"account_lockout#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 8: files ──
+            if not _skip("files"):
+                pm.set_phase_status(f"files#{_ctx_label}", "running", "Sensitive Files")
+                try:
+                    _phase_files(target, _ctx_cfg, pm, out, effective_auth)
+                    pm.set_phase_status(f"files#{_ctx_label}", "complete", "Sensitive Files")
+                except Exception as e:
+                    vc.error(f"Phase files [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"files#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 10: graphql ──
+            if not _skip("graphql"):
+                pm.set_phase_status(f"graphql#{_ctx_label}", "running", "GraphQL")
+                try:
+                    _phase_graphql(target, _ctx_cfg, pm, out, effective_auth)
+                    pm.set_phase_status(f"graphql#{_ctx_label}", "complete", "GraphQL")
+                except Exception as e:
+                    vc.error(f"Phase graphql [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"graphql#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 10b: logging_monitoring ──
+            if not _skip("logging_monitoring"):
+                pm.set_phase_status(f"logging_monitoring#{_ctx_label}", "running",
+                                    "Logging & Monitoring")
+                try:
+                    _phase_logging_monitoring(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    pm.set_phase_status(f"logging_monitoring#{_ctx_label}", "complete",
+                                        "Logging & Monitoring")
+                except Exception as e:
+                    vc.error(f"Phase logging_monitoring [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"logging_monitoring#{_ctx_label}", "error",
+                                        detail=str(e))
+
+            # ── Phase 11: auth_recon ──
+            if not _skip("auth_recon"):
+                if not _ctx_cfg["auth"].get("enabled"):
+                    vc.log(f"[auth_recon] auth not enabled for [{_ctx_label}] — skipping",
+                           "WARNING")
+                    pm.set_phase_status(f"auth_recon#{_ctx_label}", "skipped", "auth_recon")
+                else:
+                    pm.set_phase_status(f"auth_recon#{_ctx_label}", "running", "Auth Recon")
+                    try:
+                        auth_recon_data = _phase_auth_recon(
+                            target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                        pm.set_phase_status(f"auth_recon#{_ctx_label}", "complete", "Auth Recon")
+                        for _k in ("forms", "links", "resource_ids"):
+                            _combined_auth_recon[_k].extend(auth_recon_data.get(_k, []))
+                    except Exception as e:
+                        vc.error(f"Phase auth_recon [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"auth_recon#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 13: session ──
+            if not _skip("session"):
+                if not _ctx_cfg["auth"].get("enabled"):
+                    vc.log(f"[session] auth not enabled for [{_ctx_label}] — skipping", "WARNING")
+                    pm.set_phase_status(f"session#{_ctx_label}", "skipped", "session")
+                else:
+                    pm.set_phase_status(f"session#{_ctx_label}", "running", "Session Analysis")
+                    try:
+                        _phase_session(target, _ctx_cfg, pm, out, effective_auth)
+                        pm.set_phase_status(f"session#{_ctx_label}", "complete",
+                                            "Session Analysis")
+                    except Exception as e:
+                        vc.error(f"Phase session [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"session#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 14: csrf ──
+            if not _skip("csrf"):
+                if not _ctx_cfg["auth"].get("enabled"):
+                    vc.log(f"[csrf] auth not enabled for [{_ctx_label}] — skipping", "WARNING")
+                    pm.set_phase_status(f"csrf#{_ctx_label}", "skipped", "csrf")
+                else:
+                    pm.set_phase_status(f"csrf#{_ctx_label}", "running", "CSRF Testing")
+                    try:
+                        _phase_csrf(target, _ctx_cfg, pm, out, effective_auth, auth_recon_data)
+                        pm.set_phase_status(f"csrf#{_ctx_label}", "complete", "CSRF Testing")
+                    except Exception as e:
+                        vc.error(f"Phase csrf [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"csrf#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 16: open_redirect ──
+            if not _skip("open_redirect"):
+                pm.set_phase_status(f"open_redirect#{_ctx_label}", "running", "Open Redirect")
+                try:
+                    _phase_open_redirect(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    pm.set_phase_status(f"open_redirect#{_ctx_label}", "complete", "Open Redirect")
+                except Exception as e:
+                    vc.error(f"Phase open_redirect [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"open_redirect#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 17: deserialization ──
+            if not _skip("deserialization"):
+                pm.set_phase_status(f"deserialization#{_ctx_label}", "running", "Deserialization")
+                try:
+                    _phase_deserialization(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    pm.set_phase_status(f"deserialization#{_ctx_label}", "complete",
+                                        "Deserialization")
+                except Exception as e:
+                    vc.error(f"Phase deserialization [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"deserialization#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 18: file_upload_info ──
+            if not _skip("file_upload_info"):
+                pm.set_phase_status(f"file_upload_info#{_ctx_label}", "running", "File Upload Info")
+                try:
+                    _phase_file_upload_info(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    pm.set_phase_status(f"file_upload_info#{_ctx_label}", "complete",
+                                        "File Upload Info")
+                except Exception as e:
+                    vc.error(f"Phase file_upload_info [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"file_upload_info#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 19: mass_assignment ──
+            if not _skip("mass_assignment"):
+                pm.set_phase_status(f"mass_assignment#{_ctx_label}", "running", "Mass Assignment")
+                try:
+                    _phase_mass_assignment(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    pm.set_phase_status(f"mass_assignment#{_ctx_label}", "complete",
+                                        "Mass Assignment")
+                except Exception as e:
+                    vc.error(f"Phase mass_assignment [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"mass_assignment#{_ctx_label}", "error", detail=str(e))
+
+        # ── Post-context: privilege-escalation / cross-credential phases ───
+        def _skip(phase_name: str) -> bool:
+            if not phases_enabled.get(phase_name, False):
+                vc.log(f"[{phase_name}] Phase disabled — skipping", "INFO")
+                return True
+            if pm.is_phase_complete(phase_name):
+                vc.log(f"[{phase_name}] Already complete — skipping (checkpoint)", "INFO")
+                return True
+            return False
+
+        effective_auth = auth_sess or sess
 
         # ── Phase 12: authorization ──
         if not _skip("authorization"):
@@ -7899,39 +8630,12 @@ def main() -> None:
             else:
                 pm.set_phase_status("authorization", "running", "Authorization")
                 try:
-                    _phase_authorization(target, cfg, pm, out, effective_auth, auth_recon_data)
+                    _phase_authorization(target, cfg, pm, out, effective_auth,
+                                         _combined_auth_recon)
                     pm.set_phase_status("authorization", "complete", "Authorization")
                 except Exception as e:
                     vc.error(f"Phase authorization error: {e}")
                     pm.set_phase_status("authorization", "error", detail=str(e))
-
-        # ── Phase 13: session ──
-        if not _skip("session"):
-            if not cfg["auth"].get("enabled"):
-                vc.log("[session] auth not enabled — skipping", "WARNING")
-                pm.set_phase_status("session", "skipped", "session")
-            else:
-                pm.set_phase_status("session", "running", "Session Analysis")
-                try:
-                    _phase_session(target, cfg, pm, out, effective_auth)
-                    pm.set_phase_status("session", "complete", "Session Analysis")
-                except Exception as e:
-                    vc.error(f"Phase session error: {e}")
-                    pm.set_phase_status("session", "error", detail=str(e))
-
-        # ── Phase 14: csrf ──
-        if not _skip("csrf"):
-            if not cfg["auth"].get("enabled"):
-                vc.log("[csrf] auth not enabled — skipping", "WARNING")
-                pm.set_phase_status("csrf", "skipped", "csrf")
-            else:
-                pm.set_phase_status("csrf", "running", "CSRF Testing")
-                try:
-                    _phase_csrf(target, cfg, pm, out, effective_auth, auth_recon_data)
-                    pm.set_phase_status("csrf", "complete", "CSRF Testing")
-                except Exception as e:
-                    vc.error(f"Phase csrf error: {e}")
-                    pm.set_phase_status("csrf", "error", detail=str(e))
 
         # ── Phase 15: cross_user ──
         if not _skip("cross_user"):
@@ -7939,57 +8643,32 @@ def main() -> None:
                 vc.log("[cross_user] auth and/or auth2 not enabled — skipping", "WARNING")
                 pm.set_phase_status("cross_user", "skipped", "cross_user")
             elif not auth2_sess:
-                vc.log("[cross_user] auth2 session could not be established — skipping", "WARNING")
+                vc.log("[cross_user] auth2 session could not be established — skipping",
+                       "WARNING")
                 pm.set_phase_status("cross_user", "skipped", "cross_user")
             else:
                 pm.set_phase_status("cross_user", "running", "Cross-User Testing")
                 try:
                     _phase_cross_user(target, cfg, pm, out, effective_auth,
-                                      auth2_sess, auth_recon_data)
+                                      auth2_sess, _combined_auth_recon)
                     pm.set_phase_status("cross_user", "complete", "Cross-User Testing")
                 except Exception as e:
                     vc.error(f"Phase cross_user error: {e}")
                     pm.set_phase_status("cross_user", "error", detail=str(e))
 
-        # ── Phase 16: open_redirect ──
-        if not _skip("open_redirect"):
-            pm.set_phase_status("open_redirect", "running", "Open Redirect")
+        # ── Phase 20: access_matrix ──
+        # Deduplicate crawl links accumulated across all contexts
+        _seen_lnk: set = set()
+        _dedup_links = [l for l in _all_crawl_links
+                        if l not in _seen_lnk and not _seen_lnk.add(l)]
+        if not _skip("access_matrix"):
+            pm.set_phase_status("access_matrix", "running", "Access Matrix")
             try:
-                _phase_open_redirect(target, cfg, pm, out, sess, crawl_data)
-                pm.set_phase_status("open_redirect", "complete", "Open Redirect")
+                _phase_access_matrix(target, cfg, pm, out, sess, {"links": _dedup_links})
+                pm.set_phase_status("access_matrix", "complete", "Access Matrix")
             except Exception as e:
-                vc.error(f"Phase open_redirect error: {e}")
-                pm.set_phase_status("open_redirect", "error", detail=str(e))
-
-        # ── Phase 17: deserialization ──
-        if not _skip("deserialization"):
-            pm.set_phase_status("deserialization", "running", "Deserialization")
-            try:
-                _phase_deserialization(target, cfg, pm, out, sess, crawl_data)
-                pm.set_phase_status("deserialization", "complete", "Deserialization")
-            except Exception as e:
-                vc.error(f"Phase deserialization error: {e}")
-                pm.set_phase_status("deserialization", "error", detail=str(e))
-
-        # ── Phase 18: file_upload_info ──
-        if not _skip("file_upload_info"):
-            pm.set_phase_status("file_upload_info", "running", "File Upload Info")
-            try:
-                _phase_file_upload_info(target, cfg, pm, out, sess, crawl_data)
-                pm.set_phase_status("file_upload_info", "complete", "File Upload Info")
-            except Exception as e:
-                vc.error(f"Phase file_upload_info error: {e}")
-                pm.set_phase_status("file_upload_info", "error", detail=str(e))
-
-        # ── Phase 19: mass_assignment ──
-        if not _skip("mass_assignment"):
-            pm.set_phase_status("mass_assignment", "running", "Mass Assignment")
-            try:
-                _phase_mass_assignment(target, cfg, pm, out, sess, crawl_data)
-                pm.set_phase_status("mass_assignment", "complete", "Mass Assignment")
-            except Exception as e:
-                vc.error(f"Phase mass_assignment error: {e}")
-                pm.set_phase_status("mass_assignment", "error", detail=str(e))
+                vc.error(f"Phase access_matrix error: {e}")
+                pm.set_phase_status("access_matrix", "error", detail=str(e))
 
         # Write summary
         try:
