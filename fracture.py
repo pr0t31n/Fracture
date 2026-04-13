@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1957,6 +1957,8 @@ DEFAULT_SETTINGS: dict = {
             "graphql": False, "logging_monitoring": True, "account_lockout": True,
             "auth_recon": False, "authorization": False,
             "session": False, "csrf": False, "cross_user": False,
+            "open_redirect": True, "deserialization": True,
+            "file_upload_info": True, "mass_assignment": True,
         },
         "auth": {
             "enabled":                 False,
@@ -2089,7 +2091,11 @@ PHASE_LIST = [
     ("authorization", "Phase 12: IDOR / privilege escalation testing (requires auth)"),
     ("session",       "Phase 13: Session management analysis (requires auth)"),
     ("csrf",          "Phase 14: CSRF protection testing (requires auth)"),
-    ("cross_user",    "Phase 15: Cross-user data leakage (requires auth + auth2)"),
+    ("cross_user",      "Phase 15: Cross-user data leakage (requires auth + auth2)"),
+    ("open_redirect",   "Phase 16: Open redirect testing"),
+    ("deserialization", "Phase 17: Insecure deserialization detection"),
+    ("file_upload_info","Phase 18: File upload endpoint detection (informational)"),
+    ("mass_assignment", "Phase 19: Mass assignment / privilege escalation testing"),
 ]
 
 
@@ -4889,6 +4895,64 @@ _CMD_PAYLOADS = [
 ]
 _CRLF_PAYLOAD = "%0d%0aX-Injected-Fracture: test"
 
+_NOSQL_PAYLOADS = [
+    ('{"$gt": ""}',       re.compile(r'\$gt|\$ne|\$where|unexpected.*operator|cast.*failed|E11000', re.I)),
+    ('{"$ne": null}',     re.compile(r'\$gt|\$ne|\$where|unexpected.*operator|E11000', re.I)),
+    ("[$ne]=1",           re.compile(r'\$ne|\$gt|unexpected.*operator', re.I)),
+]
+_LDAP_PAYLOADS = [
+    ("*)(cn=*",           re.compile(r'ldap.*error|invalid.*dn|javax\.naming|objectClass', re.I)),
+    (")(|(objectClass=*", re.compile(r'ldap.*error|invalid.*dn|javax\.naming|objectClass', re.I)),
+]
+_XPATH_PAYLOADS = [
+    ("' or '1'='1",       re.compile(r'xpath|xquery|xmlsyntax|invalid.*expression', re.I)),
+    ("' or 1=1 or 'x'='x", re.compile(r'xpath|xquery|xmlsyntax|invalid.*expression', re.I)),
+]
+_LOG_INJECT_PAYLOAD = "%0afracture_log_inject_SUCCESS%0a"
+_CSV_INJECT_PAYLOADS = [
+    "=CMD|'/C echo fracture'!A0",
+    "+cmd|'/C echo fracture'!A0",
+    "@SUM(1+1)*cmd|'/C echo fracture'!A0",
+]
+_CODE_INJECT_PAYLOADS = [
+    ("__import__('os').system('echo fracture_ci')", re.compile(r'fracture_ci')),
+    ("eval('7*7')",                                 re.compile(r'\b49\b')),
+    (";echo fracture_ci;#",                         re.compile(r'fracture_ci')),
+]
+_OPEN_REDIRECT_PAYLOADS = [
+    "//evil.fracture.test/",
+    "https://evil.fracture.test/",
+    "/\\evil.fracture.test/",
+    "///evil.fracture.test/",
+]
+_OPEN_REDIRECT_PARAMS = {
+    "next", "url", "redirect", "return", "goto", "returnurl", "returnto",
+    "target", "redir", "redirect_uri", "forward", "location", "continue",
+    "ref", "back", "dest", "destination",
+}
+_OPEN_REDIRECT_EXTERNAL_RE = re.compile(r'evil\.fracture\.test', re.I)
+_DESER_RESP_RE = re.compile(
+    r'pickle|marshal|deserializ|yaml\.load|__reduce__|java\.io\.Serializable|'
+    r'org\.apache\.commons\.collections|aced0005', re.I
+)
+_DESER_FIELD_RE = re.compile(
+    r'^(serialized|object|payload|blob|pickle|marshal)$', re.I
+)
+_MASS_ASSIGN_FIELDS = [
+    "is_admin", "isAdmin", "role", "user_role", "admin", "privilege",
+    "permissions", "is_staff", "isStaff", "superuser", "is_superuser",
+    "verified", "is_verified", "approved", "is_approved",
+]
+_UPLOAD_ACCEPT_DANGEROUS = re.compile(
+    r'\.(php|phtml|asp|aspx|jsp|cgi|pl|py|sh|bat|ps1|vbs|war|jar)\b', re.I
+)
+_JSONP_CB_PARAMS = ["callback", "cb", "jsonp", "jsoncallback", "json_callback"]
+_DESER_CONTENT_TYPES = [
+    "application/x-java-serialized-object",
+    "application/x-python-serialize",
+    "application/x-marshal",
+]
+
 
 def _qs_inject(base_url: str, param: str, value: str,
                sess: requests.Session, timeout: int) -> "requests.Response | None":
@@ -5111,7 +5175,316 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
 
-    vc.status(phase, "Injection Testing", "complete", "Done", 7, 7)
+    # 9. Second-order SQL injection
+    vc.status(phase, "Injection Testing", "running", "Second-order SQLi", 7, 17)
+    for form in forms[:5]:
+        action = form.get("action", url)
+        inputs = form.get("inputs", [])
+        for inp in inputs:
+            pname = inp.get("name", "")
+            if not pname or inp.get("type") in ("hidden", "submit", "button"):
+                continue
+            data = {i["name"]: "fracture_test" for i in inputs if i.get("name")}
+            data[pname] = "fracture_so_sqli'"
+            try:
+                sess.post(action, data=data, timeout=timeout)
+                r2 = sess.get(action, timeout=timeout)
+                if r2 and _SQL_ERROR_RE.search(r2.text):
+                    out.add_finding(
+                        title="Second-Order SQL Injection",
+                        url=action, port=target["port"], risk="CRITICAL",
+                        description=(f"Second-order SQL injection detected via field '{pname}' at {action}. "
+                                     f"A quote character stored in the field triggered a SQL error on the "
+                                     f"next retrieval, indicating the stored value is interpolated unsafely."),
+                        output=f"Field: {pname}\nStore payload: fracture_so_sqli'\nSQL error on retrieval",
+                        sources="fracture-injection", service=target["scheme"],
+                        affected=action, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation="Use parameterised queries for all database operations, including reads of stored values.",
+                    )
+                    vc.log(f"[injection] Second-order SQLi at {action} field={pname}", "SUCCESS")
+                    break
+            except Exception:
+                pass
+
+    # 10. CSV / formula injection
+    vc.status(phase, "Injection Testing", "running", "CSV injection", 8, 17)
+    _csv_found_forms: set = set()
+    for form in forms[:15]:
+        action = form.get("action", url)
+        if action in _csv_found_forms:
+            continue
+        inputs = form.get("inputs", [])
+        for inp in inputs:
+            pname = inp.get("name", "")
+            if not pname or inp.get("type") in ("hidden", "submit", "button", "password"):
+                continue
+            data = {i["name"]: "fracture_test" for i in inputs if i.get("name")}
+            data[pname] = _CSV_INJECT_PAYLOADS[0]
+            try:
+                r = sess.post(action, data=data, timeout=timeout)
+                if r and r.status_code in (200, 201, 302):
+                    _csv_found_forms.add(action)
+                    out.add_finding(
+                        title="CSV / Formula Injection",
+                        url=action, port=target["port"], risk="HIGH",
+                        description=(f"Input field '{pname}' at {action} accepted a formula injection payload "
+                                     f"({_CSV_INJECT_PAYLOADS[0]!r}). If this data is exported to a CSV or "
+                                     f"spreadsheet, the formula may execute commands on the recipient's workstation."),
+                        output=f"Field: {pname}\nPayload: {_CSV_INJECT_PAYLOADS[0]}\nResponse: {r.status_code}",
+                        sources="fracture-injection", service=target["scheme"],
+                        affected=action, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation=(
+                            "Sanitise all text inputs before CSV/Excel export. "
+                            "Prefix cells beginning with =, +, -, @ with a single-quote character."
+                        ),
+                    )
+                    vc.log(f"[injection] CSV injection at {action} field={pname}", "SUCCESS")
+                    break
+            except Exception:
+                pass
+
+    # 11. NoSQL injection
+    vc.status(phase, "Injection Testing", "running", "NoSQL injection", 9, 17)
+    for entry in params[:10]:
+        purl = entry["url"]
+        for param in entry["params"]:
+            for nosql_pay, nosql_err in _NOSQL_PAYLOADS:
+                r = _qs_inject(purl, param, nosql_pay, sess, timeout)
+                if r and (nosql_err.search(r.text) or r.status_code == 500):
+                    out.add_finding(
+                        title="NoSQL Injection",
+                        url=purl, port=target["port"], risk="CRITICAL",
+                        description=(f"NoSQL injection detected in parameter '{param}'. Payload "
+                                     f"'{nosql_pay}' produced an error response consistent with "
+                                     f"unhandled MongoDB/NoSQL operator injection."),
+                        output=f"Parameter: {param}\nPayload: {nosql_pay}\nResponse ({r.status_code}): {r.text[:300]}",
+                        sources="fracture-injection", service=target["scheme"],
+                        affected=purl, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation="Strip or reject operator characters ($, {, [) from user input before NoSQL queries.",
+                    )
+                    vc.log(f"[injection] NoSQL injection: {purl} param={param}", "SUCCESS")
+                    break
+
+    # 12. LDAP injection
+    vc.status(phase, "Injection Testing", "running", "LDAP injection", 10, 17)
+    for entry in params[:10]:
+        purl = entry["url"]
+        for param in entry["params"]:
+            for ldap_pay, ldap_err in _LDAP_PAYLOADS:
+                r = _qs_inject(purl, param, ldap_pay, sess, timeout)
+                if r and (ldap_err.search(r.text) or r.status_code == 500):
+                    out.add_finding(
+                        title="LDAP Injection",
+                        url=purl, port=target["port"], risk="HIGH",
+                        description=(f"LDAP injection detected in parameter '{param}' with payload "
+                                     f"'{ldap_pay}'. Error response reveals LDAP query construction."),
+                        output=f"Parameter: {param}\nPayload: {ldap_pay}\nResponse ({r.status_code}): {r.text[:300]}",
+                        sources="fracture-injection", service=target["scheme"],
+                        affected=purl, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation="Escape all LDAP special characters. Use an LDAP-safe query library with parameterised filters.",
+                    )
+                    vc.log(f"[injection] LDAP injection: {purl} param={param}", "SUCCESS")
+                    break
+
+    # 13. XPath injection
+    vc.status(phase, "Injection Testing", "running", "XPath injection", 11, 17)
+    for entry in params[:10]:
+        purl = entry["url"]
+        for param in entry["params"]:
+            for xpath_pay, xpath_err in _XPATH_PAYLOADS:
+                r = _qs_inject(purl, param, xpath_pay, sess, timeout)
+                if r and (xpath_err.search(r.text) or r.status_code == 500):
+                    out.add_finding(
+                        title="XPath Injection",
+                        url=purl, port=target["port"], risk="HIGH",
+                        description=(f"XPath injection detected in parameter '{param}' with payload "
+                                     f"'{xpath_pay}'. Error response reveals XPath expression construction."),
+                        output=f"Parameter: {param}\nPayload: {xpath_pay}\nResponse ({r.status_code}): {r.text[:300]}",
+                        sources="fracture-injection", service=target["scheme"],
+                        affected=purl, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation="Use a parameterised XPath API. Never concatenate user input into XPath expressions.",
+                    )
+                    vc.log(f"[injection] XPath injection: {purl} param={param}", "SUCCESS")
+                    break
+
+    # 14. Log injection
+    vc.status(phase, "Injection Testing", "running", "Log injection", 12, 17)
+    _log_found: set = set()
+    for entry in params[:10]:
+        purl = entry["url"]
+        for param in entry["params"]:
+            if purl in _log_found:
+                continue
+            r = _qs_inject(purl, param, _LOG_INJECT_PAYLOAD, sess, timeout)
+            if r and r.status_code in (200, 201, 400, 422, 500):
+                _log_found.add(purl)
+                out.add_finding(
+                    title="Log Injection / CRLF in Log Entries",
+                    url=purl, port=target["port"], risk="MEDIUM",
+                    description=(f"Parameter '{param}' at {purl} accepted a newline-embedded log injection "
+                                 f"payload. If the server logs this input without sanitisation, an attacker "
+                                 f"can inject fake log entries to mislead forensic analysis."),
+                    output=f"Parameter: {param}\nPayload: {repr(_LOG_INJECT_PAYLOAD)}\nResponse: {r.status_code}",
+                    sources="fracture-injection", service=target["scheme"],
+                    affected=purl, owasp="A03:2025 Injection", nist="AU-3",
+                    remediation="Strip CRLF/newline characters from all inputs written to logs. Use a structured logging library.",
+                )
+                vc.log(f"[injection] Log injection accepted: {purl} param={param}", "SUCCESS")
+                break
+
+    # 15. HTTP Parameter Pollution
+    vc.status(phase, "Injection Testing", "running", "HTTP Parameter Pollution", 13, 17)
+    for entry in params[:10]:
+        purl = entry["url"]
+        for param in entry["params"]:
+            try:
+                parsed_u = urllib.parse.urlparse(purl)
+                hpp_qs   = f"{param}=legitimate&{param}=fracture_hpp_probe"
+                hpp_url  = parsed_u._replace(query=hpp_qs).geturl()
+                r = sess.get(hpp_url, timeout=timeout)
+                if r and r.status_code == 200 and "fracture_hpp_probe" in r.text:
+                    out.add_finding(
+                        title="HTTP Parameter Pollution (HPP)",
+                        url=purl, port=target["port"], risk="MEDIUM",
+                        description=(f"Parameter '{param}' is vulnerable to HTTP Parameter Pollution. "
+                                     f"Sending the parameter twice caused the second value to be reflected, "
+                                     f"indicating the application processes duplicated parameters inconsistently."),
+                        output=f"Parameter: {param}\nTest URL: {hpp_url}\nSecond value reflected in response",
+                        sources="fracture-injection", service=target["scheme"],
+                        affected=purl, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation="Define explicit single-value semantics for all parameters. Reject or normalise duplicate query parameters.",
+                    )
+                    vc.log(f"[injection] HPP: {purl} param={param}", "SUCCESS")
+                    break
+            except Exception:
+                pass
+
+    # 16. Code injection / eval() RCE probe
+    vc.status(phase, "Injection Testing", "running", "Code injection", 14, 17)
+    for entry in params[:10]:
+        purl = entry["url"]
+        for param in entry["params"]:
+            for ci_pay, ci_pat in _CODE_INJECT_PAYLOADS:
+                r = _qs_inject(purl, param, ci_pay, sess, timeout)
+                if r and ci_pat.search(r.text):
+                    out.add_finding(
+                        title="Remote Code Execution via Code Injection",
+                        url=purl, port=target["port"], risk="CRITICAL",
+                        description=(f"Code injection confirmed in parameter '{param}' at {purl}. "
+                                     f"Payload '{ci_pay}' was evaluated server-side, indicating the "
+                                     f"application passes user input to eval() or an equivalent."),
+                        output=f"Parameter: {param}\nPayload: {ci_pay}\nResponse: {r.text[:300]}",
+                        sources="fracture-injection", service=target["scheme"],
+                        affected=purl, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation="Never pass user-controlled input to eval(), exec(), or similar functions. Use safe alternatives.",
+                    )
+                    vc.log(f"[injection] Code injection RCE: {purl} param={param}", "SUCCESS")
+                    break
+
+    # 17. Stored XSS
+    vc.status(phase, "Injection Testing", "running", "Stored XSS", 15, 17)
+    _stored_xss_marker = "<img/src=x id=fracture_sxss>"
+    _stored_xss_found: set = set()
+    for form in forms[:10]:
+        action = form.get("action", url)
+        inputs = form.get("inputs", [])
+        text_inputs = [i for i in inputs if i.get("type", "text") in ("text", "textarea", "search", "")
+                       and i.get("name")]
+        if not text_inputs:
+            continue
+        for inp in text_inputs:
+            if action in _stored_xss_found:
+                break
+            pname = inp["name"]
+            data = {i["name"]: "fracture_test" for i in inputs if i.get("name")}
+            data[pname] = _stored_xss_marker
+            try:
+                sess.post(action, data=data, timeout=timeout)
+                # Fetch page most likely to display stored content
+                for check_url in [action, url, url + "/dashboard", url + "/profile"]:
+                    r2 = sess.get(check_url, timeout=timeout)
+                    if r2 and "fracture_sxss" in r2.text:
+                        _stored_xss_found.add(action)
+                        out.add_finding(
+                            title="Stored Cross-Site Scripting (XSS)",
+                            url=action, port=target["port"], risk="HIGH",
+                            description=(f"Stored XSS detected via field '{pname}' at {action}. "
+                                         f"The injected payload was reflected at {check_url}, indicating "
+                                         f"the submitted value is stored and rendered without encoding."),
+                            output=f"Field: {pname}\nPayload: {_stored_xss_marker}\nReflected at: {check_url}",
+                            sources="fracture-injection", service=target["scheme"],
+                            affected=check_url, owasp="A03:2025 Injection", nist="SI-10",
+                            remediation="HTML-encode all stored user-supplied content before rendering. Implement a strict Content-Security-Policy.",
+                        )
+                        vc.log(f"[injection] Stored XSS at {action} field={pname}", "SUCCESS")
+                        break
+            except Exception:
+                pass
+
+    # 18. DOM-based XSS — static source analysis in discovered JS files
+    vc.status(phase, "Injection Testing", "running", "DOM XSS (static)", 16, 17)
+    _dom_sink_re = re.compile(
+        r'(document\.write|innerHTML|outerHTML|insertAdjacentHTML|eval\s*\(|'
+        r'setTimeout\s*\(\s*["\']|setInterval\s*\(\s*["\']|location\.href\s*=|'
+        r'location\.replace\s*\(|\.src\s*=)[^\n]{0,120}'
+        r'(location\.search|location\.hash|location\.href|location\.pathname|'
+        r'document\.URL|window\.name|document\.referrer|URLSearchParams)',
+        re.I
+    )
+    _js_links = [lk for lk in crawl_data.get("links", []) if lk.endswith(".js")]
+    for js_url in _js_links[:20]:
+        try:
+            r = sess.get(js_url, timeout=timeout)
+            if r and r.status_code == 200 and _dom_sink_re.search(r.text):
+                m = _dom_sink_re.search(r.text)
+                out.add_finding(
+                    title="DOM-Based Cross-Site Scripting (XSS) — Source/Sink Pattern",
+                    url=js_url, port=target["port"], risk="HIGH",
+                    description=(f"A JavaScript file ({js_url}) contains a pattern where a DOM source "
+                                 f"(e.g. location.search, location.hash) is passed to a dangerous sink "
+                                 f"(e.g. innerHTML, eval). This indicates a potential DOM-based XSS vector."),
+                    output=f"Pattern found near: ...{m.group(0)[:200]}...",
+                    sources="fracture-injection", service=target["scheme"],
+                    affected=js_url, owasp="A03:2025 Injection", nist="SI-10",
+                    remediation=(
+                        "Never pass URL-derived input to dangerous DOM sinks. "
+                        "Use textContent instead of innerHTML. Implement a strict CSP."
+                    ),
+                )
+                vc.log(f"[injection] DOM XSS source/sink: {js_url}", "SUCCESS")
+        except Exception:
+            pass
+
+    # 19. JSONP endpoint detection
+    vc.status(phase, "Injection Testing", "running", "JSONP endpoints", 17, 17)
+    _jsonp_wrap_re = re.compile(r'^[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(', re.M)
+    for entry in params[:15]:
+        purl = entry["url"]
+        for cb_param in _JSONP_CB_PARAMS:
+            r = _qs_inject(purl, cb_param, "fracture_jsonp_cb", sess, timeout)
+            if r and r.status_code == 200:
+                ct = r.headers.get("content-type", "")
+                if ("javascript" in ct or "json" in ct or _jsonp_wrap_re.search(r.text[:100])):
+                    if "fracture_jsonp_cb" in r.text and _jsonp_wrap_re.search(r.text[:100]):
+                        out.add_finding(
+                            title="JSONP Endpoint — Cross-Origin Data Leakage",
+                            url=purl, port=target["port"], risk="HIGH",
+                            description=(f"JSONP endpoint detected at {purl}. The '{cb_param}' parameter "
+                                         f"is reflected as a JavaScript callback function name, wrapping "
+                                         f"the response. An attacker can use a <script> tag on any domain "
+                                         f"to exfiltrate the response data."),
+                            output=f"Parameter: {cb_param}\nCallback reflected: {r.text[:200]}",
+                            sources="fracture-injection", service=target["scheme"],
+                            affected=purl, owasp="A05:2025 Security Misconfiguration", nist="SC-8",
+                            remediation=(
+                                "Remove JSONP support and use CORS instead. "
+                                "If JSONP is required, validate the callback name against a strict whitelist."
+                            ),
+                        )
+                        vc.log(f"[injection] JSONP endpoint: {purl} param={cb_param}", "SUCCESS")
+                        break
+
+    vc.status(phase, "Injection Testing", "complete", "Done", 17, 17)
     vc.log("[injection] Phase complete", "SUCCESS")
 
 
@@ -5431,6 +5804,46 @@ def _phase_ssrf(target: dict, cfg: dict, pm: ProgressManager,
                 vc.log(f"[ssrf] SSRF via {param}: {ssrf_desc}", "SUCCESS")
                 break
 
+    # Blind SSRF — timing-based detection (closed port vs. potentially open internal)
+    _blind_ssrf_targets = [
+        ("http://127.0.0.1:80/",    "localhost:80"),
+        ("http://127.0.0.1:8080/",  "localhost:8080"),
+        ("http://10.0.0.1/",        "RFC-1918 10.x gateway"),
+        ("http://172.16.0.1/",      "RFC-1918 172.16.x gateway"),
+        ("http://192.168.1.1/",     "RFC-1918 192.168.1.1 gateway"),
+    ]
+    # Use a fast-refuse address as baseline
+    import time as _time
+    for purl, param in ssrf_params[:3]:
+        for blind_target, blind_desc in _blind_ssrf_targets:
+            try:
+                t0 = _time.monotonic()
+                r = _qs_inject(purl, param, blind_target, sess, max(3, timeout // 3))
+                elapsed = _time.monotonic() - t0
+                # A response with content (not just a connection error) to an
+                # internal address strongly suggests the server fetched it
+                if r and r.status_code == 200 and len(r.text) > 20:
+                    out.add_finding(
+                        title="Blind SSRF — Internal Network Probing",
+                        url=purl, port=target["port"], risk="HIGH",
+                        description=(f"Blind SSRF detected: parameter '{param}' appears to have fetched "
+                                     f"the internal address {blind_target} ({blind_desc}). "
+                                     f"The server returned a 200 response with {len(r.text)} bytes of content."),
+                        output=(f"Parameter: {param}\nTarget: {blind_target}\n"
+                                f"Response: HTTP {r.status_code}, {len(r.text)} bytes\n{r.text[:300]}"),
+                        sources="fracture-ssrf", service=target["scheme"],
+                        affected=f"{purl}?{param}={blind_target}",
+                        owasp="A10:2025 Server-Side Request Forgery", nist="SC-7",
+                        remediation=(
+                            "Block requests to RFC-1918 and loopback addresses. "
+                            "Implement an allowlist of permitted outbound destinations."
+                        ),
+                    )
+                    vc.log(f"[ssrf] Blind SSRF via {param} → {blind_desc}", "SUCCESS")
+                    break
+            except Exception:
+                pass
+
     vc.status(phase, "SSRF Testing", "complete", "Done", len(ssrf_params), len(ssrf_params))
     vc.log("[ssrf] Phase complete", "SUCCESS")
 
@@ -5623,7 +6036,106 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
 
-    vc.status(phase, "Auth Bypass", "complete", "Done", 4, 4)
+    vc.status(phase, "Auth Bypass", "running", "JWT claim inspection", 4, 7)
+    # 5. JWT Missing Expiry claim
+    for cookie in sess.cookies:
+        val = cookie.value or ""
+        if re.match(r'eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.', val):
+            try:
+                import base64 as _b64j
+                parts = val.split(".")
+                payload_padded = parts[1] + "=" * (-len(parts[1]) % 4)
+                jwt_payload = json.loads(_b64j.urlsafe_b64decode(payload_padded).decode("utf-8", errors="replace"))
+                if "exp" not in jwt_payload:
+                    out.add_finding(
+                        title="JWT — Missing Expiry Claim (No exp)",
+                        url=url, port=target["port"], risk="MEDIUM",
+                        description=(f"The JWT in cookie '{cookie.name}' has no 'exp' claim. "
+                                     f"Without an expiry, the token is valid indefinitely and cannot "
+                                     f"be invalidated server-side after issuance."),
+                        output=f"Cookie: {cookie.name}\nJWT payload: {json.dumps(jwt_payload)[:300]}",
+                        sources="fracture-auth-bypass", service=target["scheme"],
+                        output_file=str(auth_out),
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="IA-5",
+                        remediation="Always include an 'exp' claim in JWTs. Set a short expiry (≤15 minutes for sensitive operations).",
+                    )
+                    vc.log(f"[auth_bypass] JWT missing exp: {cookie.name}", "SUCCESS")
+            except Exception:
+                pass
+
+    vc.status(phase, "Auth Bypass", "running", "Credentials in URL", 5, 7)
+    # 6. Credentials transmitted in URL query parameters
+    _cred_param_re = re.compile(
+        r'[?&](password|passwd|pwd|secret|token|api_key|apikey|auth|access_token)'
+        r'=([^&\s]{4,})', re.I
+    )
+    for link in crawl_data.get("links", []):
+        if _cred_param_re.search(link):
+            m = _cred_param_re.search(link)
+            out.add_finding(
+                title="Credentials Transmitted in URL Query Parameters",
+                url=link, port=target["port"], risk="HIGH",
+                description=(f"Sensitive credential parameter '{m.group(1)}' found in URL query string. "
+                             f"URLs containing credentials are logged by proxies, referrer headers, "
+                             f"and browser history, exposing them to unintended disclosure."),
+                output=f"URL: {link}\nParameter: {m.group(1)}",
+                sources="fracture-auth-bypass", service=target["scheme"],
+                affected=link,
+                owasp="A07:2025 Identification and Authentication Failures",
+                nist="IA-5",
+                remediation="Transmit credentials only in request body or headers, never in URL query parameters.",
+            )
+            vc.log(f"[auth_bypass] Credentials in URL: {link[:80]}", "SUCCESS")
+
+    vc.status(phase, "Auth Bypass", "running", "Timing attack probe", 6, 7)
+    # 7. Timing attack — non-constant-time comparison on login
+    import time as _time_ab
+    _timing_login_paths = ["/login", "/auth/login", "/api/login", "/signin", "/auth/token"]
+    for lpath in _timing_login_paths:
+        try:
+            login_u = url + lpath
+            times_invalid = []
+            times_valid_fmt = []
+            # Probe with clearly invalid usernames vs. valid-format usernames
+            for _ in range(5):
+                t0 = _time_ab.monotonic()
+                sess.post(login_u, json={"username": "zzznouserzzzz", "password": "wrong"}, timeout=timeout)
+                times_invalid.append(_time_ab.monotonic() - t0)
+            for _ in range(5):
+                t0 = _time_ab.monotonic()
+                sess.post(login_u, json={"username": "admin", "password": "wrong_password_xyz"}, timeout=timeout)
+                times_valid_fmt.append(_time_ab.monotonic() - t0)
+            if times_invalid and times_valid_fmt:
+                avg_invalid = sum(times_invalid) / len(times_invalid)
+                avg_valid   = sum(times_valid_fmt) / len(times_valid_fmt)
+                # If valid-format username is consistently >150ms slower, timing oracle likely
+                if avg_valid - avg_invalid > 0.15:
+                    out.add_finding(
+                        title="Timing Attack — Non-Constant-Time Authentication",
+                        url=login_u, port=target["port"], risk="MEDIUM",
+                        description=(f"Login endpoint {lpath} shows a {(avg_valid - avg_invalid)*1000:.0f}ms "
+                                     f"average response time difference between invalid usernames and "
+                                     f"valid-format usernames, suggesting non-constant-time comparison. "
+                                     f"An attacker can use this timing oracle for username enumeration."),
+                        output=(f"Avg time (invalid user): {avg_invalid*1000:.0f}ms\n"
+                                f"Avg time (valid-format user): {avg_valid*1000:.0f}ms\n"
+                                f"Delta: {(avg_valid-avg_invalid)*1000:.0f}ms"),
+                        sources="fracture-auth-bypass", service=target["scheme"],
+                        affected=login_u,
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="IA-5",
+                        remediation=(
+                            "Use constant-time comparison functions for all credential checks. "
+                            "Hash credentials before comparison and add artificial jitter to login response times."
+                        ),
+                    )
+                    vc.log(f"[auth_bypass] Timing oracle at {lpath} ({(avg_valid-avg_invalid)*1000:.0f}ms delta)", "SUCCESS")
+                    break
+        except Exception:
+            pass
+
+    vc.status(phase, "Auth Bypass", "complete", "Done", 7, 7)
     vc.log("[auth_bypass] Phase complete", "SUCCESS")
 
 
@@ -6448,7 +6960,86 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
             )
             vc.log(f"[logging_monitoring] No brute-force protection: {login_url}", "SUCCESS")
 
-    vc.status(phase, "Logging & Monitoring", "complete", "Done", 4, 4)
+    # 5. Prometheus / metrics endpoint exposure
+    vc.status(phase, "Logging & Monitoring", "running", "Metrics endpoints", 4, 7)
+    _metrics_paths = ["/metrics", "/prometheus", "/prometheus/metrics",
+                      "/internal/metrics", "/ops/metrics"]
+    for mpath in _metrics_paths:
+        murl = url.rstrip("/") + mpath
+        try:
+            r = sess.get(murl, timeout=timeout, allow_redirects=False)
+            if r and r.status_code == 200 and re.search(r'^#\s+HELP\s+|^#\s+TYPE\s+|\bprocess_cpu\b|\bgo_goroutines\b', r.text, re.M):
+                out.add_finding(
+                    title="Exposed Metrics Endpoint with Sensitive Data",
+                    url=murl, port=target["port"], risk="MEDIUM",
+                    description=(f"A Prometheus-format metrics endpoint was found at {murl} without "
+                                 f"authentication. It exposes internal process metrics, request counters, "
+                                 f"and potentially sensitive timing and resource data."),
+                    output=f"GET {murl} → HTTP {r.status_code}\n{r.text[:500]}",
+                    sources="fracture-logging", service=target["scheme"],
+                    affected=murl, owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                    remediation="Restrict /metrics and /prometheus endpoints to localhost or a monitoring network. Require authentication.",
+                )
+                vc.log(f"[logging_monitoring] Prometheus metrics: {murl}", "SUCCESS")
+        except Exception:
+            pass
+
+    # 6. JSONP endpoint detection via callback parameter on discovered paths
+    vc.status(phase, "Logging & Monitoring", "running", "JSONP endpoints (recon)", 5, 7)
+    _jsonp_probe_paths = ["/api/user", "/api/data", "/data", "/export", "/feed",
+                          "/api/profile", "/user/info", "/api/json"]
+    _jsonp_wrap_re2 = re.compile(r'^[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(', re.M)
+    for jpath in _jsonp_probe_paths:
+        jurl = url.rstrip("/") + jpath + "?callback=fracture_jsonp_check"
+        try:
+            r = sess.get(jurl, timeout=timeout, allow_redirects=False)
+            if r and r.status_code == 200:
+                if "fracture_jsonp_check" in r.text and _jsonp_wrap_re2.search(r.text[:100]):
+                    out.add_finding(
+                        title="JSONP Endpoint — Cross-Origin Data Leakage",
+                        url=url.rstrip("/") + jpath, port=target["port"], risk="HIGH",
+                        description=(f"JSONP endpoint found at {jpath}. The 'callback' parameter is "
+                                     f"reflected as a JavaScript function name wrapping the response body. "
+                                     f"An attacker can embed a <script> tag to exfiltrate the response from any domain."),
+                        output=f"GET {jurl} → HTTP {r.status_code}\n{r.text[:300]}",
+                        sources="fracture-logging", service=target["scheme"],
+                        affected=url.rstrip("/") + jpath,
+                        owasp="A05:2025 Security Misconfiguration", nist="SC-8",
+                        remediation="Remove JSONP support and use CORS with an origin allowlist instead.",
+                    )
+                    vc.log(f"[logging_monitoring] JSONP endpoint: {jpath}", "SUCCESS")
+        except Exception:
+            pass
+
+    # 7. Missing Cache-Control on sensitive pages
+    vc.status(phase, "Logging & Monitoring", "running", "Cache-Control on sensitive pages", 6, 7)
+    _sensitive_paths_cc = ["/login", "/profile", "/account", "/dashboard",
+                           "/admin", "/settings", "/password", "/reset"]
+    for spath in _sensitive_paths_cc:
+        surl = url.rstrip("/") + spath
+        try:
+            r = sess.get(surl, timeout=timeout, allow_redirects=True)
+            if r and r.status_code == 200:
+                cc = r.headers.get("Cache-Control", "")
+                pragma = r.headers.get("Pragma", "")
+                if not re.search(r'no-store|no-cache|private|must-revalidate', cc, re.I) \
+                        and "no-cache" not in pragma.lower():
+                    out.add_finding(
+                        title="Missing Cache-Control on Sensitive Page",
+                        url=surl, port=target["port"], risk="LOW",
+                        description=(f"The sensitive page {spath} is missing Cache-Control: no-store / no-cache. "
+                                     f"Browsers and intermediate proxies may cache the response, "
+                                     f"exposing sensitive data to users of shared computers."),
+                        output=f"GET {surl} → HTTP {r.status_code}\nCache-Control: {cc or '(absent)'}\nPragma: {pragma or '(absent)'}",
+                        sources="fracture-logging", service=target["scheme"],
+                        affected=surl, owasp="A05:2025 Security Misconfiguration", nist="SC-28",
+                        remediation="Add 'Cache-Control: no-store, no-cache, private' and 'Pragma: no-cache' to all authenticated and sensitive pages.",
+                    )
+                    vc.log(f"[logging_monitoring] Missing Cache-Control: {spath}", "SUCCESS")
+        except Exception:
+            pass
+
+    vc.status(phase, "Logging & Monitoring", "complete", "Done", 7, 7)
     vc.log("[logging_monitoring] Phase complete", "SUCCESS")
 
 
@@ -6547,6 +7138,379 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
 
     vc.status(phase, "Account Lockout", "complete", "Done", 3, 3)
     vc.log("[account_lockout] Phase complete", "SUCCESS")
+
+
+# =============================================================================
+# Phase 16: Open Redirect
+# =============================================================================
+
+def _phase_open_redirect(target: dict, cfg: dict, pm: ProgressManager,
+                         out: OutputManager, sess: requests.Session,
+                         crawl_data: dict) -> None:
+    """Phase 16: Open redirect testing on URL-like parameters."""
+    phase   = "open_redirect"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    params  = crawl_data.get("params", [])
+    vc.status(phase, "Open Redirect", "running", "Testing redirect params", 0, 1)
+
+    redir_params = [
+        (e["url"], p) for e in params for p in e["params"]
+        if p.lower().replace("-", "").replace("_", "") in _OPEN_REDIRECT_PARAMS
+    ]
+    _found: set = set()
+
+    for purl, param in redir_params:
+        if purl in _found:
+            continue
+        for payload in _OPEN_REDIRECT_PAYLOADS:
+            try:
+                r = _qs_inject(purl, param, payload, sess, timeout)
+                if r is None:
+                    continue
+                # Check Location header (3xx) or meta-refresh / body reflection
+                loc = r.headers.get("Location", "") if r.status_code in (301, 302, 303, 307, 308) else ""
+                if _OPEN_REDIRECT_EXTERNAL_RE.search(loc) or \
+                        _OPEN_REDIRECT_EXTERNAL_RE.search(r.text[:3000]):
+                    _found.add(purl)
+                    out.add_finding(
+                        title="Open Redirect",
+                        url=purl, port=target["port"], risk="MEDIUM",
+                        description=(f"Open redirect via parameter '{param}' at {purl}. "
+                                     f"Payload '{payload}' caused a redirect to an external domain. "
+                                     f"An attacker can craft a trusted-looking URL that silently "
+                                     f"redirects users to a phishing or malware site."),
+                        output=(f"Parameter: {param}\nPayload: {payload}\n"
+                                f"Response: HTTP {r.status_code}\nLocation: {loc or '(in body)'}"),
+                        sources="fracture-open-redirect", service=target["scheme"],
+                        affected=purl, owasp="A01:2025 Broken Access Control", nist="SC-7",
+                        remediation=(
+                            "Validate redirect destinations against an allowlist of trusted domains. "
+                            "Never use raw user input as a redirect target."
+                        ),
+                    )
+                    vc.log(f"[open_redirect] Open redirect: {purl} param={param}", "SUCCESS")
+                    break
+            except Exception:
+                pass
+
+    vc.status(phase, "Open Redirect", "complete", "Done", 1, 1)
+    vc.log("[open_redirect] Phase complete", "SUCCESS")
+
+
+# =============================================================================
+# Phase 17: Deserialization Detection
+# =============================================================================
+
+def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
+                           out: OutputManager, sess: requests.Session,
+                           crawl_data: dict) -> None:
+    """Phase 17: Detect insecure deserialization endpoints and patterns."""
+    phase   = "deserialization"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    forms   = crawl_data.get("forms", [])
+    vc.status(phase, "Deserialization", "running", "Error pattern check", 0, 3)
+
+    # 1. Trigger errors that reveal deserialization stack traces
+    _deser_triggers = [
+        b"rO0AB",          # Java serialized object base64 prefix
+        b"gASV",           # Python pickle base64 prefix
+        b"!!python/object", # YAML Python tag
+        b"---\n!!",        # YAML prefix
+    ]
+    for form in forms[:10]:
+        action = form.get("action", url)
+        inputs = form.get("inputs", [])
+        for inp in inputs:
+            pname = inp.get("name", "")
+            if not pname or not _DESER_FIELD_RE.search(pname):
+                continue
+            for trigger in _deser_triggers:
+                try:
+                    import base64 as _b64d
+                    encoded = _b64d.b64encode(trigger).decode()
+                    data = {i["name"]: "test" for i in inputs if i.get("name")}
+                    data[pname] = encoded
+                    r = sess.post(action, data=data, timeout=timeout)
+                    if r and _DESER_RESP_RE.search(r.text):
+                        out.add_finding(
+                            title="Insecure Deserialization — Error Disclosure",
+                            url=action, port=target["port"], risk="HIGH",
+                            description=(f"Field '{pname}' at {action} returned an error message "
+                                         f"revealing deserialization stack trace or library details. "
+                                         f"This indicates the application deserialises user-controlled input."),
+                            output=f"Field: {pname}\nPayload: {encoded[:40]}\nResponse: {r.text[:500]}",
+                            sources="fracture-deserialization", service=target["scheme"],
+                            affected=action, owasp="A08:2025 Software and Data Integrity Failures",
+                            nist="SI-7",
+                            remediation=(
+                                "Avoid deserialising untrusted data. Use safe formats (JSON, Protobuf). "
+                                "If deserialization is required, implement integrity checks and input validation."
+                            ),
+                        )
+                        vc.log(f"[deserialization] Error discloses deserializer at {action}", "SUCCESS")
+                        break
+                except Exception:
+                    pass
+
+    vc.status(phase, "Deserialization", "running", "Content-Type probe", 1, 3)
+    # 2. Probe common endpoints with serialized content-types
+    for ct in _DESER_CONTENT_TYPES:
+        try:
+            r = sess.post(url, data=b"\xac\xed\x00\x05", timeout=timeout,
+                          headers={"Content-Type": ct})
+            if r and _DESER_RESP_RE.search(r.text):
+                out.add_finding(
+                    title="Insecure Deserialization — Serialized Object Accepted",
+                    url=url, port=target["port"], risk="CRITICAL",
+                    description=(f"The endpoint accepted a POST request with Content-Type '{ct}' "
+                                 f"and the response suggests the payload was processed by a "
+                                 f"deserialization library. Insecure deserialization can lead to RCE."),
+                    output=f"POST {url} with Content-Type: {ct}\nResponse: {r.text[:500]}",
+                    sources="fracture-deserialization", service=target["scheme"],
+                    affected=url, owasp="A08:2025 Software and Data Integrity Failures",
+                    nist="SI-7",
+                    remediation=(
+                        "Reject requests with serialization content-types unless explicitly required. "
+                        "Use integrity-checked, schema-validated formats."
+                    ),
+                )
+                vc.log(f"[deserialization] Serialized CT accepted: {ct}", "SUCCESS")
+        except Exception:
+            pass
+
+    vc.status(phase, "Deserialization", "running", "YAML deserialization probe", 2, 3)
+    # 3. YAML deserialization probe via form fields and API endpoints
+    _yaml_payload = "!!python/object/apply:os.system ['echo fracture_yaml_rce']"
+    for form in forms[:5]:
+        action = form.get("action", url)
+        inputs = form.get("inputs", [])
+        for inp in inputs:
+            pname = inp.get("name", "")
+            if not pname:
+                continue
+            data = {i["name"]: "test" for i in inputs if i.get("name")}
+            data[pname] = _yaml_payload
+            try:
+                r = sess.post(action, data=data, timeout=timeout)
+                if r and (re.search(r'fracture_yaml_rce|yaml.*error|unsafe.*load', r.text, re.I)
+                          or r.status_code == 500):
+                    out.add_finding(
+                        title="Insecure Deserialization — YAML Tag Injection",
+                        url=action, port=target["port"], risk="CRITICAL",
+                        description=(f"Field '{pname}' at {action} accepted a YAML tag injection payload "
+                                     f"({_yaml_payload!r}). The response indicates YAML parsing of the input."),
+                        output=f"Field: {pname}\nPayload: {_yaml_payload}\nResponse ({r.status_code}): {r.text[:400]}",
+                        sources="fracture-deserialization", service=target["scheme"],
+                        affected=action, owasp="A08:2025 Software and Data Integrity Failures",
+                        nist="SI-7",
+                        remediation="Use yaml.safe_load() instead of yaml.load(). Never pass user input to YAML parsers that process Python tags.",
+                    )
+                    vc.log(f"[deserialization] YAML tag injection at {action}", "SUCCESS")
+                    break
+            except Exception:
+                pass
+
+    vc.status(phase, "Deserialization", "complete", "Done", 3, 3)
+    vc.log("[deserialization] Phase complete", "SUCCESS")
+
+
+# =============================================================================
+# Phase 18: File Upload — Informational
+# =============================================================================
+
+def _phase_file_upload_info(target: dict, cfg: dict, pm: ProgressManager,
+                            out: OutputManager, sess: requests.Session,
+                            crawl_data: dict) -> None:
+    """Phase 18: Detect file upload endpoints and report accepted file types (informational)."""
+    phase   = "file_upload_info"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    forms   = crawl_data.get("forms", [])
+    vc.status(phase, "File Upload Info", "running", "Detecting upload forms", 0, 1)
+
+    upload_forms = [
+        f for f in forms
+        if any(i.get("type") == "file" for i in f.get("inputs", []))
+        or "multipart" in f.get("enctype", "")
+    ]
+
+    for form in upload_forms:
+        action   = form.get("action", url)
+        inputs   = form.get("inputs", [])
+        file_inp = next((i for i in inputs if i.get("type") == "file"), None)
+        if not file_inp:
+            continue
+
+        accept_attr = file_inp.get("accept", "")
+        pname       = file_inp.get("name", "file")
+
+        # Determine which types to probe
+        probe_extensions = [".txt", ".html", ".php", ".jsp", ".aspx", ".svg"]
+        accepted_types   = []
+        dangerous_found  = []
+
+        for ext in probe_extensions:
+            fname    = f"fracture_probe{ext}"
+            content  = b"fracture_upload_test"
+            files    = {pname: (fname, content, "text/plain")}
+            extra    = {i["name"]: "fracture_test" for i in inputs
+                        if i.get("name") and i.get("type") != "file"}
+            try:
+                r = sess.post(action, files=files, data=extra, timeout=timeout)
+                if r and r.status_code in (200, 201, 302):
+                    accepted_types.append(ext)
+                    if _UPLOAD_ACCEPT_DANGEROUS.search(ext):
+                        dangerous_found.append(ext)
+            except Exception:
+                pass
+
+        risk        = "HIGH" if dangerous_found else "INFO"
+        description = (
+            f"File upload endpoint found at {action} (field: '{pname}'). "
+            + (f"Accepted file types from probe: {', '.join(accepted_types)}. " if accepted_types else "")
+            + (f"DANGEROUS: server accepted potentially executable extensions: "
+               f"{', '.join(dangerous_found)}. " if dangerous_found else "")
+            + (f"'accept' attribute declares: {accept_attr}. " if accept_attr else "")
+        )
+        remediation = (
+            "Validate file extensions and MIME types server-side. "
+            "Store uploads outside the web root. "
+            "Rename uploaded files to random UUIDs. "
+            "Scan uploaded content with antivirus. "
+            "Restrict execution permissions on the upload directory."
+        ) if dangerous_found else (
+            "Confirm server-side extension validation is enforced. "
+            "Ensure uploaded files are stored outside the web root with non-executable permissions."
+        )
+
+        out.add_finding(
+            title="File Upload Endpoint Detected" if not dangerous_found
+                  else "Unrestricted File Upload — Dangerous Extension Accepted",
+            url=action, port=target["port"], risk=risk,
+            description=description,
+            output=(f"Form action: {action}\nFile field: {pname}\n"
+                    f"Accept attribute: {accept_attr or '(none)'}\n"
+                    f"Probed extensions: {', '.join(probe_extensions)}\n"
+                    f"Accepted: {', '.join(accepted_types) or '(none confirmed)'}"),
+            sources="fracture-file-upload", service=target["scheme"],
+            affected=action, owasp="A04:2025 Insecure Design", nist="SI-3",
+            remediation=remediation,
+        )
+        vc.log(f"[file_upload_info] Upload form at {action} — accepted: {accepted_types}", "SUCCESS")
+
+    if not upload_forms:
+        vc.log("[file_upload_info] No file upload forms detected", "INFO")
+
+    vc.status(phase, "File Upload Info", "complete", "Done", 1, 1)
+    vc.log("[file_upload_info] Phase complete", "SUCCESS")
+
+
+# =============================================================================
+# Phase 19: Mass Assignment
+# =============================================================================
+
+def _phase_mass_assignment(target: dict, cfg: dict, pm: ProgressManager,
+                           out: OutputManager, sess: requests.Session,
+                           crawl_data: dict) -> None:
+    """Phase 19: Test web forms and JSON endpoints for mass assignment vulnerabilities."""
+    phase   = "mass_assignment"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    forms   = crawl_data.get("forms", [])
+    vc.status(phase, "Mass Assignment", "running", "Testing forms", 0, 2)
+
+    _ma_found: set = set()
+
+    # 1. Form-based mass assignment
+    for form in forms[:15]:
+        action  = form.get("action", url)
+        method  = form.get("method", "POST")
+        inputs  = form.get("inputs", [])
+        if method.upper() not in ("POST", "PUT", "PATCH"):
+            continue
+        if action in _ma_found:
+            continue
+
+        # Baseline submission
+        base_data = {i["name"]: "test_value" for i in inputs if i.get("name")}
+        try:
+            r_base = sess.post(action, data=base_data, timeout=timeout)
+        except Exception:
+            continue
+
+        # Augmented submission with privileged fields
+        aug_data = dict(base_data)
+        for ma_field in _MASS_ASSIGN_FIELDS:
+            aug_data[ma_field] = "1"
+        try:
+            r_aug = sess.post(action, data=aug_data, timeout=timeout)
+            # Heuristic: if augmented response contains the injected field name,
+            # the server accepted the extra parameter
+            if r_aug and any(f in r_aug.text for f in _MASS_ASSIGN_FIELDS):
+                reflected = [f for f in _MASS_ASSIGN_FIELDS if f in r_aug.text]
+                _ma_found.add(action)
+                out.add_finding(
+                    title="Mass Assignment / Privilege Escalation",
+                    url=action, port=target["port"], risk="HIGH",
+                    description=(f"Mass assignment vulnerability at {action}. Injecting privileged "
+                                 f"fields ({', '.join(reflected)}) into the form submission caused "
+                                 f"them to appear in the server response, indicating they were accepted "
+                                 f"and potentially stored."),
+                    output=(f"Form: {action}\nInjected fields: {', '.join(reflected)}\n"
+                            f"Response snippet: {r_aug.text[:400]}"),
+                    sources="fracture-mass-assignment", service=target["scheme"],
+                    affected=action, owasp="A01:2025 Broken Access Control", nist="AC-3",
+                    remediation=(
+                        "Use an explicit allowlist of bindable fields (DTO pattern). "
+                        "Never bind all request parameters directly to model objects."
+                    ),
+                )
+                vc.log(f"[mass_assignment] Form mass assignment at {action}: {reflected}", "SUCCESS")
+        except Exception:
+            pass
+
+    vc.status(phase, "Mass Assignment", "running", "Testing JSON endpoints", 1, 2)
+    # 2. JSON body mass assignment on common profile/update endpoints
+    _json_update_paths = ["/api/user", "/api/profile", "/profile", "/user",
+                          "/api/v1/user", "/api/v1/profile", "/account", "/api/account",
+                          "/user/update", "/api/user/update"]
+    for jpath in _json_update_paths:
+        jurl = url.rstrip("/") + jpath
+        if jurl in _ma_found:
+            continue
+        try:
+            base_resp = sess.put(jurl, json={"name": "fracture_test"}, timeout=timeout)
+            if base_resp and base_resp.status_code in (200, 201, 204):
+                priv_payload = {"name": "fracture_test"}
+                for f in _MASS_ASSIGN_FIELDS:
+                    priv_payload[f] = True
+                r_priv = sess.put(jurl, json=priv_payload, timeout=timeout)
+                if r_priv and any(f in r_priv.text for f in _MASS_ASSIGN_FIELDS):
+                    reflected_j = [f for f in _MASS_ASSIGN_FIELDS if f in r_priv.text]
+                    _ma_found.add(jurl)
+                    out.add_finding(
+                        title="Mass Assignment / Privilege Escalation",
+                        url=jurl, port=target["port"], risk="HIGH",
+                        description=(f"Mass assignment via JSON body at {jpath}. Privileged fields "
+                                     f"({', '.join(reflected_j)}) were accepted by the server and "
+                                     f"reflected in the response."),
+                        output=(f"PUT {jpath}\nInjected: {list(priv_payload.keys())}\n"
+                                f"Reflected: {reflected_j}\nResponse: {r_priv.text[:400]}"),
+                        sources="fracture-mass-assignment", service=target["scheme"],
+                        affected=jurl, owasp="A01:2025 Broken Access Control", nist="AC-3",
+                        remediation=(
+                            "Use strict schema validation on all incoming JSON bodies. "
+                            "Maintain an explicit allowlist of fields that may be set via each endpoint."
+                        ),
+                    )
+                    vc.log(f"[mass_assignment] JSON mass assignment at {jpath}: {reflected_j}", "SUCCESS")
+        except Exception:
+            pass
+
+    vc.status(phase, "Mass Assignment", "complete", "Done", 2, 2)
+    vc.log("[mass_assignment] Phase complete", "SUCCESS")
 
 
 # =============================================================================
@@ -6986,6 +7950,46 @@ def main() -> None:
                 except Exception as e:
                     vc.error(f"Phase cross_user error: {e}")
                     pm.set_phase_status("cross_user", "error", detail=str(e))
+
+        # ── Phase 16: open_redirect ──
+        if not _skip("open_redirect"):
+            pm.set_phase_status("open_redirect", "running", "Open Redirect")
+            try:
+                _phase_open_redirect(target, cfg, pm, out, sess, crawl_data)
+                pm.set_phase_status("open_redirect", "complete", "Open Redirect")
+            except Exception as e:
+                vc.error(f"Phase open_redirect error: {e}")
+                pm.set_phase_status("open_redirect", "error", detail=str(e))
+
+        # ── Phase 17: deserialization ──
+        if not _skip("deserialization"):
+            pm.set_phase_status("deserialization", "running", "Deserialization")
+            try:
+                _phase_deserialization(target, cfg, pm, out, sess, crawl_data)
+                pm.set_phase_status("deserialization", "complete", "Deserialization")
+            except Exception as e:
+                vc.error(f"Phase deserialization error: {e}")
+                pm.set_phase_status("deserialization", "error", detail=str(e))
+
+        # ── Phase 18: file_upload_info ──
+        if not _skip("file_upload_info"):
+            pm.set_phase_status("file_upload_info", "running", "File Upload Info")
+            try:
+                _phase_file_upload_info(target, cfg, pm, out, sess, crawl_data)
+                pm.set_phase_status("file_upload_info", "complete", "File Upload Info")
+            except Exception as e:
+                vc.error(f"Phase file_upload_info error: {e}")
+                pm.set_phase_status("file_upload_info", "error", detail=str(e))
+
+        # ── Phase 19: mass_assignment ──
+        if not _skip("mass_assignment"):
+            pm.set_phase_status("mass_assignment", "running", "Mass Assignment")
+            try:
+                _phase_mass_assignment(target, cfg, pm, out, sess, crawl_data)
+                pm.set_phase_status("mass_assignment", "complete", "Mass Assignment")
+            except Exception as e:
+                vc.error(f"Phase mass_assignment error: {e}")
+                pm.set_phase_status("mass_assignment", "error", detail=str(e))
 
         # Write summary
         try:
