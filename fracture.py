@@ -21,6 +21,7 @@ import importlib
 import importlib.util
 import platform
 import re
+import random
 import shutil
 import argparse
 import json
@@ -43,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.1.0"
+VERSION = "2.3.4"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1268,14 +1269,15 @@ class OutputManager:
     _log_lock:      threading.Lock = threading.Lock()
 
     def __init__(self, project_name: str) -> None:
-        self.project_name = project_name
-        self.root         = Path(project_name).resolve()
-        self.log_file      = self.root / "scan.log"
-        self.json_log_file = self.root / "scan.log.json"
-        self.error_log     = self.root / "errors.log"
-        self.findings_json = self.root / "findings.json"
-        self.findings_csv  = self.root / "findings.csv"
-        self.summary_json  = self.root / "summary.json"
+        self.project_name     = project_name
+        self.root             = Path(project_name).resolve()
+        self.log_file         = self.root / "scan.log"
+        self.json_log_file    = self.root / "scan.log.json"
+        self.error_log        = self.root / "errors.log"
+        self.findings_json    = self.root / "findings.json"
+        self.findings_csv     = self.root / "findings.csv"
+        self.summary_json     = self.root / "summary.json"
+        self._current_accounts: list = []
         self._setup_dirs()
 
     def _setup_dirs(self) -> None:
@@ -1352,6 +1354,10 @@ class OutputManager:
             with self.error_log.open("a", encoding="utf-8") as f:
                 f.write(f"[{ts}] ERROR  TOOL={tool}\n  Command : {cmd_str}\n  Error   : {error}\n\n")
 
+    def set_auth_context(self, accounts: list) -> None:
+        """Set the active auth context for subsequent add_finding calls."""
+        self._current_accounts = list(accounts)
+
     def add_finding(
         self,
         title: str,
@@ -1407,6 +1413,7 @@ class OutputManager:
             "owasp_url":      _owasp_url or "",
             "nist":           nist or "",
             "remediation":    remediation or "",
+            "accounts":       list(self._current_accounts),
         }
         csv_entry = dict(entry)
         csv_entry["title"] = ascii_title
@@ -1456,6 +1463,16 @@ class OutputManager:
                         new_desc = description.strip()
                         if new_desc and new_desc not in ex_desc:
                             ex["description"] = f"{ex_desc}\n\n{new_desc}".strip() if ex_desc else new_desc
+                    # merge accounts
+                    if self._current_accounts:
+                        _ex_accts = ex.get("accounts") or []
+                        _acct_keys = {(a.get("username", ""), a.get("role", "")) for a in _ex_accts}
+                        for _a in self._current_accounts:
+                            _k = (_a.get("username", ""), _a.get("role", ""))
+                            if _k not in _acct_keys:
+                                _ex_accts.append(_a)
+                                _acct_keys.add(_k)
+                        ex["accounts"] = _ex_accts
                     # escalate risk
                     _risk_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
                     if _risk_rank.get((risk or "").upper(), 0) > _risk_rank.get((ex.get("risk") or "").upper(), 0):
@@ -1518,6 +1535,7 @@ _BANNER = r"""
 vc: VantageConsole = VantageConsole()
 _active_procs: list = []
 _procs_lock = threading.Lock()
+_redirect_seen: set = set()  # (from_url, to_url) pairs already reported
 
 
 def _register_proc(proc: subprocess.Popen) -> None:
@@ -1563,8 +1581,41 @@ atexit.register(_atexit_kill_procs)
 # ─────────────────────────────────────────────
 # Shared HTTP session factory
 # ─────────────────────────────────────────────
-def _make_session(cfg: dict) -> requests.Session:
-    sess = requests.Session()
+def _is_in_scope_url(url: str, scope_hostnames: set) -> bool:
+    """Return True if the URL's hostname is within the configured scope."""
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+    except Exception:
+        return False
+    return host in scope_hostnames
+
+
+class _ScopedSession(requests.Session):
+    """requests.Session that blocks any request whose hostname is outside scope."""
+
+    def __init__(self, scope_hostnames: set) -> None:
+        super().__init__()
+        self._scope = scope_hostnames
+
+    def send(self, request, **kwargs):
+        try:
+            host = urllib.parse.urlparse(request.url).hostname or ""
+        except Exception:
+            host = ""
+        if host and host not in self._scope:
+            vc.log(
+                f"[scope] Blocked out-of-scope request: {request.method} {request.url}",
+                "WARNING",
+            )
+            raise ValueError(f"Out-of-scope request blocked: {request.url}")
+        return super().send(request, **kwargs)
+
+
+def _make_session(cfg: dict, scope_hostnames: "set | None" = None) -> requests.Session:
+    if scope_hostnames is not None:
+        sess = _ScopedSession(scope_hostnames)
+    else:
+        sess = requests.Session()
     sess.verify  = cfg.get("verify_ssl", False)
     ua           = cfg.get("user_agent", "Mozilla/5.0 (compatible; Fracture/1.0; Security Assessment)")
     sess.headers.update({"User-Agent": ua})
@@ -1577,7 +1628,8 @@ def _make_session(cfg: dict) -> requests.Session:
     return sess
 
 
-def _build_auth_session(cfg: dict, auth_key: str = "auth") -> "requests.Session | None":
+def _build_auth_session(cfg: dict, auth_key: str = "auth",
+                        scope_hostnames: "set | None" = None) -> "requests.Session | None":
     """
     Return an authenticated requests.Session for the given cfg/auth_key, or None if disabled.
     Supports all 20 auth methods from Fracture testConnection.py.
@@ -1585,7 +1637,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth") -> "requests.Session 
     auth = cfg.get(auth_key, {})
     if not auth.get("enabled"):
         return None
-    sess    = _make_session(cfg)
+    sess    = _make_session(cfg, scope_hostnames)
     timeout = cfg.get("timeout", 10)
     method  = (auth.get("method") or auth.get("auth_type") or "form_login").strip().lower()
 
@@ -1992,6 +2044,85 @@ def _normalize_url(base: str, href: str) -> "str | None":
         return None
 
 
+def _attach_redirect_hook(
+    sess: "requests.Session",
+    scope_hostnames: set,
+    target: dict,
+    out: "OutputManager",
+    in_scope_new: list,
+) -> None:
+    """Attach a response hook that records redirect findings and queues in-scope targets."""
+    def _hook(r, *args, **kwargs):
+        if r.status_code not in (301, 302, 303, 307, 308):
+            return
+        loc = r.headers.get("Location", "")
+        if not loc:
+            return
+        try:
+            abs_loc = urllib.parse.urljoin(r.url, loc)
+            p = urllib.parse.urlparse(abs_loc)
+            if p.scheme not in ("http", "https"):
+                return
+            dest_host = p.hostname or ""
+        except Exception:
+            return
+        key = (r.url, abs_loc)
+        if key in _redirect_seen:
+            return
+        _redirect_seen.add(key)
+        import hashlib as _hl
+        _redir_hash = _hl.md5(f"{r.url}|{abs_loc}".encode()).hexdigest()[:8]
+        _redir_rq, _redir_rp = _save_http_evidence(out, "recon", f"redirect_{_redir_hash}", r)
+        _redir_files = f"{_redir_rq},{_redir_rp}"
+        in_scope = dest_host in scope_hostnames
+        if in_scope:
+            out.add_finding(
+                title="HTTP Redirect to In-Scope URL",
+                url=r.url, port=target["port"], risk="INFO",
+                description=(
+                    f"A {r.status_code} redirect was observed from {r.url} to {abs_loc}. "
+                    f"The destination is within the assessed scope and has been queued for testing."
+                ),
+                output=f"From: {r.url}\nTo:   {abs_loc}\nStatus: {r.status_code}",
+                sources="fracture-redirect",
+                service=target["scheme"],
+                affected=r.url,
+                output_file=_redir_files,
+                owasp="A04:2025 Insecure Design",
+                nist="SC-7",
+                remediation=(
+                    "Verify that this redirect is intentional and does not expose sensitive "
+                    "paths or bypass access controls."
+                ),
+            )
+            norm = abs_loc.rstrip("/")
+            if norm not in in_scope_new:
+                in_scope_new.append(norm)
+            vc.log(f"[redirect] In-scope {r.status_code}: {r.url} → {abs_loc}", "INFO")
+        else:
+            out.add_finding(
+                title="HTTP Redirect to External URL",
+                url=r.url, port=target["port"], risk="INFO",
+                description=(
+                    f"A {r.status_code} redirect was observed from {r.url} to {abs_loc}. "
+                    f"The destination is outside the assessed scope."
+                ),
+                output=f"From: {r.url}\nTo:   {abs_loc}\nStatus: {r.status_code}",
+                sources="fracture-redirect",
+                service=target["scheme"],
+                affected=r.url,
+                output_file=_redir_files,
+                owasp="A04:2025 Insecure Design",
+                nist="SC-7",
+                remediation=(
+                    "Verify that this external redirect is intentional. "
+                    "Unvalidated redirects can be abused for phishing and open-redirect attacks."
+                ),
+            )
+            vc.log(f"[redirect] Out-of-scope {r.status_code}: {r.url} → {abs_loc}", "INFO")
+    sess.hooks["response"].append(_hook)
+
+
 # ─────────────────────────────────────────────
 # Default settings
 # ─────────────────────────────────────────────
@@ -2297,17 +2428,18 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         return
 
     vc.log(f"[recon] {url} → HTTP {status_code}", "INFO")
+    # Write "/" immediately so the Structure tab shows something from the first moment
+    try:
+        _write_structure_map(out, target, path_statuses={"/": status_code})
+    except Exception:
+        pass
     server_hdr  = headers.get("Server", "")
     powered_by  = headers.get("X-Powered-By", "")
     all_text    = body + " ".join(f"{k}: {v}" for k, v in headers.items())
 
-    # Save initial HTTP probe response as evidence
-    probe_out = out.output_path(phase, "http_probe_" + target["hostname"])
-    probe_out.write_text(
-        "\n".join(f"{k}: {v}" for k, v in headers.items())
-        + f"\n\nHTTP {status_code}\n\n{body[:10000]}",
-        encoding="utf-8",
-    )
+    # Save initial HTTP probe request + response as separate evidence files
+    _probe_rq, _probe_rp = _save_http_evidence(out, phase, "http_probe_" + target["hostname"], resp)
+    _probe_files = f"{_probe_rq},{_probe_rp}"
 
     # Check probe response for missing security headers.
     # Risk and format match shcheck so findings merge when both tools run.
@@ -2327,7 +2459,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 output=f"Missing: {_hdr_name}",
                 affected=_hdr_name,
                 sources="fracture-recon", service=target["scheme"],
-                output_file=str(probe_out),
+                output_file=_probe_files,
                 owasp="A05:2025 Security Misconfiguration", nist=_hdr_nist,
                 remediation=_hdr_remed,
             )
@@ -2341,7 +2473,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             url=url, port=target["port"], risk="LOW",
             description=f"The Server response header discloses the web server: '{server_hdr}'.",
             output=f"Server: {server_hdr}", sources="fracture-recon",
-            service=target["scheme"], output_file=str(probe_out),
+            service=target["scheme"], output_file=_probe_files,
             owasp="A05:2025 Security Misconfiguration", nist="SI-2",
             remediation="Suppress or genericise the Server header.",
         )
@@ -2351,7 +2483,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             url=url, port=target["port"], risk="LOW",
             description=f"X-Powered-By reveals: '{powered_by}'.",
             output=f"X-Powered-By: {powered_by}", sources="fracture-recon",
-            service=target["scheme"], output_file=str(probe_out),
+            service=target["scheme"], output_file=_probe_files,
             owasp="A05:2025 Security Misconfiguration", nist="SI-2",
             remediation="Remove the X-Powered-By header.",
         )
@@ -2589,23 +2721,38 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     for rpath in ["/robots.txt", "/sitemap.xml"]:
         try:
             r = sess.get(url + rpath, timeout=timeout)
+            _rpath_status = r.status_code
             if r.status_code == 200 and len(r.text) > 10 \
                     and not _is_wildcard_match(r, wc_baseline):
-                out_f = out.output_path(phase, rpath.lstrip("/").replace(".", "_"))
-                out_f.write_text(r.text, encoding="utf-8")
+                _rf_safe = rpath.lstrip("/").replace(".", "_")
+                _rf_rq, _rf_rp = _save_http_evidence(out, phase, _rf_safe, r)
                 vc.log(f"[recon] Found {rpath} ({len(r.text)} bytes)", "SUCCESS")
+                try:
+                    _write_structure_map(out, target, path_statuses={rpath: _rpath_status})
+                except Exception:
+                    pass
                 if rpath == "/robots.txt":
+                    # Also add any Disallow paths from robots.txt to the structure map
                     _raw_disallowed = re.findall(r'(?i)disallow:\s*(\S+)', r.text)
-                    # Skip catch-all entries (/, /*, *) — not specific sensitive paths
+                    _allowed_paths  = re.findall(r'(?i)allow:\s*(\S+)', r.text)
                     disallowed = [p for p in _raw_disallowed
                                   if p not in ("/", "/*", "*")]
+                    _robots_sm = {}
+                    for _rp_path in _raw_disallowed + _allowed_paths:
+                        if _rp_path not in ("/", "/*", "*"):
+                            _robots_sm[_rp_path] = None
+                    if _robots_sm:
+                        try:
+                            _write_structure_map(out, target, path_statuses=_robots_sm)
+                        except Exception:
+                            pass
                     if disallowed:
                         out.add_finding(
                             title="Sensitive Paths Disclosed in robots.txt",
                             url=url + rpath, port=target["port"], risk="INFO",
                             description=f"robots.txt disallows {len(disallowed)} path(s).",
                             output=r.text[:2000], sources="fracture-recon",
-                            service=target["scheme"], output_file=str(out_f),
+                            service=target["scheme"], output_file=f"{_rf_rq},{_rf_rp}",
                             affected="\n".join(disallowed[:20]),
                             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                             remediation="Review robots.txt for sensitive path disclosure.",
@@ -2617,38 +2764,42 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     for apath in _ADMIN_PATHS:
         try:
             r = sess.get(url + apath, timeout=timeout, allow_redirects=False)
-            if r.status_code in (200, 301, 302, 401, 403):
+            if r.status_code in (200, 301, 302):
                 # Wildcard baseline check: skip if response matches the catch-all pattern
                 if _is_wildcard_match(r, wc_baseline):
                     continue
                 # HTTP 200: panel accessible without authentication (CWE-306) → HIGH
-                # HTTP 401/403/redirect: panel exists but access controls are enforced → MEDIUM
+                # HTTP 301/302: panel exists and redirects (e.g. to login) → MEDIUM
                 _admin_risk = "HIGH" if r.status_code == 200 else "MEDIUM"
                 _admin_desc = (
                     f"Administrative interface accessible without authentication at {apath} "
                     f"(HTTP {r.status_code}). CWE-306 (Missing Authentication for Critical Function)."
                     if r.status_code == 200 else
                     f"Administrative interface found at {apath} (HTTP {r.status_code}). "
-                    f"Panel exists; authentication controls are enforced."
+                    f"Panel exists and redirects (likely to a login page)."
                 )
                 _admin_safe = apath.lstrip("/").replace("/", "_").replace(".", "_") or "root"
-                _admin_out  = out.output_path(phase, f"admin_{_admin_safe}")
-                _admin_out.write_text(
-                    f"GET {apath} HTTP/1.1\nHost: {target['hostname']}\n\n"
-                    f"HTTP {r.status_code}\n{r.text[:5000]}",
-                    encoding="utf-8",
-                )
+                _admin_rq, _admin_rp = _save_http_evidence(out, phase, f"admin_{_admin_safe}", r)
                 out.add_finding(
                     title="Admin Panel Exposed",
                     url=url + apath, port=target["port"], risk=_admin_risk,
                     description=_admin_desc,
                     output=f"GET {apath} → {r.status_code}",
                     sources="fracture-recon", service=target["scheme"],
-                    affected=url + apath, output_file=str(_admin_out),
+                    affected=url + apath, output_file=f"{_admin_rq},{_admin_rp}",
                     owasp="A05:2025 Security Misconfiguration", nist="AC-3",
                     remediation="Restrict admin interfaces by IP allowlist or VPN.",
                 )
                 vc.log(f"[recon] Admin panel: {apath} → {r.status_code}", "SUCCESS")
+                try:
+                    _admin_redir = None
+                    if r.status_code in (301, 302, 307, 308):
+                        _admin_redir = r.headers.get("Location", "")
+                    _write_structure_map(out, target,
+                                         path_statuses={apath: r.status_code},
+                                         path_redirects={apath: _admin_redir} if _admin_redir else None)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -2659,19 +2810,14 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             if r.status_code == 200 and cpath in ("/.git/HEAD", "/.env") \
                     and not _is_wildcard_match(r, wc_baseline):
                 _cp_safe = cpath.lstrip("/").replace("/", "_").replace(".", "_")
-                _cp_out  = out.output_path(phase, f"sensitive_path_{_cp_safe}")
-                _cp_out.write_text(
-                    f"GET {cpath} HTTP/1.1\nHost: {target['hostname']}\n\n"
-                    f"HTTP {r.status_code}\n{r.text[:5000]}",
-                    encoding="utf-8",
-                )
+                _cp_rq, _cp_rp = _save_http_evidence(out, phase, f"sensitive_path_{_cp_safe}", r)
                 out.add_finding(
                     title=f"Sensitive Path Accessible: {cpath}",
                     url=url + cpath, port=target["port"], risk="CRITICAL",
                     description=f"The path {cpath} is publicly accessible.",
                     output=f"GET {cpath} → {r.status_code}\n{r.text[:500]}",
                     sources="fracture-recon", service=target["scheme"],
-                    affected=url + cpath, output_file=str(_cp_out),
+                    affected=url + cpath, output_file=f"{_cp_rq},{_cp_rp}",
                     owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                     remediation=f"Block public access to {cpath}.",
                 )
@@ -2718,6 +2864,21 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         if found:
             out_f.write_text("\n".join(found), encoding="utf-8")
 
+    # Write gobuster dirs to structure map as soon as it finishes
+    if out_f.exists():
+        try:
+            _sm_ps, _sm_rd = {}, {}
+            for _gu, _gs, _gr in _parse_gobuster_with_status(out_f, url):
+                _sp = urllib.parse.urlparse(_gu).path or "/"
+                _sm_ps[_sp] = _gs
+                if _gr:
+                    _sm_rd[_sp] = _gr
+            if _sm_ps:
+                _write_structure_map(out, target, path_statuses=_sm_ps,
+                                     path_redirects=_sm_rd or None)
+        except Exception:
+            pass
+
     # feroxbuster — recursive directory discovery; runs even on wildcard hosts
     feroxbuster = _find_tool("feroxbuster")
     if feroxbuster and Path(wordlist).exists():
@@ -2727,17 +2888,41 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             "--depth", "2", "--threads", "30", "--quiet",
             "--status-codes", "200,204,301,302,307,401,403",
             "--output", str(fer_out), "--insecure",
-            "--auto-tune",
+            "--auto-tune", "--time-limit", "4m",
         ]
         vc.log("[recon] Running feroxbuster ...", "INFO")
+        _fer_proc = None
         try:
-            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-            _register_proc(proc)
-            proc.communicate(timeout=300)
-            _deregister_proc(proc)
+            _fer_proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            _register_proc(_fer_proc)
+            _fer_proc.communicate(timeout=300)
+            _deregister_proc(_fer_proc)
             out.log_command("feroxbuster", cmd, fer_out)
+        except subprocess.TimeoutExpired:
+            _fer_proc.kill()
+            _fer_proc.communicate()
+            _deregister_proc(_fer_proc)
+            vc.log("[recon] feroxbuster timed out after 300s — killed", "WARNING")
         except Exception as e:
+            if _fer_proc:
+                try: _fer_proc.kill(); _fer_proc.communicate()
+                except Exception: pass
+                _deregister_proc(_fer_proc)
             out.log_error("feroxbuster", cmd, str(e))
+        # Write feroxbuster dirs to structure map
+        if fer_out.exists():
+            try:
+                _sm_ps, _sm_rd = {}, {}
+                for _fu, _fs, _fr in _parse_feroxbuster_with_status(fer_out):
+                    _sp = urllib.parse.urlparse(_fu).path or "/"
+                    _sm_ps[_sp] = _fs
+                    if _fr:
+                        _sm_rd[_sp] = _fr
+                if _sm_ps:
+                    _write_structure_map(out, target, path_statuses=_sm_ps,
+                                         path_redirects=_sm_rd or None)
+            except Exception:
+                pass
     elif feroxbuster:
         vc.log(f"[recon] feroxbuster found but wordlist missing: {wordlist}", "WARNING")
 
@@ -2766,6 +2951,20 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 out.log_command("gobuster", cmd, gob_files_out)
             except Exception as e:
                 out.log_error("gobuster", cmd, str(e))
+            # Write gobuster files to structure map
+            if gob_files_out.exists():
+                try:
+                    _sm_ps, _sm_rd = {}, {}
+                    for _gu, _gs, _gr in _parse_gobuster_with_status(gob_files_out, url):
+                        _sp = urllib.parse.urlparse(_gu).path or "/"
+                        _sm_ps[_sp] = _gs
+                        if _gr:
+                            _sm_rd[_sp] = _gr
+                    if _sm_ps:
+                        _write_structure_map(out, target, path_statuses=_sm_ps,
+                                             path_redirects=_sm_rd or None)
+                except Exception:
+                    pass
         # feroxbuster files: always run (handles wildcards natively)
         if feroxbuster:
             fer_files_out = out.output_path(phase, "feroxbuster_files_" + target["hostname"])
@@ -2774,17 +2973,41 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 "--depth", "2", "--threads", "30", "--quiet",
                 "--status-codes", "200,204,301,302,307,401,403",
                 "--output", str(fer_files_out), "--insecure",
-                "--auto-tune",
+                "--auto-tune", "--time-limit", "4m",
             ]
             vc.log("[recon] Running feroxbuster (files) ...", "INFO")
+            _fer_files_proc = None
             try:
-                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-                _register_proc(proc)
-                proc.communicate(timeout=300)
-                _deregister_proc(proc)
+                _fer_files_proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                _register_proc(_fer_files_proc)
+                _fer_files_proc.communicate(timeout=300)
+                _deregister_proc(_fer_files_proc)
                 out.log_command("feroxbuster", cmd, fer_files_out)
+            except subprocess.TimeoutExpired:
+                _fer_files_proc.kill()
+                _fer_files_proc.communicate()
+                _deregister_proc(_fer_files_proc)
+                vc.log("[recon] feroxbuster (files) timed out after 300s — killed", "WARNING")
             except Exception as e:
+                if _fer_files_proc:
+                    try: _fer_files_proc.kill(); _fer_files_proc.communicate()
+                    except Exception: pass
+                    _deregister_proc(_fer_files_proc)
                 out.log_error("feroxbuster", cmd, str(e))
+            # Write feroxbuster files to structure map
+            if fer_files_out.exists():
+                try:
+                    _sm_ps, _sm_rd = {}, {}
+                    for _fu, _fs, _fr in _parse_feroxbuster_with_status(fer_files_out):
+                        _sp = urllib.parse.urlparse(_fu).path or "/"
+                        _sm_ps[_sp] = _fs
+                        if _fr:
+                            _sm_rd[_sp] = _fr
+                    if _sm_ps:
+                        _write_structure_map(out, target, path_statuses=_sm_ps,
+                                             path_redirects=_sm_rd or None)
+                except Exception:
+                    pass
 
     vc.status(phase, "Recon", "running", "Directory listing check", 7, 10)
     try:
@@ -2881,6 +3104,14 @@ def _parse_gobuster_output(filepath: Path, base_url: str) -> list:
         if m:
             urls.append(f"{base}{m.group(1)}")
     return urls
+
+
+def _url_is_file(url: str) -> bool:
+    """Return True if the URL's last path segment looks like a file (has a non-leading dot)."""
+    path = urllib.parse.urlparse(url).path.rstrip("/")
+    last = path.split("/")[-1] if path else ""
+    dot  = last.find(".", 1)  # ignore leading dots (e.g. .htaccess is still a file, but index is not)
+    return dot != -1
 
 
 def _parse_feroxbuster_output(filepath: Path) -> list:
@@ -3048,7 +3279,7 @@ def _phase_endpoint_tools(
             if ep_wc is not None:
                 vc.log(f"[endpoint_tools] Wildcard detected on {ep_url} — skipping brute-force", "WARNING")
 
-        if ep_wc is None and gobuster and Path(wordlist_dir).exists():
+        if ep_wc is None and gobuster and Path(wordlist_dir).exists() and not _url_is_file(ep_url):
             ep_gob = out.output_path("recon", f"gobuster_ep_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_dir,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob)]
@@ -3063,8 +3294,21 @@ def _phase_endpoint_tools(
                 out.log_command("gobuster", cmd, ep_gob)
             except Exception as e:
                 out.log_error("gobuster", cmd, str(e))
+            if ep_gob.exists():
+                try:
+                    _ep_ps, _ep_rd = {}, {}
+                    for _gu, _gs, _gr in _parse_gobuster_with_status(ep_gob, ep_url):
+                        _sp = urllib.parse.urlparse(_gu).path or "/"
+                        _ep_ps[_sp] = _gs
+                        if _gr:
+                            _ep_rd[_sp] = _gr
+                    if _ep_ps:
+                        _write_structure_map(out, target, path_statuses=_ep_ps,
+                                             path_redirects=_ep_rd or None)
+                except Exception:
+                    pass
 
-        if ep_wc is None and gobuster and Path(wordlist_file).exists():
+        if ep_wc is None and gobuster and Path(wordlist_file).exists() and not _url_is_file(ep_url):
             ep_gob_f = out.output_path("recon", f"gobuster_ep_files_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_file,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob_f)]
@@ -3078,23 +3322,60 @@ def _phase_endpoint_tools(
                 out.log_command("gobuster", cmd, ep_gob_f)
             except Exception as e:
                 out.log_error("gobuster", cmd, str(e))
+            if ep_gob_f.exists():
+                try:
+                    _ep_ps, _ep_rd = {}, {}
+                    for _gu, _gs, _gr in _parse_gobuster_with_status(ep_gob_f, ep_url):
+                        _sp = urllib.parse.urlparse(_gu).path or "/"
+                        _ep_ps[_sp] = _gs
+                        if _gr:
+                            _ep_rd[_sp] = _gr
+                    if _ep_ps:
+                        _write_structure_map(out, target, path_statuses=_ep_ps,
+                                             path_redirects=_ep_rd or None)
+                except Exception:
+                    pass
 
-        # feroxbuster: always run — handles wildcards natively
-        if feroxbuster and Path(wordlist_dir).exists():
+        # feroxbuster: always run on directories — handles wildcards natively
+        if feroxbuster and Path(wordlist_dir).exists() and not _url_is_file(ep_url):
             ep_fer = out.output_path("recon", f"feroxbuster_ep_{ep_safe}")
             cmd = [feroxbuster, "--url", ep_url, "--wordlist", wordlist_dir,
                    "--depth", "1", "--threads", "20", "--quiet",
                    "--status-codes", "200,204,301,302,307,401,403",
-                   "--output", str(ep_fer), "--insecure", "--auto-tune"]
+                   "--output", str(ep_fer), "--insecure", "--auto-tune",
+                   "--time-limit", "2m"]
             vc.log(f"[endpoint_tools] feroxbuster on {ep_url}", "INFO")
+            _ep_fer_proc = None
             try:
-                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-                _register_proc(proc)
-                proc.communicate(timeout=180)
-                _deregister_proc(proc)
+                _ep_fer_proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                _register_proc(_ep_fer_proc)
+                _ep_fer_proc.communicate(timeout=180)
+                _deregister_proc(_ep_fer_proc)
                 out.log_command("feroxbuster", cmd, ep_fer)
+            except subprocess.TimeoutExpired:
+                _ep_fer_proc.kill()
+                _ep_fer_proc.communicate()
+                _deregister_proc(_ep_fer_proc)
+                vc.log(f"[endpoint_tools] feroxbuster timed out after 180s — killed", "WARNING")
             except Exception as e:
+                if _ep_fer_proc:
+                    try: _ep_fer_proc.kill(); _ep_fer_proc.communicate()
+                    except Exception: pass
+                    _deregister_proc(_ep_fer_proc)
                 out.log_error("feroxbuster", cmd, str(e))
+            if ep_fer.exists():
+                try:
+                    _ep_ps, _ep_rd = {}, {}
+                    for _fu, _fs, _fr in _parse_feroxbuster_with_status(ep_fer):
+                        _sp = urllib.parse.urlparse(_fu).path or "/"
+                        _ep_ps[_sp] = _fs
+                        if _fr:
+                            _ep_rd[_sp] = _fr
+                    if _ep_ps:
+                        _write_structure_map(out, target, path_statuses=_ep_ps,
+                                             path_redirects=_ep_rd or None)
+                except Exception:
+                    pass
 
     vc.status("endpoint_tools", "Endpoint Tools", "complete", "Done",
               len(endpoints), len(endpoints))
@@ -3793,25 +4074,78 @@ _SECURITY_HEADERS = [
     ("Referrer-Policy",           "LOW",    "Missing Referrer-Policy Header",
      "Without Referrer-Policy, URL parameters may leak to third parties.",
      "SI-12", "Add: Referrer-Policy: strict-origin-when-cross-origin"),
-    ("Permissions-Policy",        "LOW",    "Missing Permissions-Policy Header",
-     "Without Permissions-Policy, browser features may be accessible unintentionally.",
-     "CM-7",  "Add: Permissions-Policy: geolocation=(), camera=(), microphone=()"),
-    ("X-XSS-Protection",          "LOW",    "Missing X-XSS-Protection Header",
-     "Without X-XSS-Protection, older browsers lack an extra XSS filter hint.",
-     "SI-10", "Add: X-XSS-Protection: 1; mode=block"),
-    ("Cross-Origin-Opener-Policy", "MEDIUM", "Missing Cross-Origin-Opener-Policy (COOP) Header",
-     "Without COOP, malicious pages can access window references to your site, enabling "
-     "Spectre-style side-channel leaks and cross-window scripting.",
-     "SC-8", "Add: Cross-Origin-Opener-Policy: same-origin"),
-    ("Cross-Origin-Resource-Policy", "MEDIUM", "Missing Cross-Origin-Resource-Policy (CORP) Header",
-     "Without CORP, other origins can load your resources (images, scripts), enabling "
-     "Spectre cross-site leaks and hotlinking of sensitive assets.",
-     "AC-4", "Add: Cross-Origin-Resource-Policy: same-origin (or same-site for CDN resources)"),
-    ("Cross-Origin-Embedder-Policy", "LOW", "Missing Cross-Origin-Embedder-Policy (COEP) Header",
-     "Without COEP, cross-origin isolation cannot be enabled, blocking access to "
-     "SharedArrayBuffer and high-precision timers needed for Spectre mitigation.",
-     "SC-8", "Add: Cross-Origin-Embedder-Policy: require-corp"),
+    ("Cache-Control",             "LOW",    "Missing Cache-Control Header",
+     "Without Cache-Control, sensitive responses may be stored by browser or proxy caches.",
+     "SI-12", "Add: Cache-Control: no-store, no-cache to sensitive endpoint responses."),
 ]
+
+# Headers allowed by the shcheck parser — must match _SECURITY_HEADERS names exactly
+_SHCHECK_ALLOWED_HEADERS = {
+    "Strict-Transport-Security", "Content-Security-Policy",
+    "X-Frame-Options", "X-Content-Type-Options",
+    "Referrer-Policy", "Cache-Control",
+}
+
+
+def _platform_remed(base: str, server: str = "", powered_by: str = "") -> str:
+    """Extend a base remediation string with platform-specific guidance."""
+    _s = (server + " " + powered_by).lower()
+    parts = [base]
+    if "iis" in _s or "microsoft" in _s or "asp.net" in _s or "aspnet" in _s:
+        parts.append(
+            "Windows / IIS: Add via web.config <customHeaders> or URL Rewrite outbound rules. "
+            "PowerShell: Set-WebConfigurationProperty -pspath 'IIS:\\\\' "
+            "-filter system.webServer/httpProtocol/customHeaders -name . "
+            "-value @{name='<Header>';value='<Value>'}"
+        )
+    elif "apache" in _s:
+        parts.append(
+            "Apache (Debian/Ubuntu): sudo a2enmod headers && "
+            "echo 'Header always set <Header> \"<Value>\"' | "
+            "sudo tee /etc/apache2/conf-available/security-headers.conf && "
+            "sudo a2enconf security-headers && sudo systemctl reload apache2\n"
+            "Apache (RHEL/CentOS): add to /etc/httpd/conf/httpd.conf or conf.d/*.conf: "
+            "Header always set <Header> \"<Value>\""
+        )
+    elif "nginx" in _s:
+        parts.append(
+            "Nginx (Debian/Ubuntu): add to /etc/nginx/conf.d/security.conf: "
+            "add_header <Header> '<Value>' always; then: sudo nginx -t && sudo systemctl reload nginx\n"
+            "Nginx (RHEL/CentOS): add to /etc/nginx/nginx.conf server{} block: "
+            "add_header <Header> '<Value>' always;"
+        )
+    elif "flask" in _s or "werkzeug" in _s or "gunicorn" in _s or "uvicorn" in _s:
+        parts.append(
+            "Flask/Python: @app.after_request\n"
+            "def set_security_headers(response):\n"
+            "    response.headers['<Header>'] = '<Value>'\n"
+            "    return response"
+        )
+    elif "tomcat" in _s or "spring" in _s or "jetty" in _s:
+        parts.append(
+            "Tomcat: Add HttpHeaderSecurityFilter to web.xml. "
+            "Spring Security: http.headers().addHeaderWriter("
+            "new StaticHeadersWriter(\"<Header>\", \"<Value>\"));"
+        )
+    elif "express" in _s or "node" in _s:
+        parts.append(
+            "Express/Node.js: npm install helmet && app.use(helmet()); "
+            "or: app.use((req,res,next)=>{ res.setHeader('<Header>','<Value>'); next(); });"
+        )
+    elif "caddy" in _s:
+        parts.append(
+            "Caddy: Add to Caddyfile: header <Header> \"<Value>\""
+        )
+    else:
+        parts.append(
+            "Apache: Header always set <Header> \"<Value>\" | "
+            "Nginx: add_header <Header> '<Value>' always; | "
+            "IIS: web.config <customHeaders> | "
+            "Flask: @app.after_request | "
+            "Express/Node: helmet or res.setHeader() | "
+            "Tomcat: HttpHeaderSecurityFilter in web.xml"
+        )
+    return "\n".join(parts)
 
 
 def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
@@ -3833,31 +4167,72 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         "\n".join(f"{k}: {v}" for k, v in headers.items()), encoding="utf-8"
     )
 
-    # Informational findings — record technology/server info observed on target
+    # Header Data Leakage — record server/technology disclosure headers
+    _hdr_cmd = f"python3 -c \"import requests; r=requests.get('{url}'); print(dict(r.headers))\""
     server_hdr = headers.get("Server", "")
     if server_hdr:
         out.add_finding(
-            title="Web Server Identified",
-            url=url, port=target["port"], risk="INFO",
-            description=f"The target is running {server_hdr}. Server version banners "
-                        "may assist attackers in fingerprinting known vulnerabilities.",
+            title="Header Data Leakage: Server",
+            url=url, port=target["port"], risk="LOW",
+            description=f"The Server header discloses the web server software and potentially its version: '{server_hdr}'. This information assists attackers in fingerprinting known vulnerabilities.",
             output=f"Server: {server_hdr}",
             sources="fracture-headers", service=target["scheme"],
             output_file=str(out_f),
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
-            remediation="Configure the web server to suppress or genericise the Server header.",
+            remediation=_platform_remed(
+                "Configure the web server to suppress or genericize the Server header.",
+                server_hdr, "",
+            ),
+            command=_hdr_cmd,
         )
     powered_by = headers.get("X-Powered-By", "")
     if powered_by:
         out.add_finding(
-            title="Technology Stack Identified",
-            url=url, port=target["port"], risk="INFO",
-            description=f"The X-Powered-By header reveals the technology stack: {powered_by}.",
+            title="Header Data Leakage: X-Powered-By",
+            url=url, port=target["port"], risk="LOW",
+            description=f"The X-Powered-By header discloses the technology stack: '{powered_by}'. This assists attackers in identifying framework-specific vulnerabilities.",
             output=f"X-Powered-By: {powered_by}",
             sources="fracture-headers", service=target["scheme"],
             output_file=str(out_f),
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
-            remediation="Remove the X-Powered-By header to limit technology fingerprinting.",
+            remediation=_platform_remed(
+                "Remove the X-Powered-By header from all responses.",
+                server_hdr, powered_by,
+            ),
+            command=_hdr_cmd,
+        )
+    aspnet_ver = headers.get("X-AspNet-Version", "") or headers.get("X-AspNetMvc-Version", "")
+    if aspnet_ver:
+        out.add_finding(
+            title="Header Data Leakage: X-AspNet-Version",
+            url=url, port=target["port"], risk="LOW",
+            description=f"The X-AspNet-Version header discloses the ASP.NET runtime version: '{aspnet_ver}'. Exposing the exact runtime version allows targeted vulnerability enumeration.",
+            output=f"X-AspNet-Version: {aspnet_ver}",
+            sources="fracture-headers", service=target["scheme"],
+            output_file=str(out_f),
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation=_platform_remed(
+                "Disable X-AspNet-Version in web.config: "
+                "<httpRuntime enableVersionHeader=\"false\"/>",
+                server_hdr, powered_by,
+            ),
+            command=_hdr_cmd,
+        )
+    via_hdr = headers.get("Via", "")
+    if via_hdr:
+        out.add_finding(
+            title="Header Data Leakage: Via",
+            url=url, port=target["port"], risk="LOW",
+            description=f"The Via header discloses intermediate proxy or CDN infrastructure: '{via_hdr}'. This reveals internal routing topology and proxy software versions.",
+            output=f"Via: {via_hdr}",
+            sources="fracture-headers", service=target["scheme"],
+            output_file=str(out_f),
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation=_platform_remed(
+                "Configure proxies and load balancers to strip or genericize the Via header before forwarding to clients.",
+                server_hdr, powered_by,
+            ),
+            command=_hdr_cmd,
         )
 
     vc.status(phase, "Security Headers", "running", "Security header check", 1, 5)
@@ -3872,10 +4247,142 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 url=url, port=target["port"], risk=risk,
                 description=desc, sources="fracture-headers",
                 service=target["scheme"], output_file=str(out_f),
-                owasp="A05", nist=nist_ctrl, remediation=remed,
+                owasp="A05", nist=nist_ctrl,
+                remediation=_platform_remed(remed, server_hdr, powered_by),
                 output=f"Missing: {hdr_name}",
                 affected=hdr_name,
+                command=_hdr_cmd,
             )
+
+    # ── Permissive (misconfigured) security header checks ────────────────────
+    _csp_val = headers.get("Content-Security-Policy", "")
+    if _csp_val:
+        _csp_l = _csp_val.lower()
+        if "unsafe-inline" in _csp_l or "unsafe-eval" in _csp_l or (
+            re.search(r"(?:default|script)-src[^;]*\*", _csp_l)
+        ):
+            out.add_finding(
+                title="Permissive Security Header: Content-Security-Policy",
+                url=url, port=target["port"], risk="LOW",
+                description=(
+                    "Content-Security-Policy is present but contains permissive directives "
+                    f"(unsafe-inline, unsafe-eval, or wildcard sources) that undermine XSS protection: "
+                    f"{_csp_val[:200]}"
+                ),
+                output=f"Content-Security-Policy: {_csp_val[:300]}",
+                sources="fracture-headers", service=target["scheme"],
+                output_file=str(out_f),
+                owasp="A05:2025 Security Misconfiguration", nist="SI-10",
+                remediation=_platform_remed(
+                    "Remove 'unsafe-inline' and 'unsafe-eval' from CSP. "
+                    "Use nonces or hashes for inline scripts. Replace wildcard (*) sources with explicit origins.",
+                    server_hdr, powered_by,
+                ),
+                command=_hdr_cmd,
+            )
+
+    _hsts_val = headers.get("Strict-Transport-Security", "")
+    if _hsts_val and is_https:
+        _ma_m = re.search(r'max-age\s*=\s*(\d+)', _hsts_val, re.I)
+        _max_age = int(_ma_m.group(1)) if _ma_m else 0
+        if _max_age < 31536000:
+            out.add_finding(
+                title="Permissive Security Header: Strict-Transport-Security",
+                url=url, port=target["port"], risk="LOW",
+                description=(
+                    f"HSTS is present but max-age ({_max_age}s) is below the recommended "
+                    "minimum of 31536000s (1 year), reducing protection against SSL-stripping."
+                ),
+                output=f"Strict-Transport-Security: {_hsts_val}",
+                sources="fracture-headers", service=target["scheme"],
+                output_file=str(out_f),
+                owasp="A05:2025 Security Misconfiguration", nist="SC-8",
+                remediation=_platform_remed(
+                    "Set Strict-Transport-Security: max-age=31536000; includeSubDomains; preload",
+                    server_hdr, powered_by,
+                ),
+                command=_hdr_cmd,
+            )
+
+    _xfo_val = headers.get("X-Frame-Options", "")
+    if _xfo_val and _xfo_val.upper().strip() not in ("DENY", "SAMEORIGIN"):
+        out.add_finding(
+            title="Permissive Security Header: X-Frame-Options",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"X-Frame-Options is set to a permissive or non-standard value: '{_xfo_val}'. "
+                "Only DENY or SAMEORIGIN provide effective clickjacking protection."
+            ),
+            output=f"X-Frame-Options: {_xfo_val}",
+            sources="fracture-headers", service=target["scheme"],
+            output_file=str(out_f),
+            owasp="A05:2025 Security Misconfiguration", nist="SI-10",
+            remediation=_platform_remed(
+                "Set X-Frame-Options: DENY (or SAMEORIGIN if same-origin embedding is required).",
+                server_hdr, powered_by,
+            ),
+            command=_hdr_cmd,
+        )
+
+    _xcto_val = headers.get("X-Content-Type-Options", "")
+    if _xcto_val and _xcto_val.strip().lower() != "nosniff":
+        out.add_finding(
+            title="Permissive Security Header: X-Content-Type-Options",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"X-Content-Type-Options is present but not set to 'nosniff': '{_xcto_val}'. "
+                "MIME-sniffing protection is not active."
+            ),
+            output=f"X-Content-Type-Options: {_xcto_val}",
+            sources="fracture-headers", service=target["scheme"],
+            output_file=str(out_f),
+            owasp="A05:2025 Security Misconfiguration", nist="SI-10",
+            remediation=_platform_remed(
+                "Set X-Content-Type-Options: nosniff",
+                server_hdr, powered_by,
+            ),
+            command=_hdr_cmd,
+        )
+
+    _rp_val = headers.get("Referrer-Policy", "")
+    if _rp_val and _rp_val.strip().lower() in ("unsafe-url", "no-referrer-when-downgrade", ""):
+        out.add_finding(
+            title="Permissive Security Header: Referrer-Policy",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"Referrer-Policy is set to '{_rp_val}', which sends the full URL as referrer "
+                "to third-party destinations and may leak sensitive path or query parameters."
+            ),
+            output=f"Referrer-Policy: {_rp_val}",
+            sources="fracture-headers", service=target["scheme"],
+            output_file=str(out_f),
+            owasp="A05:2025 Security Misconfiguration", nist="SI-12",
+            remediation=_platform_remed(
+                "Set Referrer-Policy: strict-origin-when-cross-origin (or no-referrer for highest privacy).",
+                server_hdr, powered_by,
+            ),
+            command=_hdr_cmd,
+        )
+
+    _cc_val = headers.get("Cache-Control", "")
+    if _cc_val and "public" in _cc_val.lower() and "no-store" not in _cc_val.lower():
+        out.add_finding(
+            title="Permissive Security Header: Cache-Control",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"Cache-Control is set to '{_cc_val}' which permits public caching without "
+                "'no-store'. Sensitive responses may be cached by intermediary proxies or CDNs."
+            ),
+            output=f"Cache-Control: {_cc_val}",
+            sources="fracture-headers", service=target["scheme"],
+            output_file=str(out_f),
+            owasp="A05:2025 Security Misconfiguration", nist="SI-12",
+            remediation=_platform_remed(
+                "Add 'Cache-Control: no-store, no-cache' to sensitive endpoint responses.",
+                server_hdr, powered_by,
+            ),
+            command=_hdr_cmd,
+        )
 
     vc.status(phase, "Security Headers", "running", "CORS check", 2, 5)
     acao = headers.get("Access-Control-Allow-Origin", "")
@@ -4152,9 +4659,11 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
                     hdr = str(hdr).strip()
                     if not hdr:
                         continue
+                    if hdr not in _SHCHECK_ALLOWED_HEADERS:
+                        continue   # filter to the canonical 6 security headers only
                     if hdr == _HSTS and not tgt["is_https"]:
                         continue   # HSTS only applies to HTTPS
-                    risk = "MEDIUM" if hdr == _HSTS else "LOW"
+                    risk = "HIGH" if hdr == _HSTS else ("MEDIUM" if hdr == "Content-Security-Policy" else "LOW")
                     out.add_finding(
                         title=f"Missing Security Header: {hdr}",
                         url=tgt_url, port=port, risk=risk,
@@ -4187,9 +4696,11 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
                 if not m:
                     continue
                 hdr = m.group(1).strip()
+                if hdr not in _SHCHECK_ALLOWED_HEADERS:
+                    continue   # filter to the canonical 6 security headers only
                 if hdr == _HSTS and not tgt["is_https"]:
                     continue
-                risk = "MEDIUM" if hdr == _HSTS else "LOW"
+                risk = "HIGH" if hdr == _HSTS else ("MEDIUM" if hdr == "Content-Security-Policy" else "LOW")
                 out.add_finding(
                     title=f"Missing Security Header: {hdr}",
                     url=tgt_url, port=port, risk=risk,
@@ -5009,12 +5520,65 @@ _XSS_PAYLOADS = [
     "'><img src=x onerror=alert(1)>",
     "<svg onload=alert(1)>",
 ]
-_SSTI_PAYLOADS = [
-    ("{{7*7}}", "49"),
-    ("${7*7}", "49"),
-    ("#{7*7}", "49"),
-    ("<%= 7*7 %>", "49"),
-]
+
+def _xss_confirmed(payload: str, r) -> bool:
+    """Return True only if payload appears in an executable HTML context.
+
+    Eliminates false positives where the app reflects the payload safely:
+      - URL reflected in an href/src/action attribute (URL kept as a link)
+      - Payload HTML-encoded (browser won't execute it)
+      - Payload only present in the request URL echo
+    """
+    import html as _html_mod
+    text = r.text
+    if payload not in text:
+        return False
+
+    # 1. If every occurrence is HTML-encoded, it's safe
+    enc = _html_mod.escape(payload, quote=True)
+    if enc != payload and enc in text:
+        stripped = text.replace(enc, "")
+        if payload not in stripped:
+            return False
+
+    # 2. Strip the request URL and its decoded variants (URL reflection)
+    body = text
+    for variant in (r.url,
+                    urllib.parse.unquote(r.url),
+                    urllib.parse.unquote_plus(r.url)):
+        body = body.replace(variant, "")
+
+    # 3. Strip payload appearances inside URL attribute values
+    #    e.g.  href="...payload..."  or  href='...payload...'
+    _esc_pl = re.escape(payload)
+    body = re.sub(
+        r'(?:href|src|action|data(?:-[a-z][a-z0-9-]*)?)(?:\s*)=(?:\s*)["\'][^"\']*'
+        + _esc_pl + r'[^"\']*["\']',
+        '', body, flags=re.I
+    )
+    # Also strip URL-percent-encoded occurrences inside attributes
+    _url_enc_pl = urllib.parse.quote(payload, safe='')
+    if _url_enc_pl != payload:
+        body = re.sub(
+            r'(?:href|src|action)(?:\s*)=(?:\s*)["\'][^"\']*'
+            + re.escape(_url_enc_pl) + r'[^"\']*["\']',
+            '', body, flags=re.I
+        )
+
+    return payload in body
+
+def _ssti_probes():
+    """Generate randomised SSTI payloads so the expected result is unique
+    and cannot appear on the page by coincidence or URL reflection."""
+    _a = random.randint(10000, 99999)
+    _b = random.randint(10000, 99999)
+    _r = str(_a * _b)
+    return [
+        (f"{{{{{_a}*{_b}}}}}", _r),
+        (f"${{{_a}*{_b}}}",    _r),
+        (f"#{{{_a}*{_b}}}",    _r),
+        (f"<%= {_a}*{_b} %>",  _r),
+    ]
 _CMD_PAYLOADS = [
     (";id",    re.compile(r'uid=\d+\(')),
     ("|id",    re.compile(r'uid=\d+\(')),
@@ -5042,11 +5606,19 @@ _CSV_INJECT_PAYLOADS = [
     "+cmd|'/C echo fracture'!A0",
     "@SUM(1+1)*cmd|'/C echo fracture'!A0",
 ]
-_CODE_INJECT_PAYLOADS = [
-    ("__import__('os').system('echo fracture_ci')", re.compile(r'fracture_ci')),
-    ("eval('7*7')",                                 re.compile(r'\b49\b')),
-    (";echo fracture_ci;#",                         re.compile(r'fracture_ci')),
-]
+def _code_inject_probes():
+    """Generate randomised code injection payloads.  A per-run nonce and
+    large random arithmetic result make coincidental matches impossible."""
+    _nonce  = random.randint(100000, 999999)
+    _marker = f"fracture_{_nonce}"
+    _a      = random.randint(10000, 99999)
+    _b      = random.randint(10000, 99999)
+    _eval_r = str(_a * _b)
+    return [
+        (f"__import__('os').system('echo {_marker}')", re.compile(re.escape(_marker))),
+        (f"eval(str({_a}*{_b}))",                      re.compile(rf'\b{re.escape(_eval_r)}\b')),
+        (f";echo {_marker};#",                          re.compile(re.escape(_marker))),
+    ]
 _OPEN_REDIRECT_PAYLOADS = [
     "//evil.fracture.test/",
     "https://evil.fracture.test/",
@@ -5094,6 +5666,202 @@ def _qs_inject(base_url: str, param: str, value: str,
         return None
 
 
+def _save_http_evidence(out: "OutputManager", phase: str, label: str,
+                        r: "requests.Response") -> "tuple[str, str]":
+    """Write HTTP request/response pair to the phase evidence directory.
+
+    Returns (request_file_path, response_file_path).
+    """
+    safe      = re.sub(r'[^\w]', '_', label)[:60]
+    req_path  = out.output_path(phase, f"{safe}_request")
+    resp_path = out.output_path(phase, f"{safe}_response")
+
+    prep = r.request
+    req_lines = [f"{prep.method} {prep.url}"]
+    for k, v in (prep.headers or {}).items():
+        req_lines.append(f"{k}: {v}")
+    req_lines.append("")
+    if prep.body:
+        body = prep.body if isinstance(prep.body, str) \
+               else prep.body.decode("utf-8", errors="replace")
+        req_lines.append(body)
+    req_path.write_text("\n".join(req_lines), encoding="utf-8")
+
+    resp_lines = [f"HTTP/1.1 {r.status_code} {r.reason or ''}"]
+    for k, v in r.headers.items():
+        resp_lines.append(f"{k}: {v}")
+    resp_lines.append("")
+    resp_lines.append(r.text[:524288])
+    resp_path.write_text("\n".join(resp_lines), encoding="utf-8")
+
+    return str(req_path), str(resp_path)
+
+
+def _parse_gobuster_with_status(filepath: "Path", base_url: str) -> "list[tuple[str, int | None, str | None]]":
+    """Parse gobuster output returning (original_url, status_code, redirect_to_url) tuples.
+    Handles both gobuster format and the TOP_200_PATHS fallback format."""
+    results = []
+    base = base_url.rstrip("/")
+    for line in filepath.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        status = None
+        m_status = re.search(r'\(Status:\s*(\d+)\)|\[(\d{3})\]', line)
+        if m_status:
+            status = int(m_status.group(1) or m_status.group(2))
+        m_redir = re.search(r'-->\s*(https?://[^\]\s]+)', line)
+        redirect_to = m_redir.group(1).rstrip("/\\") if m_redir else None
+        m_path = re.match(r'(/\S+)', line)
+        if m_path:
+            results.append((f"{base}{m_path.group(1)}", status, redirect_to))
+        elif redirect_to:
+            # Line has redirect target but no leading path (unusual) — skip
+            pass
+    return results
+
+
+def _parse_feroxbuster_with_status(filepath: "Path") -> "list[tuple[str, int | None, str | None]]":
+    """Parse feroxbuster output returning (url, status_code, redirect_to_url) tuples."""
+    results = []
+    for line in filepath.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Format: 301  GET  ...  http://target/admin => http://target/admin/
+        m = re.match(r'^(\d{3})\s+\w+\s+.*?(https?://\S+?)(?:\s+=>\s+(https?://\S+))?$', line)
+        if m:
+            redirect_to = m.group(3).rstrip("/\\") if m.group(3) else None
+            results.append((m.group(2).rstrip("/\\"), int(m.group(1)), redirect_to))
+            continue
+        m2 = re.search(r'(https?://\S+)', line)
+        if m2:
+            results.append((m2.group(1).rstrip("/\\"), None, None))
+    return results
+
+
+def _sm_normalize_redirect(redirect_url: str, base_host: str) -> "str | None":
+    """Normalize a redirect Location to a relative path if it is in-scope, else None."""
+    if not redirect_url:
+        return None
+    try:
+        p = urllib.parse.urlparse(redirect_url)
+        # Absolute URL — must be same host to be in-scope
+        if p.scheme and p.hostname and p.hostname != base_host:
+            return None
+        return p.path or "/"
+    except Exception:
+        # Relative redirect (no scheme/host) — treat as-is if it starts with /
+        if redirect_url.startswith("/"):
+            return redirect_url
+        return None
+
+
+def _write_structure_map(out: "OutputManager", target: dict,
+                         crawl_data: "dict | None" = None,
+                         extra_urls: "list | None" = None,
+                         path_statuses: "dict | None" = None,
+                         path_redirects: "dict | None" = None) -> None:
+    """Incrementally build and persist structure_map.json.
+
+    Each call merges newly discovered paths into the existing map so information
+    accumulates across phases without overwriting earlier data.
+    path_statuses: dict of {path: status_code} to record HTTP status per path.
+    path_redirects: dict of {path: redirect_url} for in-scope redirect targets.
+    """
+    sm_path = out.root / "structure_map.json"
+    try:
+        existing = json.loads(sm_path.read_text()) if sm_path.exists() else {}
+    except Exception:
+        existing = {}
+
+    paths: dict = existing.get("paths", {})
+    base_host = target["hostname"]
+
+    def _add_url(raw_url: str, status: "int | None" = None) -> None:
+        try:
+            raw_url = raw_url.strip('"\'').strip()
+            if not raw_url:
+                return
+            # Reject anything that looks like an absolute URL to a different host
+            if "://" in raw_url:
+                p = urllib.parse.urlparse(raw_url)
+                if not p.hostname or p.hostname != base_host:
+                    return
+                path = p.path or "/"
+            else:
+                path = raw_url if raw_url.startswith("/") else ("/" + raw_url)
+            # Final sanity: path must not contain a scheme fragment
+            if "://" in path or not path.startswith("/"):
+                return
+            entry = paths.setdefault(path, {})
+            if status is not None:
+                entry["status"] = status
+        except Exception:
+            pass
+
+    if path_statuses:
+        for ps_path, ps_status in path_statuses.items():
+            entry = paths.setdefault(ps_path, {})
+            if ps_status is not None:
+                entry["status"] = ps_status
+
+    if path_redirects:
+        for pr_path, pr_url in path_redirects.items():
+            rt = _sm_normalize_redirect(pr_url, base_host)
+            if rt:
+                paths.setdefault(pr_path, {})["redirect_to"] = rt
+
+    if crawl_data:
+        for lnk in crawl_data.get("links", []):
+            _add_url(lnk)
+        for form in crawl_data.get("forms", []):
+            act = form.get("action", "")
+            if act:
+                try:
+                    p = urllib.parse.urlparse(act)
+                    if p.hostname and p.hostname != base_host:
+                        continue
+                    path = p.path or "/"
+                    entry = paths.setdefault(path, {})
+                    entry["has_form"] = True
+                    if form.get("method"):
+                        entry["form_method"] = form["method"].upper()
+                    _inps = [i.get("name") for i in form.get("inputs", []) if i.get("name")]
+                    if _inps:
+                        _ex = set(entry.get("form_inputs", []))
+                        _ex.update(_inps)
+                        entry["form_inputs"] = sorted(_ex)
+                except Exception:
+                    pass
+        for pe in crawl_data.get("params", []):
+            _add_url(pe.get("url", ""))
+            try:
+                p = urllib.parse.urlparse(pe.get("url", ""))
+                path = p.path or "/"
+                if path in paths:
+                    _ex = set(paths[path].get("params", []))
+                    _ex.update(pe.get("params", []))
+                    paths[path]["params"] = sorted(_ex)
+            except Exception:
+                pass
+
+    for eu in (extra_urls or []):
+        _add_url(eu)
+
+    if "/" not in paths:
+        paths["/"] = {}
+
+    try:
+        sm_path.write_text(json.dumps({
+            "target":       target["url"],
+            "generated_at": datetime.now().isoformat(),
+            "paths":        dict(sorted(paths.items())),
+        }, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                      out: OutputManager, sess: requests.Session,
                      crawl_data: dict, fast: bool = False) -> None:
@@ -5110,11 +5878,13 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         for param in entry["params"]:
             r = _qs_inject(purl, param, "test'", sess, timeout)
             if r and _SQL_ERROR_RE.search(r.text):
+                _rq, _rp = _save_http_evidence(out, phase, f"sqli_error_{param}", r)
                 out.add_finding(
                     title="SQL Injection (Error-Based)",
                     url=purl, port=target["port"], risk="CRITICAL",
                     description=f"SQL injection in parameter '{param}' via error-based detection.",
                     output=f"Parameter: {param}\nURL: {purl}",
+                    output_file=f"{_rq},{_rp}",
                     sources="fracture-injection", service=target["scheme"],
                     affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                     remediation="Use parameterised queries throughout the application.",
@@ -5137,11 +5907,13 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 r = sess.post(action, data=data, timeout=timeout) if method == "POST" \
                     else sess.get(action, params=data, timeout=timeout)
                 if _SQL_ERROR_RE.search(r.text):
+                    _rq, _rp = _save_http_evidence(out, phase, f"sqli_form_{pname}", r)
                     out.add_finding(
                         title="SQL Injection in Form (Error-Based)",
                         url=action, port=target["port"], risk="CRITICAL",
                         description=f"SQLi in form field '{pname}' at {action}.",
                         output=f"Form: {action}\nField: {pname}",
+                        output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=action, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Use parameterised queries. Validate all inputs.",
@@ -5187,12 +5959,14 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         for param in entry["params"]:
             for payload in _XSS_PAYLOADS[:3]:
                 r = _qs_inject(purl, param, payload, sess, timeout)
-                if r and payload in r.text:
+                if r and _xss_confirmed(payload, r):
+                    _rq, _rp = _save_http_evidence(out, phase, f"xss_{param}", r)
                     out.add_finding(
                         title="Reflected Cross-Site Scripting (XSS)",
                         url=purl, port=target["port"], risk="HIGH",
                         description=f"Reflected XSS in parameter '{param}'.",
                         output=f"Parameter: {param}\nPayload: {payload}",
+                        output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Encode all user output. Implement CSP.",
@@ -5229,14 +6003,26 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     for entry in params[:10]:
         purl = entry["url"]
         for param in entry["params"]:
-            for payload, expected in _SSTI_PAYLOADS:
+            for payload, expected in _ssti_probes():
                 r = _qs_inject(purl, param, payload, sess, timeout)
-                if r and expected in r.text:
+                if not r:
+                    continue
+                _ssti_body = r.text
+                for _enc in (r.url,
+                             urllib.parse.unquote(r.url),
+                             urllib.parse.unquote_plus(r.url),
+                             payload,
+                             urllib.parse.quote(payload),
+                             urllib.parse.quote_plus(payload)):
+                    _ssti_body = _ssti_body.replace(_enc, "")
+                if expected in _ssti_body:
+                    _rq, _rp = _save_http_evidence(out, phase, f"ssti_{param}", r)
                     out.add_finding(
                         title="Server-Side Template Injection (SSTI)",
                         url=purl, port=target["port"], risk="CRITICAL",
                         description=f"SSTI in parameter '{param}'. Payload '{payload}' evaluated server-side.",
                         output=f"Parameter: {param}\nPayload: {payload} → {expected}",
+                        output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Never pass user input to template engines unsanitised.",
@@ -5251,11 +6037,13 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             for cmd_pay, cmd_pat in _CMD_PAYLOADS:
                 r = _qs_inject(purl, param, "test" + cmd_pay, sess, timeout)
                 if r and cmd_pat.search(r.text):
+                    _rq, _rp = _save_http_evidence(out, phase, f"cmdi_{param}", r)
                     out.add_finding(
                         title="OS Command Injection",
                         url=purl, port=target["port"], risk="CRITICAL",
                         description=f"Command injection in parameter '{param}'.",
                         output=f"Parameter: {param}\nPayload: {cmd_pay}",
+                        output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Never pass user input to OS calls.",
@@ -5269,11 +6057,13 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         for param in entry["params"]:
             r = _qs_inject(purl, param, _CRLF_PAYLOAD, sess, timeout)
             if r and ("X-Injected-Fracture" in r.text or "X-Injected-Fracture" in str(r.headers)):
+                _rq, _rp = _save_http_evidence(out, phase, f"crlf_{param}", r)
                 out.add_finding(
                     title="CRLF Injection",
                     url=purl, port=target["port"], risk="HIGH",
                     description=f"CRLF injection in parameter '{param}'.",
                     output=f"Parameter: {param}\nPayload: {_CRLF_PAYLOAD}",
+                    output_file=f"{_rq},{_rp}",
                     sources="fracture-injection", service=target["scheme"],
                     owasp="A03:2025 Injection", nist="SI-10",
                     remediation="Strip CRLF characters from input used in HTTP headers.",
@@ -5290,11 +6080,13 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             r = sess.post(action, data=_xxe_payload, timeout=timeout,
                           headers={"Content-Type": "application/xml"})
             if re.search(r'root:.*:/bin/', r.text):
+                _rq, _rp = _save_http_evidence(out, phase, "xxe", r)
                 out.add_finding(
                     title="XML External Entity (XXE) Injection",
                     url=action, port=target["port"], risk="CRITICAL",
                     description=f"XXE injection confirmed at {action}. /etc/passwd content was returned.",
                     output=r.text[:500],
+                    output_file=f"{_rq},{_rp}",
                     sources="fracture-injection", service=target["scheme"],
                     affected=action, owasp="A03:2025 Injection", nist="SI-10",
                     remediation="Disable external entity processing in XML parsers.",
@@ -5318,6 +6110,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 sess.post(action, data=data, timeout=timeout)
                 r2 = sess.get(action, timeout=timeout)
                 if r2 and _SQL_ERROR_RE.search(r2.text):
+                    _rq, _rp = _save_http_evidence(out, phase, f"sqli_so_{pname}", r2)
                     out.add_finding(
                         title="Second-Order SQL Injection",
                         url=action, port=target["port"], risk="CRITICAL",
@@ -5325,6 +6118,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                      f"A quote character stored in the field triggered a SQL error on the "
                                      f"next retrieval, indicating the stored value is interpolated unsafely."),
                         output=f"Field: {pname}\nStore payload: fracture_so_sqli'\nSQL error on retrieval",
+                        output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=action, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Use parameterised queries for all database operations, including reads of stored values.",
@@ -5352,6 +6146,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 r = sess.post(action, data=data, timeout=timeout)
                 if r and r.status_code in (200, 201, 302):
                     _csv_found_forms.add(action)
+                    _rq, _rp = _save_http_evidence(out, phase, f"csv_{pname}", r)
                     out.add_finding(
                         title="CSV / Formula Injection",
                         url=action, port=target["port"], risk="HIGH",
@@ -5359,6 +6154,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                      f"({_CSV_INJECT_PAYLOADS[0]!r}). If this data is exported to a CSV or "
                                      f"spreadsheet, the formula may execute commands on the recipient's workstation."),
                         output=f"Field: {pname}\nPayload: {_CSV_INJECT_PAYLOADS[0]}\nResponse: {r.status_code}",
+                        output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=action, owasp="A03:2025 Injection", nist="SI-10",
                         remediation=(
@@ -5379,6 +6175,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             for nosql_pay, nosql_err in _NOSQL_PAYLOADS:
                 r = _qs_inject(purl, param, nosql_pay, sess, timeout)
                 if r and (nosql_err.search(r.text) or r.status_code == 500):
+                    _rq, _rp = _save_http_evidence(out, phase, f"nosql_{param}", r)
                     out.add_finding(
                         title="NoSQL Injection",
                         url=purl, port=target["port"], risk="CRITICAL",
@@ -5386,6 +6183,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                      f"'{nosql_pay}' produced an error response consistent with "
                                      f"unhandled MongoDB/NoSQL operator injection."),
                         output=f"Parameter: {param}\nPayload: {nosql_pay}\nResponse ({r.status_code}): {r.text[:300]}",
+                        output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Strip or reject operator characters ($, {, [) from user input before NoSQL queries.",
@@ -5401,12 +6199,14 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             for ldap_pay, ldap_err in _LDAP_PAYLOADS:
                 r = _qs_inject(purl, param, ldap_pay, sess, timeout)
                 if r and (ldap_err.search(r.text) or r.status_code == 500):
+                    _rq, _rp = _save_http_evidence(out, phase, f"ldap_{param}", r)
                     out.add_finding(
                         title="LDAP Injection",
                         url=purl, port=target["port"], risk="HIGH",
                         description=(f"LDAP injection detected in parameter '{param}' with payload "
                                      f"'{ldap_pay}'. Error response reveals LDAP query construction."),
                         output=f"Parameter: {param}\nPayload: {ldap_pay}\nResponse ({r.status_code}): {r.text[:300]}",
+                        output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Escape all LDAP special characters. Use an LDAP-safe query library with parameterised filters.",
@@ -5422,12 +6222,14 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             for xpath_pay, xpath_err in _XPATH_PAYLOADS:
                 r = _qs_inject(purl, param, xpath_pay, sess, timeout)
                 if r and (xpath_err.search(r.text) or r.status_code == 500):
+                    _rq, _rp = _save_http_evidence(out, phase, f"xpath_{param}", r)
                     out.add_finding(
                         title="XPath Injection",
                         url=purl, port=target["port"], risk="HIGH",
                         description=(f"XPath injection detected in parameter '{param}' with payload "
                                      f"'{xpath_pay}'. Error response reveals XPath expression construction."),
                         output=f"Parameter: {param}\nPayload: {xpath_pay}\nResponse ({r.status_code}): {r.text[:300]}",
+                        output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Use a parameterised XPath API. Never concatenate user input into XPath expressions.",
@@ -5446,6 +6248,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             r = _qs_inject(purl, param, _LOG_INJECT_PAYLOAD, sess, timeout)
             if r and r.status_code in (200, 201, 400, 422, 500):
                 _log_found.add(purl)
+                _rq, _rp = _save_http_evidence(out, phase, f"loginject_{param}", r)
                 out.add_finding(
                     title="Log Injection / CRLF in Log Entries",
                     url=purl, port=target["port"], risk="MEDIUM",
@@ -5453,6 +6256,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                  f"payload. If the server logs this input without sanitisation, an attacker "
                                  f"can inject fake log entries to mislead forensic analysis."),
                     output=f"Parameter: {param}\nPayload: {repr(_LOG_INJECT_PAYLOAD)}\nResponse: {r.status_code}",
+                    output_file=f"{_rq},{_rp}",
                     sources="fracture-injection", service=target["scheme"],
                     affected=purl, owasp="A03:2025 Injection", nist="AU-3",
                     remediation="Strip CRLF/newline characters from all inputs written to logs. Use a structured logging library.",
@@ -5470,20 +6274,28 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 hpp_qs   = f"{param}=legitimate&{param}=fracture_hpp_probe"
                 hpp_url  = parsed_u._replace(query=hpp_qs).geturl()
                 r = sess.get(hpp_url, timeout=timeout)
-                if r and r.status_code == 200 and "fracture_hpp_probe" in r.text:
-                    out.add_finding(
-                        title="HTTP Parameter Pollution (HPP)",
-                        url=purl, port=target["port"], risk="MEDIUM",
-                        description=(f"Parameter '{param}' is vulnerable to HTTP Parameter Pollution. "
-                                     f"Sending the parameter twice caused the second value to be reflected, "
-                                     f"indicating the application processes duplicated parameters inconsistently."),
-                        output=f"Parameter: {param}\nTest URL: {hpp_url}\nSecond value reflected in response",
-                        sources="fracture-injection", service=target["scheme"],
-                        affected=purl, owasp="A03:2025 Injection", nist="SI-10",
-                        remediation="Define explicit single-value semantics for all parameters. Reject or normalise duplicate query parameters.",
-                    )
-                    vc.log(f"[injection] HPP: {purl} param={param}", "SUCCESS")
-                    break
+                if r and r.status_code == 200:
+                    _hpp_body = r.text
+                    for _strip in (r.url, hpp_url,
+                                   urllib.parse.unquote(hpp_url),
+                                   urllib.parse.unquote_plus(hpp_url)):
+                        _hpp_body = _hpp_body.replace(_strip, "")
+                    if "fracture_hpp_probe" in _hpp_body:
+                        _rq, _rp = _save_http_evidence(out, phase, f"hpp_{param}", r)
+                        out.add_finding(
+                            title="HTTP Parameter Pollution (HPP)",
+                            url=purl, port=target["port"], risk="MEDIUM",
+                            description=(f"Parameter '{param}' is vulnerable to HTTP Parameter Pollution. "
+                                         f"Sending the parameter twice caused the second value to be reflected, "
+                                         f"indicating the application processes duplicated parameters inconsistently."),
+                            output=f"Parameter: {param}\nTest URL: {hpp_url}\nSecond value reflected in response",
+                            output_file=f"{_rq},{_rp}",
+                            sources="fracture-injection", service=target["scheme"],
+                            affected=purl, owasp="A03:2025 Injection", nist="SI-10",
+                            remediation="Define explicit single-value semantics for all parameters. Reject or normalise duplicate query parameters.",
+                        )
+                        vc.log(f"[injection] HPP: {purl} param={param}", "SUCCESS")
+                        break
             except Exception:
                 pass
 
@@ -5492,9 +6304,26 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     for entry in params[:10]:
         purl = entry["url"]
         for param in entry["params"]:
-            for ci_pay, ci_pat in _CODE_INJECT_PAYLOADS:
+            for ci_pay, ci_pat in _code_inject_probes():
                 r = _qs_inject(purl, param, ci_pay, sess, timeout)
-                if r and ci_pat.search(r.text):
+                if not r:
+                    continue
+                # Strip the full request URL and its decoded forms first —
+                # canonical link tags and self-referential hrefs embed the
+                # URL-encoded payload, which would otherwise match the
+                # execution marker as part of the URL string.
+                _ci_body = r.text
+                for _strip in (r.url,
+                               urllib.parse.unquote(r.url),
+                               urllib.parse.unquote_plus(r.url)):
+                    _ci_body = _ci_body.replace(_strip, "")
+                # Also strip the raw payload and its URL-encoded forms.
+                for _enc in (ci_pay,
+                             urllib.parse.quote(ci_pay),
+                             urllib.parse.quote_plus(ci_pay)):
+                    _ci_body = _ci_body.replace(_enc, "")
+                if ci_pat.search(_ci_body):
+                    _rq, _rp = _save_http_evidence(out, phase, f"codeinject_{param}", r)
                     out.add_finding(
                         title="Remote Code Execution via Code Injection",
                         url=purl, port=target["port"], risk="CRITICAL",
@@ -5502,6 +6331,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                      f"Payload '{ci_pay}' was evaluated server-side, indicating the "
                                      f"application passes user input to eval() or an equivalent."),
                         output=f"Parameter: {param}\nPayload: {ci_pay}\nResponse: {r.text[:300]}",
+                        output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Never pass user-controlled input to eval(), exec(), or similar functions. Use safe alternatives.",
@@ -5533,6 +6363,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     r2 = sess.get(check_url, timeout=timeout)
                     if r2 and "fracture_sxss" in r2.text:
                         _stored_xss_found.add(action)
+                        _rq, _rp = _save_http_evidence(out, phase, f"sxss_{pname}", r2)
                         out.add_finding(
                             title="Stored Cross-Site Scripting (XSS)",
                             url=action, port=target["port"], risk="HIGH",
@@ -5540,6 +6371,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                          f"The injected payload was reflected at {check_url}, indicating "
                                          f"the submitted value is stored and rendered without encoding."),
                             output=f"Field: {pname}\nPayload: {_stored_xss_marker}\nReflected at: {check_url}",
+                            output_file=f"{_rq},{_rp}",
                             sources="fracture-injection", service=target["scheme"],
                             affected=check_url, owasp="A03:2025 Injection", nist="SI-10",
                             remediation="HTML-encode all stored user-supplied content before rendering. Implement a strict Content-Security-Policy.",
@@ -7329,20 +8161,25 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
             debug_hdrs = [h for h in r.headers if _DEBUG_HEADER_RE.search(h)]
             if debug_hdrs:
                 out.add_finding(
-                    title="Debug / Trace Headers Exposed in Response",
+                    title="Header Data Leakage: Debug/Trace Headers",
                     url=url, port=target["port"], risk="LOW",
                     description=(
                         f"Response headers include diagnostic or debug headers: "
-                        f"{', '.join(debug_hdrs)}. These reveal implementation details."
+                        f"{', '.join(debug_hdrs)}. These reveal implementation details "
+                        "that may assist attackers in identifying instrumentation, tracing systems, "
+                        "or internal infrastructure."
                     ),
                     output=f"Headers: {', '.join(f'{h}: {r.headers[h]}' for h in debug_hdrs)}",
                     sources="fracture-logging", service=target["scheme"],
                     affected=url,
                     owasp="A09:2025 Security Logging and Monitoring Failures", nist="AU-3",
                     remediation=(
-                        "Remove or restrict debug/trace response headers in production. "
-                        "Use X-Request-Id only if not echoing internal trace IDs."
+                        "Remove debug and trace headers from production responses. "
+                        "If X-Request-Id is used for correlation, ensure it is a random UUID "
+                        "and does not echo internal trace IDs or stack paths."
                     ),
+                    command=f"python3 -c \"import requests; r=requests.get('{url}'); "
+                            f"print({{'debug_hdrs': [h for h in r.headers if any(k in h.lower() for k in ['debug','trace','x-request','x-powered'])]}})\"",
                 )
     except Exception:
         pass
@@ -7658,6 +8495,7 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
                     data[pname] = encoded
                     r = sess.post(action, data=data, timeout=timeout)
                     if r and _DESER_RESP_RE.search(r.text):
+                        _rq, _rp = _save_http_evidence(out, phase, f"deser_error_{pname}", r)
                         out.add_finding(
                             title="Insecure Deserialization — Error Disclosure",
                             url=action, port=target["port"], risk="HIGH",
@@ -7665,6 +8503,7 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
                                          f"revealing deserialization stack trace or library details. "
                                          f"This indicates the application deserialises user-controlled input."),
                             output=f"Field: {pname}\nPayload: {encoded[:40]}\nResponse: {r.text[:500]}",
+                            output_file=f"{_rq},{_rp}",
                             sources="fracture-deserialization", service=target["scheme"],
                             affected=action, owasp="A08:2025 Software and Data Integrity Failures",
                             nist="SI-7",
@@ -7685,6 +8524,7 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
             r = sess.post(url, data=b"\xac\xed\x00\x05", timeout=timeout,
                           headers={"Content-Type": ct})
             if r and _DESER_RESP_RE.search(r.text):
+                _rq, _rp = _save_http_evidence(out, phase, f"deser_ct_{re.sub(r'[^\\w]', '_', ct)[:20]}", r)
                 out.add_finding(
                     title="Insecure Deserialization — Serialized Object Accepted",
                     url=url, port=target["port"], risk="CRITICAL",
@@ -7692,6 +8532,7 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
                                  f"and the response suggests the payload was processed by a "
                                  f"deserialization library. Insecure deserialization can lead to RCE."),
                     output=f"POST {url} with Content-Type: {ct}\nResponse: {r.text[:500]}",
+                    output_file=f"{_rq},{_rp}",
                     sources="fracture-deserialization", service=target["scheme"],
                     affected=url, owasp="A08:2025 Software and Data Integrity Failures",
                     nist="SI-7",
@@ -7718,14 +8559,24 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
             data[pname] = _yaml_payload
             try:
                 r = sess.post(action, data=data, timeout=timeout)
-                if r and (re.search(r'fracture_yaml_rce|yaml.*error|unsafe.*load', r.text, re.I)
+                # Strip payload reflections before checking for the
+                # execution marker — same false-positive risk as code
+                # injection: some apps echo POST field values back.
+                _yaml_body = r.text
+                for _enc in (_yaml_payload,
+                             urllib.parse.quote(_yaml_payload),
+                             urllib.parse.quote_plus(_yaml_payload)):
+                    _yaml_body = _yaml_body.replace(_enc, "")
+                if (re.search(r'fracture_yaml_rce|yaml.*error|unsafe.*load', _yaml_body, re.I)
                           or r.status_code == 500):
+                    _rq, _rp = _save_http_evidence(out, phase, f"deser_yaml_{pname}", r)
                     out.add_finding(
                         title="Insecure Deserialization — YAML Tag Injection",
                         url=action, port=target["port"], risk="CRITICAL",
                         description=(f"Field '{pname}' at {action} accepted a YAML tag injection payload "
                                      f"({_yaml_payload!r}). The response indicates YAML parsing of the input."),
                         output=f"Field: {pname}\nPayload: {_yaml_payload}\nResponse ({r.status_code}): {r.text[:400]}",
+                        output_file=f"{_rq},{_rp}",
                         sources="fracture-deserialization", service=target["scheme"],
                         affected=action, owasp="A08:2025 Software and Data Integrity Failures",
                         nist="SI-7",
@@ -7946,12 +8797,57 @@ def _print_banner() -> None:
     _tprint(f"{Fore.CYAN}  OWASP Top 10 2025 Coverage: A01–A10{Style.RESET_ALL}\n")
 
 
+def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
+                                      roles: "list[str]") -> None:
+    """Write access_matrix.json from current structure_map paths without probing.
+    Crucible can display the growing path list in real time; Phase 20 fills in
+    actual HTTP statuses per role once probing is complete.
+    """
+    sm_path = out.root / "structure_map.json"
+    am_path = out.root / "access_matrix.json"
+    try:
+        sm = json.loads(sm_path.read_text()) if sm_path.exists() else {}
+    except Exception:
+        return
+    all_paths = sorted(sm.get("paths", {}).keys())
+    if not all_paths:
+        return
+    try:
+        existing_am = json.loads(am_path.read_text()) if am_path.exists() else {}
+    except Exception:
+        existing_am = {}
+    existing_entries = {e["path"]: e for e in existing_am.get("paths", [])}
+    base_url = target["url"].rstrip("/")
+    path_entries = []
+    for p in all_paths:
+        if p in existing_entries:
+            path_entries.append(existing_entries[p])
+        else:
+            path_entries.append({"path": p, "url": base_url + p, "access": {}})
+    # Merge roles: preserve any roles already in file
+    merged_roles = list(existing_am.get("roles", []))
+    for r in roles:
+        if r not in merged_roles:
+            merged_roles.append(r)
+    data = {
+        "roles": merged_roles,
+        "most_privileged": existing_am.get("most_privileged"),
+        "privilege_counts": existing_am.get("privilege_counts", {}),
+        "paths": path_entries,
+    }
+    try:
+        am_path.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
+
+
 def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                           out: OutputManager, sess: requests.Session,
                           crawl_data: dict) -> dict:
     """
     Phase 20: Multi-credential access matrix: tests each discovered path with
     every role in cfg['auth_matrix'] plus unauthenticated.
+    Sources paths from structure_map.json (all gobuster/crawl discovered paths).
     Generates access_matrix.json, MEDIUM findings for unauth access,
     HIGH findings for BFLA (lower-priv accessing admin paths).
     """
@@ -7964,10 +8860,26 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     timeout     = cfg.get("timeout", 10)
     project_dir = out.root
     verify_ssl  = cfg.get("verify_ssl", False)
-    crawled_paths = crawl_data.get("links", [])
 
-    if not auth_matrix and not crawled_paths:
-        vc.status(phase, "Access Matrix", "complete", "No paths or roles — skipped", 0, 0)
+    # Build path list from structure_map.json (primary) + crawl_data links (supplemental)
+    sm_path = out.root / "structure_map.json"
+    _sm_path_keys: list = []
+    try:
+        _sm = json.loads(sm_path.read_text()) if sm_path.exists() else {}
+        _sm_path_keys = sorted(_sm.get("paths", {}).keys())
+    except Exception:
+        pass
+    _seen_paths: set = set(_sm_path_keys)
+    for _lnk in crawl_data.get("links", []):
+        _p = urllib.parse.urlparse(_lnk).path or "/"
+        if _p not in _seen_paths:
+            _seen_paths.add(_p)
+            _sm_path_keys.append(_p)
+    crawled_paths = _sm_path_keys
+
+    # Only skip if truly no paths discovered anywhere
+    if not crawled_paths:
+        vc.status(phase, "Access Matrix", "complete", "No paths discovered — skipped", 0, 0)
         return {}
 
     vc.status(phase, "Access Matrix", "running", "Building role sessions", 0, 1)
@@ -8005,23 +8917,29 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
 
     path_access = []
     for idx, path in enumerate(crawled_paths):
-        url = path if path.startswith("http") else base_url + path
+        # Paths from structure_map are always relative (e.g. "/admin"); normalize
+        if path.startswith("http"):
+            url = path
+            rel = urllib.parse.urlparse(path).path or "/"
+        else:
+            rel = path if path.startswith("/") else "/" + path
+            url = base_url + rel
         access = {}
         for role, r_sess in role_sessions.items():
             try:
                 r = r_sess.get(url, timeout=timeout, allow_redirects=False,
                                headers={"Accept": "text/html,application/json"})
-                access[role] = {
-                    "status":     r.status_code,
-                    "accessible": r.status_code in (200, 201, 202, 204),
-                }
+                access[role] = r.status_code
             except Exception:
-                access[role] = {"status": None, "accessible": False}
-        path_access.append({"path": path, "url": url, "access": access})
+                access[role] = None
+        path_access.append({"path": rel, "url": url, "access": access})
         vc.status(phase, "Access Matrix", "running", f"Path {idx+1}/{len(crawled_paths)}", idx+1, len(crawled_paths))
 
+    def _ok(status):
+        return isinstance(status, int) and status in (200, 201, 202, 204)
+
     privilege_counts = {
-        role: sum(1 for ep in path_access if ep["access"].get(role, {}).get("accessible"))
+        role: sum(1 for ep in path_access if _ok(ep["access"].get(role)))
         for role in all_roles
     }
     most_privileged = (
@@ -8030,20 +8948,20 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     print(f"  Most privileged: {most_privileged} ({privilege_counts.get(most_privileged, 0)} paths)")
 
     for ep in path_access:
-        ep_access  = ep["access"]
-        unauth     = ep_access.get("unauthenticated", {})
-        any_authed = any(ep_access.get(r, {}).get("accessible") for r in cred_roles)
+        ep_access   = ep["access"]
+        unauth_st   = ep_access.get("unauthenticated")
+        any_authed  = any(_ok(ep_access.get(r)) for r in cred_roles)
 
-        if unauth.get("accessible") and any_authed:
+        if _ok(unauth_st) and any_authed:
             out.add_finding(
                 title="Unauthenticated Access to Protected Path",
                 url=ep["url"], port=port, risk="MEDIUM",
                 description=(
-                    f"Path {ep['path']} returned HTTP {unauth['status']} without "
+                    f"Path {ep['path']} returned HTTP {unauth_st} without "
                     f"authentication but returns 2xx when authenticated. "
                     f"Missing or insufficient access control."
                 ),
-                output=f"URL: {ep['url']} | Unauth: HTTP {unauth['status']}",
+                output=f"URL: {ep['url']} | Unauth: HTTP {unauth_st}",
                 command=f"GET {ep['url']} (no auth)",
                 affected=ep["url"],
                 owasp="A01:2021 Broken Access Control", nist="AC-3",
@@ -8051,12 +8969,12 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             )
 
         if most_privileged and len(cred_roles) > 1:
-            high_ok = ep_access.get(most_privileged, {}).get("accessible")
+            high_ok = _ok(ep_access.get(most_privileged))
             if high_ok:
                 for low_role in cred_roles:
                     if low_role == most_privileged:
                         continue
-                    if ep_access.get(low_role, {}).get("accessible"):
+                    if _ok(ep_access.get(low_role)):
                         out.add_finding(
                             title=f"BFLA: Role '{low_role}' Can Access Admin Path",
                             url=ep["url"], port=port, risk="HIGH",
@@ -8067,8 +8985,8 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                             ),
                             output=(
                                 f"URL: {ep['url']} | "
-                                f"{most_privileged}: HTTP {ep_access[most_privileged]['status']} | "
-                                f"{low_role}: HTTP {ep_access[low_role]['status']}"
+                                f"{most_privileged}: HTTP {ep_access[most_privileged]} | "
+                                f"{low_role}: HTTP {ep_access[low_role]}"
                             ),
                             command=f"GET {ep['url']} (role: {low_role})",
                             affected=ep["url"],
@@ -8167,13 +9085,28 @@ def main() -> None:
     vc.log(f"Project:   {cfg['project']}", "INFO")
     vc.log(f"Phases:    {', '.join(k for k, v in cfg['phases'].items() if v)}", "INFO")
 
-    # For each target URL
-    for raw_url in target_urls:
-        if not raw_url:
+    # Scope hostnames: set of all configured target hostnames
+    _scope_hostnames: set = {
+        urllib.parse.urlparse(u).hostname for u in target_urls if u
+    }
+
+    # Pending URL queue — grows when in-scope redirects are discovered during scanning
+    _pending_urls:        list = list(target_urls)
+    _processed_urls:      set  = set()
+    _redirect_discovered: set  = set()  # tracks redirect-discovered target URLs
+    _pending_idx = 0
+
+    while _pending_idx < len(_pending_urls):
+        raw_url      = _pending_urls[_pending_idx]
+        _pending_idx += 1
+        if not raw_url or raw_url in _processed_urls:
             continue
+        _processed_urls.add(raw_url)
+        _is_redirect_target = raw_url in _redirect_discovered
+
         target = _parse_target(raw_url)
         project_dir = Path(cfg["project"]).resolve()
-        if len(target_urls) > 1:
+        if len(target_urls) > 1 or _is_redirect_target:
             # Sub-directory per target
             safe_host = _RE_UNSAFE_FNAME.sub("_", target["hostname"])
             project_dir = project_dir / safe_host
@@ -8194,10 +9127,18 @@ def main() -> None:
 
         vc.log(f"Output directory: {project_dir}", "INFO")
 
-        # Build sessions
-        sess       = _make_session(cfg)
-        auth_sess  = _build_auth_session(cfg, "auth")
-        auth2_sess = _build_auth_session(cfg, "auth2")
+        # Build sessions — all sessions are scope-enforcing
+        sess       = _make_session(cfg, _scope_hostnames)
+        auth_sess  = _build_auth_session(cfg, "auth", _scope_hostnames)
+        auth2_sess = _build_auth_session(cfg, "auth2", _scope_hostnames)
+
+        # Redirect tracking — accumulates in-scope redirect destinations found during this scan
+        _in_scope_new: list = []
+        _attach_redirect_hook(sess, _scope_hostnames, target, out, _in_scope_new)
+        if auth_sess:
+            _attach_redirect_hook(auth_sess, _scope_hostnames, target, out, _in_scope_new)
+        if auth2_sess:
+            _attach_redirect_hook(auth2_sess, _scope_hostnames, target, out, _in_scope_new)
 
         # ------------------------------------------------------------------
         # Build per-credential contexts from auth_matrix + unauthenticated.
@@ -8219,6 +9160,9 @@ def main() -> None:
             return False
 
         # ── Server-side phases — run once, no auth dependency ──────────────
+        # Pre-loop phases use the unauthenticated sess — always tag as UNAUTH
+        out.set_auth_context([{"username": "UNAUTH", "role": "unauthenticated"}])
+
         # Phase 0: recon
         wc_baseline = None
         if not _skip("recon"):
@@ -8316,7 +9260,9 @@ def main() -> None:
             _r_cfg["auth"]["enabled"]  = True
             _r_cfg["auth"]["username"] = _rc.get("username", "")
             _r_cfg["auth"]["password"] = _rc.get("password", "")
-            _r_as    = _build_auth_session(_r_cfg, "auth")
+            _r_as    = _build_auth_session(_r_cfg, "auth", _scope_hostnames)
+            if _r_as:
+                _attach_redirect_hook(_r_as, _scope_hostnames, target, out, _in_scope_new)
             _cred_contexts.append({"label": _r_label, "cfg": _r_cfg, "auth_sess": _r_as})
         # Unauthenticated context always last
         _r_unauth_cfg = copy.deepcopy(cfg)
@@ -8334,6 +9280,13 @@ def main() -> None:
             _ctx_label = _ctx["label"]
             _ctx_auth  = _ctx["auth_sess"]
             _ctx_cfg   = _ctx["cfg"]
+
+            # Set auth context so all findings in this pass carry the account
+            if _ctx_label == "unauthenticated":
+                out.set_auth_context([{"username": "UNAUTH", "role": "unauthenticated"}])
+            else:
+                _ctx_user = (_ctx_cfg.get("auth", {}).get("username") or "").strip() or _ctx_label
+                out.set_auth_context([{"username": _ctx_user, "role": _ctx_label}])
 
             if _ctx_auth:
                 vc.log(f"Auth [{_ctx_label}]: enabled", "INFO")
@@ -8386,17 +9339,68 @@ def main() -> None:
                     vc.error(f"Phase crawl [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"crawl#{_ctx_label}", "error", detail=str(e))
 
+            # ── Scope-filter crawl data before any test phase uses it ──────────
+            # Discard any links, params, or forms pointing outside scope hostnames.
+            # This is the primary guard against testing out-of-scope targets discovered
+            # via crawling (e.g. social-media links found on the target page).
+            _scoped_links = [
+                l for l in crawl_data.get("links", [])
+                if _is_in_scope_url(l, _scope_hostnames)
+            ]
+            _scoped_params = [
+                p for p in crawl_data.get("params", [])
+                if _is_in_scope_url(p.get("url", ""), _scope_hostnames)
+            ]
+            _scoped_forms = [
+                f for f in crawl_data.get("forms", [])
+                if not urllib.parse.urlparse(f.get("action") or "").hostname
+                or _is_in_scope_url(f.get("action", ""), _scope_hostnames)
+            ]
+            _oos_links = len(crawl_data.get("links", [])) - len(_scoped_links)
+            if _oos_links:
+                vc.log(
+                    f"[scope] Dropped {_oos_links} out-of-scope link(s) from crawl data",
+                    "WARNING",
+                )
+            crawl_data = {
+                **crawl_data,
+                "links":  _scoped_links,
+                "params": _scoped_params,
+                "forms":  _scoped_forms,
+            }
+
             # Accumulate crawl links for access_matrix
             _all_crawl_links.extend(crawl_data.get("links", []))
 
+            # Write structure map from crawl data (first pass — pages, forms, params)
+            try:
+                _write_structure_map(out, target, crawl_data=crawl_data)
+            except Exception:
+                pass
+
             # ── Phase 3c: endpoint tools ──
-            _ep_discovered = list(_ep_base) + crawl_data.get("links", [])
+            _ep_discovered = [
+                u for u in list(_ep_base) + crawl_data.get("links", [])
+                if _is_in_scope_url(u, _scope_hostnames)
+            ]
             if _ep_discovered:
+                _et_key = f"endpoint_tools#{_ctx_label}"
+                if pm.is_phase_complete(_et_key):
+                    vc.log(f"[endpoint_tools] Already complete — skipping (checkpoint)", "INFO")
+                else:
+                    pm.set_phase_status(_et_key, "running", "Endpoint Tools")
+                    try:
+                        _phase_endpoint_tools(_ep_discovered, target, _ctx_cfg, pm, out,
+                                              effective_auth, wc_baseline=wc_baseline)
+                        pm.set_phase_status(_et_key, "complete", "Endpoint Tools")
+                    except Exception as e:
+                        vc.error(f"Phase endpoint_tools [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(_et_key, "error", detail=str(e))
+                # Update structure map with endpoint_tools-discovered URLs
                 try:
-                    _phase_endpoint_tools(_ep_discovered, target, _ctx_cfg, pm, out,
-                                          effective_auth, wc_baseline=wc_baseline)
-                except Exception as e:
-                    vc.error(f"Phase endpoint_tools [{_ctx_label}] error: {e}")
+                    _write_structure_map(out, target, extra_urls=_ep_discovered)
+                except Exception:
+                    pass
 
             # ── Phase 3b: jwt ──
             if not _skip("jwt"):
@@ -8610,7 +9614,21 @@ def main() -> None:
                     vc.error(f"Phase mass_assignment [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"mass_assignment#{_ctx_label}", "error", detail=str(e))
 
+            # Write preliminary access_matrix.json after each context completes so
+            # Crucible can display the growing path list without waiting for Phase 20.
+            try:
+                _am_role = "UNAUTH" if _ctx_label == "unauthenticated" else _ctx_label
+                _write_preliminary_access_matrix(out, target, [_am_role])
+            except Exception:
+                pass
+
         # ── Post-context: privilege-escalation / cross-credential phases ───
+        if auth_sess and cfg.get("auth", {}).get("enabled"):
+            _post_user = cfg.get("auth", {}).get("username", "").strip() or "authenticated"
+            out.set_auth_context([{"username": _post_user, "role": "authenticated"}])
+        else:
+            out.set_auth_context([{"username": "UNAUTH", "role": "unauthenticated"}])
+
         def _skip(phase_name: str) -> bool:
             if not phases_enabled.get(phase_name, False):
                 vc.log(f"[{phase_name}] Phase disabled — skipping", "INFO")
@@ -8685,6 +9703,17 @@ def main() -> None:
 
         vc.log(f"Scan complete. Findings: {len(findings)}", "SUCCESS")
         vc.log(f"Output: {project_dir}", "INFO")
+
+        # Queue any in-scope redirect-discovered URLs for full scanning
+        for _new_url in _in_scope_new:
+            _norm_new = _new_url.rstrip("/")
+            if _norm_new not in _processed_urls and _norm_new not in _pending_urls:
+                _pending_urls.append(_norm_new)
+                _redirect_discovered.add(_norm_new)
+                vc.log(
+                    f"[redirect] Queued in-scope redirect target for scanning: {_norm_new}",
+                    "INFO",
+                )
 
         if not vc.managed:
             _tprint(f"\n{Fore.GREEN}[+] Scan complete!{Style.RESET_ALL}")
