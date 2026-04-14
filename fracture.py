@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.3.4"
+VERSION = "2.3.12"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -1375,6 +1375,7 @@ class OutputManager:
         nist: str = "",
         remediation: str = "",
         command: str = "",
+        http_code: int = 0,
     ) -> None:
         """Record a security finding to findings.json and findings.csv. Thread-safe."""
         ts    = self._ts()
@@ -1414,6 +1415,7 @@ class OutputManager:
             "nist":           nist or "",
             "remediation":    remediation or "",
             "accounts":       list(self._current_accounts),
+            "http_code":      int(http_code) if http_code else 0,
         }
         csv_entry = dict(entry)
         csv_entry["title"] = ascii_title
@@ -1477,6 +1479,9 @@ class OutputManager:
                     _risk_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
                     if _risk_rank.get((risk or "").upper(), 0) > _risk_rank.get((ex.get("risk") or "").upper(), 0):
                         ex["risk"] = risk
+                    # keep first non-zero http_code
+                    if http_code and not ex.get("http_code"):
+                        ex["http_code"] = int(http_code)
                     merged = True
                     break
 
@@ -2078,7 +2083,7 @@ def _attach_redirect_hook(
         if in_scope:
             out.add_finding(
                 title="HTTP Redirect to In-Scope URL",
-                url=r.url, port=target["port"], risk="INFO",
+                url=target["url"], port=target["port"], risk="INFO",
                 description=(
                     f"A {r.status_code} redirect was observed from {r.url} to {abs_loc}. "
                     f"The destination is within the assessed scope and has been queued for testing."
@@ -2094,6 +2099,7 @@ def _attach_redirect_hook(
                     "Verify that this redirect is intentional and does not expose sensitive "
                     "paths or bypass access controls."
                 ),
+                http_code=r.status_code,
             )
             norm = abs_loc.rstrip("/")
             if norm not in in_scope_new:
@@ -2118,6 +2124,7 @@ def _attach_redirect_hook(
                     "Verify that this external redirect is intentional. "
                     "Unvalidated redirects can be abused for phishing and open-redirect attacks."
                 ),
+                http_code=r.status_code,
             )
             vc.log(f"[redirect] Out-of-scope {r.status_code}: {r.url} → {abs_loc}", "INFO")
     sess.hooks["response"].append(_hook)
@@ -2444,14 +2451,14 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     # Check probe response for missing security headers.
     # Risk and format match shcheck so findings merge when both tools run.
     _HSTS_HDR = "Strict-Transport-Security"
-    for _hdr_name, _, _, _hdr_desc, _hdr_nist, _hdr_remed in _SECURITY_HEADERS:
+    for _hdr_name, _hdr_risk, _, _hdr_desc, _hdr_nist, _hdr_remed in _SECURITY_HEADERS:
         if _hdr_name == _HSTS_HDR and not target["is_https"]:
             continue
         if _hdr_name not in headers:
             out.add_finding(
                 title=f"Missing Security Header: {_hdr_name}",
                 url=url, port=target["port"],
-                risk="MEDIUM" if _hdr_name == _HSTS_HDR else "LOW",
+                risk=_hdr_risk,
                 description=(
                     f"The HTTP security header '{_hdr_name}' is absent from the "
                     f"response at {url}."
@@ -2462,6 +2469,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 output_file=_probe_files,
                 owasp="A05:2025 Security Misconfiguration", nist=_hdr_nist,
                 remediation=_hdr_remed,
+                http_code=resp.status_code,
             )
 
     detected_cms = [n for n, pats in _CMS_PATTERNS.items()
@@ -2476,6 +2484,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             service=target["scheme"], output_file=_probe_files,
             owasp="A05:2025 Security Misconfiguration", nist="SI-2",
             remediation="Suppress or genericise the Server header.",
+            http_code=resp.status_code,
         )
     if powered_by:
         out.add_finding(
@@ -2486,6 +2495,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             service=target["scheme"], output_file=_probe_files,
             owasp="A05:2025 Security Misconfiguration", nist="SI-2",
             remediation="Remove the X-Powered-By header.",
+            http_code=resp.status_code,
         )
     for cms in set(detected_cms):
         vc.log(f"[recon] CMS detected: {cms}", "SUCCESS")
@@ -2756,6 +2766,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             affected="\n".join(disallowed[:20]),
                             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                             remediation="Review robots.txt for sensitive path disclosure.",
+                            http_code=r.status_code,
                         )
         except Exception:
             pass
@@ -2781,7 +2792,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _admin_safe = apath.lstrip("/").replace("/", "_").replace(".", "_") or "root"
                 _admin_rq, _admin_rp = _save_http_evidence(out, phase, f"admin_{_admin_safe}", r)
                 out.add_finding(
-                    title="Admin Panel Exposed",
+                    title=f"Admin Panel Exposed: {apath}",
                     url=url + apath, port=target["port"], risk=_admin_risk,
                     description=_admin_desc,
                     output=f"GET {apath} → {r.status_code}",
@@ -2789,6 +2800,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     affected=url + apath, output_file=f"{_admin_rq},{_admin_rp}",
                     owasp="A05:2025 Security Misconfiguration", nist="AC-3",
                     remediation="Restrict admin interfaces by IP allowlist or VPN.",
+                    http_code=r.status_code,
                 )
                 vc.log(f"[recon] Admin panel: {apath} → {r.status_code}", "SUCCESS")
                 try:
@@ -2820,6 +2832,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     affected=url + cpath, output_file=f"{_cp_rq},{_cp_rp}",
                     owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                     remediation=f"Block public access to {cpath}.",
+                    http_code=r.status_code,
                 )
         except Exception:
             pass
@@ -2875,7 +2888,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     _sm_rd[_sp] = _gr
             if _sm_ps:
                 _write_structure_map(out, target, path_statuses=_sm_ps,
-                                     path_redirects=_sm_rd or None)
+                                     path_redirects=_sm_rd or None,
+                                     evidence_files=[str(out_f)])
         except Exception:
             pass
 
@@ -2920,7 +2934,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                         _sm_rd[_sp] = _fr
                 if _sm_ps:
                     _write_structure_map(out, target, path_statuses=_sm_ps,
-                                         path_redirects=_sm_rd or None)
+                                         path_redirects=_sm_rd or None,
+                                         evidence_files=[str(fer_out)])
             except Exception:
                 pass
     elif feroxbuster:
@@ -2962,7 +2977,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             _sm_rd[_sp] = _gr
                     if _sm_ps:
                         _write_structure_map(out, target, path_statuses=_sm_ps,
-                                             path_redirects=_sm_rd or None)
+                                             path_redirects=_sm_rd or None,
+                                             evidence_files=[str(gob_files_out)])
                 except Exception:
                     pass
         # feroxbuster files: always run (handles wildcards natively)
@@ -3005,7 +3021,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             _sm_rd[_sp] = _fr
                     if _sm_ps:
                         _write_structure_map(out, target, path_statuses=_sm_ps,
-                                             path_redirects=_sm_rd or None)
+                                             path_redirects=_sm_rd or None,
+                                             evidence_files=[str(fer_files_out)])
                 except Exception:
                     pass
 
@@ -3023,6 +3040,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 service=target["scheme"], output_file=str(_dl_out),
                 owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                 remediation="Disable directory listing (e.g. Options -Indexes for Apache).",
+                http_code=r.status_code,
             )
     except Exception:
         pass
@@ -3228,8 +3246,9 @@ def _phase_endpoint_tools(
         # ── Screenshot ──────────────────────────────────────────────────────
         ep_shot = save_dir / f"screenshot_{ep_safe}.png"
         if _capture_screenshot_to(ep_url, ep_shot, target, cfg):
+            _ep_rel = urllib.parse.urlparse(ep_url).path or "/"
             out.add_finding(
-                title="Web Screenshot Captured",
+                title=f"Web Screenshot Captured: {_ep_rel}",
                 url=ep_url, port=target["port"], risk="INFO",
                 description=f"A screenshot of discovered endpoint {ep_url} was captured.",
                 output=f"Saved: {ep_shot.name}",
@@ -3304,7 +3323,8 @@ def _phase_endpoint_tools(
                             _ep_rd[_sp] = _gr
                     if _ep_ps:
                         _write_structure_map(out, target, path_statuses=_ep_ps,
-                                             path_redirects=_ep_rd or None)
+                                             path_redirects=_ep_rd or None,
+                                             evidence_files=[str(ep_gob)])
                 except Exception:
                     pass
 
@@ -3332,7 +3352,8 @@ def _phase_endpoint_tools(
                             _ep_rd[_sp] = _gr
                     if _ep_ps:
                         _write_structure_map(out, target, path_statuses=_ep_ps,
-                                             path_redirects=_ep_rd or None)
+                                             path_redirects=_ep_rd or None,
+                                             evidence_files=[str(ep_gob_f)])
                 except Exception:
                     pass
 
@@ -3373,7 +3394,8 @@ def _phase_endpoint_tools(
                             _ep_rd[_sp] = _fr
                     if _ep_ps:
                         _write_structure_map(out, target, path_statuses=_ep_ps,
-                                             path_redirects=_ep_rd or None)
+                                             path_redirects=_ep_rd or None,
+                                             evidence_files=[str(ep_fer)])
                 except Exception:
                     pass
 
@@ -3658,14 +3680,14 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             # Checked against the full _SECURITY_HEADERS list; risk and format
             # aligned with shcheck findings so duplicates merge rather than stack.
             _HSTS_HDR = "Strict-Transport-Security"
-            for _hdr_name, _, _, _hdr_desc, _hdr_nist, _hdr_remed in _SECURITY_HEADERS:
+            for _hdr_name, _hdr_risk, _, _hdr_desc, _hdr_nist, _hdr_remed in _SECURITY_HEADERS:
                 if _hdr_name == _HSTS_HDR and not target["is_https"]:
                     continue
                 if re.search(rf'{re.escape(_hdr_name)}\s+not offered', stdout, re.I):
                     out.add_finding(
                         title=f"Missing Security Header: {_hdr_name}",
                         url=target["url"], port=port,
-                        risk="MEDIUM" if _hdr_name == _HSTS_HDR else "LOW",
+                        risk=_hdr_risk,
                         description=(
                             f"The HTTP security header '{_hdr_name}' is absent from the "
                             f"response at {target['url']}."
@@ -3978,6 +4000,7 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
                             f"at {cname_target} immediately. Monitor all DNS CNAMEs "
                             "that point to third-party services."
                         ),
+                        http_code=r.status_code,
                     )
                     vc.log(f"[subdomain_takeover] Dangling CNAME ({service}): {host} → {cname_target}", "SUCCESS")
                     break
@@ -4005,6 +4028,7 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
                             "Verify DNS records for this host and claim the associated "
                             "service resource if applicable."
                         ),
+                        http_code=r.status_code,
                     )
                     break
         except Exception:
@@ -4059,13 +4083,13 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
 # Phase 2: Headers
 # ─────────────────────────────────────────────
 _SECURITY_HEADERS = [
-    ("Strict-Transport-Security", "HIGH",   "Missing HSTS Header",
+    ("Strict-Transport-Security", "MEDIUM",  "Missing HSTS Header",
      "Without HSTS, browsers may connect over plain HTTP enabling SSL-stripping downgrade attacks (RFC 6797). CWE-523, CWE-319.",
      "SC-8", "Add: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload"),
     ("Content-Security-Policy",   "MEDIUM", "Missing Content-Security-Policy Header",
      "Without CSP, the application is susceptible to XSS attacks.",
      "SI-10", "Implement a Content-Security-Policy to restrict resource loading."),
-    ("X-Frame-Options",           "MEDIUM", "Missing X-Frame-Options Header (Clickjacking)",
+    ("X-Frame-Options",           "LOW",    "Missing X-Frame-Options Header (Clickjacking)",
      "Without X-Frame-Options, the page may be embedded in an iframe for clickjacking.",
      "SI-10", "Add: X-Frame-Options: DENY or SAMEORIGIN"),
     ("X-Content-Type-Options",    "LOW",    "Missing X-Content-Type-Options Header",
@@ -4078,6 +4102,7 @@ _SECURITY_HEADERS = [
      "Without Cache-Control, sensitive responses may be stored by browser or proxy caches.",
      "SI-12", "Add: Cache-Control: no-store, no-cache to sensitive endpoint responses."),
 ]
+_SEC_HDR_RISK = {h: r for h, r, *_ in _SECURITY_HEADERS}
 
 # Headers allowed by the shcheck parser — must match _SECURITY_HEADERS names exactly
 _SHCHECK_ALLOWED_HEADERS = {
@@ -4184,6 +4209,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 server_hdr, "",
             ),
             command=_hdr_cmd,
+            http_code=resp.status_code,
         )
     powered_by = headers.get("X-Powered-By", "")
     if powered_by:
@@ -4200,6 +4226,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 server_hdr, powered_by,
             ),
             command=_hdr_cmd,
+            http_code=resp.status_code,
         )
     aspnet_ver = headers.get("X-AspNet-Version", "") or headers.get("X-AspNetMvc-Version", "")
     if aspnet_ver:
@@ -4217,6 +4244,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 server_hdr, powered_by,
             ),
             command=_hdr_cmd,
+            http_code=resp.status_code,
         )
     via_hdr = headers.get("Via", "")
     if via_hdr:
@@ -4233,6 +4261,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 server_hdr, powered_by,
             ),
             command=_hdr_cmd,
+            http_code=resp.status_code,
         )
 
     vc.status(phase, "Security Headers", "running", "Security header check", 1, 5)
@@ -4252,6 +4281,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 output=f"Missing: {hdr_name}",
                 affected=hdr_name,
                 command=_hdr_cmd,
+                http_code=resp.status_code,
             )
 
     # ── Permissive (misconfigured) security header checks ────────────────────
@@ -4279,6 +4309,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                     server_hdr, powered_by,
                 ),
                 command=_hdr_cmd,
+                http_code=resp.status_code,
             )
 
     _hsts_val = headers.get("Strict-Transport-Security", "")
@@ -4302,6 +4333,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                     server_hdr, powered_by,
                 ),
                 command=_hdr_cmd,
+                http_code=resp.status_code,
             )
 
     _xfo_val = headers.get("X-Frame-Options", "")
@@ -4322,6 +4354,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 server_hdr, powered_by,
             ),
             command=_hdr_cmd,
+            http_code=resp.status_code,
         )
 
     _xcto_val = headers.get("X-Content-Type-Options", "")
@@ -4342,6 +4375,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 server_hdr, powered_by,
             ),
             command=_hdr_cmd,
+            http_code=resp.status_code,
         )
 
     _rp_val = headers.get("Referrer-Policy", "")
@@ -4362,6 +4396,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 server_hdr, powered_by,
             ),
             command=_hdr_cmd,
+            http_code=resp.status_code,
         )
 
     _cc_val = headers.get("Cache-Control", "")
@@ -4382,6 +4417,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 server_hdr, powered_by,
             ),
             command=_hdr_cmd,
+            http_code=resp.status_code,
         )
 
     vc.status(phase, "Security Headers", "running", "CORS check", 2, 5)
@@ -4396,6 +4432,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             sources="fracture-headers", service=target["scheme"],
             owasp="A05:2025 Security Misconfiguration", nist="AC-4",
             remediation="Specify explicit allowed origins instead of wildcard when using credentials.",
+            http_code=resp.status_code,
         )
 
     vc.status(phase, "Security Headers", "running", "Cookie flags", 3, 5)
@@ -4415,36 +4452,88 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             continue
         sc_lower = sc.lower()
         cname    = sc.split("=")[0].strip() if "=" in sc else sc.split(";")[0].strip()
+        _sc_out  = f"Set-Cookie: {sc[:300]}"
+        _sc_src  = "fracture-headers"
+        _sc_owasp = "A05:2025 Security Misconfiguration"
+        _sc_nist  = "SC-23"
+
+        # HttpOnly
         if "httponly" not in sc_lower:
             out.add_finding(
-                title="Cookie Missing HttpOnly Flag",
-                url=url, port=target["port"], risk="MEDIUM",
-                description=f"Cookie '{cname}' is set without HttpOnly, making it accessible to JavaScript.",
-                output=f"Set-Cookie: {sc[:200]}",
-                sources="fracture-headers", service=target["scheme"],
-                owasp="A05:2025 Security Misconfiguration", nist="SC-23",
-                remediation="Add HttpOnly attribute to all session cookies.",
+                title="Missing Secure Cookie Attribute: HttpOnly",
+                url=url, port=target["port"], risk="LOW",
+                description=(
+                    f"Cookie '{cname}' does not have the HttpOnly attribute. "
+                    "Without HttpOnly, the cookie is accessible to JavaScript, "
+                    "exposing it to XSS-based theft."
+                ),
+                output=_sc_out, sources=_sc_src, service=target["scheme"],
+                owasp=_sc_owasp, nist=_sc_nist,
+                remediation="Add the HttpOnly attribute to all session and authentication cookies.",
+                http_code=resp.status_code,
             )
+
+        # Secure
         if is_https and "secure" not in sc_lower:
             out.add_finding(
-                title="Cookie Missing Secure Flag",
-                url=url, port=target["port"], risk="MEDIUM",
-                description=f"Cookie '{cname}' is missing the Secure flag.",
-                output=f"Set-Cookie: {sc[:200]}",
-                sources="fracture-headers", service=target["scheme"],
-                owasp="A05:2025 Security Misconfiguration", nist="SC-23",
-                remediation="Add Secure attribute to all cookies on HTTPS sites.",
-            )
-        if "samesite" not in sc_lower:
-            out.add_finding(
-                title="Cookie Missing SameSite Attribute",
+                title="Missing Secure Cookie Attribute: Secure",
                 url=url, port=target["port"], risk="LOW",
-                description=f"Cookie '{cname}' does not have the SameSite attribute.",
-                output=f"Set-Cookie: {sc[:200]}",
-                sources="fracture-headers", service=target["scheme"],
-                owasp="A05:2025 Security Misconfiguration", nist="SC-23",
-                remediation="Add SameSite=Lax or SameSite=Strict to all cookies.",
+                description=(
+                    f"Cookie '{cname}' does not have the Secure attribute on an HTTPS site. "
+                    "Without Secure, the cookie can be transmitted over unencrypted HTTP connections."
+                ),
+                output=_sc_out, sources=_sc_src, service=target["scheme"],
+                owasp=_sc_owasp, nist=_sc_nist,
+                remediation="Add the Secure attribute to all cookies on HTTPS sites.",
+                http_code=resp.status_code,
             )
+
+        # SameSite — missing or misconfigured
+        _ss_m = re.search(r'samesite\s*=\s*([^\s;,]+)', sc_lower)
+        if not _ss_m:
+            out.add_finding(
+                title="Missing Secure Cookie Attribute: SameSite",
+                url=url, port=target["port"], risk="LOW",
+                description=(
+                    f"Cookie '{cname}' does not have the SameSite attribute. "
+                    "Without SameSite, the cookie is sent with all cross-site requests, "
+                    "increasing CSRF risk."
+                ),
+                output=_sc_out, sources=_sc_src, service=target["scheme"],
+                owasp=_sc_owasp, nist=_sc_nist,
+                remediation="Add SameSite=Lax or SameSite=Strict to all cookies.",
+                http_code=resp.status_code,
+            )
+        else:
+            _ss_val = _ss_m.group(1).strip()
+            if _ss_val not in ("strict", "lax", "none"):
+                out.add_finding(
+                    title="Misconfigured Secure Cookie Attribute: SameSite",
+                    url=url, port=target["port"], risk="LOW",
+                    description=(
+                        f"Cookie '{cname}' has SameSite set to an unrecognised value "
+                        f"'{_ss_val}'. Browsers will treat it as SameSite=None (no restriction)."
+                    ),
+                    output=_sc_out, sources=_sc_src, service=target["scheme"],
+                    owasp=_sc_owasp, nist=_sc_nist,
+                    remediation="Set SameSite to Strict, Lax, or None (with Secure).",
+                    http_code=resp.status_code,
+                )
+            elif _ss_val == "none":
+                if "secure" not in sc_lower:
+                    out.add_finding(
+                        title="Misconfigured Secure Cookie Attribute: SameSite",
+                        url=url, port=target["port"], risk="LOW",
+                        description=(
+                            f"Cookie '{cname}' has SameSite=None without the Secure attribute. "
+                            "Browsers reject SameSite=None cookies that lack Secure, and the "
+                            "cookie will be blocked or transmitted insecurely."
+                        ),
+                        output=_sc_out, sources=_sc_src, service=target["scheme"],
+                        owasp=_sc_owasp, nist=_sc_nist,
+                        remediation="Add the Secure attribute when using SameSite=None.",
+                        http_code=resp.status_code,
+                    )
 
     # Expect-CT — deprecated in Chrome 113+ but worth flagging if misconfigured
     vc.status(phase, "Security Headers", "running", "Expect-CT check", 4, 5)
@@ -4466,6 +4555,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 "Remove Expect-CT (deprecated in Chrome 113+) or set max-age to "
                 "a positive value. Modern Certificate Transparency is enforced by browsers natively."
             ),
+            http_code=resp.status_code,
         )
 
     # Origin-Agent-Cluster header (opt-in to process isolation)
@@ -4484,6 +4574,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             output_file=str(out_f),
             owasp="A05:2025 Security Misconfiguration", nist="SC-8",
             remediation="Add: Origin-Agent-Cluster: ?1",
+            http_code=resp.status_code,
         )
 
     # ── TRACE method detection (XST) ─────────────────────────────────────────
@@ -4663,7 +4754,7 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
                         continue   # filter to the canonical 6 security headers only
                     if hdr == _HSTS and not tgt["is_https"]:
                         continue   # HSTS only applies to HTTPS
-                    risk = "HIGH" if hdr == _HSTS else ("MEDIUM" if hdr == "Content-Security-Policy" else "LOW")
+                    risk = _SEC_HDR_RISK.get(hdr, "LOW")
                     out.add_finding(
                         title=f"Missing Security Header: {hdr}",
                         url=tgt_url, port=port, risk=risk,
@@ -4799,8 +4890,9 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
 
+        _ss_rel = urllib.parse.urlparse(url).path or "/"
         out.add_finding(
-            title="Web Screenshot Captured",
+            title=f"Web Screenshot Captured: {_ss_rel}",
             url=url, port=port, risk="INFO",
             description=f"A screenshot of {url} was captured during reconnaissance.",
             output=f"Saved: {out_path.name}",
@@ -4888,7 +4980,7 @@ def _phase_webfiles(target: dict, cfg: dict, pm: ProgressManager,
     for path in _WEB_WELL_KNOWN:
         fpath = _get_and_save(path)
         if fpath:
-            saved.append(fpath)
+            saved.append((path, fpath))
             if path in ("/", "/index.html", "/index.php"):
                 try:
                     text = Path(fpath).read_text(encoding="utf-8", errors="replace")
@@ -4914,24 +5006,22 @@ def _phase_webfiles(target: dict, cfg: dict, pm: ProgressManager,
             break
         fpath = _get_and_save(path)
         if fpath:
-            saved.append(fpath)
+            saved.append((path, fpath))
 
     vc.status(phase, "Web Files", "running", f"{len(saved)} files", len(saved), max(len(saved), 1))
 
-    if saved:
+    for _wf_path, _wf_fpath in saved:
         out.add_finding(
-            title="Web Files Downloaded",
+            title=f"Web Files Downloaded: {_wf_path}",
             url=url, port=port, risk="INFO",
-            description=(
-                f"{len(saved)} file(s) downloaded from {url} during reconnaissance. "
-                "Review for sensitive content."
-            ),
-            output="\n".join(Path(f).name for f in saved[:20]),
+            description=f"File downloaded from {base_url}{_wf_path} during reconnaissance.",
+            output=Path(_wf_fpath).name,
             sources="fracture-webfiles", service=target["scheme"],
-            output_file=",".join(saved[:20]),
+            output_file=_wf_fpath,
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
             remediation="Review downloaded files for sensitive information or misconfigurations.",
         )
+    if saved:
         vc.log(f"[webfiles] {len(saved)} files saved to {save_dir}", "SUCCESS")
 
     vc.status(phase, "Web Files", "complete", "Done", len(saved), max(len(saved), 1))
@@ -5761,13 +5851,16 @@ def _write_structure_map(out: "OutputManager", target: dict,
                          crawl_data: "dict | None" = None,
                          extra_urls: "list | None" = None,
                          path_statuses: "dict | None" = None,
-                         path_redirects: "dict | None" = None) -> None:
+                         path_redirects: "dict | None" = None,
+                         evidence_files: "list | None" = None) -> None:
     """Incrementally build and persist structure_map.json.
 
     Each call merges newly discovered paths into the existing map so information
     accumulates across phases without overwriting earlier data.
     path_statuses: dict of {path: status_code} to record HTTP status per path.
     path_redirects: dict of {path: redirect_url} for in-scope redirect targets.
+    evidence_files: list of file paths that produced the new paths (added to the
+                    "Web Structure Identified" finding for this target).
     """
     sm_path = out.root / "structure_map.json"
     try:
@@ -5776,6 +5869,7 @@ def _write_structure_map(out: "OutputManager", target: dict,
         existing = {}
 
     paths: dict = existing.get("paths", {})
+    _old_path_keys: set = set(paths.keys())
     base_host = target["hostname"]
 
     def _add_url(raw_url: str, status: "int | None" = None) -> None:
@@ -5791,8 +5885,32 @@ def _write_structure_map(out: "OutputManager", target: dict,
                 path = p.path or "/"
             else:
                 path = raw_url if raw_url.startswith("/") else ("/" + raw_url)
+            # Strip query/fragment — only the path is stored in structure_map
+            path = path.split("?")[0].split("#")[0]
             # Final sanity: path must not contain a scheme fragment
             if "://" in path or not path.startswith("/"):
+                return
+            # Reject paths containing characters that are never valid unencoded in URL paths
+            _BAD = frozenset(['"', '<', '>', '\\', '^', '{', '}', '|', '`',
+                               ' ', '\t', '\r', '\n', '\x00', ','])
+            if any(c in _BAD for c in path):
+                return
+            # Validate percent-encoded sequences: % must be followed by exactly two hex digits
+            _HEX = frozenset('0123456789abcdefABCDEF')
+            i = 0
+            while i < len(path):
+                if path[i] == '%':
+                    if i + 2 >= len(path) or path[i+1] not in _HEX or path[i+2] not in _HEX:
+                        return
+                    i += 3
+                else:
+                    i += 1
+            # After URL-decoding, reject paths whose segments contain injection artifacts
+            try:
+                _decoded = urllib.parse.unquote(path, errors='strict')
+                if any(c in _decoded for c in ('"', '<', '>')):
+                    return
+            except Exception:
                 return
             entry = paths.setdefault(path, {})
             if status is not None:
@@ -5802,15 +5920,15 @@ def _write_structure_map(out: "OutputManager", target: dict,
 
     if path_statuses:
         for ps_path, ps_status in path_statuses.items():
-            entry = paths.setdefault(ps_path, {})
-            if ps_status is not None:
-                entry["status"] = ps_status
+            _add_url(ps_path, ps_status)
 
     if path_redirects:
         for pr_path, pr_url in path_redirects.items():
             rt = _sm_normalize_redirect(pr_url, base_host)
             if rt:
-                paths.setdefault(pr_path, {})["redirect_to"] = rt
+                _add_url(pr_path)
+                if pr_path in paths:
+                    paths[pr_path]["redirect_to"] = rt
 
     if crawl_data:
         for lnk in crawl_data.get("links", []):
@@ -5823,7 +5941,10 @@ def _write_structure_map(out: "OutputManager", target: dict,
                     if p.hostname and p.hostname != base_host:
                         continue
                     path = p.path or "/"
-                    entry = paths.setdefault(path, {})
+                    _add_url(path)
+                    if path not in paths:
+                        continue
+                    entry = paths[path]
                     entry["has_form"] = True
                     if form.get("method"):
                         entry["form_method"] = form["method"].upper()
@@ -5861,6 +5982,38 @@ def _write_structure_map(out: "OutputManager", target: dict,
     except Exception:
         pass
 
+    # Emit / update the single "Web Structure Identified" finding for this target.
+    # Only new paths (not seen on previous calls) are reported so the description
+    # grows incrementally without duplicating lines already in the finding.
+    try:
+        _newly_added = sorted(set(paths.keys()) - _old_path_keys)
+        if _newly_added:
+            _ev_str = ",".join(str(f) for f in (evidence_files or []) if f)
+            _desc   = "\n".join(_newly_added)
+            out.add_finding(
+                title="Web Structure Identified",
+                url=target["url"],
+                port=target["port"],
+                risk="INFO",
+                description=_desc,
+                output=_desc,
+                affected=target["url"],
+                output_file=_ev_str,
+                sources="fracture-structure",
+                service=target["scheme"],
+                owasp="",
+                nist="",
+            )
+    except Exception:
+        pass
+
+    # Keep access_matrix.json in sync with every structure_map update so
+    # Crucible can show a growing path list from the very first HTTP probe.
+    try:
+        _write_preliminary_access_matrix(out, target, ["unauthenticated"])
+    except Exception:
+        pass
+
 
 def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                      out: OutputManager, sess: requests.Session,
@@ -5888,6 +6041,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     sources="fracture-injection", service=target["scheme"],
                     affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                     remediation="Use parameterised queries throughout the application.",
+                    http_code=r.status_code,
                 )
                 vc.log(f"[injection] SQLi: {purl} param={param}", "SUCCESS")
 
@@ -5917,6 +6071,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         sources="fracture-injection", service=target["scheme"],
                         affected=action, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Use parameterised queries. Validate all inputs.",
+                        http_code=r.status_code,
                     )
             except Exception:
                 pass
@@ -5970,6 +6125,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Encode all user output. Implement CSP.",
+                        http_code=r.status_code,
                     )
                     vc.log(f"[injection] XSS: {purl} param={param}", "SUCCESS")
                     break
@@ -6026,6 +6182,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Never pass user input to template engines unsanitised.",
+                        http_code=r.status_code,
                     )
                     vc.log(f"[injection] SSTI: {purl} param={param}", "SUCCESS")
 
@@ -6047,6 +6204,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Never pass user input to OS calls.",
+                        http_code=r.status_code,
                     )
                     vc.log(f"[injection] CMDi: {purl} param={param}", "SUCCESS")
 
@@ -6067,6 +6225,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     sources="fracture-injection", service=target["scheme"],
                     owasp="A03:2025 Injection", nist="SI-10",
                     remediation="Strip CRLF characters from input used in HTTP headers.",
+                    http_code=r.status_code,
                 )
 
     vc.status(phase, "Injection Testing", "running", "XXE", 6, 7)
@@ -6090,6 +6249,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     sources="fracture-injection", service=target["scheme"],
                     affected=action, owasp="A03:2025 Injection", nist="SI-10",
                     remediation="Disable external entity processing in XML parsers.",
+                    http_code=r.status_code,
                 )
                 vc.log(f"[injection] XXE at {action}", "SUCCESS")
         except Exception:
@@ -6122,6 +6282,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         sources="fracture-injection", service=target["scheme"],
                         affected=action, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Use parameterised queries for all database operations, including reads of stored values.",
+                        http_code=r2.status_code,
                     )
                     vc.log(f"[injection] Second-order SQLi at {action} field={pname}", "SUCCESS")
                     break
@@ -6161,6 +6322,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                             "Sanitise all text inputs before CSV/Excel export. "
                             "Prefix cells beginning with =, +, -, @ with a single-quote character."
                         ),
+                        http_code=r.status_code,
                     )
                     vc.log(f"[injection] CSV injection at {action} field={pname}", "SUCCESS")
                     break
@@ -6187,6 +6349,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Strip or reject operator characters ($, {, [) from user input before NoSQL queries.",
+                        http_code=r.status_code,
                     )
                     vc.log(f"[injection] NoSQL injection: {purl} param={param}", "SUCCESS")
                     break
@@ -6210,6 +6373,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Escape all LDAP special characters. Use an LDAP-safe query library with parameterised filters.",
+                        http_code=r.status_code,
                     )
                     vc.log(f"[injection] LDAP injection: {purl} param={param}", "SUCCESS")
                     break
@@ -6233,6 +6397,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Use a parameterised XPath API. Never concatenate user input into XPath expressions.",
+                        http_code=r.status_code,
                     )
                     vc.log(f"[injection] XPath injection: {purl} param={param}", "SUCCESS")
                     break
@@ -6260,6 +6425,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     sources="fracture-injection", service=target["scheme"],
                     affected=purl, owasp="A03:2025 Injection", nist="AU-3",
                     remediation="Strip CRLF/newline characters from all inputs written to logs. Use a structured logging library.",
+                    http_code=r.status_code,
                 )
                 vc.log(f"[injection] Log injection accepted: {purl} param={param}", "SUCCESS")
                 break
@@ -6293,6 +6459,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                             sources="fracture-injection", service=target["scheme"],
                             affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                             remediation="Define explicit single-value semantics for all parameters. Reject or normalise duplicate query parameters.",
+                            http_code=r.status_code,
                         )
                         vc.log(f"[injection] HPP: {purl} param={param}", "SUCCESS")
                         break
@@ -6317,11 +6484,27 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                urllib.parse.unquote(r.url),
                                urllib.parse.unquote_plus(r.url)):
                     _ci_body = _ci_body.replace(_strip, "")
-                # Also strip the raw payload and its URL-encoded forms.
+                # Also strip the raw payload and all URL-encoded variants.
                 for _enc in (ci_pay,
-                             urllib.parse.quote(ci_pay),
+                             urllib.parse.quote(ci_pay, safe=''),
                              urllib.parse.quote_plus(ci_pay)):
                     _ci_body = _ci_body.replace(_enc, "")
+                # Strip any URL that embeds the execution marker — the page may
+                # reflect the submitted URL with a different percent-encoding
+                # (e.g. + vs %20, truncated fragment) that the above replaces miss.
+                # A marker appearing only inside a URL is not code execution.
+                _pat_core = re.escape(ci_pat.pattern.replace('\\b', ''))
+                if _pat_core:
+                    _ci_body = re.sub(
+                        r'https?://[^\s<>"\']*' + _pat_core + r'[^\s<>"\']*',
+                        '', _ci_body, flags=re.I)
+                    _ci_body = re.sub(
+                        r'\?[^\s<>"\']*' + _pat_core + r'[^\s<>"\']*',
+                        '', _ci_body, flags=re.I)
+                    _ci_body = re.sub(
+                        r'(?:href|src|action|content)(?:\s*)=(?:\s*)["\'][^"\']*'
+                        + _pat_core + r'[^"\']*["\']',
+                        '', _ci_body, flags=re.I)
                 if ci_pat.search(_ci_body):
                     _rq, _rp = _save_http_evidence(out, phase, f"codeinject_{param}", r)
                     out.add_finding(
@@ -6335,6 +6518,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Never pass user-controlled input to eval(), exec(), or similar functions. Use safe alternatives.",
+                        http_code=r.status_code,
                     )
                     vc.log(f"[injection] Code injection RCE: {purl} param={param}", "SUCCESS")
                     break
@@ -6375,6 +6559,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                             sources="fracture-injection", service=target["scheme"],
                             affected=check_url, owasp="A03:2025 Injection", nist="SI-10",
                             remediation="HTML-encode all stored user-supplied content before rendering. Implement a strict Content-Security-Policy.",
+                            http_code=r2.status_code,
                         )
                         vc.log(f"[injection] Stored XSS at {action} field={pname}", "SUCCESS")
                         break
@@ -6410,6 +6595,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         "Never pass URL-derived input to dangerous DOM sinks. "
                         "Use textContent instead of innerHTML. Implement a strict CSP."
                     ),
+                    http_code=r.status_code,
                 )
                 vc.log(f"[injection] DOM XSS source/sink: {js_url}", "SUCCESS")
         except Exception:
@@ -6440,6 +6626,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                 "Remove JSONP support and use CORS instead. "
                                 "If JSONP is required, validate the callback name against a strict whitelist."
                             ),
+                            http_code=r.status_code,
                         )
                         vc.log(f"[injection] JSONP endpoint: {purl} param={cb_param}", "SUCCESS")
                         break
@@ -6565,6 +6752,7 @@ def _phase_traversal(target: dict, cfg: dict, pm: ProgressManager,
                         affected=f"{purl}?{param}=<traversal>",
                         owasp="A01:2025 Broken Access Control", nist="AC-3",
                         remediation="Validate file path inputs. Use allow-lists. Never use raw user input in filesystem operations.",
+                        http_code=r.status_code,
                     )
                     vc.log(f"[traversal] LFI: {purl} param={param}", "SUCCESS")
                     break
@@ -6636,6 +6824,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                             "Validate all numeric inputs server-side. Reject zero, "
                             "negative, and implausibly large values. Apply range checks."
                         ),
+                        http_code=r.status_code,
                     )
                     vc.log(f"[business_logic] Negative value accepted: {action} field={nf['name']}", "SUCCESS")
                     break
@@ -6668,6 +6857,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                         "Enforce server-side state machine validation. Confirm all prior "
                         "workflow steps are complete before processing late-stage requests."
                     ),
+                    http_code=r.status_code,
                 )
                 vc.log(f"[business_logic] Workflow skip: {lnk}", "SUCCESS")
         except Exception:
@@ -6773,6 +6963,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                             "financial values server-side and recalculate totals from "
                             "authoritative data before processing any transaction."
                         ),
+                        http_code=r.status_code,
                     )
                     vc.log(f"[business_logic] Price tamper accepted: {action} field={hf['name']}", "SUCCESS")
             except Exception:
@@ -6832,6 +7023,7 @@ def _phase_ssrf(target: dict, cfg: dict, pm: ProgressManager,
                     affected=f"{purl}?{param}={ssrf_payload}",
                     owasp="A10:2025 Server-Side Request Forgery", nist="SC-7",
                     remediation="Validate and restrict URLs supplied by users. Use an allowlist of permitted destinations.",
+                    http_code=r.status_code,
                 )
                 vc.log(f"[ssrf] SSRF via {param}: {ssrf_desc}", "SUCCESS")
                 break
@@ -6870,6 +7062,7 @@ def _phase_ssrf(target: dict, cfg: dict, pm: ProgressManager,
                             "Block requests to RFC-1918 and loopback addresses. "
                             "Implement an allowlist of permitted outbound destinations."
                         ),
+                        http_code=r.status_code,
                     )
                     vc.log(f"[ssrf] Blind SSRF via {param} → {blind_desc}", "SUCCESS")
                     break
@@ -7213,6 +7406,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                         owasp="A07:2025 Identification and Authentication Failures",
                         nist="IA-5",
                         remediation="Use parameterised queries for login. Implement account lockout.",
+                        http_code=r.status_code,
                     )
                     vc.log(f"[auth_bypass] Login SQLi bypass at {action}", "SUCCESS")
                     break
@@ -7244,6 +7438,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                     owasp="A07:2025 Identification and Authentication Failures",
                     nist="IA-5",
                     remediation="Ensure password reset returns a consistent message regardless of whether the email exists.",
+                    http_code=r.status_code,
                 )
                 break
         except Exception:
@@ -7286,6 +7481,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                             owasp="A07:2025 Identification and Authentication Failures",
                             nist="IA-5",
                             remediation="Explicitly reject JWTs with 'none' algorithm. Require a strong signing algorithm.",
+                            http_code=r.status_code,
                         )
                         vc.log("[auth_bypass] JWT none algorithm accepted!", "SUCCESS")
             except Exception:
@@ -7799,6 +7995,7 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
                         affected=test_url,
                         owasp="A01:2025 Broken Access Control", nist="AC-3",
                         remediation="Implement object-level authorisation. Verify the requesting user owns each resource.",
+                        http_code=r.status_code,
                     )
                     vc.log(f"[authorization] IDOR: {test_url}", "SUCCESS")
                     break
@@ -7822,6 +8019,7 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
                         affected=link,
                         owasp="A01:2025 Broken Access Control", nist="AC-3",
                         remediation="Restrict HTTP methods to only those required for each endpoint.",
+                        http_code=r.status_code,
                     )
                     vc.log(f"[authorization] Method tampering {method} on {link}", "SUCCESS")
             except Exception:
@@ -7898,6 +8096,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                     owasp="A07:2025 Identification and Authentication Failures",
                     nist="IA-5",
                     remediation="Regenerate session IDs upon authentication. Reject externally provided session IDs.",
+                    http_code=r.status_code,
                 )
                 vc.log("[session] Session fixation confirmed", "SUCCESS")
     except Exception:
@@ -7927,6 +8126,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                         owasp="A07:2025 Identification and Authentication Failures",
                         nist="SC-23",
                         remediation="Invalidate session server-side on logout. Do not rely solely on client-side cookie deletion.",
+                        http_code=r2.status_code,
                     )
                     vc.log("[session] Session not invalidated after logout", "SUCCESS")
             break
@@ -7989,6 +8189,7 @@ def _phase_csrf(target: dict, cfg: dict, pm: ProgressManager,
                         affected=action,
                         owasp="A04:2025 Insecure Design", nist="SI-10",
                         remediation="Implement synchronised CSRF tokens on all state-changing forms. Use SameSite=Lax/Strict cookies.",
+                        http_code=r.status_code,
                     )
                     vc.log(f"[csrf] CSRF: no token at {action}", "SUCCESS")
             except Exception:
@@ -8394,6 +8595,7 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                     "Add CAPTCHA or TOTP for suspicious login patterns. "
                     "Apply IP-based and user-based rate limiting on authentication endpoints."
                 ),
+                http_code=r.status_code,
             )
             vc.log(f"[account_lockout] No lockout: {action} ({len(status_codes)} attempts)", "SUCCESS")
 
@@ -8818,12 +9020,25 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
         existing_am = {}
     existing_entries = {e["path"]: e for e in existing_am.get("paths", [])}
     base_url = target["url"].rstrip("/")
+    sm_path_data = sm.get("paths", {})
+    seed_unauth = "unauthenticated" in roles
     path_entries = []
     for p in all_paths:
+        sm_status = sm_path_data.get(p, {}).get("status")
         if p in existing_entries:
-            path_entries.append(existing_entries[p])
+            entry = existing_entries[p]
+            # Backfill unauthenticated access from structure_map status if not yet probed.
+            # structure_map statuses come from pre-loop recon/gobuster (unauthenticated sess).
+            if seed_unauth and sm_status is not None and "unauthenticated" not in entry.get("access", {}):
+                entry = dict(entry)
+                entry["access"] = dict(entry.get("access", {}))
+                entry["access"]["unauthenticated"] = sm_status
+            path_entries.append(entry)
         else:
-            path_entries.append({"path": p, "url": base_url + p, "access": {}})
+            access = {}
+            if seed_unauth and sm_status is not None:
+                access["unauthenticated"] = sm_status
+            path_entries.append({"path": p, "url": base_url + p, "access": access})
     # Merge roles: preserve any roles already in file
     merged_roles = list(existing_am.get("roles", []))
     for r in roles:
@@ -9617,8 +9832,7 @@ def main() -> None:
             # Write preliminary access_matrix.json after each context completes so
             # Crucible can display the growing path list without waiting for Phase 20.
             try:
-                _am_role = "UNAUTH" if _ctx_label == "unauthenticated" else _ctx_label
-                _write_preliminary_access_matrix(out, target, [_am_role])
+                _write_preliminary_access_matrix(out, target, [_ctx_label])
             except Exception:
                 pass
 
