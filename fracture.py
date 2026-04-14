@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.3.12"
+VERSION = "2.3.13"
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -335,6 +335,7 @@ _TITLE_NORM_SUBS = [
 _WC_LEN_TOLERANCE    = 0.08   # 8 % body-length difference
 _WC_WORD_TOLERANCE   = 0.10   # 10 % word-count difference
 _WC_SIMILARITY_RATIO = 0.88   # difflib SequenceMatcher ratio threshold
+_WC_PARENT_THRESHOLD = 5      # min hits under same parent to trigger per-path wildcard probe
 _WC_SAMPLE_SIZE      = 8192   # bytes fed to SequenceMatcher (cap for O(n²))
 
 
@@ -522,6 +523,60 @@ def _is_wildcard_match(r: "requests.Response",
             votes += 1
 
     return votes >= 2
+
+
+def _filter_buster_wildcards(
+    results: "list[tuple[str, int | None, str | None]]",
+    sess: "requests.Session",
+    timeout: int,
+) -> "list[tuple[str, int | None, str | None]]":
+    """Suppress per-path wildcard false positives from gobuster/feroxbuster output.
+
+    Groups results by parent directory.  For any parent with ≥_WC_PARENT_THRESHOLD
+    entries sharing a uniform non-404/410 status code, probes the parent URL with
+    _detect_wildcard().  Entries whose parent is confirmed as a catch-all are
+    dropped and a log message is emitted.  Other entries pass through unchanged.
+    """
+    if not results:
+        return results
+
+    from collections import defaultdict
+
+    groups: dict = defaultdict(list)
+    for entry in results:
+        url, status, redirect = entry
+        try:
+            parsed = urllib.parse.urlparse(url)
+            parts  = parsed.path.rstrip("/").rsplit("/", 1)
+            parent_path = parts[0] if (len(parts) > 1 and parts[0]) else "/"
+            parent_url  = f"{parsed.scheme}://{parsed.netloc}{parent_path}"
+        except Exception:
+            parent_url = ""
+        groups[parent_url].append(entry)
+
+    kept: list = []
+    for parent_url, group_entries in groups.items():
+        statuses = [s for _, s, _ in group_entries if s is not None]
+        if (
+            len(statuses) >= _WC_PARENT_THRESHOLD
+            and len(set(statuses)) == 1
+            and statuses[0] not in (404, 410)
+            and parent_url
+        ):
+            try:
+                wc = _detect_wildcard(parent_url, sess, timeout)
+            except Exception:
+                wc = None
+            if wc is not None:
+                vc.log(
+                    f"[buster-filter] Per-path wildcard at {parent_url} "
+                    f"(HTTP {wc['status']} for all suffixes) — "
+                    f"suppressing {len(group_entries)} result(s)",
+                    "INFO",
+                )
+                continue
+        kept.extend(group_entries)
+    return kept
 
 
 # ─────────────────────────────────────────────
@@ -2881,7 +2936,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     if out_f.exists():
         try:
             _sm_ps, _sm_rd = {}, {}
-            for _gu, _gs, _gr in _parse_gobuster_with_status(out_f, url):
+            _gob_res = _filter_buster_wildcards(
+                _parse_gobuster_with_status(out_f, url), sess, timeout)
+            for _gu, _gs, _gr in _gob_res:
                 _sp = urllib.parse.urlparse(_gu).path or "/"
                 _sm_ps[_sp] = _gs
                 if _gr:
@@ -2927,7 +2984,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         if fer_out.exists():
             try:
                 _sm_ps, _sm_rd = {}, {}
-                for _fu, _fs, _fr in _parse_feroxbuster_with_status(fer_out):
+                _fer_res = _filter_buster_wildcards(
+                    _parse_feroxbuster_with_status(fer_out), sess, timeout)
+                for _fu, _fs, _fr in _fer_res:
                     _sp = urllib.parse.urlparse(_fu).path or "/"
                     _sm_ps[_sp] = _fs
                     if _fr:
@@ -2970,7 +3029,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             if gob_files_out.exists():
                 try:
                     _sm_ps, _sm_rd = {}, {}
-                    for _gu, _gs, _gr in _parse_gobuster_with_status(gob_files_out, url):
+                    _gobf_res = _filter_buster_wildcards(
+                        _parse_gobuster_with_status(gob_files_out, url), sess, timeout)
+                    for _gu, _gs, _gr in _gobf_res:
                         _sp = urllib.parse.urlparse(_gu).path or "/"
                         _sm_ps[_sp] = _gs
                         if _gr:
@@ -3014,7 +3075,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             if fer_files_out.exists():
                 try:
                     _sm_ps, _sm_rd = {}, {}
-                    for _fu, _fs, _fr in _parse_feroxbuster_with_status(fer_files_out):
+                    _ferf_res = _filter_buster_wildcards(
+                        _parse_feroxbuster_with_status(fer_files_out), sess, timeout)
+                    for _fu, _fs, _fr in _ferf_res:
                         _sp = urllib.parse.urlparse(_fu).path or "/"
                         _sm_ps[_sp] = _fs
                         if _fr:
@@ -3316,7 +3379,9 @@ def _phase_endpoint_tools(
             if ep_gob.exists():
                 try:
                     _ep_ps, _ep_rd = {}, {}
-                    for _gu, _gs, _gr in _parse_gobuster_with_status(ep_gob, ep_url):
+                    _epg_res = _filter_buster_wildcards(
+                        _parse_gobuster_with_status(ep_gob, ep_url), sess, timeout)
+                    for _gu, _gs, _gr in _epg_res:
                         _sp = urllib.parse.urlparse(_gu).path or "/"
                         _ep_ps[_sp] = _gs
                         if _gr:
@@ -3345,7 +3410,9 @@ def _phase_endpoint_tools(
             if ep_gob_f.exists():
                 try:
                     _ep_ps, _ep_rd = {}, {}
-                    for _gu, _gs, _gr in _parse_gobuster_with_status(ep_gob_f, ep_url):
+                    _epgf_res = _filter_buster_wildcards(
+                        _parse_gobuster_with_status(ep_gob_f, ep_url), sess, timeout)
+                    for _gu, _gs, _gr in _epgf_res:
                         _sp = urllib.parse.urlparse(_gu).path or "/"
                         _ep_ps[_sp] = _gs
                         if _gr:
@@ -3387,7 +3454,9 @@ def _phase_endpoint_tools(
             if ep_fer.exists():
                 try:
                     _ep_ps, _ep_rd = {}, {}
-                    for _fu, _fs, _fr in _parse_feroxbuster_with_status(ep_fer):
+                    _epf_res = _filter_buster_wildcards(
+                        _parse_feroxbuster_with_status(ep_fer), sess, timeout)
+                    for _fu, _fs, _fr in _epf_res:
                         _sp = urllib.parse.urlparse(_fu).path or "/"
                         _ep_ps[_sp] = _fs
                         if _fr:
