@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.6.0"
+VERSION = "2.6.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -388,6 +388,7 @@ def _write_project_meta(project_dir: Path, tool: str, client_short: str,
                 "year":         year,
                 "created_at":   datetime.now().isoformat(),
                 "version":      version,
+                "hostname":     socket.gethostname(),
             }, indent=2),
             encoding="utf-8",
         )
@@ -1974,6 +1975,7 @@ class OutputManager:
             "tool":        "fracture",
             "version":     VERSION,
             "generated":   datetime.now().isoformat(),
+            "hostname":    socket.gethostname(),
             "total_findings": len(findings),
             "risk_counts": counts,
             **meta,
