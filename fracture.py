@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.6.1"
+VERSION = "2.6.4"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1863,6 +1863,8 @@ class OutputManager:
             _GLOBAL_MERGE_PREFIXES = (
                 "missing security header:",
                 "interesting endpoint discovered",
+                "non-login form detected",
+                "login page detected",
             )
             _is_global = any(_title_lower.startswith(_p) for _p in _GLOBAL_MERGE_PREFIXES)
             _norm_key  = (_title_lower, "" if _is_global else url.strip(),
@@ -3103,12 +3105,18 @@ def _phase_wordpress_scan(
 
     r = _wp_get("/license.txt")
     if r and r.status_code == 200 and "wordpress" in r.text.lower():
+        try:
+            _lx_rq, _lx_rp = _save_http_evidence(out, phase, f"wp_license_{hostname}", r)
+            _lx_ev = f"{_lx_rq},{_lx_rp}"
+        except Exception:
+            _lx_ev = ""
         out.add_finding(
             title="WordPress license.txt Accessible",
             url=base + "/license.txt", port=target["port"], risk="INFO",
             description="The WordPress license.txt file is publicly accessible.",
             output=f"GET /license.txt → HTTP {r.status_code}",
             sources="fracture-wordpress", service=target["scheme"],
+            output_file=_lx_ev,
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
             remediation="Remove /license.txt from production to reduce fingerprinting.",
             http_code=r.status_code,
@@ -3195,6 +3203,7 @@ def _phase_wordpress_scan(
         r_lp = _wp_get("/wp-login.php?action=lostpassword")
         if r_lp and r_lp.status_code == 200 and (
                 "user_login" in r_lp.text.lower() or "username" in r_lp.text.lower()):
+            _lprq, _lprp = _save_http_evidence(out, phase, f"wp_lostpassword_{hostname}", r_lp)
             out.add_finding(
                 title="WordPress Password Reset Form Accessible",
                 url=base + "/wp-login.php?action=lostpassword",
@@ -3206,6 +3215,7 @@ def _phase_wordpress_scan(
                 ),
                 output=f"GET /wp-login.php?action=lostpassword → HTTP {r_lp.status_code}",
                 sources="fracture-wordpress", service=target["scheme"],
+                output_file=f"{_lprq},{_lprp}",
                 owasp="A07:2025 Identification and Authentication Failures", nist="IA-5",
                 remediation=(
                     "Return generic error messages that do not distinguish between "
@@ -3422,6 +3432,7 @@ def _phase_wordpress_scan(
             _media = json.loads(r_rest_media.text)
             if isinstance(_media, list) and _media:
                 _m_urls = [m.get("source_url","") for m in _media if m.get("source_url")]
+                _mrq, _mrp = _save_http_evidence(out, phase, f"wp_rest_media_{hostname}", r_rest_media)
                 out.add_finding(
                     title="WordPress Media Files Enumerable via REST API",
                     url=base + "/wp-json/wp/v2/media",
@@ -3433,6 +3444,7 @@ def _phase_wordpress_scan(
                     ),
                     output="\n".join(_m_urls[:10]),
                     sources="fracture-wordpress", service=target["scheme"],
+                    output_file=f"{_mrq},{_mrp}",
                     owasp="A01:2025 Broken Access Control", nist="AC-3",
                     remediation=(
                         "Restrict the media REST endpoint to authenticated users. "
@@ -3791,6 +3803,12 @@ def _phase_wordpress_scan(
                 wp_info["plugins"].append(
                     {"slug": _ps, "version": None,
                      "name": _ps, "source": "passive"})
+        _plugins_src_ev = out.output_path(phase, f"wp_plugins_source_{hostname}")
+        try:
+            _plugins_src_ev.write_text(homepage_html[:100000], encoding="utf-8")
+            _plugins_src_path = str(_plugins_src_ev)
+        except Exception:
+            _plugins_src_path = ""
         out.add_finding(
             title=f"WordPress Plugins Detected in Page Source ({len(_passive_plugins)} plugin(s))",
             url=base, port=target["port"], risk="INFO",
@@ -3803,6 +3821,7 @@ def _phase_wordpress_scan(
             ),
             output="\n".join(sorted(_passive_plugins)),
             sources="fracture-wordpress", service=target["scheme"],
+            output_file=_plugins_src_path,
             owasp="A06:2025 Vulnerable and Outdated Components", nist="SI-2",
             remediation=(
                 "Obfuscate plugin asset URLs to prevent passive enumeration. "
@@ -5038,7 +5057,15 @@ def _phase_endpoint_tools(
 
             # ── Source code download ─────────────────────────────────────────
             _ep_src_resp = page_data.get("response")
+            _ep_page_ev = ""
             if _ep_src_resp is not None:
+                try:
+                    _ep_pgrq, _ep_pgrp = _save_http_evidence(
+                        out, "crawl", f"ep_page_{ep_safe}", _ep_src_resp)
+                    _ep_page_ev = json.dumps(
+                        [{"url": ep_url, "req": str(_ep_pgrq), "resp": str(_ep_pgrp)}])
+                except Exception:
+                    pass
                 _ep_src_file = out.output_path("recon", f"source_{ep_safe}.html")
                 try:
                     _ep_src_file.write_text(_ep_src_resp.text or "", encoding="utf-8")
@@ -5098,6 +5125,7 @@ def _phase_endpoint_tools(
                         ),
                         output=_fm_out, sources="fracture-crawl",
                         service=target["scheme"],
+                        output_file=_ep_page_ev,
                         owasp="A07:2025 Identification and Authentication Failures",
                         nist="IA-2",
                         remediation=(
@@ -5117,6 +5145,7 @@ def _phase_endpoint_tools(
                         ),
                         output=_fm_out, sources="fracture-crawl",
                         service=target["scheme"],
+                        output_file=_ep_page_ev,
                         owasp="A04:2025 Insecure Design", nist="CM-7",
                         remediation=(
                             "Add CSRF tokens to all form submissions. Validate and sanitise "
@@ -5160,6 +5189,7 @@ def _phase_endpoint_tools(
                         output=f"Present at endpoint: {_hn}: {_ep_hdrs.get(_hn, '')}",
                         affected=_ep_rel_crawl,
                         sources="fracture-crawl", service=target["scheme"],
+                        output_file=_ep_page_ev,
                         owasp="A05:2025 Security Misconfiguration", nist=_hnist,
                         remediation=(
                             "Ensure security headers are applied consistently across "
@@ -5177,6 +5207,16 @@ def _phase_endpoint_tools(
                 _raw_sc = _ep_hdrs.get("Set-Cookie", "")
                 if _raw_sc:
                     _ep_sc_list = [_raw_sc]
+            # Save HTTP evidence once for all cookie-attribute findings on this endpoint
+            _ep_cookie_ev = ""
+            if _ep_sc_list:
+                try:
+                    _ep_ckrq, _ep_ckrp = _save_http_evidence(
+                        out, "crawl", f"ep_cookie_{ep_safe}", _ep_resp)
+                    _ep_cookie_ev = json.dumps(
+                        [{"url": ep_url, "req": str(_ep_ckrq), "resp": str(_ep_ckrp)}])
+                except Exception:
+                    pass
             for _ep_sc in _ep_sc_list:
                 if not _ep_sc:
                     continue
@@ -5196,6 +5236,7 @@ def _phase_endpoint_tools(
                         output=_ep_sc_out, sources="fracture-headers",
                         service=target["scheme"],
                         owasp="A05:2025 Security Misconfiguration", nist="SC-23",
+                        output_file=_ep_cookie_ev,
                         remediation="Add the HttpOnly attribute to all session and authentication cookies.",
                         http_code=_ep_resp.status_code,
                     )
@@ -5210,6 +5251,7 @@ def _phase_endpoint_tools(
                         output=_ep_sc_out, sources="fracture-headers",
                         service=target["scheme"],
                         owasp="A05:2025 Security Misconfiguration", nist="SC-23",
+                        output_file=_ep_cookie_ev,
                         remediation="Add the Secure attribute to all cookies on HTTPS sites.",
                         http_code=_ep_resp.status_code,
                     )
@@ -5225,6 +5267,7 @@ def _phase_endpoint_tools(
                         output=_ep_sc_out, sources="fracture-headers",
                         service=target["scheme"],
                         owasp="A05:2025 Security Misconfiguration", nist="SC-23",
+                        output_file=_ep_cookie_ev,
                         remediation="Add SameSite=Strict or SameSite=Lax to prevent cross-site request forgery.",
                         http_code=_ep_resp.status_code,
                     )
@@ -6020,6 +6063,11 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 capture_output=True, text=True, timeout=10,
             )
             if _caa_proc.returncode == 0 and not _caa_proc.stdout.strip():
+                _caa_out = out.output_path(phase, f"dig_caa_{hostname}")
+                _caa_out.write_text(
+                    f"$ dig +short CAA {hostname}\n{_caa_proc.stdout or '(no output — no CAA records found)'}",
+                    encoding="utf-8",
+                )
                 out.add_finding(
                     title="SSL/TLS DNS: Missing CAA Record",
                     url=target["url"], port=port, risk="LOW",
@@ -6030,6 +6078,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     ),
                     output=f"dig +short CAA {hostname} → (no records)",
                     sources="fracture-tls-dns", service="https",
+                    output_file=str(_caa_out),
                     owasp="A05:2025 Security Misconfiguration", nist="SC-8",
                     remediation=(
                         f'Add a CAA record: {hostname} CAA 0 issue "letsencrypt.org" '
@@ -6596,6 +6645,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 ),
                 output=_sc_out, sources=_sc_src, service=target["scheme"],
                 owasp=_sc_owasp, nist=_sc_nist,
+                output_file=_sh_ev,
                 remediation="Add the HttpOnly attribute to all session and authentication cookies.",
                 http_code=resp.status_code,
             )
@@ -6611,6 +6661,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 ),
                 output=_sc_out, sources=_sc_src, service=target["scheme"],
                 owasp=_sc_owasp, nist=_sc_nist,
+                output_file=_sh_ev,
                 remediation="Add the Secure attribute to all cookies on HTTPS sites.",
                 http_code=resp.status_code,
             )
@@ -6628,6 +6679,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 ),
                 output=_sc_out, sources=_sc_src, service=target["scheme"],
                 owasp=_sc_owasp, nist=_sc_nist,
+                output_file=_sh_ev,
                 remediation="Add SameSite=Lax or SameSite=Strict to all cookies.",
                 http_code=resp.status_code,
             )
@@ -6643,6 +6695,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                     ),
                     output=_sc_out, sources=_sc_src, service=target["scheme"],
                     owasp=_sc_owasp, nist=_sc_nist,
+                    output_file=_sh_ev,
                     remediation="Set SameSite to Strict, Lax, or None (with Secure).",
                     http_code=resp.status_code,
                 )
@@ -6658,6 +6711,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                         ),
                         output=_sc_out, sources=_sc_src, service=target["scheme"],
                         owasp=_sc_owasp, nist=_sc_nist,
+                        output_file=_sh_ev,
                         remediation="Add the Secure attribute when using SameSite=None.",
                         http_code=resp.status_code,
                     )
@@ -11851,6 +11905,15 @@ def main() -> None:
                     _ep_rel  = _url_rel_path(_ep_url, target["url"])
                     _base_absent  = target.get("_base_sec_hdrs_absent",  set())
                     _base_present = target.get("_base_sec_hdrs_present", set())
+                    _ep_shdr_ev = ""
+                    try:
+                        _ep_shdr_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', _ep_url)[:50]
+                        _ep_shdr_rq, _ep_shdr_rp = _save_http_evidence(
+                            out, "recon", f"ep_headers_{_ep_shdr_safe}", _ep_resp)
+                        _ep_shdr_ev = json.dumps(
+                            [{"url": _ep_url, "req": str(_ep_shdr_rq), "resp": str(_ep_shdr_rp)}])
+                    except Exception:
+                        pass
                     for _hn, _hr, _, _hd, _hnist, _hremed in _SECURITY_HEADERS:
                         if _hn == "Strict-Transport-Security" and not target["is_https"]:
                             continue
@@ -11871,6 +11934,7 @@ def main() -> None:
                                 output=f"Missing: {_hn}",
                                 affected=_ep_rel,
                                 sources="fracture-recon", service=target["scheme"],
+                                output_file=_ep_shdr_ev,
                                 owasp="A05:2025 Security Misconfiguration", nist=_hnist,
                                 remediation=_hremed,
                                 http_code=_ep_resp.status_code,
@@ -11889,6 +11953,7 @@ def main() -> None:
                                 output=f"Present at endpoint: {_hn}: {_ep_hdrs.get(_hn, '')}",
                                 affected=_ep_rel,
                                 sources="fracture-recon", service=target["scheme"],
+                                output_file=_ep_shdr_ev,
                                 owasp="A05:2025 Security Misconfiguration", nist=_hnist,
                                 remediation=(
                                     "Ensure security headers are applied consistently "
