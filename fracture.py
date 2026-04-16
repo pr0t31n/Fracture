@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.6.4"
+VERSION = "2.7.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1865,6 +1865,8 @@ class OutputManager:
                 "interesting endpoint discovered",
                 "non-login form detected",
                 "login page detected",
+                "missing secure cookie attribute:",
+                "misconfigured secure cookie attribute:",
             )
             _is_global = any(_title_lower.startswith(_p) for _p in _GLOBAL_MERGE_PREFIXES)
             _norm_key  = (_title_lower, "" if _is_global else url.strip(),
@@ -3861,20 +3863,21 @@ def _phase_wordpress_scan(
         _p_ev.write_text(r.text[:5000], encoding="utf-8")
         _ver_str = f" v{_p_ver}" if _p_ver else ""
         out.add_finding(
-            title=f"WordPress Plugin Detected: {_p_name}{_ver_str}",
-            url=base + _rm_path, port=target["port"], risk="INFO",
+            title="WordPress Plugin Detected",
+            url=base, port=target["port"], risk="INFO",
             description=(
-                f"Plugin '{_p_name}' (slug: {_slug}){_ver_str} confirmed via "
-                "readme.txt. Version disclosure enables targeted CVE research."
-                + (f" Installed version: {_p_ver}." if _p_ver else "")
+                "WordPress plugin(s) confirmed via readme.txt enumeration. "
+                "Version disclosure enables targeted CVE lookups."
             ),
-            output=r.text[:300],
+            output=f"Plugin: {_p_name}{_ver_str} | {r.text[:200]}",
+            affected=f"{_p_name}{_ver_str} (slug: {_slug})",
             sources="fracture-wordpress", service=target["scheme"],
             output_file=str(_p_ev),
             owasp="A06:2025 Vulnerable and Outdated Components", nist="SI-2",
             remediation=(
-                f"Keep {_p_name} updated to the latest release. "
-                "Remove readme.txt from plugin directories on production servers."
+                "Keep all WordPress plugins updated to the latest release. "
+                "Remove readme.txt from plugin directories on production servers. "
+                "Remove unused plugins to reduce attack surface."
             ),
             http_code=r.status_code,
         )
@@ -6739,24 +6742,6 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             http_code=resp.status_code,
         )
 
-    # Origin-Agent-Cluster header (opt-in to process isolation)
-    oac = headers.get("Origin-Agent-Cluster", "")
-    if not oac:
-        out.add_finding(
-            title="Missing Origin-Agent-Cluster Header",
-            url=url, port=target["port"], risk="LOW",
-            description=(
-                "The Origin-Agent-Cluster header is not set. This header hints "
-                "browsers to isolate the origin in its own agent cluster, strengthening "
-                "process isolation against Spectre-style side-channel attacks."
-            ),
-            output="Missing: Origin-Agent-Cluster",
-            sources="fracture-headers", service=target["scheme"],
-            output_file=str(out_f),
-            owasp="A05:2025 Security Misconfiguration", nist="SC-8",
-            remediation="Add: Origin-Agent-Cluster: ?1",
-            http_code=resp.status_code,
-        )
 
     # ── TRACE method detection (XST) ─────────────────────────────────────────
     try:
@@ -11884,7 +11869,12 @@ def main() -> None:
 
             # ── Phase 3c: endpoint tools ──
             _ep_discovered = [
-                u for u in list(_ep_base) + crawl_data.get("links", [])
+                u for u in (
+                    list(_ep_base)
+                    + crawl_data.get("links", [])
+                    + [f["action"] for f in crawl_data.get("forms", []) if f.get("action")]
+                    + [pe["url"] for pe in crawl_data.get("params", []) if pe.get("url")]
+                )
                 if _is_in_scope_url(u, _scope_hostnames) and _is_valid_endpoint_url(u)
             ]
 

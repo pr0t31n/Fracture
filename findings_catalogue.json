@@ -304,15 +304,15 @@
     "title": "WordPress Plugin Detected",
     "risk": "INFO",
     "owasp": "A06:2025",
-    "nist": "CM-7",
+    "nist": "SI-2",
     "sources": [
       "fracture-wordpress"
     ],
     "cves": [],
     "service": "http",
     "phase": "recon",
-    "description": "One or more WordPress plugins were detected via static asset paths or readme files. Plugin names and versions may be used to identify known CVEs.",
-    "remediation": "Keep all plugins updated. Remove unused plugins. Restrict access to plugin readme.txt files."
+    "description": "WordPress plugin(s) confirmed via readme.txt enumeration. Version disclosure enables targeted CVE lookups. Plugin names and versions are listed in the Affected field.",
+    "remediation": "Keep all WordPress plugins updated to the latest release. Remove readme.txt from plugin directories on production servers. Remove unused plugins to reduce attack surface."
   },
   {
     "id": "FR-022",
