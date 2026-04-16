@@ -44,7 +44,101 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.3.13"
+VERSION = "2.6.0"
+
+# ── Adaptive concurrency ──────────────────────────────────────────────────────
+def _hw_detect():
+    """Return (logical_cpu_count, ram_gb) for the local machine."""
+    _cpu = os.cpu_count() or 2
+    try:
+        import psutil as _ps
+        _ram_gb = _ps.virtual_memory().total / (1024 ** 3)
+    except ImportError:
+        _ram_gb = 4.0
+    return _cpu, _ram_gb
+
+def _calc_initial_concurrency(cpu, ram_gb):
+    """
+    Derive a starting concurrency limit from hardware specs.
+    Uses 75 % of logical CPUs, bounded by RAM (0.25 GB assumed per worker)
+    and clamped to [4, 64].
+    """
+    return min(max(4, int(cpu * 0.75)), max(4, int(ram_gb / 0.25)), 64)
+
+class _AdaptiveSemaphore:
+    """Counting semaphore whose limit can be raised or lowered at runtime."""
+    def __init__(self, initial):
+        self._limit = initial
+        self._count = 0
+        self._cond  = threading.Condition(threading.Lock())
+
+    def acquire(self, timeout=None):
+        with self._cond:
+            deadline = (time.monotonic() + timeout) if timeout else None
+            while self._count >= self._limit:
+                rem = (deadline - time.monotonic()) if deadline else None
+                if deadline and rem <= 0:
+                    return False
+                self._cond.wait(timeout=rem)
+            self._count += 1
+            return True
+
+    def release(self):
+        with self._cond:
+            if self._count > 0:
+                self._count -= 1
+            self._cond.notify_all()
+
+    def set_limit(self, new_limit):
+        with self._cond:
+            self._limit = max(2, new_limit)
+            self._cond.notify_all()
+
+    @property
+    def limit(self):
+        return self._limit
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *_):
+        self.release()
+
+def _start_concurrency_monitor(sem, interval=10):
+    """
+    Daemon thread: samples CPU/RAM usage every *interval* seconds and
+    nudges *sem* to keep resource pressure below 80 %.
+    Requires psutil; silently no-ops if unavailable.
+    """
+    try:
+        import psutil as _psm
+    except ImportError:
+        return None
+    _base = sem.limit
+
+    def _loop():
+        while True:
+            try:
+                time.sleep(interval)
+                _cpu_pct = _psm.cpu_percent(interval=2)
+                _mem_pct = _psm.virtual_memory().percent
+                _cur     = sem.limit
+                if _cpu_pct > 80 or _mem_pct > 80:
+                    sem.set_limit(max(2, int(_cur * 0.75)))
+                elif _cpu_pct < 50 and _mem_pct < 60:
+                    sem.set_limit(min(_base, int(_cur * 1.25)))
+            except Exception:
+                pass
+
+    _t = threading.Thread(target=_loop, daemon=True, name="fr-concurrency-monitor")
+    _t.start()
+    return _t
+
+_hw_cpu, _hw_ram    = _hw_detect()
+_SCAN_CONCURRENCY   = _calc_initial_concurrency(_hw_cpu, _hw_ram)
+_SCAN_SEM           = _AdaptiveSemaphore(_SCAN_CONCURRENCY)
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────
 # Tool discovery helpers
@@ -354,7 +448,7 @@ def _wc_body_fp(text: str, probe_paths: "list[str]") -> dict:
         "hash":   hashlib.md5(sample.encode("utf-8", errors="replace")).hexdigest(),
         "words":  len(norm.split()),
         "lines":  norm.count("\n") + 1,
-        "length": len(text),
+        "length": len(norm),
         "sample": sample,
     }
 
@@ -402,45 +496,84 @@ def _detect_wildcard(base_url: str, sess: "requests.Session",
     if status in (404, 410):
         return None
 
-    # Redirect wildcard: every unknown path redirects to the same Location
+    # Redirect wildcard: every unknown path redirects to the same destination.
+    # Many servers embed the probe path in the Location query string
+    # (e.g. /404?from=/abc123-notfound), so we compare only the path portion.
     if status in (301, 302, 303, 307, 308):
         locations = [r.headers.get("Location", "") for _, r in responses]
+        # Exact match first
         if len(set(locations)) == 1 and locations[0]:
             return {
-                "status":      status,
-                "location":    locations[0],
-                "body_len":    0.0,
-                "word_count":  0.0,
-                "line_count":  0.0,
-                "body_hash":   "",
-                "sample":      "",
-                "probe_paths": probe_paths,
-                "redirect":    True,
+                "status":         status,
+                "location":       locations[0],
+                "location_exact": True,
+                "body_len":       0.0,
+                "word_count":     0.0,
+                "line_count":     0.0,
+                "body_hash":      "",
+                "sample":         "",
+                "probe_paths":    probe_paths,
+                "redirect":       True,
+            }
+        # Path-only match (ignores probe path embedded in query string)
+        loc_paths = [urllib.parse.urlparse(loc).path for loc in locations if loc]
+        if loc_paths and len(set(loc_paths)) == 1:
+            return {
+                "status":         status,
+                "location":       loc_paths[0],
+                "location_exact": False,
+                "body_len":       0.0,
+                "word_count":     0.0,
+                "line_count":     0.0,
+                "body_hash":      "",
+                "sample":         "",
+                "probe_paths":    probe_paths,
+                "redirect":       True,
             }
         return None  # redirects differ → not uniform
 
-    # For 200/403/other: compare body fingerprints across probes
-    fps = [_wc_body_fp(r.text, probe_paths) for _, r in responses]
+    # For 200/403/other: compare body fingerprints across all probe pairs.
+    # Using all pairs (not just fps[0] vs fps[1]) makes detection stable when
+    # one probe response has dynamic content (timestamp, nonce) that slightly
+    # differs from the others — a majority agreement across pairs confirms the
+    # wildcard even when one individual pair falls below a threshold.
+    fps   = [_wc_body_fp(r.text, probe_paths) for _, r in responses]
+    pairs = [(i, j) for i in range(len(fps)) for j in range(i + 1, len(fps))]
 
     def _ratio_ok(a: float, b: float, tol: float) -> bool:
         mx = max(a, b, 1)
         return abs(a - b) / mx < tol
 
+    def _majority(matches: int, total: int) -> bool:
+        """True when strictly more than half of pairs match."""
+        return matches * 2 > total
+
     votes = 0
 
-    # Signal 1 — body length ratio (first two probes)
-    if _ratio_ok(fps[0]["length"], fps[1]["length"], _WC_LEN_TOLERANCE):
+    # Signal 1 — body length ratio: majority of pairs must agree
+    len_matches = sum(
+        _ratio_ok(fps[i]["length"], fps[j]["length"], _WC_LEN_TOLERANCE)
+        for i, j in pairs
+    )
+    if _majority(len_matches, len(pairs)):
         votes += 1
 
-    # Signal 2 — word count ratio
-    if _ratio_ok(fps[0]["words"], fps[1]["words"], _WC_WORD_TOLERANCE):
+    # Signal 2 — word count ratio: majority of pairs must agree
+    word_matches = sum(
+        _ratio_ok(fps[i]["words"], fps[j]["words"], _WC_WORD_TOLERANCE)
+        for i, j in pairs
+    )
+    if _majority(word_matches, len(pairs)):
         votes += 1
 
-    # Signal 3 — structural similarity via SequenceMatcher
-    sm_ratio = difflib.SequenceMatcher(
-        None, fps[0]["sample"], fps[1]["sample"], autojunk=True
-    ).ratio()
-    if sm_ratio >= _WC_SIMILARITY_RATIO:
+    # Signal 3 — structural similarity via SequenceMatcher: majority of pairs
+    sm_matches = sum(
+        difflib.SequenceMatcher(
+            None, fps[i]["sample"], fps[j]["sample"], autojunk=True
+        ).ratio() >= _WC_SIMILARITY_RATIO
+        for i, j in pairs
+    )
+    if _majority(sm_matches, len(pairs)):
         votes += 1
 
     if votes < 2:
@@ -484,9 +617,14 @@ def _is_wildcard_match(r: "requests.Response",
     if r.status_code != baseline["status"]:
         return False
 
-    # Redirect wildcard: same Location header = same catch-all redirect
+    # Redirect wildcard: same destination = same catch-all redirect.
+    # Exact match when the baseline was built from identical Location headers;
+    # path-only match when the probe path was embedded in the query string.
     if baseline.get("redirect"):
-        return r.headers.get("Location", "") == baseline["location"]
+        loc = r.headers.get("Location", "")
+        if baseline.get("location_exact"):
+            return loc == baseline["location"]
+        return urllib.parse.urlparse(loc).path == baseline["location"]
 
     probe_paths = baseline.get("probe_paths", [])
     fp = _wc_body_fp(r.text, probe_paths)
@@ -532,13 +670,59 @@ def _filter_buster_wildcards(
 ) -> "list[tuple[str, int | None, str | None]]":
     """Suppress per-path wildcard false positives from gobuster/feroxbuster output.
 
-    Groups results by parent directory.  For any parent with ≥_WC_PARENT_THRESHOLD
-    entries sharing a uniform non-404/410 status code, probes the parent URL with
-    _detect_wildcard().  Entries whose parent is confirmed as a catch-all are
-    dropped and a log message is emitted.  Other entries pass through unchanged.
+    First performs a global check: if ALL results share the same non-404/410 status
+    code (and optionally the same redirect destination), probes the server root with
+    random paths to confirm a server-wide catch-all.  If confirmed, every result is
+    suppressed — the tool is reporting uniform responses for everything it tried.
+
+    Then performs a per-directory check: groups results by parent directory.  For
+    any parent with ≥_WC_PARENT_THRESHOLD entries sharing a uniform non-404/410
+    status code, probes the parent URL with _detect_wildcard().  Entries whose
+    parent is confirmed as a catch-all are dropped and a log message is emitted.
+    Other entries pass through unchanged.
     """
     if not results:
         return results
+
+    # ── Global uniform-response check ─────────────────────────────────────────
+    # If every result shares exactly one non-404/410 status code AND every redirect
+    # destination is the same (when present), the server is likely returning the
+    # same catch-all for all probed paths.  Confirm with a random-path probe at the
+    # server root before suppressing, so legitimate all-403 scenarios (e.g. auth
+    # wall on a specific subtree) are not incorrectly discarded.
+    _global_statuses = [s for _, s, _ in results if s is not None]
+    _global_redirects = [rd for _, _, rd in results if rd is not None]
+    _uniform_status = (
+        len(_global_statuses) >= _WC_PARENT_THRESHOLD
+        and len(set(_global_statuses)) == 1
+        and _global_statuses[0] not in (404, 410)
+    )
+    _uniform_redirect = (
+        _uniform_status
+        and bool(_global_redirects)
+        and len(set(_global_redirects)) == 1
+        and len(_global_redirects) == len(results)
+    )
+    if _uniform_status:
+        _wc_global = None
+        try:
+            _sp = urllib.parse.urlparse(results[0][0])
+            _root_url = f"{_sp.scheme}://{_sp.netloc}"
+            _wc_global = _detect_wildcard(_root_url, sess, timeout)
+        except Exception:
+            pass
+        if _wc_global is not None:
+            _reason = (
+                f"uniform HTTP {_global_statuses[0]} + redirect → {_global_redirects[0]}"
+                if _uniform_redirect
+                else f"uniform HTTP {_global_statuses[0]}"
+            )
+            vc.log(
+                f"[buster-filter] All {len(results)} result(s) share {_reason} and "
+                f"server returns the same catch-all for random paths — suppressing all",
+                "WARN",
+            )
+            return []
 
     from collections import defaultdict
 
@@ -554,28 +738,217 @@ def _filter_buster_wildcards(
             parent_url = ""
         groups[parent_url].append(entry)
 
+    # Cache per-parent wildcard probes so each parent URL is only probed once
+    # even when multiple status codes at the same parent exceed the threshold.
+    _parent_wc_cache: dict = {}
+
     kept: list = []
     for parent_url, group_entries in groups.items():
-        statuses = [s for _, s, _ in group_entries if s is not None]
-        if (
-            len(statuses) >= _WC_PARENT_THRESHOLD
-            and len(set(statuses)) == 1
-            and statuses[0] not in (404, 410)
-            and parent_url
-        ):
-            try:
-                wc = _detect_wildcard(parent_url, sess, timeout)
-            except Exception:
-                wc = None
-            if wc is not None:
+        # Bucket entries by status code.  This lets us detect the common case
+        # where a mix of real results (302 redirects, 200 pages) and wildcard
+        # responses (hundreds of identical 403s for !Admin, !Archive, etc.) live
+        # under the same parent — previously the uniform-status requirement would
+        # prevent any filtering because the statuses weren't all the same.
+        sc_buckets: dict = defaultdict(list)
+        for entry in group_entries:
+            _, s, _ = entry
+            if s is not None and s not in (404, 410):
+                sc_buckets[s].append(entry)
+
+        # For each status code that appears ≥ _WC_PARENT_THRESHOLD times, probe
+        # the parent directory.  If _detect_wildcard confirms that the server
+        # returns that same status for random paths, re-fetch every entry with
+        # that status and compare its body against the wildcard baseline.
+        # Entries whose body matches the baseline are false positives; entries
+        # with a genuinely different body (a real restricted page) are kept.
+        _handled_ids: set = set()
+
+        for sc, sc_entries in sc_buckets.items():
+            if len(sc_entries) < _WC_PARENT_THRESHOLD or not parent_url:
+                continue
+            if parent_url not in _parent_wc_cache:
+                try:
+                    _parent_wc_cache[parent_url] = _detect_wildcard(
+                        parent_url, sess, timeout)
+                except Exception:
+                    _parent_wc_cache[parent_url] = None
+            wc = _parent_wc_cache[parent_url]
+            if wc is None or wc["status"] != sc:
+                continue
+            vc.log(
+                f"[buster-filter] Per-path wildcard at {parent_url} "
+                f"(HTTP {sc} catch-all) — validating {len(sc_entries)} result(s)",
+                "INFO",
+            )
+            _suppressed = 0
+            for entry in sc_entries:
+                _handled_ids.add(id(entry))
+                eu = entry[0]
+                try:
+                    _rv = sess.get(
+                        eu, timeout=max(timeout // 2, 3),
+                        allow_redirects=False,
+                        headers={"Accept": "text/html,application/json"},
+                    )
+                    if _is_wildcard_match(_rv, wc):
+                        _suppressed += 1
+                        continue
+                except Exception:
+                    pass
+                kept.append(entry)
+            if _suppressed:
                 vc.log(
-                    f"[buster-filter] Per-path wildcard at {parent_url} "
-                    f"(HTTP {wc['status']} for all suffixes) — "
-                    f"suppressing {len(group_entries)} result(s)",
+                    f"[buster-filter] Suppressed {_suppressed}/{len(sc_entries)} "
+                    f"wildcard-matching HTTP {sc} result(s) at {parent_url}",
                     "INFO",
                 )
+
+        # Keep every entry that was not identified as a wildcard false positive
+        for entry in group_entries:
+            if id(entry) not in _handled_ids:
+                kept.append(entry)
+
+    return _filter_dominant_code(kept, sess, timeout)
+
+
+# ── Dead-endpoint / dominant-code source-validation filter ───────────────────
+#
+# If >80 % of buster/fuzzer results share the same HTTP status code the server
+# is likely returning a catch-all response for non-existent paths rather than
+# reporting real findings.  Each dominant-code entry is re-fetched and its
+# response body is inspected for 404-indicating content.  Entries whose source
+# confirms a dead / non-existent resource are dropped; entries with genuinely
+# different content are kept.  Entries with non-dominant codes pass through
+# unconditionally.
+
+_WC_DOMINANT_RATIO   = 0.80   # trigger threshold (>80 % share same code)
+_WC_DEAD_MIN_TEXT    = 100    # visible text shorter than this → dead endpoint
+
+_DEAD_TITLE_RE = re.compile(
+    r"<title[^>]*>[^<]*"
+    r"(404|not\s+found|page\s+not\s+found|file\s+not\s+found|"
+    r"resource\s+not\s+found|does?\s*n[o']t\s+exist|"
+    r"no\s+longer\s+(available|exists?)|error\s+404|"
+    r"oops[!,.]|we\s+can.t\s+find|nothing\s+here)"
+    r"[^<]*</title>",
+    re.I | re.S,
+)
+
+_DEAD_BODY_PHRASES: tuple = (
+    "page not found",
+    "resource not found",
+    "file not found",
+    "the page you requested could not be found",
+    "the requested url was not found",
+    "the requested resource could not be found",
+    "this page doesn't exist",
+    "this page does not exist",
+    "this url doesn't exist",
+    "this url does not exist",
+    "no longer available",
+    "no longer exists",
+    "content not found",
+    "couldn't find what you were looking for",
+    "can't find the page",
+    "cannot find the page",
+    "we couldn't find that page",
+    "we can't find that page",
+    "sorry, we can't find",
+    "sorry, the page you were looking for",
+    "oops! that page can't be found",
+    "oops, that page was not found",
+    "hmm. we're having trouble finding that site",
+    "404 error",
+    "error 404",
+    "http 404",
+    "nothing here",
+    "the page could not be found",
+    "there is nothing here",
+)
+
+
+def _is_dead_endpoint_body(text: str) -> bool:
+    """Return True if *text* (raw HTTP response body) indicates a dead or
+    non-existent endpoint — i.e. the server is serving a 404-equivalent page
+    regardless of the HTTP status code it reported."""
+    if not text or len(text.strip()) < 20:
+        return True                          # empty / trivially short body
+    if _DEAD_TITLE_RE.search(text):
+        return True                          # <title> explicitly says 404/not-found
+    lower = text.lower()
+    if any(phrase in lower for phrase in _DEAD_BODY_PHRASES):
+        return True                          # body phrase matches known error copy
+    # Strip all HTML tags and measure visible text length
+    _visible = re.sub(r"<[^>]+>", " ", text)
+    _visible = re.sub(r"\s+", " ", _visible).strip()
+    if len(_visible) < _WC_DEAD_MIN_TEXT:
+        return True                          # virtually no visible content
+    return False
+
+
+def _filter_dominant_code(
+    results: "list[tuple[str, int | None, str | None]]",
+    sess: "requests.Session",
+    timeout: int,
+) -> "list[tuple[str, int | None, str | None]]":
+    """Source-code validation pass applied after wildcard filtering.
+
+    When >80 % of the remaining results share one HTTP status code, re-fetch
+    every entry with that code and inspect its response body for dead-endpoint
+    indicators (404-equivalent page titles, not-found phrases, minimal visible
+    text).  Confirmed dead entries are suppressed; entries with genuine content
+    — and all entries with non-dominant codes — are returned unchanged.
+    """
+    if not results:
+        return results
+
+    all_codes = [s for _, s, _ in results if s is not None]
+    if len(all_codes) < 5:
+        return results
+
+    from collections import Counter
+    dominant_code, dominant_count = Counter(all_codes).most_common(1)[0]
+    ratio = dominant_count / len(all_codes)
+
+    if ratio <= _WC_DOMINANT_RATIO:
+        return results
+
+    vc.log(
+        f"[buster-filter] {dominant_count}/{len(all_codes)} results "
+        f"({ratio:.0%}) share HTTP {dominant_code} — "
+        f"source-validating dominant-code entries for dead endpoints",
+        "INFO",
+    )
+
+    kept       = []
+    _suppressed = 0
+    for entry in results:
+        url, status, redirect = entry
+        if status != dominant_code:
+            kept.append(entry)
+            continue
+        # Re-fetch and inspect source code for 404-indicating content
+        try:
+            _rv = sess.get(
+                url,
+                timeout=max(timeout // 2, 3),
+                allow_redirects=True,
+                headers={"Accept": "text/html,application/json"},
+            )
+            if _is_dead_endpoint_body(_rv.text):
+                _suppressed += 1
                 continue
-        kept.extend(group_entries)
+        except Exception:
+            pass  # network error — keep the entry (conservative)
+        kept.append(entry)
+
+    if _suppressed:
+        vc.log(
+            f"[buster-filter] Suppressed {_suppressed} dead-endpoint "
+            f"HTTP {dominant_code} result(s) — "
+            f"source code confirms no real content (404-equivalent page)",
+            "INFO",
+        )
     return kept
 
 
@@ -1484,13 +1857,23 @@ class OutputManager:
                 existing_all = []
 
             _title_lower = title.strip().lower()
-            _norm_key    = (_title_lower, url.strip(), int(port) if port else 0)
-            merged       = False
+            # Findings that should merge globally by (title, port) only — the
+            # incoming URL is always folded into the affected list on merge.
+            _GLOBAL_MERGE_PREFIXES = (
+                "missing security header:",
+                "interesting endpoint discovered",
+            )
+            _is_global = any(_title_lower.startswith(_p) for _p in _GLOBAL_MERGE_PREFIXES)
+            _norm_key  = (_title_lower, "" if _is_global else url.strip(),
+                          int(port) if port else 0)
+            merged     = False
 
             for ex in existing_all:
+                _ex_tl = (ex.get("title") or "").strip().lower()
+                _ex_is_global = any(_ex_tl.startswith(_p) for _p in _GLOBAL_MERGE_PREFIXES)
                 ex_key = (
-                    (ex.get("title") or "").strip().lower(),
-                    (ex.get("ip") or "").strip(),
+                    _ex_tl,
+                    "" if _ex_is_global else (ex.get("ip") or "").strip(),
                     int(ex.get("port") or 0),
                 )
                 if ex_key == _norm_key:
@@ -1504,16 +1887,39 @@ class OutputManager:
                         ex_cves = set(c.strip() for c in (ex.get("cves") or "").split(",") if c.strip())
                         new_cves = set(c.strip() for c in cves.split(",") if c.strip())
                         ex["cves"] = ",".join(sorted(ex_cves | new_cves))
-                    # merge affected
+                    # merge affected — for global-merge titles always include the
+                    # incoming url so every affected URL is captured even when the
+                    # caller passes affected="" (e.g. header findings from other phases)
+                    _ex_aff = set(a.strip() for a in (ex.get("affected") or "").split("\n") if a.strip())
+                    if _is_global:
+                        _ex_aff.add(url.strip())
                     if affected:
-                        ex_aff = set(a.strip() for a in (ex.get("affected") or "").split("\n") if a.strip())
-                        new_aff = set(a.strip() for a in affected.split("\n") if a.strip())
-                        ex["affected"] = "\n".join(sorted(ex_aff | new_aff))
-                    # merge output_file
+                        _ex_aff |= set(a.strip() for a in affected.split("\n") if a.strip())
+                    if _ex_aff:
+                        ex["affected"] = "\n".join(sorted(_ex_aff))
+                    # merge output_file — handle JSON array ({url,req,resp}) and
+                    # legacy comma-separated path formats
                     if output_file:
-                        ex_files = set(f.strip() for f in (ex.get("output_file") or "").split(",") if f.strip())
-                        ex_files.add(output_file.strip())
-                        ex["output_file"] = ",".join(sorted(ex_files))
+                        _ex_of  = (ex.get("output_file") or "").strip()
+                        _in_of  = output_file.strip()
+                        _ex_json = _ex_of.startswith("[")
+                        _in_json = _in_of.startswith("[")
+                        if _ex_json or _in_json:
+                            try:
+                                _ex_ents = json.loads(_ex_of) if _ex_json and _ex_of else []
+                                _in_ents = json.loads(_in_of) if _in_json else []
+                            except Exception:
+                                _ex_ents, _in_ents = [], []
+                            _seen_ev = {e.get("url", "") for e in _ex_ents}
+                            for _e in _in_ents:
+                                if _e.get("url", "") not in _seen_ev:
+                                    _ex_ents.append(_e)
+                                    _seen_ev.add(_e.get("url", ""))
+                            ex["output_file"] = json.dumps(_ex_ents) if _ex_ents else _ex_of
+                        else:
+                            ex_files = set(f.strip() for f in _ex_of.split(",") if f.strip())
+                            ex_files.add(_in_of)
+                            ex["output_file"] = ",".join(sorted(ex_files))
                     # merge description
                     if description:
                         ex_desc  = (ex.get("description") or "").strip()
@@ -1648,6 +2054,18 @@ def _is_in_scope_url(url: str, scope_hostnames: set) -> bool:
     except Exception:
         return False
     return host in scope_hostnames
+
+
+def _is_valid_endpoint_url(u: str) -> bool:
+    """Return True if u is a well-formed http(s) URL with no invalid path characters."""
+    try:
+        p = urllib.parse.urlparse(u)
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return False
+        path = p.path or "/"
+        return not any(c in path for c in (',', '"', "'", ' ', '\t', '\r', '\n'))
+    except Exception:
+        return False
 
 
 class _ScopedSession(requests.Session):
@@ -2084,6 +2502,21 @@ def _parse_target(url: str) -> dict:
     }
 
 
+def _url_rel_path(full_url: str, base_url: str) -> str:
+    """Strip scheme+host+port from full_url using base_url's origin.
+    Returns the path (e.g. '/admin') or '/' if full_url IS the base.
+    Falls back to full_url unchanged if parsing fails or origin doesn't match."""
+    try:
+        origin = urllib.parse.urlparse(base_url)
+        prefix = f"{origin.scheme}://{origin.netloc}"
+        if full_url.startswith(prefix):
+            rel = full_url[len(prefix):]
+            return rel if rel else "/"
+    except Exception:
+        pass
+    return full_url
+
+
 def _same_origin(base_url: str, candidate: str) -> bool:
     try:
         b = urllib.parse.urlparse(base_url)
@@ -2136,26 +2569,62 @@ def _attach_redirect_hook(
         _redir_files = f"{_redir_rq},{_redir_rp}"
         in_scope = dest_host in scope_hostnames
         if in_scope:
-            out.add_finding(
-                title="HTTP Redirect to In-Scope URL",
-                url=target["url"], port=target["port"], risk="INFO",
-                description=(
-                    f"A {r.status_code} redirect was observed from {r.url} to {abs_loc}. "
-                    f"The destination is within the assessed scope and has been queued for testing."
-                ),
-                output=f"From: {r.url}\nTo:   {abs_loc}\nStatus: {r.status_code}",
-                sources="fracture-redirect",
-                service=target["scheme"],
-                affected=r.url,
-                output_file=_redir_files,
-                owasp="A04:2025 Insecure Design",
-                nist="SC-7",
-                remediation=(
-                    "Verify that this redirect is intentional and does not expose sensitive "
-                    "paths or bypass access controls."
-                ),
-                http_code=r.status_code,
+            _from_p   = urllib.parse.urlparse(r.url)
+            _to_p     = urllib.parse.urlparse(abs_loc)
+            _is_slash = (
+                _from_p.netloc == _to_p.netloc
+                and _from_p.query == _to_p.query
+                and _from_p.fragment == _to_p.fragment
+                and _from_p.path.rstrip("/") == _to_p.path.rstrip("/")
+                and _from_p.path != _to_p.path
             )
+            if _is_slash:
+                _slash_dir = "added" if _to_p.path.endswith("/") else "removed"
+                out.add_finding(
+                    title="Internal Redirect: Trailing Slash Mismatch",
+                    url=target["url"], port=target["port"], risk="INFO",
+                    description=(
+                        f"A {r.status_code} redirect was observed from {r.url} to {abs_loc}. "
+                        f"The server {_slash_dir} a trailing slash to normalise the path. "
+                        f"This is an internal redirect caused by a trailing slash mismatch "
+                        f"between the requested URL and the canonical form expected by the server."
+                    ),
+                    output=f"From: {r.url}\nTo:   {abs_loc}\nStatus: {r.status_code}",
+                    sources="fracture-redirect",
+                    service=target["scheme"],
+                    affected=r.url,
+                    output_file=_redir_files,
+                    owasp="A05:2025 Security Misconfiguration",
+                    nist="SC-7",
+                    remediation=(
+                        "Ensure all internal links use the canonical URL form (with or without "
+                        "trailing slash, consistently) to avoid unnecessary redirect chains. "
+                        "This may also reveal inconsistencies in access control enforcement "
+                        "between the redirect source and destination."
+                    ),
+                    http_code=r.status_code,
+                )
+            else:
+                out.add_finding(
+                    title="HTTP Redirect to In-Scope URL",
+                    url=target["url"], port=target["port"], risk="INFO",
+                    description=(
+                        f"A {r.status_code} redirect was observed from {r.url} to {abs_loc}. "
+                        f"The destination is within the assessed scope and has been queued for testing."
+                    ),
+                    output=f"From: {r.url}\nTo:   {abs_loc}\nStatus: {r.status_code}",
+                    sources="fracture-redirect",
+                    service=target["scheme"],
+                    affected=r.url,
+                    output_file=_redir_files,
+                    owasp="A04:2025 Insecure Design",
+                    nist="SC-7",
+                    remediation=(
+                        "Verify that this redirect is intentional and does not expose sensitive "
+                        "paths or bypass access controls."
+                    ),
+                    http_code=r.status_code,
+                )
             norm = abs_loc.rstrip("/")
             if norm not in in_scope_new:
                 in_scope_new.append(norm)
@@ -2202,7 +2671,7 @@ DEFAULT_SETTINGS: dict = {
         "target_url":       "",
         "target_urls":      [],
         "wordlist":         "/usr/share/seclists/Discovery/Web-Content/raft-large-files.txt",
-        "threads":          30,
+        "threads":          _SCAN_CONCURRENCY,
         "timeout":          10,
         "follow_redirects": True,
         "user_agent":       "Mozilla/5.0 (compatible; Fracture/1.0; Security Assessment)",
@@ -2301,8 +2770,8 @@ DEFAULT_SETTINGS: dict = {
         "auth_matrix": [],   # list of {role, username, password} for access matrix
         "sqlmap_timeout":   300,
         "nuclei_timeout":   600,
-        "crawl_depth":      3,
-        "crawl_max_pages":  150,
+        "crawl_depth":      10,
+        "crawl_max_pages":  500,
         "gobuster_wordlist": "/usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt",
         "ffuf_vhost_wordlist": "/usr/share/seclists/Discovery/DNS/namelist.txt",
         "ffuf_param_wordlist": "/usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt",
@@ -2444,6 +2913,1168 @@ _TOP_200_PATHS = [
     "/web.config", "/.htpasswd", "/console", "/shell", "/private", "/internal",
 ]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WordPress native scanner — constants
+# ─────────────────────────────────────────────────────────────────────────────
+_WP_CONFIG_BACKUPS = [
+    "wp-config.bak", "wp-config.php.bak", "wp-config.php~",
+    "wp-config.php.old", "wp-config.php.orig", "wp-config.php.save",
+    "wp-config.php.swp", ".wp-config.php.swp", "wp-config.php.txt",
+    "wp-config-sample.php",
+]
+
+_WP_DB_BACKUP_PATHS = [
+    "/backup.sql", "/backup.sql.gz", "/backup.zip",
+    "/database.sql", "/db.sql", "/mysql.sql", "/dump.sql",
+    "/wordpress.sql", "/wp.sql",
+    "/wp-content/backup-db/backup.sql", "/wp-content/backups/backup.sql",
+    "/wp-content/uploads/backup.sql", "/wp-content/uploads/database.sql",
+    "/export.xml", "/wp-export.xml",
+]
+
+_WP_PLUGIN_SLUGS = [
+    "akismet", "all-in-one-seo-pack", "all-in-one-wp-migration",
+    "all-in-one-wp-security-and-firewall", "bbpress", "better-wp-security",
+    "bookingpress-appointment-booking", "buddypress", "classic-editor",
+    "contact-form-7", "cookie-notice", "depicter", "download-manager",
+    "drag-and-drop-multiple-file-upload-contact-form-7", "duplicator",
+    "easy-wp-smtp", "elementor", "elementor-pro",
+    "essential-addons-for-elementor-lite", "file-manager-advanced-shortcode",
+    "formidable", "give", "gravityforms", "jetpack", "learnpress",
+    "loginizer", "mailchimp-for-wp", "memberpress",
+    "modern-events-calendar-lite", "nextgen-gallery", "ninja-forms",
+    "paid-memberships-pro", "photo-gallery", "pie-register", "popup-maker",
+    "post-smtp", "really-simple-ssl", "redirection", "royal-elementor-addons",
+    "seo-by-rank-math", "shortpixel-image-optimiser", "simple-file-list",
+    "slider-revolution", "suretriggers", "tatsu", "the-events-calendar",
+    "ultimate-member", "updraftplus", "user-registration", "w3-total-cache",
+    "woocommerce", "woocommerce-payments", "wordfence", "wordpress-importer",
+    "wordpress-popular-posts", "wpforms-lite", "wpdiscuz", "wp-automatic",
+    "wp-fastest-cache", "wp-file-manager", "wp-gdpr-compliance",
+    "wp-mail-smtp", "wp-optimize", "wp-statistics", "wp-super-cache",
+    "wp-time-capsule", "wptouch", "wp-ultimate-csv-importer",
+    "wp-user-avatar", "wysija-newsletters", "yoast-seo",
+    "ajax-load-more", "backup-backup", "boldgrid-backup",
+    "catch-themes-demo-import", "email-subscribers", "front-end-editor",
+    "inboundio-marketing", "masterstudy-lms-learning-management-system",
+    "perfect-survey", "plainview-activity-monitor", "reflex-gallery",
+    "secure-copy-content-protection", "sexy-contact-form",
+    "slideshow-gallery", "sp-client-document-manager",
+    "subscribe-to-comments", "website-contact-form-with-file-upload",
+    "woocommerce-abandoned-cart", "work-the-flow-file-upload",
+    "wp-easycart", "wp-mobile-detector", "wpshop", "wp-symposium",
+    "bulletproof-security", "chopslider", "hash-form", "gi-media-library",
+    "smtp-mailer", "social-login-bws", "yet-another-related-posts-plugin",
+    "duplicator-pro", "envato-elements", "mc4wp-mailchimp-for-wp",
+    "blocksy-companion", "kadence-blocks", "generateblocks",
+    "beaver-builder-lite-version",
+]
+
+_WP_THEME_SLUGS = [
+    "twentytwentyfour", "twentytwentythree", "twentytwentytwo",
+    "twentytwentyone", "twentytwenty", "twentynineteen",
+    "twentyseventeen", "twentysixteen", "twentyfifteen",
+    "astra", "avada", "blocksy", "bricks", "bridge", "divi",
+    "enfold", "flatsome", "generatepress", "hello-elementor",
+    "kadence", "neve", "oceanwp", "porto", "salient",
+    "storefront", "the7", "woodmart", "xstore", "zakra",
+    "sydney", "hestia", "betheme", "jupiter", "uncode",
+    "newspaper", "total", "zephyr-lite",
+]
+
+
+def _phase_wordpress_scan(
+    url: str, target: dict, cfg: dict,
+    out: "OutputManager", sess: "requests.Session",
+    phase: str = "recon",
+    homepage_html: str = "",
+) -> dict:
+    """Native WordPress enumeration: version, users, plugins, themes, XML-RPC,
+    REST API, config/file exposure, directory listings, and backup detection.
+    Runs whenever WordPress is detected — no external tool required."""
+    base       = url.rstrip("/")
+    wp_timeout = min(cfg.get("timeout", 10), 8)
+    hostname   = target["hostname"]
+    wp_info: dict = {
+        "version": None, "version_source": None,
+        "users": [], "plugins": [], "themes": [],
+        "xmlrpc": False, "rest_api": False, "multisite": False,
+        "login_accessible": False, "debug_log": False,
+        "config_backups": [],
+    }
+    xmlrpc_methods: list = []
+    _wp_discovered_urls: list = []   # (full_url, status_code, redirect_dest | None)
+
+    def _wp_get(path, **kw):
+        try:
+            _allow_redir = kw.pop("allow_redirects", True)
+            r = sess.get(base + path, timeout=wp_timeout,
+                         allow_redirects=_allow_redir, **kw)
+            if r is None:
+                return r
+            if 200 <= r.status_code < 300:
+                _wp_discovered_urls.append((base + path, r.status_code, None))
+            elif 300 <= r.status_code < 400:
+                # allow_redirects=False call: r is the raw redirect response
+                _wp_discovered_urls.append(
+                    (base + path, r.status_code,
+                     r.headers.get("Location") or None))
+            elif _allow_redir and r.history:
+                # allow_redirects=True call: history[0] is the original redirect
+                _first = r.history[0]
+                if 300 <= _first.status_code < 400:
+                    _wp_discovered_urls.append(
+                        (base + path, _first.status_code,
+                         _first.headers.get("Location") or None))
+            return r
+        except Exception:
+            return None
+
+    vc.log("[wordpress] Starting native WordPress scan", "INFO")
+
+    # ── 1. VERSION DETECTION ─────────────────────────────────────────────────
+    ver_candidates: list = []  # (version, confidence_pct, source_label)
+
+    if homepage_html:
+        m = re.search(
+            r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']WordPress\s+([\d.]+)',
+            homepage_html, re.I,
+        )
+        if not m:
+            m = re.search(
+                r'content=["\']WordPress\s+([\d.]+)["\'][^>]+name=["\']generator["\']',
+                homepage_html, re.I,
+            )
+        if m:
+            ver_candidates.append((m.group(1), 100, "meta-generator"))
+        xgen_m = re.search(r'X-Generator:\s*WordPress/([\d.]+)', homepage_html, re.I)
+        if xgen_m:
+            ver_candidates.append((xgen_m.group(1), 95, "X-Generator-header"))
+
+    _feed_checks = [
+        ("/?feed=rss2",
+         r'<generator>https?://wordpress\.(?:org|com)/\?v=([\d.]+)</generator>',
+         "rss2-feed"),
+        ("/feed/",
+         r'<generator>https?://wordpress\.(?:org|com)/\?v=([\d.]+)</generator>',
+         "rss-feed"),
+        ("/?feed=atom",
+         r'<generator[^>]+version=["\']?([\d.]+)["\']?>WordPress',
+         "atom-feed"),
+        ("/wp-links-opml.php",
+         r'generator=["\']wordpress/([\d.]+)["\']',
+         "opml"),
+        ("/?feed=rdf",
+         r'rdf:resource=["\']https?://wordpress\.org/\?v=([\d.]+)["\']',
+         "rdf-feed"),
+    ]
+    for _fp, _fp_re, _fp_src in _feed_checks:
+        if any(c[2].endswith("feed") for c in ver_candidates):
+            break
+        r = _wp_get(_fp)
+        if r and r.status_code == 200:
+            m = re.search(_fp_re, r.text, re.I)
+            if m:
+                ver_candidates.append((m.group(1), 90, _fp_src))
+
+    r = _wp_get("/readme.html")
+    if r and r.status_code == 200 and "wordpress" in r.text.lower():
+        m = re.search(r'[Vv]ersion\s+([\d.]+)', r.text)
+        if m:
+            ver_candidates.append((m.group(1), 70, "readme.html"))
+        _rq, _rp = _save_http_evidence(out, phase, f"wp_readme_{hostname}", r)
+        out.add_finding(
+            title="WordPress readme.html Accessible",
+            url=base + "/readme.html", port=target["port"], risk="LOW",
+            description=(
+                "The WordPress readme.html file is publicly accessible. "
+                "It discloses version information and confirms the CMS. "
+                "This file serves no purpose in production."
+            ),
+            output=f"GET /readme.html → HTTP {r.status_code}",
+            sources="fracture-wordpress", service=target["scheme"],
+            output_file=f"{_rq},{_rp}",
+            owasp="A06:2025 Vulnerable and Outdated Components", nist="CM-7",
+            remediation="Delete /readme.html from your WordPress installation.",
+            http_code=r.status_code,
+        )
+
+    r = _wp_get("/license.txt")
+    if r and r.status_code == 200 and "wordpress" in r.text.lower():
+        out.add_finding(
+            title="WordPress license.txt Accessible",
+            url=base + "/license.txt", port=target["port"], risk="INFO",
+            description="The WordPress license.txt file is publicly accessible.",
+            output=f"GET /license.txt → HTTP {r.status_code}",
+            sources="fracture-wordpress", service=target["scheme"],
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation="Remove /license.txt from production to reduce fingerprinting.",
+            http_code=r.status_code,
+        )
+
+    if ver_candidates:
+        ver_candidates.sort(key=lambda x: x[1], reverse=True)
+        best_ver, best_conf, best_src = ver_candidates[0]
+        wp_info["version"]        = best_ver
+        wp_info["version_source"] = best_src
+        _ver_ev = out.output_path(phase, f"wp_version_{hostname}")
+        _ver_ev.write_text(
+            "\n".join(f"{v}  confidence:{c}%  source:{s}"
+                      for v, c, s in ver_candidates),
+            encoding="utf-8",
+        )
+        out.add_finding(
+            title=f"WordPress Version Detected: {best_ver}",
+            url=base, port=target["port"], risk="LOW",
+            description=(
+                f"WordPress version {best_ver} was identified via {best_src} "
+                f"(confidence {best_conf}%). Advertising the exact CMS version "
+                "leaks information that assists attackers in targeting known vulnerabilities."
+            ),
+            output="\n".join(f"{v}  ({s})" for v, _, s in ver_candidates),
+            sources="fracture-wordpress", service=target["scheme"],
+            output_file=str(_ver_ev),
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation=(
+                "Remove version indicators: delete readme.html and license.txt; "
+                "suppress the generator meta tag with "
+                "remove_action('wp_head','wp_generator') in functions.php; "
+                "keep WordPress updated to the latest release."
+            ),
+        )
+        vc.log(f"[wordpress] Version: {best_ver} via {best_src}", "SUCCESS")
+
+    # ── 2. LOGIN PAGE ANALYSIS ───────────────────────────────────────────────
+    r = _wp_get("/wp-login.php")
+    if r and r.status_code == 200 and "user_login" in r.text:
+        wp_info["login_accessible"] = True
+        _lrq, _lrp = _save_http_evidence(out, phase, f"wp_login_{hostname}", r)
+        out.add_finding(
+            title="WordPress Login Page Accessible",
+            url=base + "/wp-login.php", port=target["port"], risk="MEDIUM",
+            description=(
+                "The WordPress login page is publicly accessible, exposing the "
+                "site to brute-force and credential stuffing attacks. "
+                "Its presence also confirms the CMS identity and version family."
+            ),
+            output=f"GET /wp-login.php → HTTP {r.status_code}",
+            sources="fracture-wordpress", service=target["scheme"],
+            output_file=f"{_lrq},{_lrp}",
+            owasp="A07:2025 Identification and Authentication Failures", nist="IA-5",
+            remediation=(
+                "Rename or restrict the login URL (e.g., WPS Hide Login plugin). "
+                "Enforce rate limiting, CAPTCHA, account lockout, and two-factor "
+                "authentication on the login endpoint."
+            ),
+            http_code=r.status_code,
+        )
+        r_reg = _wp_get("/wp-login.php?action=register")
+        if r_reg and r_reg.status_code == 200 and "user_email" in r_reg.text.lower():
+            _rrq, _rrp = _save_http_evidence(out, phase, f"wp_register_{hostname}", r_reg)
+            out.add_finding(
+                title="WordPress User Registration Enabled",
+                url=base + "/wp-login.php?action=register",
+                port=target["port"], risk="MEDIUM",
+                description=(
+                    "WordPress user registration is open to anyone. "
+                    "If default roles are misconfigured this may allow "
+                    "privilege escalation or spam account creation."
+                ),
+                output=f"GET /wp-login.php?action=register → HTTP {r_reg.status_code}",
+                sources="fracture-wordpress", service=target["scheme"],
+                output_file=f"{_rrq},{_rrp}",
+                owasp="A05:2025 Security Misconfiguration", nist="IA-5",
+                remediation=(
+                    "Disable open registration in Settings > General unless required. "
+                    "Set the default user role to Subscriber and review existing accounts."
+                ),
+                http_code=r_reg.status_code,
+            )
+        r_lp = _wp_get("/wp-login.php?action=lostpassword")
+        if r_lp and r_lp.status_code == 200 and (
+                "user_login" in r_lp.text.lower() or "username" in r_lp.text.lower()):
+            out.add_finding(
+                title="WordPress Password Reset Form Accessible",
+                url=base + "/wp-login.php?action=lostpassword",
+                port=target["port"], risk="LOW",
+                description=(
+                    "The password reset form is publicly accessible. "
+                    "Depending on error messages, it may confirm whether a "
+                    "given username or e-mail address exists."
+                ),
+                output=f"GET /wp-login.php?action=lostpassword → HTTP {r_lp.status_code}",
+                sources="fracture-wordpress", service=target["scheme"],
+                owasp="A07:2025 Identification and Authentication Failures", nist="IA-5",
+                remediation=(
+                    "Return generic error messages that do not distinguish between "
+                    "valid and invalid usernames. Implement rate limiting."
+                ),
+                http_code=r_lp.status_code,
+            )
+
+    # ── 3. XML-RPC ANALYSIS ──────────────────────────────────────────────────
+    try:
+        _hd = sess.head(base + "/", timeout=wp_timeout, allow_redirects=True)
+        xpb = _hd.headers.get("X-Pingback", "")
+        if xpb:
+            out.add_finding(
+                title="WordPress X-Pingback Header Present",
+                url=base, port=target["port"], risk="LOW",
+                description=(
+                    f"The X-Pingback response header ({xpb}) discloses the "
+                    "XML-RPC endpoint and confirms XML-RPC is active."
+                ),
+                output=f"X-Pingback: {xpb}",
+                sources="fracture-wordpress", service=target["scheme"],
+                owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                remediation=(
+                    "Remove the X-Pingback header and disable XML-RPC if not required."
+                ),
+            )
+    except Exception:
+        pass
+
+    r_xmlrpc = _wp_get("/xmlrpc.php")
+    if r_xmlrpc and r_xmlrpc.status_code in (200, 405):
+        wp_info["xmlrpc"] = True
+        _xrq, _xrp = _save_http_evidence(out, phase, f"wp_xmlrpc_{hostname}", r_xmlrpc)
+        _xmlrpc_list_payload = (
+            '<?xml version="1.0" encoding="iso-8859-1"?>'
+            '<methodCall><methodName>system.listMethods</methodName>'
+            '<params></params></methodCall>'
+        )
+        try:
+            r_methods = sess.post(
+                base + "/xmlrpc.php",
+                data=_xmlrpc_list_payload,
+                headers={"Content-Type": "text/xml"},
+                timeout=wp_timeout,
+                allow_redirects=False,
+            )
+            if r_methods.status_code == 200 and "<methodResponse>" in r_methods.text:
+                xmlrpc_methods = re.findall(r'<string>([\w.]+)</string>', r_methods.text)
+                _xm_ev = out.output_path(phase, f"wp_xmlrpc_methods_{hostname}")
+                _xm_ev.write_text("\n".join(xmlrpc_methods), encoding="utf-8")
+                _multicall = "system.multicall" in xmlrpc_methods
+                _pingback  = "pingback.ping"    in xmlrpc_methods
+                out.add_finding(
+                    title="WordPress Vulnerability / Misconfiguration",
+                    url=base + "/xmlrpc.php", port=target["port"], risk="HIGH",
+                    description="The WordPress installation has one or more security issues including an accessible XML-RPC interface, outdated core/plugins/themes, or other misconfigured features, expanding the attack surface.",
+                    output=(
+                        f"Methods ({len(xmlrpc_methods)}): "
+                        + ", ".join(xmlrpc_methods[:20])
+                        + (" ..." if len(xmlrpc_methods) > 20 else "")
+                    ),
+                    sources="fracture-wordpress", service=target["scheme"],
+                    output_file=f"{_xrq},{_xrp},{str(_xm_ev)}",
+                    owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                    remediation="Disable the XML-RPC interface unless required; keep WordPress core, plugins, and themes fully updated; remove unused extensions; and restrict administrative interfaces to trusted networks.",
+                    http_code=r_xmlrpc.status_code,
+                )
+                if _multicall:
+                    out.add_finding(
+                        title="WordPress XML-RPC Multicall Brute-Force Vector",
+                        url=base + "/xmlrpc.php", port=target["port"], risk="HIGH",
+                        description=(
+                            "system.multicall bundles multiple credential-check calls "
+                            "in one HTTP request, allowing an attacker to test hundreds "
+                            "of username/password pairs while evading per-request rate "
+                            "limiting."
+                        ),
+                        output="system.multicall confirmed via system.listMethods",
+                        sources="fracture-wordpress", service=target["scheme"],
+                        output_file=str(_xm_ev),
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="IA-5",
+                        remediation=(
+                            "Disable XML-RPC entirely. If unavoidable, deploy a WAF "
+                            "rule blocking multicall bodies."
+                        ),
+                    )
+                if _pingback:
+                    out.add_finding(
+                        title="WordPress XML-RPC Pingback SSRF Vector",
+                        url=base + "/xmlrpc.php", port=target["port"], risk="HIGH",
+                        description=(
+                            "pingback.ping is exposed, allowing an unauthenticated "
+                            "attacker to force the server to make arbitrary outbound "
+                            "HTTP requests (SSRF). This can be used to probe internal "
+                            "networks, cloud metadata endpoints (169.254.169.254), or "
+                            "amplify DDoS attacks against third-party targets."
+                        ),
+                        output="pingback.ping confirmed via system.listMethods",
+                        sources="fracture-wordpress", service=target["scheme"],
+                        output_file=str(_xm_ev),
+                        owasp="A10:2025 Server-Side Request Forgery", nist="SC-7",
+                        remediation=(
+                            "Remove pingback support: add_filter('xmlrpc_methods', "
+                            "function($m){ unset($m['pingback.ping']); return $m; }); "
+                            "in functions.php, or disable XML-RPC entirely."
+                        ),
+                    )
+        except Exception:
+            out.add_finding(
+                title="WordPress Vulnerability / Misconfiguration",
+                url=base + "/xmlrpc.php", port=target["port"], risk="HIGH",
+                description="The WordPress installation has one or more security issues including an accessible XML-RPC interface, outdated core/plugins/themes, or other misconfigured features, expanding the attack surface.",
+                output=f"GET /xmlrpc.php → HTTP {r_xmlrpc.status_code}",
+                sources="fracture-wordpress", service=target["scheme"],
+                output_file=f"{_xrq},{_xrp}",
+                owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                remediation="Disable the XML-RPC interface unless required; keep WordPress core, plugins, and themes fully updated; remove unused extensions; and restrict administrative interfaces to trusted networks.",
+                http_code=r_xmlrpc.status_code,
+            )
+
+    # ── 4. REST API ENUMERATION ──────────────────────────────────────────────
+    r_rest = _wp_get("/wp-json/")
+    if r_rest and r_rest.status_code == 200:
+        wp_info["rest_api"] = True
+        _rest_ev = out.output_path(phase, f"wp_rest_api_{hostname}")
+        _rest_ev.write_text(r_rest.text[:10000], encoding="utf-8")
+        try:
+            _rest_data  = json.loads(r_rest.text)
+            _namespaces = _rest_data.get("namespaces", [])
+            _ns_str     = ", ".join(_namespaces[:20]) or "unknown"
+        except Exception:
+            _namespaces = []
+            _ns_str     = "unknown"
+        out.add_finding(
+            title="WordPress REST API Exposed",
+            url=base + "/wp-json/", port=target["port"], risk="MEDIUM",
+            description=(
+                f"The WordPress REST API is publicly accessible, exposing "
+                f"{len(_namespaces)} namespace(s): {_ns_str}. "
+                "Unauthenticated REST access can leak user accounts, published posts, "
+                "media files, and plugin-specific data."
+            ),
+            output=f"Namespaces: {_ns_str}",
+            sources="fracture-wordpress", service=target["scheme"],
+            output_file=str(_rest_ev),
+            owasp="A01:2025 Broken Access Control", nist="AC-3",
+            remediation=(
+                "Restrict unauthenticated REST access with an authentication filter. "
+                "At minimum, disable the /wp-json/wp/v2/users endpoint."
+            ),
+            http_code=r_rest.status_code,
+        )
+
+    r_rest_users = _wp_get("/wp-json/wp/v2/users?per_page=10")
+    if not r_rest_users or r_rest_users.status_code != 200:
+        r_rest_users = _wp_get("/wp-json/wp/v2/users")
+    if r_rest_users and r_rest_users.status_code == 200:
+        try:
+            _rest_user_list = json.loads(r_rest_users.text)
+            if isinstance(_rest_user_list, list) and _rest_user_list:
+                _ru_extracted = [
+                    {"id": u.get("id"), "slug": u.get("slug",""),
+                     "name": u.get("name","")}
+                    for u in _rest_user_list
+                ]
+                for _ru in _ru_extracted:
+                    if _ru["slug"] not in [x.get("slug") for x in wp_info["users"]]:
+                        wp_info["users"].append(_ru)
+                _ru_ev = out.output_path(phase, f"wp_rest_users_{hostname}")
+                _ru_ev.write_text(
+                    "\n".join(f"ID:{u['id']} slug:{u['slug']} name:{u['name']}"
+                              for u in _ru_extracted),
+                    encoding="utf-8",
+                )
+                _rurq, _rurp = _save_http_evidence(
+                    out, phase, f"wp_rest_users_req_{hostname}", r_rest_users)
+                out.add_finding(
+                    title=f"WordPress Users Exposed via REST API ({len(_ru_extracted)} user(s))",
+                    url=base + "/wp-json/wp/v2/users",
+                    port=target["port"], risk="HIGH",
+                    description=(
+                        f"The REST API /wp/v2/users endpoint returned "
+                        f"{len(_ru_extracted)} user account(s) without authentication. "
+                        "Disclosed usernames enable targeted brute-force, credential "
+                        "stuffing, phishing, and social engineering. Users: "
+                        + ", ".join(u["slug"] for u in _ru_extracted[:10])
+                        + (" ..." if len(_ru_extracted) > 10 else "")
+                    ),
+                    output="\n".join(
+                        f"ID:{u['id']}  slug:{u['slug']}  display:{u['name']}"
+                        for u in _ru_extracted[:20]
+                    ),
+                    sources="fracture-wordpress", service=target["scheme"],
+                    output_file=f"{_rurq},{_rurp},{str(_ru_ev)}",
+                    owasp="A01:2025 Broken Access Control", nist="AC-3,IA-5",
+                    remediation=(
+                        "Filter the REST user endpoint: "
+                        "add_filter('rest_user_query',function($p,$r){"
+                        "if(!current_user_can('list_users'))$p['login__in']=[0];"
+                        "return $p;},10,2); "
+                        "Or use a plugin such as Perfmatters or WP Hardening."
+                    ),
+                    http_code=r_rest_users.status_code,
+                )
+                vc.log(f"[wordpress] REST users: {len(_ru_extracted)}", "SUCCESS")
+        except Exception:
+            pass
+
+    r_rest_media = _wp_get("/wp-json/wp/v2/media?per_page=10")
+    if r_rest_media and r_rest_media.status_code == 200:
+        try:
+            _media = json.loads(r_rest_media.text)
+            if isinstance(_media, list) and _media:
+                _m_urls = [m.get("source_url","") for m in _media if m.get("source_url")]
+                out.add_finding(
+                    title="WordPress Media Files Enumerable via REST API",
+                    url=base + "/wp-json/wp/v2/media",
+                    port=target["port"], risk="LOW",
+                    description=(
+                        f"The REST API /wp/v2/media endpoint lists {len(_media)} "
+                        "uploaded file(s) without authentication, potentially exposing "
+                        "documents with metadata, private images, or sensitive uploads."
+                    ),
+                    output="\n".join(_m_urls[:10]),
+                    sources="fracture-wordpress", service=target["scheme"],
+                    owasp="A01:2025 Broken Access Control", nist="AC-3",
+                    remediation=(
+                        "Restrict the media REST endpoint to authenticated users. "
+                        "Audit the uploads directory for sensitive files."
+                    ),
+                    http_code=r_rest_media.status_code,
+                )
+        except Exception:
+            pass
+
+    # ── 5. USER ENUMERATION — AUTHOR ARCHIVES ───────────────────────────────
+    _author_users: list = []
+    for _uid in range(1, 11):
+        try:
+            r_au = sess.get(
+                base + f"/?author={_uid}", timeout=wp_timeout,
+                allow_redirects=True,
+            )
+            _slug = None
+            if r_au.status_code == 200:
+                m_au = re.search(r'/author/([^/"?#\s]+)/?', r_au.url)
+                if not m_au:
+                    m_au = re.search(r'/author/([^/"?#\s]+)/?', r_au.text)
+                if m_au:
+                    _slug = m_au.group(1).rstrip("/")
+            elif r_au.status_code in (301, 302, 307, 308):
+                loc = r_au.headers.get("Location", "")
+                m_au = re.search(r'/author/([^/"?#\s]+)/?', loc)
+                if m_au:
+                    _slug = m_au.group(1).rstrip("/")
+            if _slug and _slug not in [u.get("slug") for u in _author_users]:
+                _author_users.append({"id": _uid, "slug": _slug})
+        except Exception:
+            continue
+
+    if _author_users:
+        for _au in _author_users:
+            if _au["slug"] not in [u.get("slug") for u in wp_info["users"]]:
+                wp_info["users"].append(_au)
+        _au_ev = out.output_path(phase, f"wp_author_users_{hostname}")
+        _au_ev.write_text(
+            "\n".join(f"ID:{u['id']}  slug:{u['slug']}" for u in _author_users),
+            encoding="utf-8",
+        )
+        out.add_finding(
+            title=f"WordPress User Enumeration via Author Archives ({len(_author_users)} user(s))",
+            url=base + "/?author=1", port=target["port"], risk="MEDIUM",
+            description=(
+                f"Author archive pages disclosed {len(_author_users)} username(s) "
+                "by iterating /?author=N. "
+                "Usernames: " + ", ".join(u["slug"] for u in _author_users) + ". "
+                "These feed directly into credential attacks."
+            ),
+            output="\n".join(f"ID:{u['id']}  slug:{u['slug']}" for u in _author_users),
+            sources="fracture-wordpress", service=target["scheme"],
+            output_file=str(_au_ev),
+            owasp="A07:2025 Identification and Authentication Failures", nist="IA-5",
+            remediation=(
+                "Disable author archives or redirect them: "
+                "add_action('template_redirect',function(){"
+                "if(is_author()){wp_redirect(home_url());exit;}}); in functions.php."
+            ),
+        )
+        vc.log(f"[wordpress] Author users: {len(_author_users)}", "SUCCESS")
+
+    # oEmbed user disclosure
+    try:
+        r_oe = sess.get(
+            base + f"/wp-json/oembed/1.0/embed?url={base}/&format=json",
+            timeout=wp_timeout, allow_redirects=True,
+        )
+        if r_oe.status_code == 200:
+            _oe = json.loads(r_oe.text)
+            _oe_au = _oe.get("author_url", "")
+            m_oe = re.search(r'/author/([^/"?#\s]+)/?', _oe_au)
+            if m_oe:
+                _oe_slug = m_oe.group(1)
+                if _oe_slug not in [u.get("slug") for u in wp_info["users"]]:
+                    wp_info["users"].append(
+                        {"id": None, "slug": _oe_slug, "source": "oembed"})
+                    out.add_finding(
+                        title="WordPress Username Disclosed via oEmbed API",
+                        url=base + "/wp-json/oembed/1.0/embed",
+                        port=target["port"], risk="LOW",
+                        description=(
+                            f"The oEmbed API disclosed username '{_oe_slug}' in the "
+                            "author_url field without authentication."
+                        ),
+                        output=f"author_url: {_oe_au}",
+                        sources="fracture-wordpress", service=target["scheme"],
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="IA-5",
+                        remediation=(
+                            "Filter oEmbed output to remove the author_url field, "
+                            "or restrict the oEmbed endpoint to authenticated requests."
+                        ),
+                        http_code=r_oe.status_code,
+                    )
+    except Exception:
+        pass
+
+    # ── 6. CONFIGURATION & FILE EXPOSURE ────────────────────────────────────
+    for _cb in _WP_CONFIG_BACKUPS:
+        r = _wp_get(f"/{_cb}")
+        if r and r.status_code == 200:
+            _cfg_content = bool(re.search(
+                r'define\s*\(|DB_NAME|DB_USER|DB_PASSWORD|DB_HOST|'
+                r'table_prefix|AUTH_KEY|SECURE_AUTH_KEY',
+                r.text, re.I,
+            ))
+            wp_info["config_backups"].append(_cb)
+            _cbrq, _cbrp = _save_http_evidence(
+                out, phase, f"wp_cfgbak_{_cb[:25]}_{hostname}", r)
+            out.add_finding(
+                title=f"WordPress Configuration Backup Exposed: {_cb}",
+                url=base + f"/{_cb}", port=target["port"],
+                risk="CRITICAL" if _cfg_content else "HIGH",
+                description=(
+                    f"/{_cb} is publicly accessible"
+                    + (" and contains WordPress configuration data including "
+                       "database credentials and secret keys."
+                       if _cfg_content
+                       else " and may contain WordPress configuration data.")
+                    + " Exposure of this file allows full database compromise "
+                    "and site takeover."
+                ),
+                output=r.text[:200],
+                sources="fracture-wordpress", service=target["scheme"],
+                output_file=f"{_cbrq},{_cbrp}",
+                owasp="A01:2025 Broken Access Control", nist="AC-3,IA-5",
+                remediation=(
+                    f"Delete /{_cb} immediately. Configure the web server to "
+                    "deny access to *.bak, *.old, *.orig, *.save, and *.swp "
+                    "files. Rotate all exposed database credentials and "
+                    "WordPress secret keys."
+                ),
+                http_code=r.status_code,
+            )
+            vc.log(f"[wordpress] CRITICAL: config backup exposed: {_cb}", "ERROR")
+
+    # Direct wp-config.php source leak (only if PHP isn't being executed)
+    r = _wp_get("/wp-config.php")
+    if r and r.status_code == 200 and re.search(
+            r'DB_NAME|DB_PASSWORD|AUTH_KEY', r.text, re.I):
+        _wcrq, _wcrp = _save_http_evidence(out, phase, f"wp_config_src_{hostname}", r)
+        out.add_finding(
+            title="WordPress wp-config.php Source Code Exposed",
+            url=base + "/wp-config.php", port=target["port"], risk="CRITICAL",
+            description=(
+                "wp-config.php is being served as plain text rather than executed. "
+                "The file contains database credentials, authentication keys, and "
+                "salts. Full site compromise is trivial with this information."
+            ),
+            output=r.text[:300],
+            sources="fracture-wordpress", service=target["scheme"],
+            output_file=f"{_wcrq},{_wcrp}",
+            owasp="A01:2025 Broken Access Control", nist="AC-3,IA-5",
+            remediation=(
+                "Fix PHP configuration so .php files are executed. "
+                "Move wp-config.php one directory above the web root. "
+                "Rotate all credentials in the file immediately."
+            ),
+            http_code=r.status_code,
+        )
+
+    r = _wp_get("/wp-content/debug.log")
+    if r and r.status_code == 200 and len(r.text) > 10:
+        wp_info["debug_log"] = True
+        _dbrq, _dbrp = _save_http_evidence(out, phase, f"wp_debug_log_{hostname}", r)
+        _dl_ev = out.output_path(phase, f"wp_debug_log_content_{hostname}")
+        _dl_ev.write_text(r.text[:50000], encoding="utf-8")
+        out.add_finding(
+            title="WordPress Debug Log Exposed",
+            url=base + "/wp-content/debug.log",
+            port=target["port"], risk="HIGH",
+            description=(
+                "wp-content/debug.log is publicly accessible. Debug logs commonly "
+                "expose absolute file-system paths, database query details, plugin "
+                "and theme error traces, and server configuration — significantly "
+                "aiding further attacks."
+            ),
+            output=r.text[:500],
+            sources="fracture-wordpress", service=target["scheme"],
+            output_file=f"{_dbrq},{_dbrp},{str(_dl_ev)}",
+            owasp="A05:2025 Security Misconfiguration", nist="AU-9",
+            remediation=(
+                "Set define('WP_DEBUG_LOG', false) or move the log path outside "
+                "the web root. Add 'deny from all' in /wp-content/.htaccess. "
+                "Delete the existing debug.log."
+            ),
+            http_code=r.status_code,
+        )
+
+    for _el in ("/error_log", "/wp-content/error_log", "/wp-includes/error_log"):
+        r = _wp_get(_el)
+        if r and r.status_code == 200 and len(r.text) > 20:
+            _elrq, _elrp = _save_http_evidence(
+                out, phase,
+                f"wp_errlog_{_el.strip('/').replace('/', '_')[:30]}_{hostname}", r)
+            out.add_finding(
+                title=f"PHP Error Log Exposed: {_el}",
+                url=base + _el, port=target["port"], risk="MEDIUM",
+                description=(
+                    f"A PHP error log ({_el}) is publicly accessible, disclosing "
+                    "file-system paths, function names, and database query fragments "
+                    "that aid targeted attacks."
+                ),
+                output=r.text[:300],
+                sources="fracture-wordpress", service=target["scheme"],
+                output_file=f"{_elrq},{_elrp}",
+                owasp="A05:2025 Security Misconfiguration", nist="AU-9",
+                remediation=(
+                    "Disable PHP error logging to web-accessible paths. "
+                    "Direct logs to a location outside the document root."
+                ),
+                http_code=r.status_code,
+            )
+
+    # ── 7. DIRECTORY LISTINGS ────────────────────────────────────────────────
+    _DL_RE = re.compile(r'Index of /|Directory listing for|<title>Index of', re.I)
+    _wp_dirs = {
+        "/wp-content/":            "HIGH",
+        "/wp-content/uploads/":    "HIGH",
+        "/wp-content/plugins/":    "HIGH",
+        "/wp-content/themes/":     "MEDIUM",
+        "/wp-includes/":           "MEDIUM",
+        "/wp-content/mu-plugins/": "HIGH",
+    }
+    for _dp, _dp_risk in _wp_dirs.items():
+        r = _wp_get(_dp)
+        if r and r.status_code == 200 and _DL_RE.search(r.text):
+            _dpev = out.output_path(
+                phase,
+                f"wp_dirlist_{_dp.strip('/').replace('/', '_')[:30]}_{hostname}")
+            _dpev.write_text(r.text[:5000], encoding="utf-8")
+            out.add_finding(
+                title=f"WordPress Directory Listing Enabled: {_dp}",
+                url=base + _dp, port=target["port"], risk=_dp_risk,
+                description=(
+                    f"Directory listing is enabled for {_dp}, exposing file names, "
+                    "plugin/theme names, and uploaded content to unauthenticated users."
+                ),
+                output=r.text[:300],
+                sources="fracture-wordpress", service=target["scheme"],
+                output_file=str(_dpev),
+                owasp="A01:2025 Broken Access Control", nist="AC-3",
+                remediation=(
+                    "Add 'Options -Indexes' to .htaccess or the web server "
+                    "virtual-host configuration."
+                ),
+                http_code=r.status_code,
+            )
+
+    # ── 8. WP-CRON EXPOSURE ──────────────────────────────────────────────────
+    r = _wp_get("/wp-cron.php")
+    if r and r.status_code == 200:
+        _wpcron_ev = ""
+        try:
+            _wpcron_rq, _wpcron_rp = _save_http_evidence(
+                out, phase, f"wp_cron_{hostname}", r)
+            _wpcron_ev = f"{_wpcron_rq},{_wpcron_rp}"
+        except Exception:
+            pass
+        out.add_finding(
+            title="WordPress wp-cron.php Publicly Accessible",
+            url=base + "/wp-cron.php", port=target["port"], risk="MEDIUM",
+            description=(
+                "wp-cron.php is accessible to unauthenticated requests. "
+                "Repeated requests can trigger all scheduled tasks simultaneously, "
+                "causing resource exhaustion and unexpected behaviour such as "
+                "mass outbound email delivery."
+            ),
+            output=f"GET /wp-cron.php → HTTP {r.status_code}",
+            sources="fracture-wordpress", service=target["scheme"],
+            output_file=_wpcron_ev,
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation=(
+                "Add define('DISABLE_WP_CRON', true) to wp-config.php and "
+                "schedule 'wp cron event run --due-now' via a system cron job. "
+                "Block direct access to wp-cron.php at the web-server level."
+            ),
+            http_code=r.status_code,
+        )
+
+    # ── 9. MULTISITE DETECTION ───────────────────────────────────────────────
+    r = _wp_get("/wp-signup.php")
+    if r and r.status_code == 200 and "signup" in r.text.lower():
+        wp_info["multisite"] = True
+        out.add_finding(
+            title="WordPress Multisite Installation Detected",
+            url=base + "/wp-signup.php", port=target["port"], risk="INFO",
+            description=(
+                "WordPress Multisite is enabled (/wp-signup.php is accessible). "
+                "Multisite installations have a broader attack surface including "
+                "network-level administration and per-site configuration."
+            ),
+            output=f"GET /wp-signup.php → HTTP {r.status_code}",
+            sources="fracture-wordpress", service=target["scheme"],
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation=(
+                "Restrict /wp-signup.php if public sub-site registration is "
+                "not intended. Review network-admin capabilities."
+            ),
+            http_code=r.status_code,
+        )
+
+    # ── 10. SENSITIVE WP PATHS ───────────────────────────────────────────────
+    _WP_EXTRA_PATHS = [
+        ("/wp-admin/install.php",  "MEDIUM",
+         "WordPress installation script is accessible. "
+         "If triggered it could allow a full site reset."),
+        ("/wp-admin/upgrade.php",  "MEDIUM",
+         "WordPress upgrade script is directly accessible."),
+        ("/wp-content/backup-db/", "MEDIUM",
+         "WordPress backup-db directory is accessible, potentially exposing "
+         "database backup files."),
+        ("/wp-content/backups/",   "MEDIUM",
+         "WordPress backups directory is accessible."),
+        ("/.git/config",           "MEDIUM",
+         "Git repository configuration is exposed. Use git-dumper to reconstruct "
+         "the full source tree, commit history, and any committed secrets."),
+        ("/.git/HEAD",             "MEDIUM",
+         "Git repository HEAD reference is exposed, confirming .git is inside "
+         "the web root."),
+    ]
+    for _ep, _ep_risk, _ep_desc in _WP_EXTRA_PATHS:
+        r = _wp_get(_ep)
+        if r and r.status_code == 200:
+            _ep_ev = out.output_path(
+                phase,
+                f"wp_path_{_ep.strip('/').replace('/', '_')[:30]}_{hostname}")
+            _ep_ev.write_text(r.text[:5000], encoding="utf-8")
+            out.add_finding(
+                title=f"Sensitive WordPress Path Accessible: {_ep}",
+                url=base + _ep, port=target["port"], risk=_ep_risk,
+                description=_ep_desc,
+                output=f"GET {_ep} → HTTP {r.status_code}",
+                sources="fracture-wordpress", service=target["scheme"],
+                output_file=str(_ep_ev),
+                owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                remediation=(
+                    f"Restrict access to {_ep} via web server configuration or "
+                    "remove the file/directory from the web root."
+                ),
+                http_code=r.status_code,
+            )
+
+    # ── 11. PASSIVE PLUGIN DETECTION ────────────────────────────────────────
+    _passive_plugins: set = set()
+    if homepage_html:
+        for _pp in re.findall(r'/wp-content/plugins/([^/"\']+)/', homepage_html):
+            _passive_plugins.add(_pp)
+    if _passive_plugins:
+        for _ps in sorted(_passive_plugins):
+            if not any(x["slug"] == _ps for x in wp_info["plugins"]):
+                wp_info["plugins"].append(
+                    {"slug": _ps, "version": None,
+                     "name": _ps, "source": "passive"})
+        out.add_finding(
+            title=f"WordPress Plugins Detected in Page Source ({len(_passive_plugins)} plugin(s))",
+            url=base, port=target["port"], risk="INFO",
+            description=(
+                f"{len(_passive_plugins)} WordPress plugin(s) identified passively "
+                "from HTML source references: "
+                + ", ".join(sorted(_passive_plugins)[:20])
+                + (" ..." if len(_passive_plugins) > 20 else "")
+                + ". Plugin enumeration enables targeted vulnerability research."
+            ),
+            output="\n".join(sorted(_passive_plugins)),
+            sources="fracture-wordpress", service=target["scheme"],
+            owasp="A06:2025 Vulnerable and Outdated Components", nist="SI-2",
+            remediation=(
+                "Obfuscate plugin asset URLs to prevent passive enumeration. "
+                "Ensure all detected plugins are on their latest version."
+            ),
+        )
+
+    # ── 12. ACTIVE PLUGIN ENUMERATION ───────────────────────────────────────
+    _slugs_to_probe = (
+        sorted(_passive_plugins)
+        + [s for s in _WP_PLUGIN_SLUGS if s not in _passive_plugins]
+    )
+    for _slug in _slugs_to_probe:
+        _rm_path = f"/wp-content/plugins/{_slug}/readme.txt"
+        r = _wp_get(_rm_path)
+        if not (r and r.status_code == 200 and len(r.text) > 20):
+            continue
+        _p_ver = None
+        m_pv = re.search(
+            r'(?:Stable\s+tag|Version)\s*:\s*(?!trunk\b)([\d][^\s\r\n,]*)',
+            r.text, re.I,
+        )
+        if m_pv:
+            _p_ver = m_pv.group(1).strip()
+        m_pn = re.search(r'^===\s*(.+?)\s*===', r.text, re.M)
+        _p_name = m_pn.group(1).strip() if m_pn else _slug
+        _existing = next((x for x in wp_info["plugins"] if x["slug"] == _slug), None)
+        if _existing:
+            _existing["version"] = _p_ver
+            _existing["name"]    = _p_name
+            _existing["source"]  = "active"
+        else:
+            wp_info["plugins"].append(
+                {"slug": _slug, "version": _p_ver,
+                 "name": _p_name, "source": "active"})
+        _p_ev = out.output_path(phase, f"wp_plugin_{_slug[:30]}_{hostname}")
+        _p_ev.write_text(r.text[:5000], encoding="utf-8")
+        _ver_str = f" v{_p_ver}" if _p_ver else ""
+        out.add_finding(
+            title=f"WordPress Plugin Detected: {_p_name}{_ver_str}",
+            url=base + _rm_path, port=target["port"], risk="INFO",
+            description=(
+                f"Plugin '{_p_name}' (slug: {_slug}){_ver_str} confirmed via "
+                "readme.txt. Version disclosure enables targeted CVE research."
+                + (f" Installed version: {_p_ver}." if _p_ver else "")
+            ),
+            output=r.text[:300],
+            sources="fracture-wordpress", service=target["scheme"],
+            output_file=str(_p_ev),
+            owasp="A06:2025 Vulnerable and Outdated Components", nist="SI-2",
+            remediation=(
+                f"Keep {_p_name} updated to the latest release. "
+                "Remove readme.txt from plugin directories on production servers."
+            ),
+            http_code=r.status_code,
+        )
+        vc.log(f"[wordpress] Plugin: {_p_name}{_ver_str}", "INFO")
+
+    # ── 13. THEME ENUMERATION ────────────────────────────────────────────────
+    _passive_themes: set = set()
+    if homepage_html:
+        for _pt in re.findall(r'/wp-content/themes/([^/"\']+)/', homepage_html):
+            _passive_themes.add(_pt)
+
+    _themes_to_probe = (
+        sorted(_passive_themes)
+        + [s for s in _WP_THEME_SLUGS if s not in _passive_themes]
+    )
+    _checked_parents: set = set()
+    # Accumulate all detected themes; emit a single combined finding after the loop.
+    _detected_themes: list = []   # (name, ver_str, parent_str, ev_path, style_url)
+    for _tslug in _themes_to_probe:
+        _sc_path = f"/wp-content/themes/{_tslug}/style.css"
+        r = _wp_get(_sc_path)
+        if not (r and r.status_code == 200):
+            continue
+        _t_ver    = None
+        _t_name   = _tslug
+        _t_parent = None
+        m_tv  = re.search(r'Version\s*:\s*([\d][^\r\n]*)', r.text, re.I)
+        if m_tv:
+            _t_ver = m_tv.group(1).strip()
+        m_tn  = re.search(r'Theme Name\s*:\s*([^\r\n]+)', r.text, re.I)
+        if m_tn:
+            _t_name = m_tn.group(1).strip()
+        m_tp  = re.search(r'Template\s*:\s*([^\r\n]+)', r.text, re.I)
+        if m_tp:
+            _t_parent = m_tp.group(1).strip()
+        wp_info["themes"].append(
+            {"slug": _tslug, "version": _t_ver,
+             "name": _t_name, "parent": _t_parent})
+        _th_ev = out.output_path(phase, f"wp_theme_{_tslug[:30]}_{hostname}")
+        _th_ev.write_text(r.text[:5000], encoding="utf-8")
+        _tv_str = f" v{_t_ver}" if _t_ver else ""
+        _tp_str = f" (child of: {_t_parent})" if _t_parent else ""
+        _detected_themes.append((_t_name, _tv_str, _tp_str, str(_th_ev), base + _sc_path))
+        vc.log(f"[wordpress] Theme: {_t_name}{_tv_str}", "INFO")
+
+    # Single combined finding for all detected themes
+    if _detected_themes:
+        _theme_lines = [
+            f"• {_tn}{_tv}{_tp}" for _tn, _tv, _tp, _, _ in _detected_themes
+        ]
+        _theme_ev = ",".join(_ev for _, _, _, _ev, _ in _detected_themes)
+        out.add_finding(
+            title="WordPress Theme Detected",
+            url=base, port=target["port"], risk="INFO",
+            description=(
+                f"{len(_detected_themes)} theme(s) detected via style.css. "
+                "Version disclosure enables CVE research.\n"
+                + "\n".join(_theme_lines)
+            ),
+            output="\n".join(_theme_lines),
+            sources="fracture-wordpress", service=target["scheme"],
+            output_file=_theme_ev,
+            owasp="A06:2025 Vulnerable and Outdated Components", nist="SI-2",
+            remediation=(
+                "Keep all installed themes updated. "
+                "Restrict access to style.css on production servers. "
+                "Remove unused themes."
+            ),
+        )
+
+        # Parent theme check
+        if _t_parent and _t_parent not in _checked_parents and _t_parent != _tslug:
+            _checked_parents.add(_t_parent)
+            _psc = f"/wp-content/themes/{_t_parent}/style.css"
+            r_par = _wp_get(_psc)
+            if r_par and r_par.status_code == 200:
+                _pt_ver  = None
+                _pt_name = _t_parent
+                m_ptv = re.search(r'Version\s*:\s*([\d][^\r\n]*)', r_par.text, re.I)
+                if m_ptv:
+                    _pt_ver = m_ptv.group(1).strip()
+                m_ptn = re.search(r'Theme Name\s*:\s*([^\r\n]+)', r_par.text, re.I)
+                if m_ptn:
+                    _pt_name = m_ptn.group(1).strip()
+                _pt_ver_str = f" v{_pt_ver}" if _pt_ver else ""
+                out.add_finding(
+                    title=f"WordPress Parent Theme Detected: {_pt_name}{_pt_ver_str}",
+                    url=base + _psc, port=target["port"], risk="INFO",
+                    description=(
+                        f"Parent theme '{_pt_name}' (slug: {_t_parent})"
+                        f"{_pt_ver_str} detected as parent of '{_t_name}'."
+                    ),
+                    output=r_par.text[:200],
+                    sources="fracture-wordpress", service=target["scheme"],
+                    owasp="A06:2025 Vulnerable and Outdated Components", nist="SI-2",
+                    remediation=f"Keep parent theme '{_pt_name}' updated.",
+                    http_code=r_par.status_code,
+                )
+
+        # TimThumb check in this theme
+        for _tim_sub in (
+            f"/wp-content/themes/{_tslug}/timthumb.php",
+            f"/wp-content/themes/{_tslug}/lib/timthumb.php",
+            f"/wp-content/themes/{_tslug}/scripts/timthumb.php",
+        ):
+            r_tim = _wp_get(_tim_sub)
+            if r_tim and r_tim.status_code in (200, 500):
+                _tv2 = None
+                m_tv2 = re.search(r'TimThumb\s+(?:version\s*)?([\d.]+)', r_tim.text, re.I)
+                if m_tv2:
+                    _tv2 = m_tv2.group(1)
+                _tv2_str = f" v{_tv2}" if _tv2 else ""
+                out.add_finding(
+                    title=f"TimThumb Script Detected: {_t_name}{_tv2_str}",
+                    url=base + _tim_sub, port=target["port"], risk="HIGH",
+                    description=(
+                        f"A TimThumb image-processing script{_tv2_str} was found "
+                        f"in theme '{_t_name}'. TimThumb has a long history of "
+                        "critical vulnerabilities including remote code execution "
+                        "(CVE-2011-4106 and others) in versions below 2.8.14."
+                    ),
+                    output=f"GET {_tim_sub} → HTTP {r_tim.status_code}",
+                    sources="fracture-wordpress", service=target["scheme"],
+                    owasp="A06:2025 Vulnerable and Outdated Components", nist="SI-2",
+                    remediation=(
+                        "Remove timthumb.php from the theme and replace with "
+                        "WordPress built-in image processing (wp_get_attachment_image)."
+                    ),
+                    http_code=r_tim.status_code,
+                )
+                break  # one hit per theme is enough
+
+    # ── 14. DATABASE BACKUP & EXPORT DETECTION ──────────────────────────────
+    _SQL_SIG = re.compile(
+        r'(?:DROP|(?:UN)?LOCK|CREATE|ALTER|TRUNCATE)\s+(?:TABLE|DATABASE)\b|'
+        r'INSERT\s+INTO\s+`?\w|--\s*MySQL\s+dump|mysqldump\s+',
+        re.I,
+    )
+    for _bkp in _WP_DB_BACKUP_PATHS:
+        r = _wp_get(_bkp)
+        if r and r.status_code == 200:
+            _is_sql  = bool(_SQL_SIG.search(r.text[:3000]))
+            _is_xml  = r.text.lstrip().startswith("<?xml") or "<rss" in r.text[:200]
+            _bk_risk = "CRITICAL" if _is_sql else "HIGH"
+            _bkev    = out.output_path(
+                phase,
+                f"wp_backup_{_bkp.strip('/').replace('/', '_')[:40]}_{hostname}")
+            _bkev.write_text(r.text[:10000], encoding="utf-8")
+            out.add_finding(
+                title=f"WordPress Backup/Export File Exposed: {_bkp}",
+                url=base + _bkp, port=target["port"], risk=_bk_risk,
+                description=(
+                    f"The file {_bkp} is publicly accessible"
+                    + (" and contains a SQL database dump" if _is_sql
+                       else " and appears to be a WordPress export file" if _is_xml
+                       else " (content accessible — review for sensitive data)")
+                    + ". Exposed backups disclose all site data including user "
+                    "credentials, private content, and configuration."
+                ),
+                output=r.text[:300],
+                sources="fracture-wordpress", service=target["scheme"],
+                output_file=str(_bkev),
+                owasp="A01:2025 Broken Access Control", nist="AC-3",
+                remediation=(
+                    f"Delete or relocate {_bkp} outside the web root immediately. "
+                    "If credentials were exposed, rotate all passwords. "
+                    "Store backups in non-web-accessible storage."
+                ),
+                http_code=r.status_code,
+            )
+            vc.log(f"[wordpress] {'CRITICAL' if _is_sql else 'HIGH'}: "
+                   f"backup exposed: {_bkp}", "ERROR")
+
+    # ── 15. SUMMARY ──────────────────────────────────────────────────────────
+    _sum_ev = out.output_path(phase, f"wp_scan_summary_{hostname}")
+    try:
+        _sum_ev.write_text(
+            json.dumps({
+                "target":           base,
+                "version":          wp_info["version"],
+                "version_source":   wp_info["version_source"],
+                "users_count":      len(wp_info["users"]),
+                "users":            wp_info["users"][:50],
+                "plugins_count":    len(wp_info["plugins"]),
+                "plugins":          wp_info["plugins"],
+                "themes_count":     len(wp_info["themes"]),
+                "themes":           wp_info["themes"],
+                "xmlrpc_enabled":   wp_info["xmlrpc"],
+                "xmlrpc_methods":   xmlrpc_methods[:50],
+                "rest_api_exposed": wp_info["rest_api"],
+                "multisite":        wp_info["multisite"],
+                "login_accessible": wp_info["login_accessible"],
+                "debug_log":        wp_info["debug_log"],
+                "config_backups":   wp_info["config_backups"],
+            }, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+    # Deduplicate discovered paths preserving order
+    _seen_wp: set = set()
+    wp_info["discovered_paths"] = []
+    for _wu, _wc, _wr in _wp_discovered_urls:
+        if _wu not in _seen_wp:
+            _seen_wp.add(_wu)
+            wp_info["discovered_paths"].append((_wu, _wc, _wr))
+
+    vc.log(
+        f"[wordpress] Scan complete — "
+        f"ver:{wp_info['version'] or 'unknown'}  "
+        f"users:{len(wp_info['users'])}  "
+        f"plugins:{len(wp_info['plugins'])}  "
+        f"themes:{len(wp_info['themes'])}  "
+        f"xmlrpc:{wp_info['xmlrpc']}  "
+        f"rest:{wp_info['rest_api']}  "
+        f"discovered:{len(wp_info['discovered_paths'])}",
+        "SUCCESS",
+    )
+    return wp_info
+
 
 def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                  out: OutputManager, sess: requests.Session) -> None:
@@ -2514,12 +4145,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 title=f"Missing Security Header: {_hdr_name}",
                 url=url, port=target["port"],
                 risk=_hdr_risk,
-                description=(
-                    f"The HTTP security header '{_hdr_name}' is absent from the "
-                    f"response at {url}."
-                ),
+                description=f"The HTTP security header '{_hdr_name}' is absent.",
                 output=f"Missing: {_hdr_name}",
-                affected=_hdr_name,
+                affected=_url_rel_path(url, target["url"]),
                 sources="fracture-recon", service=target["scheme"],
                 output_file=_probe_files,
                 owasp="A05:2025 Security Misconfiguration", nist=_hdr_nist,
@@ -2530,30 +4158,55 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     detected_cms = [n for n, pats in _CMS_PATTERNS.items()
                     if any(p.search(all_text) for p in pats)]
 
+    # Fallback: probe /wp-login.php for WordPress sites that serve CDN-rewritten
+    # HTML without wp-content/wp-includes references in the page source.
+    if "WordPress" not in detected_cms:
+        try:
+            _wplogin = sess.get(
+                url.rstrip("/") + "/wp-login.php",
+                timeout=min(timeout, 6), allow_redirects=True)
+            if (_wplogin.status_code == 200 and
+                    ("user_login" in _wplogin.text or
+                     "wp-submit" in _wplogin.text)):
+                detected_cms.append("WordPress")
+                vc.log("[recon] WordPress detected via /wp-login.php probe", "INFO")
+        except Exception:
+            pass
+
     if server_hdr:
         out.add_finding(
-            title="Web Server Version Disclosed in Header",
+            title="Header Data Leakage: Server",
             url=url, port=target["port"], risk="LOW",
-            description=f"The Server response header discloses the web server: '{server_hdr}'.",
+            description="The HTTP Server response header reveals the web server software name and version, reducing the attacker's reconnaissance effort needed to identify version-specific vulnerabilities.",
             output=f"Server: {server_hdr}", sources="fracture-recon",
             service=target["scheme"], output_file=_probe_files,
             owasp="A05:2025 Security Misconfiguration", nist="SI-2",
-            remediation="Suppress or genericise the Server header.",
+            remediation="Remove or genericise the Server response header in the web server configuration (e.g., ServerTokens Prod in Apache; server_tokens off in nginx).",
             http_code=resp.status_code,
         )
     if powered_by:
         out.add_finding(
-            title="Technology Disclosed via X-Powered-By Header",
+            title="Header Data Leakage: X-Powered-By",
             url=url, port=target["port"], risk="LOW",
-            description=f"X-Powered-By reveals: '{powered_by}'.",
+            description="The X-Powered-By response header discloses the application framework, language, or runtime version, reducing the attacker's effort needed to identify version-specific vulnerabilities.",
             output=f"X-Powered-By: {powered_by}", sources="fracture-recon",
             service=target["scheme"], output_file=_probe_files,
             owasp="A05:2025 Security Misconfiguration", nist="SI-2",
-            remediation="Remove the X-Powered-By header.",
+            remediation='Remove or suppress the X-Powered-By header at the application framework or reverse-proxy level (e.g., app.disable("x-powered-by") in Express; Header unset X-Powered-By in Apache).',
             http_code=resp.status_code,
         )
     for cms in set(detected_cms):
         vc.log(f"[recon] CMS detected: {cms}", "SUCCESS")
+        out.add_finding(
+            title=f"CMS Detected: {cms}",
+            url=url, port=target["port"], risk="INFO",
+            description=f"The CMS '{cms}' was identified from page source signatures.",
+            output=f"CMS: {cms}", sources="fracture-recon",
+            service=target["scheme"], output_file=_probe_files,
+            owasp="A05:2025 Security Misconfiguration", nist="CM-8",
+            remediation="Ensure the CMS and all plugins/themes are kept up to date.",
+            http_code=resp.status_code,
+        )
 
     vc.status(phase, "Recon", "running", "Tech fingerprint (whatweb)", 1, 10)
     _ww_versions: list = []   # [(name, version_str)] collected for searchsploit
@@ -2711,7 +4364,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             url=url, port=target["port"], risk=_hdr_risk,
                             description=_hdr_desc,
                             output=f"Missing: {_hdr_name}",
-                            affected=_hdr_name,
+                            affected=_url_rel_path(url, target["url"]),
                             sources="whatweb", service=target["scheme"],
                             output_file=str(ww_out),
                             owasp="A05:2025 Security Misconfiguration",
@@ -2905,16 +4558,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         cmd = [gobuster, "dir", "-u", url, "-w", wordlist, "-t", "30",
                "-q", "-k", "-o", str(out_f)]
         vc.log("[recon] Running gobuster ...", "INFO")
-        try:
-            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            _register_proc(proc)
-            _, gob_err = proc.communicate(timeout=300)
-            _deregister_proc(proc)
-            if gob_err:
-                vc.log(f"[recon] gobuster stderr: {gob_err[:500]}", "WARNING")
-            out.log_command("gobuster", cmd, out_f)
-        except Exception as e:
-            out.log_error("gobuster", cmd, str(e))
+        _gobuster_run(cmd, out_f, "recon", out)
     else:
         if gobuster:
             vc.log(f"[recon] gobuster found but wordlist missing: {wordlist}", "WARNING")
@@ -2950,13 +4594,13 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
 
-    # feroxbuster — recursive directory discovery; runs even on wildcard hosts
+    # feroxbuster — recursive directory discovery
     feroxbuster = _find_tool("feroxbuster")
     if feroxbuster and Path(wordlist).exists():
         fer_out = out.output_path(phase, "feroxbuster_" + target["hostname"])
         cmd = [
             feroxbuster, "--url", url, "--wordlist", wordlist,
-            "--depth", "2", "--threads", "30", "--quiet",
+            "--depth", "2", "--threads", str(_SCAN_SEM.limit), "--quiet",
             "--status-codes", "200,204,301,302,307,401,403",
             "--output", str(fer_out), "--insecure",
             "--auto-tune", "--time-limit", "4m",
@@ -3015,16 +4659,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             cmd = [gobuster, "dir", "-u", url, "-w", wordlist_files, "-t", "30",
                    "-q", "-k", "-o", str(gob_files_out)]
             vc.log("[recon] Running gobuster (files) ...", "INFO")
-            try:
-                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                _register_proc(proc)
-                _, gob_err = proc.communicate(timeout=300)
-                _deregister_proc(proc)
-                if gob_err:
-                    vc.log(f"[recon] gobuster (files) stderr: {gob_err[:500]}", "WARNING")
-                out.log_command("gobuster", cmd, gob_files_out)
-            except Exception as e:
-                out.log_error("gobuster", cmd, str(e))
+            _gobuster_run(cmd, gob_files_out, "recon", out)
             # Write gobuster files to structure map
             if gob_files_out.exists():
                 try:
@@ -3042,12 +4677,12 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                              evidence_files=[str(gob_files_out)])
                 except Exception:
                     pass
-        # feroxbuster files: always run (handles wildcards natively)
+        # feroxbuster files
         if feroxbuster:
             fer_files_out = out.output_path(phase, "feroxbuster_files_" + target["hostname"])
             cmd = [
                 feroxbuster, "--url", url, "--wordlist", wordlist_files,
-                "--depth", "2", "--threads", "30", "--quiet",
+                "--depth", "2", "--threads", str(_SCAN_SEM.limit), "--quiet",
                 "--status-codes", "200,204,301,302,307,401,403",
                 "--output", str(fer_files_out), "--insecure",
                 "--auto-tune", "--time-limit", "4m",
@@ -3098,69 +4733,35 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             out.add_finding(
                 title="Directory Listing Enabled",
                 url=url + "/", port=target["port"], risk="MEDIUM",
-                description="Directory listing is enabled, potentially exposing sensitive files.",
+                description="The web server is configured to display a browsable directory index, exposing file structure and potentially sensitive files to unauthenticated users.",
                 output=r.text[:500], sources="fracture-recon",
                 service=target["scheme"], output_file=str(_dl_out),
                 owasp="A05:2025 Security Misconfiguration", nist="CM-7",
-                remediation="Disable directory listing (e.g. Options -Indexes for Apache).",
+                remediation="Disable directory indexing (e.g., Options -Indexes in Apache; autoindex off in nginx) and ensure every directory contains an explicit index document.",
                 http_code=r.status_code,
             )
     except Exception:
         pass
 
     vc.status(phase, "Recon", "running", "WordPress scan", 8, 10)
+    _wp_discovered: list = []
     if "WordPress" in detected_cms:
-        wpscan = _find_tool("wpscan")
-        if wpscan:
-            wp_out = out.output_path(phase, "wpscan_" + target["hostname"])
-            wps_cmd = [wpscan, "--url", url, "--no-banner",
-                       "-o", str(wp_out), "--format", "json"]
-            tok = cfg.get("wpscan_token", "")
-            if tok:
-                wps_cmd += ["--api-token", tok]
-            vc.log("[recon] Running wpscan ...", "INFO")
-            try:
-                proc = _popen(wps_cmd, stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, text=True)
-                _register_proc(proc)
-                proc.communicate(timeout=300)
-                _deregister_proc(proc)
-                out.log_command("wpscan", wps_cmd, wp_out)
-                if wp_out.exists():
-                    try:
-                        wpd = json.loads(wp_out.read_text(encoding="utf-8"))
-                        ver = wpd.get("version", {}).get("number", "")
-                        if ver:
-                            out.add_finding(
-                                title="WordPress Version Detected",
-                                url=url, port=target["port"], risk="INFO",
-                                description=f"WordPress version {ver} detected.",
-                                output=f"Version: {ver}", sources="wpscan",
-                                service=target["scheme"], output_file=str(wp_out),
-                                owasp="A06:2025 Vulnerable and Outdated Components",
-                                nist="SI-2",
-                                remediation="Keep WordPress up to date.",
-                            )
-                        for vuln in wpd.get("vulnerabilities", []):
-                            out.add_finding(
-                                title=f"WordPress Vulnerability: {vuln.get('title','Unknown')}",
-                                url=url, port=target["port"], risk="HIGH",
-                                description=vuln.get("title", ""),
-                                cves=",".join(vuln.get("references", {}).get("cve", [])),
-                                sources="wpscan", service=target["scheme"],
-                                output_file=str(wp_out),
-                                owasp="A06:2025 Vulnerable and Outdated Components",
-                                nist="SI-2",
-                                remediation="Apply available WordPress patches.",
-                            )
-                    except Exception:
-                        pass
-            except Exception as e:
-                out.log_error("wpscan", wps_cmd, str(e))
+        _wp_info = _phase_wordpress_scan(url, target, cfg, out, sess, phase, body)
+        _wp_sm_ps: dict = {}
+        _wp_sm_rd: dict = {}
+        for _wu, _wc, _wr in _wp_info.get("discovered_paths", []):
+            _wpath = urllib.parse.urlparse(_wu).path or "/"
+            _wp_sm_ps[_wpath] = _wc
+            if _wr:
+                _wp_sm_rd[_wpath] = _wr
+        if _wp_sm_ps:
+            _write_structure_map(out, target, path_statuses=_wp_sm_ps,
+                                 path_redirects=_wp_sm_rd or None)
+        _wp_discovered = [_wu for _wu, *_ in _wp_info.get("discovered_paths", [])]
 
     vc.status(phase, "Recon", "complete", "Done", 10, 10)
     vc.log("[recon] Phase complete", "SUCCESS")
-    return wc_baseline
+    return wc_baseline, _wp_discovered
 
 
 # ─────────────────────────────────────────────
@@ -3203,6 +4804,69 @@ def _parse_feroxbuster_output(filepath: Path) -> list:
         if m:
             urls.append(m.group(1).rstrip("/\\"))
     return urls
+
+
+# Gobuster wildcard error: "the server returns a status code that matches the
+# provided options for non existing urls. URL => STATUS (Length: N)"
+_GOB_WILDCARD_RE = re.compile(r'Length:\s*(\d+)', re.I)
+
+
+def _gobuster_run(
+    cmd: list,
+    out_f: "Path",
+    label: str,
+    out: "OutputManager",
+    timeout: int = 300,
+) -> bool:
+    """Run gobuster, retrying with --exclude-length when the server's catch-all
+    response triggers gobuster's wildcard detection.
+
+    Returns True when results in *out_f* should be processed, False when the
+    scan was skipped or failed and the output should be ignored.
+    """
+    try:
+        proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        _register_proc(proc)
+        _, gob_err = proc.communicate(timeout=timeout)
+        _deregister_proc(proc)
+    except Exception as e:
+        out.log_error("gobuster", cmd, str(e))
+        return False
+
+    if gob_err and "server returns a status code" in gob_err.lower():
+        m = _GOB_WILDCARD_RE.search(gob_err)
+        if m:
+            excl_len = m.group(1)
+            vc.log(
+                f"[{label}] gobuster wildcard detected (catch-all response "
+                f"length {excl_len}) — retrying with --exclude-length {excl_len}",
+                "INFO",
+            )
+            retry_cmd = cmd + ["--exclude-length", excl_len]
+            try:
+                proc2 = _popen(retry_cmd, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True)
+                _register_proc(proc2)
+                _, gob_err2 = proc2.communicate(timeout=timeout)
+                _deregister_proc(proc2)
+                if gob_err2:
+                    if "server returns a status code" in gob_err2.lower():
+                        vc.log(
+                            f"[{label}] gobuster wildcard persists after exclusion — skipping",
+                            "INFO",
+                        )
+                        return False
+                    vc.log(f"[{label}] gobuster stderr: {gob_err2[:500]}", "WARNING")
+            except Exception as e2:
+                out.log_error("gobuster", retry_cmd, str(e2))
+                return False
+        else:
+            vc.log(f"[{label}] gobuster stderr: {gob_err[:500]}", "WARNING")
+    elif gob_err:
+        vc.log(f"[{label}] gobuster stderr: {gob_err[:500]}", "WARNING")
+
+    out.log_command("gobuster", cmd, out_f)
+    return True
 
 
 def _capture_screenshot_to(ep_url: str, out_path: Path,
@@ -3264,6 +4928,7 @@ def _phase_endpoint_tools(
     discovered_urls: list, target: dict, cfg: dict, pm: ProgressManager,
     out: OutputManager, sess: requests.Session,
     wc_baseline=None,
+    scope_hostnames: "set | None" = None,
 ) -> None:
     """Run screenshot, page crawl, and directory brute-force against each
     endpoint discovered by recon/crawl phases.  Capped to avoid runaway scans.
@@ -3300,6 +4965,19 @@ def _phase_endpoint_tools(
     save_dir = out.root / "recon"
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    # Per-header aggregation: collect all URLs missing each header across
+    # all endpoints and emit one consolidated finding per header at the end.
+    _hdr_missing: dict = {}   # header_name -> [url, ...]
+    _hdr_meta:    dict = {}   # header_name -> (risk, desc, nist, remed)
+    _hdr_anchor:  dict = {}   # header_name -> first URL (used as finding anchor)
+    _hdr_code:    dict = {}   # header_name -> http_code of first URL
+    _hdr_resp:    dict = {}   # header_name -> {ep_url: Response} (all responses per header)
+
+    # Interesting endpoint aggregation: group relative paths by domain so one
+    # finding per domain is emitted rather than one per discovered URL.
+    _ie_by_netloc: dict = {}   # netloc -> {"anchor": url, "paths": {rel: full_url}}
+    _ie_crawl_out: dict = {}   # netloc -> most-recent crawl output file path
+
     for idx, ep_url in enumerate(endpoints):
         ep_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', ep_url.replace("://", "_"))[:50]
         vc.status("endpoint_tools", "Endpoint Tools", "running",
@@ -3308,7 +4986,17 @@ def _phase_endpoint_tools(
 
         # ── Screenshot ──────────────────────────────────────────────────────
         ep_shot = save_dir / f"screenshot_{ep_safe}.png"
-        if _capture_screenshot_to(ep_url, ep_shot, target, cfg):
+        _ep_path_low = (urllib.parse.urlparse(ep_url).path or "/").lower()
+        _ep_scope_ok = (scope_hostnames is None or _is_in_scope_url(ep_url, scope_hostnames))
+        _ep_not_asset = not (_ep_path_low.endswith(".css") or _ep_path_low.endswith(".js"))
+        _ep_screenshot_ok = _is_valid_endpoint_url(ep_url) and _ep_scope_ok and _ep_not_asset
+        if _ep_screenshot_ok:
+            try:
+                _ss_check = sess.head(ep_url, timeout=min(timeout, 5), allow_redirects=True)
+                _ep_screenshot_ok = 200 <= _ss_check.status_code < 300
+            except Exception:
+                _ep_screenshot_ok = False
+        if _ep_screenshot_ok and _capture_screenshot_to(ep_url, ep_shot, target, cfg):
             _ep_rel = urllib.parse.urlparse(ep_url).path or "/"
             out.add_finding(
                 title=f"Web Screenshot Captured: {_ep_rel}",
@@ -3334,48 +5022,263 @@ def _phase_endpoint_tools(
                 }, indent=2),
                 encoding="utf-8",
             )
+            _ep_scope = scope_hostnames or {target["hostname"]}
             for link in page_data.get("links", []):
-                if _INTERESTING_PATH_RE.search(link):
+                if (_INTERESTING_PATH_RE.search(link)
+                        and _is_in_scope_url(link, _ep_scope)
+                        and _is_valid_endpoint_url(link)):
+                    _ie_nl  = urllib.parse.urlparse(link).netloc or link
+                    _ie_rel = urllib.parse.urlparse(link).path or link
+                    if _ie_nl not in _ie_by_netloc:
+                        _ie_by_netloc[_ie_nl] = {"anchor": link, "paths": {}}
+                    _ie_by_netloc[_ie_nl]["paths"][_ie_rel] = link
+                    _ie_crawl_out[_ie_nl] = str(ep_crawl_out)
+
+            # ── Source code download ─────────────────────────────────────────
+            _ep_src_resp = page_data.get("response")
+            if _ep_src_resp is not None:
+                _ep_src_file = out.output_path("recon", f"source_{ep_safe}.html")
+                try:
+                    _ep_src_file.write_text(_ep_src_resp.text or "", encoding="utf-8")
+                except Exception:
+                    pass
+
+                # ── Sensitive information in source ──────────────────────────
+                _ep_src_text = _ep_src_resp.text or ""
+                for _sp_pat, _sp_label in _SECRET_PATTERNS:
+                    _sp_match = _sp_pat.search(_ep_src_text)
+                    if _sp_match:
+                        _sp_val = (_sp_match.group(_sp_match.lastindex)
+                                   if _sp_match.lastindex else _sp_match.group(0))
+                        _sp_key = (_sp_match.group(1)
+                                   if _sp_match.lastindex and _sp_match.lastindex >= 2
+                                   else "")
+                        if not _is_placeholder_secret(_sp_val, _sp_key):
+                            out.add_finding(
+                                title=f"Sensitive Information in Source: {_sp_label}",
+                                url=ep_url, port=target["port"], risk="HIGH",
+                                description=(
+                                    f"A potential {_sp_label} was found in the page source "
+                                    f"at {ep_url}. Credentials and tokens exposed in "
+                                    "client-accessible source code can be harvested by "
+                                    "attackers to gain unauthorised access."
+                                ),
+                                output=f"Match: {_sp_match.group(0)[:200]}",
+                                sources="fracture-crawl", service=target["scheme"],
+                                owasp="A02:2025 Cryptographic Failures", nist="IA-5",
+                                remediation=(
+                                    "Remove all credentials, tokens, and secrets from "
+                                    "client-side source code. Use server-side environment "
+                                    "variables instead."
+                                ),
+                                output_file=str(_ep_src_file),
+                                affected=ep_url,
+                            )
+
+            # ── Form detection ───────────────────────────────────────────────
+            for _fm in page_data.get("forms", []):
+                _fm_inputs  = _fm.get("inputs", [])
+                _fm_action  = _fm.get("action", ep_url)
+                _fm_method  = _fm.get("method", "GET")
+                _fm_fields  = ", ".join(i["name"] for i in _fm_inputs if i.get("name"))
+                _fm_has_pwd = any(i.get("type", "").lower() == "password"
+                                  for i in _fm_inputs)
+                _fm_out     = (f"Form action: {_fm_action}, Method: {_fm_method}"
+                               + (f", Fields: {_fm_fields}" if _fm_fields else ""))
+                if _fm_has_pwd:
                     out.add_finding(
-                        title="Interesting Endpoint Discovered",
-                        url=link, port=target["port"], risk="INFO",
-                        description=f"Potentially sensitive endpoint found while crawling {ep_url}: {link}",
-                        sources="fracture-crawl", service=target["scheme"],
-                        affected=link, output_file=str(ep_crawl_out),
-                        owasp="A04:2025 Insecure Design", nist="CM-7",
-                        remediation="Review this endpoint for access controls.",
+                        title="Login Page Detected",
+                        url=ep_url, port=target["port"], risk="INFO",
+                        description=(
+                            f"A login form containing a password field was detected at "
+                            f"{ep_url}. Login pages should implement multi-factor "
+                            "authentication, CSRF protection, and account lockout policies."
+                        ),
+                        output=_fm_out, sources="fracture-crawl",
+                        service=target["scheme"],
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="IA-2",
+                        remediation=(
+                            "Ensure the login form enforces MFA, CSRF tokens, rate limiting, "
+                            "and account lockout. Transmit credentials over HTTPS only."
+                        ),
+                        affected=_fm_action,
                     )
+                else:
+                    out.add_finding(
+                        title="Non-Login Form Detected",
+                        url=ep_url, port=target["port"], risk="INFO",
+                        description=(
+                            f"A non-authentication form was detected at {ep_url}. "
+                            "All forms should implement CSRF protection and strict "
+                            "input validation."
+                        ),
+                        output=_fm_out, sources="fracture-crawl",
+                        service=target["scheme"],
+                        owasp="A04:2025 Insecure Design", nist="CM-7",
+                        remediation=(
+                            "Add CSRF tokens to all form submissions. Validate and sanitise "
+                            "all input server-side to prevent injection attacks."
+                        ),
+                        affected=_fm_action,
+                    )
+
+        # ── Security headers + cookie attributes ─────────────────────────────
+        _ep_resp = page_data.get("response")
+        if _ep_resp is not None:
+            _ep_hdrs = _ep_resp.headers
+            _crawl_base_absent  = target.get("_base_sec_hdrs_absent",  set())
+            _crawl_base_present = target.get("_base_sec_hdrs_present", set())
+            for _hn, _hr, _, _hd, _hnist, _hremed in _SECURITY_HEADERS:
+                if _hn == "Strict-Transport-Security" and not target["is_https"]:
+                    continue
+                _ep_has = _hn in _ep_hdrs
+                if not _ep_has:
+                    if _hn in _crawl_base_absent:
+                        # Also missing at base — skip, already reported from base
+                        continue
+                    # Present at base, missing here — deviation; aggregate
+                    _hdr_missing.setdefault(_hn, []).append(ep_url)
+                    if _hn not in _hdr_meta:
+                        _hdr_meta[_hn]   = (_hr, _hd, _hnist, _hremed)
+                        _hdr_anchor[_hn] = ep_url
+                        _hdr_code[_hn]   = _ep_resp.status_code
+                    _hdr_resp.setdefault(_hn, {})[ep_url] = _ep_resp
+                elif _hn in _crawl_base_absent:
+                    # Absent at base but present at this endpoint — informational
+                    _ep_rel_crawl = _url_rel_path(ep_url, target["url"])
+                    out.add_finding(
+                        title=f"Endpoint-Specific Security Header Found: {_hn}",
+                        url=target["url"], port=target["port"], risk="INFO",
+                        description=(
+                            f"The security header '{_hn}' is present at "
+                            f"endpoint {_ep_rel_crawl} but absent from the base URL. "
+                            "This header appears to be applied to specific routes only."
+                        ),
+                        output=f"Present at endpoint: {_hn}: {_ep_hdrs.get(_hn, '')}",
+                        affected=_ep_rel_crawl,
+                        sources="fracture-crawl", service=target["scheme"],
+                        owasp="A05:2025 Security Misconfiguration", nist=_hnist,
+                        remediation=(
+                            "Ensure security headers are applied consistently across "
+                            "all routes. Configure them globally at the server or "
+                            "middleware level."
+                        ),
+                        http_code=_ep_resp.status_code,
+                    )
+            _ep_sc_list: list = []
+            try:
+                _ep_sc_list = _ep_resp.raw.headers.getlist("Set-Cookie") or []
+            except Exception:
+                pass
+            if not _ep_sc_list:
+                _raw_sc = _ep_hdrs.get("Set-Cookie", "")
+                if _raw_sc:
+                    _ep_sc_list = [_raw_sc]
+            for _ep_sc in _ep_sc_list:
+                if not _ep_sc:
+                    continue
+                _ep_sc_low = _ep_sc.lower()
+                _ep_cname  = (_ep_sc.split("=")[0].strip() if "=" in _ep_sc
+                              else _ep_sc.split(";")[0].strip())
+                _ep_sc_out = f"Set-Cookie: {_ep_sc[:300]}"
+                if "httponly" not in _ep_sc_low:
+                    out.add_finding(
+                        title="Missing Secure Cookie Attribute: HttpOnly",
+                        url=ep_url, port=target["port"], risk="LOW",
+                        description=(
+                            f"Cookie '{_ep_cname}' does not have the HttpOnly attribute. "
+                            "Without HttpOnly, the cookie is accessible to JavaScript, "
+                            "exposing it to XSS-based theft."
+                        ),
+                        output=_ep_sc_out, sources="fracture-headers",
+                        service=target["scheme"],
+                        owasp="A05:2025 Security Misconfiguration", nist="SC-23",
+                        remediation="Add the HttpOnly attribute to all session and authentication cookies.",
+                        http_code=_ep_resp.status_code,
+                    )
+                if target["is_https"] and "secure" not in _ep_sc_low:
+                    out.add_finding(
+                        title="Missing Secure Cookie Attribute: Secure",
+                        url=ep_url, port=target["port"], risk="LOW",
+                        description=(
+                            f"Cookie '{_ep_cname}' does not have the Secure attribute on an HTTPS site. "
+                            "Without Secure, the cookie can be transmitted over unencrypted HTTP connections."
+                        ),
+                        output=_ep_sc_out, sources="fracture-headers",
+                        service=target["scheme"],
+                        owasp="A05:2025 Security Misconfiguration", nist="SC-23",
+                        remediation="Add the Secure attribute to all cookies on HTTPS sites.",
+                        http_code=_ep_resp.status_code,
+                    )
+                if not re.search(r'samesite\s*=\s*', _ep_sc_low):
+                    out.add_finding(
+                        title="Missing Secure Cookie Attribute: SameSite",
+                        url=ep_url, port=target["port"], risk="LOW",
+                        description=(
+                            f"Cookie '{_ep_cname}' does not have the SameSite attribute. "
+                            "Without SameSite, the cookie is sent on cross-site requests, "
+                            "enabling CSRF attacks."
+                        ),
+                        output=_ep_sc_out, sources="fracture-headers",
+                        service=target["scheme"],
+                        owasp="A05:2025 Security Misconfiguration", nist="SC-23",
+                        remediation="Add SameSite=Strict or SameSite=Lax to prevent cross-site request forgery.",
+                        http_code=_ep_resp.status_code,
+                    )
+
+            # ── Software version disclosure ──────────────────────────────────
+            for _vh, _vr in (("Server", "LOW"), ("X-Powered-By", "LOW"),
+                             ("X-AspNet-Version", "LOW"), ("X-Runtime", "INFO"),
+                             ("X-Generator", "INFO")):
+                _vhv = _ep_hdrs.get(_vh, "")
+                if _vhv:
+                    _vname, _vver = _parse_software(_vhv)
+                    if _vver:
+                        out.add_finding(
+                            title=f"Software Version Disclosed: {_vname} {_vver}",
+                            url=ep_url, port=target["port"], risk=_vr,
+                            description=(
+                                f"The HTTP response header '{_vh}' discloses software "
+                                f"version information: {_vhv}. Attackers can use disclosed "
+                                "version numbers to identify known vulnerabilities."
+                            ),
+                            output=f"{_vh}: {_vhv}",
+                            sources="fracture-headers", service=target["scheme"],
+                            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                            remediation=(
+                                f"Configure the server to suppress the '{_vh}' response "
+                                "header or remove version numbers from its value."
+                            ),
+                            affected=ep_url,
+                            http_code=_ep_resp.status_code,
+                        )
 
         # ── Directory brute-force ────────────────────────────────────────────
         # Inherit the parent wildcard only when this endpoint is on the same
         # hostname as the target.  A different subdomain (e.g. admin.example.com
         # discovered via crawl while scanning example.com) must be tested
         # independently — it is a distinct host and may not be a wildcard.
+        # Skip wildcard detection entirely for file URLs — brute-force will be
+        # skipped anyway and probing a CSS/JS/image path for wildcards is pointless.
         _ep_host = urllib.parse.urlparse(ep_url).hostname or ""
         _same_host = (_ep_host == target["hostname"])
-        if wc_baseline is not None and _same_host:
+        if _url_is_file(ep_url):
+            ep_wc = None  # file URLs are never brute-forced; no wildcard probe needed
+        elif wc_baseline is not None and _same_host:
             ep_wc = wc_baseline
             vc.log(f"[endpoint_tools] Parent wildcard — skipping brute-force for {ep_url}", "INFO")
         else:
             ep_wc = _detect_wildcard(ep_url, sess, timeout)
             if ep_wc is not None:
-                vc.log(f"[endpoint_tools] Wildcard detected on {ep_url} — skipping brute-force", "WARNING")
+                vc.log(f"[endpoint_tools] Wildcard detected on {ep_url} — skipping brute-force", "INFO")
 
         if ep_wc is None and gobuster and Path(wordlist_dir).exists() and not _url_is_file(ep_url):
             ep_gob = out.output_path("recon", f"gobuster_ep_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_dir,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob)]
             vc.log(f"[endpoint_tools] gobuster on {ep_url}", "INFO")
-            try:
-                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                _register_proc(proc)
-                _, gob_err = proc.communicate(timeout=180)
-                _deregister_proc(proc)
-                if gob_err:
-                    vc.log(f"[endpoint_tools] gobuster stderr: {gob_err[:500]}", "WARNING")
-                out.log_command("gobuster", cmd, ep_gob)
-            except Exception as e:
-                out.log_error("gobuster", cmd, str(e))
+            _gobuster_run(cmd, ep_gob, "endpoint_tools", out, timeout=180)
             if ep_gob.exists():
                 try:
                     _ep_ps, _ep_rd = {}, {}
@@ -3397,16 +5300,7 @@ def _phase_endpoint_tools(
             ep_gob_f = out.output_path("recon", f"gobuster_ep_files_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_file,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob_f)]
-            try:
-                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                _register_proc(proc)
-                _, gob_err = proc.communicate(timeout=180)
-                _deregister_proc(proc)
-                if gob_err:
-                    vc.log(f"[endpoint_tools] gobuster (files) stderr: {gob_err[:500]}", "WARNING")
-                out.log_command("gobuster", cmd, ep_gob_f)
-            except Exception as e:
-                out.log_error("gobuster", cmd, str(e))
+            _gobuster_run(cmd, ep_gob_f, "endpoint_tools", out, timeout=180)
             if ep_gob_f.exists():
                 try:
                     _ep_ps, _ep_rd = {}, {}
@@ -3428,7 +5322,7 @@ def _phase_endpoint_tools(
         if feroxbuster and Path(wordlist_dir).exists() and not _url_is_file(ep_url):
             ep_fer = out.output_path("recon", f"feroxbuster_ep_{ep_safe}")
             cmd = [feroxbuster, "--url", ep_url, "--wordlist", wordlist_dir,
-                   "--depth", "1", "--threads", "20", "--quiet",
+                   "--depth", "1", "--threads", str(_SCAN_SEM.limit), "--quiet",
                    "--status-codes", "200,204,301,302,307,401,403",
                    "--output", str(ep_fer), "--insecure", "--auto-tune",
                    "--time-limit", "2m"]
@@ -3467,6 +5361,53 @@ def _phase_endpoint_tools(
                                              evidence_files=[str(ep_fer)])
                 except Exception:
                     pass
+
+    # ── Aggregated "Interesting Endpoint Discovered" (one per base domain) ─────
+    for _ie_nl, _ie_data in _ie_by_netloc.items():
+        _ie_sorted = sorted(_ie_data["paths"].keys())
+        out.add_finding(
+            title="Interesting Endpoint Discovered",
+            url=_ie_data["anchor"], port=target["port"], risk="INFO",
+            description=(
+                f"{len(_ie_sorted)} potentially sensitive endpoint(s) found at {_ie_nl}."
+            ),
+            sources="fracture-crawl", service=target["scheme"],
+            affected="\n".join(_ie_sorted),
+            output_file=_ie_crawl_out.get(_ie_nl, ""),
+            owasp="A04:2025 Insecure Design", nist="CM-7",
+            remediation="Review these endpoints for access controls.",
+        )
+
+    # ── Aggregated security header findings (one per header, all URLs listed) ──
+    for _hn, _urls in _hdr_missing.items():
+        _hr, _hd, _hnist, _hremed = _hdr_meta[_hn]
+        _hn_safe = re.sub(r'[^\w]', '_', _hn)[:40]
+        _ep_url_resp_map = _hdr_resp.get(_hn, {})
+        _ev_list = []
+        for _eu in _urls:
+            _er = _ep_url_resp_map.get(_eu)
+            if _er is not None:
+                try:
+                    _eu_safe = re.sub(r'[^\w]', '_', _eu)[:30]
+                    _ep_hrq, _ep_hrp = _save_http_evidence(
+                        out, "headers", f"ep_header_{_hn_safe}_{_eu_safe}", _er)
+                    _ev_list.append({"url": _eu, "req": str(_ep_hrq), "resp": str(_ep_hrp)})
+                except Exception:
+                    pass
+        _ep_hdr_ev = json.dumps(_ev_list) if _ev_list else ""
+        out.add_finding(
+            title=f"Missing Security Header: {_hn}",
+            url=_hdr_anchor[_hn],
+            port=target["port"], risk=_hr,
+            description=_hd, sources="fracture-headers",
+            service=target["scheme"],
+            owasp="A05:2025 Security Misconfiguration", nist=_hnist,
+            remediation=_hremed,
+            output=f"Missing: {_hn}",
+            affected="\n".join(_url_rel_path(u, target["url"]) for u in _urls),
+            output_file=_ep_hdr_ev,
+            http_code=_hdr_code[_hn],
+        )
 
     vc.status("endpoint_tools", "Endpoint Tools", "complete", "Done",
               len(endpoints), len(endpoints))
@@ -3530,40 +5471,42 @@ _TS_SKIP_IDS = frozenset({
 
 
 _TLS_VULN_PATTERNS = {
-    # Aligned with Scattershot3 finding titles for cross-tool deduplication
+    # Tuples: (pattern, risk, cve, affected_cipher)
+    # affected_cipher is non-empty only for weak cipher entries; callers use it
+    # to emit title="Weak Cipher Identified" with the cipher type in affected.
     # Risk levels based on NVD CVSS scores and pentest industry consensus.
-    "Deprecated Protocol Enabled: SSLv2":   (re.compile(r'SSLv2\s+enabled|Accepted\s+SSLv2', re.I),   "CRITICAL", "CVE-2016-0800"),
-    "Deprecated Protocol Enabled: SSLv3":   (re.compile(r'SSLv3\s+enabled|Accepted\s+SSLv3', re.I),   "HIGH",     "CVE-2014-3566"),
+    "Deprecated Protocol Enabled: SSLv2":   (re.compile(r'SSLv2\s+enabled|Accepted\s+SSLv2', re.I),   "CRITICAL", "CVE-2016-0800", ""),
+    "Deprecated Protocol Enabled: SSLv3":   (re.compile(r'SSLv3\s+enabled|Accepted\s+SSLv3', re.I),   "HIGH",     "CVE-2014-3566", ""),
     # TLSv1.0: MEDIUM — BEAST (CVE-2011-3389, CVSS 4.3) is largely mitigated by browser 1/n-1 splitting;
     # non-trivially exploitable in practice. PCI DSS prohibits it post-2018. CWE-326.
-    "Deprecated Protocol Enabled: TLSv1.0": (re.compile(r'TLSv1\.0\s+enabled|Accepted\s+TLSv1\.0\b', re.I), "MEDIUM", "CVE-2011-3389"),
+    "Deprecated Protocol Enabled: TLSv1.0": (re.compile(r'TLSv1\.0\s+enabled|Accepted\s+TLSv1\.0\b', re.I), "MEDIUM", "CVE-2011-3389", ""),
     # TLSv1.1: MEDIUM — deprecated per RFC 8996 (2021); no forward secrecy; SHA-1 integrity.
     # No single exploited CVE but formally deprecated and prohibited by PCI DSS. CWE-326.
-    "Deprecated Protocol Enabled: TLSv1.1": (re.compile(r'TLSv1\.1\s+enabled|Accepted\s+TLSv1\.1', re.I), "MEDIUM", ""),
+    "Deprecated Protocol Enabled: TLSv1.1": (re.compile(r'TLSv1\.1\s+enabled|Accepted\s+TLSv1\.1', re.I), "MEDIUM", "", ""),
     # RC4: MEDIUM — statistical bias (CVE-2013-2566 CVSS 4.3); Bar Mitzvah attack (CVE-2015-2808 CVSS 4.3).
     # RFC 7465 prohibits RC4 in TLS. CWE-327.
-    "Weak Cipher Identified: RC4":          (re.compile(r'\bRC4\b', re.I),          "MEDIUM",   "CVE-2013-2566, CVE-2015-2808"),
-    "Weak Cipher Identified: NULL":         (re.compile(r'NULL\s+Cipher|NULL-', re.I), "CRITICAL", ""),
+    "Weak Cipher Identified: RC4":          (re.compile(r'\bRC4\b', re.I),          "MEDIUM",   "CVE-2013-2566, CVE-2015-2808", "RC4"),
+    "Weak Cipher Identified: NULL":         (re.compile(r'NULL\s+Cipher|NULL-', re.I), "CRITICAL", "", "NULL"),
     # EXPORT: MEDIUM — FREAK attack (CVE-2015-0204 CVSS 4.3); requires active MITM. CWE-326.
-    "Weak Cipher Identified: EXPORT":       (re.compile(r'\bEXPORT\b', re.I),       "MEDIUM",   "CVE-2015-0204"),
+    "Weak Cipher Identified: EXPORT":       (re.compile(r'\bEXPORT\b', re.I),       "MEDIUM",   "CVE-2015-0204", "EXPORT"),
     # DES: MEDIUM — SWEET32 birthday attack on 64-bit block ciphers (CVE-2016-2183). CWE-326.
-    "Weak Cipher Identified: DES":          (re.compile(r'\bDES\b(?!-CBC3)', re.I), "MEDIUM",   "CVE-2016-2183"),
+    "Weak Cipher Identified: DES":          (re.compile(r'\bDES\b(?!-CBC3)', re.I), "MEDIUM",   "CVE-2016-2183", "DES"),
     "Heartbleed (CVE-2014-0160) Vulnerability Detected":
-                                            (re.compile(r'heartbleed|VULNERABLE.*heartbleed', re.I), "CRITICAL", "CVE-2014-0160"),
-    "SSL/TLS Vulnerability: POODLE":        (re.compile(r'POODLE|VULNERABLE.*poodle', re.I),  "HIGH",   "CVE-2014-3566"),
-    "SSL/TLS Vulnerability: BEAST":         (re.compile(r'BEAST|VULNERABLE.*beast', re.I),    "MEDIUM", "CVE-2011-3389"),
-    "SSL/TLS Vulnerability: CRIME":         (re.compile(r'CRIME|VULNERABLE.*crime', re.I),    "HIGH",   "CVE-2012-4929"),
+                                            (re.compile(r'heartbleed|VULNERABLE.*heartbleed', re.I), "CRITICAL", "CVE-2014-0160", ""),
+    "SSL/TLS Vulnerability: POODLE":        (re.compile(r'POODLE|VULNERABLE.*poodle', re.I),  "HIGH",   "CVE-2014-3566", ""),
+    "SSL/TLS Vulnerability: BEAST":         (re.compile(r'BEAST|VULNERABLE.*beast', re.I),    "MEDIUM", "CVE-2011-3389", ""),
+    "SSL/TLS Vulnerability: CRIME":         (re.compile(r'CRIME|VULNERABLE.*crime', re.I),    "HIGH",   "CVE-2012-4929", ""),
     # DROWN: HIGH — cross-protocol Bleichenbacher oracle via SSLv2 decrypts TLS sessions
     # (CVE-2016-0800 CVSS v3 5.9 MEDIUM; pentest consensus HIGH given C:H impact). CWE-310.
-    "SSL/TLS Vulnerability: DROWN":         (re.compile(r'DROWN|VULNERABLE.*drown', re.I),    "HIGH",   "CVE-2016-0800"),
-    "SSL/TLS Vulnerability: LOGJAM":        (re.compile(r'LOGJAM|VULNERABLE.*logjam', re.I),  "HIGH",   "CVE-2015-4000"),
-    "SSL/TLS Vulnerability: FREAK":         (re.compile(r'FREAK|VULNERABLE.*freak', re.I),    "MEDIUM", "CVE-2015-0204"),
-    "SSL/TLS Vulnerability: SWEET32":       (re.compile(r'SWEET32|3DES.*cipher|DES-CBC3', re.I), "MEDIUM", "CVE-2016-2183"),
-    "SSL/TLS Vulnerability: LUCKY13":       (re.compile(r'LUCKY13|lucky13', re.I),            "MEDIUM", "CVE-2013-0169"),
+    "SSL/TLS Vulnerability: DROWN":         (re.compile(r'DROWN|VULNERABLE.*drown', re.I),    "HIGH",   "CVE-2016-0800", ""),
+    "SSL/TLS Vulnerability: LOGJAM":        (re.compile(r'LOGJAM|VULNERABLE.*logjam', re.I),  "HIGH",   "CVE-2015-4000", ""),
+    "SSL/TLS Vulnerability: FREAK":         (re.compile(r'FREAK|VULNERABLE.*freak', re.I),    "MEDIUM", "CVE-2015-0204", ""),
+    "SSL/TLS Vulnerability: SWEET32":       (re.compile(r'SWEET32|3DES.*cipher|DES-CBC3', re.I), "MEDIUM", "CVE-2016-2183", ""),
+    "SSL/TLS Vulnerability: LUCKY13":       (re.compile(r'LUCKY13|lucky13', re.I),            "MEDIUM", "CVE-2013-0169", ""),
     # Self-Signed: MEDIUM — eliminates PKI trust chain, enabling MITM; requires attacker positioning.
     # CWE-295 (Improper Certificate Validation), CWE-296.
-    "SSL/TLS Certificate: Self-Signed":     (re.compile(r'self.signed|Self signed', re.I),    "MEDIUM", ""),
-    "SSL/TLS Certificate: Expired":         (re.compile(r'expired|NOT after.*passed', re.I),  "HIGH",   ""),
+    "SSL/TLS Certificate: Self-Signed":     (re.compile(r'self.signed|Self signed', re.I),    "MEDIUM", "", ""),
+    "SSL/TLS Certificate: Expired":         (re.compile(r'expired|NOT after.*passed', re.I),  "HIGH",   "", ""),
 }
 
 
@@ -3600,13 +5543,15 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 if "not vulnerable" not in ln.lower()
                 and not _SSL_SECTION_HDR.match(ln)
             )
-            for ftitle, (pat, risk, cve) in _TLS_VULN_PATTERNS.items():
+            for ftitle, (pat, risk, cve, _affected) in _TLS_VULN_PATTERNS.items():
                 if pat.search(_sslscan_filtered):
+                    _emit_title = "Weak Cipher Identified" if _affected else ftitle
                     out.add_finding(
-                        title=ftitle, url=target["url"], port=port,
-                        risk=risk, description=f"TLS issue: {ftitle}",
+                        title=_emit_title, url=target["url"], port=port,
+                        risk=risk, description=f"TLS issue: {_emit_title}",
                         cves=cve, sources="sslscan", service="https",
                         output_file=str(out_f),
+                        affected=_affected or "",
                         owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                         remediation="Disable weak protocols/ciphers. Use TLS 1.2/1.3 with AEAD ciphers.",
                     )
@@ -3644,18 +5589,70 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         "bits":     _m.group(2),
                         "cipher":   _m.group(3),
                     })
+            # Dedicated Heartbleed check on raw output — the section-header filter
+            # removes "  Heartbleed:" so the generic _TLS_VULN_PATTERNS match fails.
+            _hb_sect = re.search(
+                r'Heartbleed:(.*?)(?=\n\s*\n|\n[A-Z]|\Z)', stdout, re.DOTALL | re.I)
+            if _hb_sect:
+                _hb_body = _hb_sect.group(1)
+                if (re.search(r'\bvulnerable\b', _hb_body, re.I)
+                        and not re.search(r'not vulnerable', _hb_body, re.I)):
+                    out.add_finding(
+                        title="Heartbleed (CVE-2014-0160) Vulnerability Detected",
+                        url=target["url"], port=port, risk="CRITICAL",
+                        description=(
+                            "sslscan: The server is vulnerable to Heartbleed (CVE-2014-0160). "
+                            "Attackers can read up to 64 KB of server memory per request, "
+                            "exposing private keys, session tokens, and credentials."
+                        ),
+                        cves="CVE-2014-0160", sources="sslscan", service="https",
+                        output_file=str(out_f),
+                        owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                        remediation=(
+                            "Update OpenSSL to 1.0.1g+ or 1.0.2+. Revoke and reissue "
+                            "all certificates. Invalidate all active session tokens."
+                        ),
+                    )
+            # Explicit cert expiry check — compare parsed Not-valid-after date to UTC now
+            if _ss_cert_expiry:
+                try:
+                    from datetime import datetime as _dt
+                    _exp_date = None
+                    _clean_exp = (_ss_cert_expiry.strip()
+                                  .replace(" GMT", "").replace(" UTC", ""))
+                    for _fmt in (
+                        "%b %d %H:%M:%S %Y",
+                        "%b  %d %H:%M:%S %Y",
+                        "%Y-%m-%dT%H:%M:%S",
+                        "%Y-%m-%d",
+                    ):
+                        try:
+                            _exp_date = _dt.strptime(_clean_exp, _fmt)
+                            break
+                        except ValueError:
+                            continue
+                    if _exp_date and _exp_date < _dt.now(__import__('datetime').timezone.utc).replace(tzinfo=None):
+                        out.add_finding(
+                            title="SSL/TLS Certificate: Expired",
+                            url=target["url"], port=port, risk="HIGH",
+                            description="The server's TLS certificate has passed its expiry date, causing browser trust errors and indicating a breakdown in certificate lifecycle management.",
+                            output=f"Not valid after: {_ss_cert_expiry}",
+                            sources="sslscan", service="https",
+                            output_file=str(out_f),
+                            owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                            remediation="Renew the certificate immediately and implement automated renewal (e.g., ACME/Let's Encrypt) to prevent future expiry.",
+                        )
+                except Exception:
+                    pass
             if _ss_cert_valid == "self-signed":
                 out.add_finding(
                     title="SSL/TLS Certificate: Self-Signed",
                     url=target["url"], port=port, risk="MEDIUM",
-                    description=(
-                        "sslscan: Certificate is self-signed and not issued by a trusted CA. "
-                        "Enables trivial MITM attacks. CWE-295."
-                    ),
+                    description="The server presented a self-signed TLS certificate that is not anchored to a publicly trusted CA, preventing clients from verifying the server's identity and enabling trivial MITM attacks.",
                     sources="sslscan", service="https",
                     output_file=str(out_f),
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
-                    remediation="Replace with a certificate issued by a trusted CA.",
+                    remediation="Replace self-signed certificates with certificates issued by a trusted CA; use ACME/Let's Encrypt for cost-free automation.",
                 )
             _tls10_on    = any("1.0" in c.get("protocol", "") for c in _ss_ciphers)
             _cbc_suites  = [c["cipher"] for c in _ss_ciphers if "cbc" in c["cipher"].lower()]
@@ -3735,13 +5732,15 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 ln for ln in stdout.splitlines()
                 if "(OK)" not in ln and not _TESTSSL_NOISE.search(ln)
             )
-            for ftitle, (pat, risk, cve) in _TLS_VULN_PATTERNS.items():
+            for ftitle, (pat, risk, cve, _affected) in _TLS_VULN_PATTERNS.items():
                 if pat.search(_ok_filtered):
+                    _emit_title = "Weak Cipher Identified" if _affected else ftitle
                     out.add_finding(
-                        title=ftitle, url=target["url"], port=port,
-                        risk=risk, description=f"TLS issue: {ftitle}",
+                        title=_emit_title, url=target["url"], port=port,
+                        risk=risk, description=f"TLS issue: {_emit_title}",
                         cves=cve, sources="testssl.sh", service="https",
                         output_file=str(out_f),
+                        affected=_affected or "",
                         owasp="A02", nist="SC-8",
                         remediation="Disable weak protocols. Enable TLS 1.2/1.3 only.",
                     )
@@ -3757,12 +5756,9 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         title=f"Missing Security Header: {_hdr_name}",
                         url=target["url"], port=port,
                         risk=_hdr_risk,
-                        description=(
-                            f"The HTTP security header '{_hdr_name}' is absent from the "
-                            f"response at {target['url']}."
-                        ),
+                        description=f"The HTTP security header '{_hdr_name}' is absent.",
                         output=f"Missing: {_hdr_name}",
-                        affected=_hdr_name,
+                        affected=_url_rel_path(target["url"], target["url"]),
                         sources="testssl.sh", service="https",
                         output_file=str(out_f),
                         owasp="A05:2025 Security Misconfiguration", nist=_hdr_nist,
@@ -3876,6 +5872,14 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                                 _tsf_title    = "Missing Security Headers"
                                 _tsf_affected = "Strict-Transport-Security"
                                 _tsf_risk     = "LOW"
+                            elif _tsf_id in ("cert_notAfter", "cert_expirationStatus",
+                                             "expiration"):
+                                if any(kw in _tsf_finding_lo
+                                       for kw in ("expired", "already past", "has expired")):
+                                    _tsf_title = "SSL/TLS Certificate: Expired"
+                                    _tsf_risk  = "HIGH"
+                                else:
+                                    continue
                             elif _tsf_id == "cert_keySize":
                                 _tsf_title = "SSL/TLS Certificate: Weak Encryption Method"
                             elif _tsf_id == "cert_serialNumberLen":
@@ -3909,6 +5913,31 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         )
                     except Exception:
                         continue
+            # SAN coverage check — does the cert actually cover this hostname?
+            if _ts_cert_san:
+                _san_match = any(
+                    hostname == s.strip().lstrip("*.") or
+                    hostname.endswith("." + s.strip().lstrip("*."))
+                    for s in _ts_cert_san
+                )
+                if not _san_match:
+                    out.add_finding(
+                        title="SSL/TLS Certificate: Hostname Mismatch",
+                        url=target["url"], port=port, risk="HIGH",
+                        description=(
+                            f"The TLS certificate's Subject Alternative Names do not cover "
+                            f"{hostname}. Clients will display a certificate mismatch warning, "
+                            "enabling trivial MITM attacks. CWE-297."
+                        ),
+                        output=f"Hostname: {hostname}\nSANs: {', '.join(_ts_cert_san[:10])}",
+                        sources="testssl.sh", service="https",
+                        output_file=str(out_f),
+                        owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                        remediation=(
+                            f"Reissue the certificate to include {hostname} "
+                            "in the Subject Alternative Name extension."
+                        ),
+                    )
         except Exception as e:
             out.log_error("testssl.sh", cmd, str(e))
     else:
@@ -3961,22 +5990,49 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 out.add_finding(
                     title="SSL/TLS Certificate: Self-Signed",
                     url=target["url"], port=port, risk="MEDIUM",
-                    description=(
-                        "The server presents a self-signed certificate. No trusted CA has "
-                        "vouched for its authenticity, enabling trivial MITM attacks. CWE-295."
-                    ),
+                    description="The server presented a self-signed TLS certificate that is not anchored to a publicly trusted CA, preventing clients from verifying the server's identity and enabling trivial MITM attacks.",
                     sources="fracture-tls-socket", service="https",
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
-                    remediation="Replace the self-signed certificate with one issued by a trusted CA.",
+                    remediation="Replace self-signed certificates with certificates issued by a trusted CA; use ACME/Let's Encrypt for cost-free automation.",
                 )
             elif "expired" in _em or "has expired" in _em:
                 out.add_finding(
                     title="SSL/TLS Certificate: Expired",
                     url=target["url"], port=port, risk="HIGH",
-                    description="The TLS certificate has expired. Clients may reject the connection.",
+                    description="The server's TLS certificate has passed its expiry date, causing browser trust errors and indicating a breakdown in certificate lifecycle management.",
                     sources="fracture-tls-socket", service="https",
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
-                    remediation="Renew the TLS certificate before its expiry date.",
+                    remediation="Renew the certificate immediately and implement automated renewal (e.g., ACME/Let's Encrypt) to prevent future expiry.",
+                )
+        except Exception:
+            pass
+
+    # ── CAA DNS record check ──────────────────────────────────────────────────
+    # CAA restricts which CAs can issue certs for the domain.
+    # Missing CAA = any CA can issue, enabling mis-issuance attacks.
+    _dig_bin = shutil.which("dig")
+    if _dig_bin:
+        try:
+            _caa_proc = subprocess.run(
+                [_dig_bin, "+short", "CAA", hostname],
+                capture_output=True, text=True, timeout=10,
+            )
+            if _caa_proc.returncode == 0 and not _caa_proc.stdout.strip():
+                out.add_finding(
+                    title="SSL/TLS DNS: Missing CAA Record",
+                    url=target["url"], port=port, risk="LOW",
+                    description=(
+                        f"No CAA (Certification Authority Authorization) DNS record "
+                        f"exists for {hostname}. Without CAA, any certificate authority "
+                        "can issue certificates for this domain, increasing mis-issuance risk."
+                    ),
+                    output=f"dig +short CAA {hostname} → (no records)",
+                    sources="fracture-tls-dns", service="https",
+                    owasp="A05:2025 Security Misconfiguration", nist="SC-8",
+                    remediation=(
+                        f'Add a CAA record: {hostname} CAA 0 issue "letsencrypt.org" '
+                        "(replace with your preferred CA)."
+                    ),
                 )
         except Exception:
             pass
@@ -4118,13 +6174,9 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
                     # AXFR succeeded — huge finding
                     names = [str(n) for n in zone.nodes.keys()][:20]
                     out.add_finding(
-                        title="DNS Zone Transfer (AXFR) Permitted",
+                        title="DNS Zone Transfer Permitted (AXFR)",
                         url=url, port=target["port"], risk="HIGH",
-                        description=(
-                            f"DNS zone transfer (AXFR) was permitted by nameserver "
-                            f"'{ns_host}' for domain '{host}'. This exposes the complete "
-                            f"DNS zone including all subdomains, internal names, and IPs."
-                        ),
+                        description="The DNS server responds to unauthenticated AXFR zone transfer requests, exposing the complete DNS zone including internal hostnames, IP addresses, and mail infrastructure.",
                         output=(
                             f"Nameserver: {ns_host}\n"
                             f"Records ({len(names)} shown): {', '.join(names)}"
@@ -4132,10 +6184,7 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
                         sources="fracture-subdomain-takeover", service="dns",
                         affected=host,
                         owasp="A05:2025 Security Misconfiguration", nist="SC-5",
-                        remediation=(
-                            "Restrict AXFR to authorised nameservers and monitoring hosts only. "
-                            "Configure the nameserver ACL to deny zone transfers from unknown IPs."
-                        ),
+                        remediation="Restrict zone transfer permissions to authorised secondary name server IP addresses using ACLs in the DNS server configuration.",
                     )
                     vc.log(f"[subdomain_takeover] AXFR permitted: {ns_host} → {host}", "SUCCESS")
                     break
@@ -4171,7 +6220,7 @@ _SECURITY_HEADERS = [
      "Without Cache-Control, sensitive responses may be stored by browser or proxy caches.",
      "SI-12", "Add: Cache-Control: no-store, no-cache to sensitive endpoint responses."),
 ]
-_SEC_HDR_RISK = {h: r for h, r, *_ in _SECURITY_HEADERS}
+_SEC_HDR_RISK  = {h: r for h, r, *_ in _SECURITY_HEADERS}
 
 # Headers allowed by the shcheck parser — must match _SECURITY_HEADERS names exactly
 _SHCHECK_ALLOWED_HEADERS = {
@@ -4260,6 +6309,15 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     out_f.write_text(
         "\n".join(f"{k}: {v}" for k, v in headers.items()), encoding="utf-8"
     )
+    # Save the raw HTTP request/response pair as evidence for header findings;
+    # encode as a single-entry JSON array so Crucible can render the URL dropdown
+    _sh_ev = ""
+    try:
+        _sh_rq, _sh_rp = _save_http_evidence(
+            out, phase, f"headers_req_{target['hostname']}", resp)
+        _sh_ev = json.dumps([{"url": url, "req": str(_sh_rq), "resp": str(_sh_rp)}])
+    except Exception:
+        pass
 
     # Header Data Leakage — record server/technology disclosure headers
     _hdr_cmd = f"python3 -c \"import requests; r=requests.get('{url}'); print(dict(r.headers))\""
@@ -4268,15 +6326,12 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         out.add_finding(
             title="Header Data Leakage: Server",
             url=url, port=target["port"], risk="LOW",
-            description=f"The Server header discloses the web server software and potentially its version: '{server_hdr}'. This information assists attackers in fingerprinting known vulnerabilities.",
+            description="The HTTP Server response header reveals the web server software name and version, reducing the attacker's reconnaissance effort needed to identify version-specific vulnerabilities.",
             output=f"Server: {server_hdr}",
             sources="fracture-headers", service=target["scheme"],
             output_file=str(out_f),
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
-            remediation=_platform_remed(
-                "Configure the web server to suppress or genericize the Server header.",
-                server_hdr, "",
-            ),
+            remediation="Remove or genericise the Server response header in the web server configuration (e.g., ServerTokens Prod in Apache; server_tokens off in nginx).",
             command=_hdr_cmd,
             http_code=resp.status_code,
         )
@@ -4285,15 +6340,12 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         out.add_finding(
             title="Header Data Leakage: X-Powered-By",
             url=url, port=target["port"], risk="LOW",
-            description=f"The X-Powered-By header discloses the technology stack: '{powered_by}'. This assists attackers in identifying framework-specific vulnerabilities.",
+            description="The X-Powered-By response header discloses the application framework, language, or runtime version, reducing the attacker's effort needed to identify version-specific vulnerabilities.",
             output=f"X-Powered-By: {powered_by}",
             sources="fracture-headers", service=target["scheme"],
             output_file=str(out_f),
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
-            remediation=_platform_remed(
-                "Remove the X-Powered-By header from all responses.",
-                server_hdr, powered_by,
-            ),
+            remediation='Remove or suppress the X-Powered-By header at the application framework or reverse-proxy level (e.g., app.disable("x-powered-by") in Express; Header unset X-Powered-By in Apache).',
             command=_hdr_cmd,
             http_code=resp.status_code,
         )
@@ -4302,16 +6354,12 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         out.add_finding(
             title="Header Data Leakage: X-AspNet-Version",
             url=url, port=target["port"], risk="LOW",
-            description=f"The X-AspNet-Version header discloses the ASP.NET runtime version: '{aspnet_ver}'. Exposing the exact runtime version allows targeted vulnerability enumeration.",
+            description="The X-AspNet-Version response header reveals the exact ASP.NET framework version, aiding an attacker in identifying applicable CVEs or version-specific attack techniques.",
             output=f"X-AspNet-Version: {aspnet_ver}",
             sources="fracture-headers", service=target["scheme"],
             output_file=str(out_f),
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
-            remediation=_platform_remed(
-                "Disable X-AspNet-Version in web.config: "
-                "<httpRuntime enableVersionHeader=\"false\"/>",
-                server_hdr, powered_by,
-            ),
+            remediation='Disable the header by setting enableVersionHeader="false" in the httpRuntime element of web.config.',
             command=_hdr_cmd,
             http_code=resp.status_code,
         )
@@ -4336,22 +6384,30 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Security Headers", "running", "Security header check", 1, 5)
 
     is_https = target["is_https"]
+    _base_sec_hdrs_present: set = set()
+    _base_sec_hdrs_absent:  set = set()
     for hdr_name, risk, _unused_title, desc, nist_ctrl, remed in _SECURITY_HEADERS:
         if hdr_name == "Strict-Transport-Security" and not is_https:
             continue
         if hdr_name not in headers:
+            _base_sec_hdrs_absent.add(hdr_name)
             out.add_finding(
                 title=f"Missing Security Header: {hdr_name}",
                 url=url, port=target["port"], risk=risk,
                 description=desc, sources="fracture-headers",
-                service=target["scheme"], output_file=str(out_f),
+                service=target["scheme"], output_file=_sh_ev,
                 owasp="A05", nist=nist_ctrl,
                 remediation=_platform_remed(remed, server_hdr, powered_by),
                 output=f"Missing: {hdr_name}",
-                affected=hdr_name,
+                affected=_url_rel_path(url, target["url"]),
                 command=_hdr_cmd,
                 http_code=resp.status_code,
             )
+        else:
+            _base_sec_hdrs_present.add(hdr_name)
+    # Persist base-domain header state for per-endpoint deviation detection
+    target["_base_sec_hdrs_present"] = _base_sec_hdrs_present
+    target["_base_sec_hdrs_absent"]  = _base_sec_hdrs_absent
 
     # ── Permissive (misconfigured) security header checks ────────────────────
     _csp_val = headers.get("Content-Security-Policy", "")
@@ -4494,13 +6550,13 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     acac = headers.get("Access-Control-Allow-Credentials", "")
     if acao == "*" and acac.lower() == "true":
         out.add_finding(
-            title="CORS Misconfiguration: Wildcard with Credentials",
+            title="CORS Misconfiguration Allowing Credential Leakage",
             url=url, port=target["port"], risk="HIGH",
-            description="Access-Control-Allow-Origin: * combined with Allow-Credentials: true allows any origin to make credentialed requests.",
+            description="The CORS policy reflects arbitrary origins or uses a wildcard origin combined with credentials-allowed, permitting malicious third-party sites to make credentialed cross-origin requests and read responses.",
             output=f"Access-Control-Allow-Origin: {acao}\nAccess-Control-Allow-Credentials: {acac}",
             sources="fracture-headers", service=target["scheme"],
             owasp="A05:2025 Security Misconfiguration", nist="AC-4",
-            remediation="Specify explicit allowed origins instead of wildcard when using credentials.",
+            remediation="Maintain an explicit allowlist of trusted origins; never combine Access-Control-Allow-Origin: * with Access-Control-Allow-Credentials: true; and reject unexpected Origin headers.",
             http_code=resp.status_code,
         )
 
@@ -4827,14 +6883,11 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
                     out.add_finding(
                         title=f"Missing Security Header: {hdr}",
                         url=tgt_url, port=port, risk=risk,
-                        description=(
-                            f"The HTTP security header '{hdr}' is absent from the "
-                            f"response at {tgt_url}."
-                        ),
+                        description=f"The HTTP security header '{hdr}' is absent.",
                         output=f"Missing: {hdr}",
                         sources="shcheck", service=tgt["scheme"],
                         output_file=str(out_f),
-                        affected=hdr,
+                        affected=_url_rel_path(tgt_url, target["url"]),
                         owasp="A05:2025 Security Misconfiguration", nist="SC-8",
                         remediation=f"Add the '{hdr}' header to all HTTP responses.",
                     )
@@ -4864,14 +6917,11 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
                 out.add_finding(
                     title=f"Missing Security Header: {hdr}",
                     url=tgt_url, port=port, risk=risk,
-                    description=(
-                        f"The HTTP security header '{hdr}' is absent from the "
-                        f"response at {tgt_url}."
-                    ),
+                    description=f"The HTTP security header '{hdr}' is absent.",
                     output=line,
                     sources="shcheck", service=tgt["scheme"],
                     output_file=str(out_f),
-                    affected=hdr,
+                    affected=_url_rel_path(tgt_url, target["url"]),
                     owasp="A05:2025 Security Misconfiguration", nist="SC-8",
                     remediation=f"Add the '{hdr}' header to all HTTP responses.",
                 )
@@ -5295,9 +7345,10 @@ _INTERESTING_PATH_RE = re.compile(
 
 def _crawl_page(page_url: str, sess: requests.Session,
                 timeout: int, base_url: str) -> dict:
-    result = {"links": [], "forms": [], "js_files": [], "error": None}
+    result = {"links": [], "forms": [], "js_files": [], "error": None, "response": None}
     try:
         resp = sess.get(page_url, timeout=timeout, allow_redirects=True)
+        result["response"] = resp  # exposed for header/cookie checks by callers
         ctype = resp.headers.get("Content-Type", "")
         if "text/html" not in ctype:
             return result
@@ -5366,8 +7417,8 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     phase     = "crawl"
     url       = target["url"]
     timeout   = cfg.get("timeout", 10)
-    max_depth = cfg.get("crawl_depth", 3)
-    max_pages = cfg.get("crawl_max_pages", 150)
+    max_depth = cfg.get("crawl_depth", 10)
+    max_pages = cfg.get("crawl_max_pages", 500)
     vc.status(phase, "Crawl", "running", "Crawling", 0, max_pages)
 
     visited:     set  = set()
@@ -5408,17 +7459,31 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         encoding="utf-8",
     )
 
+    _crawl_scope = {target.get("hostname") or urllib.parse.urlparse(url).hostname or ""}
+    _ie_crawl_by_nl: dict = {}
     for link in set(all_links):
-        if _INTERESTING_PATH_RE.search(link):
-            out.add_finding(
-                title="Interesting Endpoint Discovered",
-                url=link, port=target["port"], risk="INFO",
-                description=f"Potentially sensitive endpoint: {link}",
-                sources="fracture-crawl", service=target["scheme"],
-                affected=link, output_file=str(crawl_out),
-                owasp="A04:2025 Insecure Design", nist="CM-7",
-                remediation="Review this endpoint for access controls.",
-            )
+        if (_INTERESTING_PATH_RE.search(link)
+                and _is_in_scope_url(link, _crawl_scope)
+                and _is_valid_endpoint_url(link)):
+            _ie_c_nl  = urllib.parse.urlparse(link).netloc or link
+            _ie_c_rel = urllib.parse.urlparse(link).path or link
+            if _ie_c_nl not in _ie_crawl_by_nl:
+                _ie_crawl_by_nl[_ie_c_nl] = {"anchor": link, "paths": {}}
+            _ie_crawl_by_nl[_ie_c_nl]["paths"][_ie_c_rel] = link
+    for _ie_c_nl, _ie_c_data in _ie_crawl_by_nl.items():
+        _ie_c_sorted = sorted(_ie_c_data["paths"].keys())
+        out.add_finding(
+            title="Interesting Endpoint Discovered",
+            url=_ie_c_data["anchor"], port=target["port"], risk="INFO",
+            description=(
+                f"{len(_ie_c_sorted)} potentially sensitive endpoint(s) found at {_ie_c_nl}."
+            ),
+            sources="fracture-crawl", service=target["scheme"],
+            affected="\n".join(_ie_c_sorted),
+            output_file=str(crawl_out),
+            owasp="A04:2025 Insecure Design", nist="CM-7",
+            remediation="Review these endpoints for access controls.",
+        )
 
     vc.status(phase, "Crawl", "running", "JS secret scan", page_count, max_pages)
     for js_url in set(all_js):
@@ -5711,7 +7776,7 @@ def _xss_confirmed(payload: str, r) -> bool:
     #    e.g.  href="...payload..."  or  href='...payload...'
     _esc_pl = re.escape(payload)
     body = re.sub(
-        r'(?:href|src|action|data(?:-[a-z][a-z0-9-]*)?)(?:\s*)=(?:\s*)["\'][^"\']*'
+        r'(?:href|src|action|content|data(?:-[a-z][a-z0-9-]*)?)(?:\s*)=(?:\s*)["\'][^"\']*'
         + _esc_pl + r'[^"\']*["\']',
         '', body, flags=re.I
     )
@@ -5719,7 +7784,7 @@ def _xss_confirmed(payload: str, r) -> bool:
     _url_enc_pl = urllib.parse.quote(payload, safe='')
     if _url_enc_pl != payload:
         body = re.sub(
-            r'(?:href|src|action)(?:\s*)=(?:\s*)["\'][^"\']*'
+            r'(?:href|src|action|content)(?:\s*)=(?:\s*)["\'][^"\']*'
             + re.escape(_url_enc_pl) + r'[^"\']*["\']',
             '', body, flags=re.I
         )
@@ -5825,15 +7890,78 @@ def _qs_inject(base_url: str, param: str, value: str,
         return None
 
 
+def _strip_url_echo(text: str, r, extra: "list[str] | None" = None) -> str:
+    """Remove the echoed request URL — in all encoding variants — from response text.
+
+    Sites that reflect the full URL in their source (canonical tags, breadcrumbs,
+    og:url meta, etc.) cause false positives when the injected payload is part of
+    the URL.  Stripping every form of the URL leaves only content that was
+    independently generated by the server, not passively reflected from the request.
+
+    extra: additional raw string values to also strip in their encoded forms
+           (use for probe markers that appear literally inside the URL).
+    """
+    for variant in (r.url,
+                    urllib.parse.unquote(r.url),
+                    urllib.parse.unquote_plus(r.url)):
+        if variant:
+            text = text.replace(variant, "")
+    for val in (extra or []):
+        for enc in (val,
+                    urllib.parse.quote(val, safe=''),
+                    urllib.parse.quote_plus(val)):
+            if enc:
+                text = text.replace(enc, "")
+    return text
+
+
+def _endpoint_dir_name(method: str, url: str) -> str:
+    """Return a filesystem-safe directory name for an endpoint: METHOD__safe_path.
+
+    Examples:
+        GET  https://example.com/api/v1/users  →  GET__api_v1_users
+        POST https://example.com/              →  POST__root
+    """
+    try:
+        path = urllib.parse.urlparse(url).path.strip("/") or "root"
+    except Exception:
+        path = "root"
+    safe_path = re.sub(r'[^\w\-]', '_', path)
+    return f"{(method or 'GET').upper()}__{safe_path}"[:80]
+
+
 def _save_http_evidence(out: "OutputManager", phase: str, label: str,
-                        r: "requests.Response") -> "tuple[str, str]":
+                        r: "requests.Response", *,
+                        endpoint_url: str = "",
+                        method: str = "") -> "tuple[str, str]":
     """Write HTTP request/response pair to the phase evidence directory.
+
+    If *endpoint_url* is given the files are written into a per-endpoint
+    subdirectory (``METHOD__safe_path/``) inside the phase directory.
+    When the base filename already exists an incrementing index suffix
+    (_01_, _02_, …) is appended so successive confirmations on the same
+    parameter are preserved rather than overwritten.
 
     Returns (request_file_path, response_file_path).
     """
-    safe      = re.sub(r'[^\w]', '_', label)[:60]
-    req_path  = out.output_path(phase, f"{safe}_request")
-    resp_path = out.output_path(phase, f"{safe}_response")
+    safe = re.sub(r'[^\w]', '_', label)[:60]
+    if endpoint_url:
+        _m = method or (r.request.method if r.request else "GET")
+        ep_dir = out.root / phase / _endpoint_dir_name(_m, endpoint_url)
+        ep_dir.mkdir(parents=True, exist_ok=True)
+        req_path  = ep_dir / f"{safe}_request.txt"
+        resp_path = ep_dir / f"{safe}_response.txt"
+        if req_path.exists():
+            idx = 1
+            while True:
+                req_path  = ep_dir / f"{safe}_{idx:02d}_request.txt"
+                resp_path = ep_dir / f"{safe}_{idx:02d}_response.txt"
+                if not req_path.exists():
+                    break
+                idx += 1
+    else:
+        req_path  = out.output_path(phase, f"{safe}_request")
+        resp_path = out.output_path(phase, f"{safe}_response")
 
     prep = r.request
     req_lines = [f"{prep.method} {prep.url}"]
@@ -6100,16 +8228,16 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         for param in entry["params"]:
             r = _qs_inject(purl, param, "test'", sess, timeout)
             if r and _SQL_ERROR_RE.search(r.text):
-                _rq, _rp = _save_http_evidence(out, phase, f"sqli_error_{param}", r)
+                _rq, _rp = _save_http_evidence(out, phase, f"sqli_error_{param}", r, endpoint_url=purl, method="GET")
                 out.add_finding(
                     title="SQL Injection (Error-Based)",
                     url=purl, port=target["port"], risk="CRITICAL",
-                    description=f"SQL injection in parameter '{param}' via error-based detection.",
+                    description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
                     output=f"Parameter: {param}\nURL: {purl}",
                     output_file=f"{_rq},{_rp}",
                     sources="fracture-injection", service=target["scheme"],
                     affected=purl, owasp="A03:2025 Injection", nist="SI-10",
-                    remediation="Use parameterised queries throughout the application.",
+                    remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                     http_code=r.status_code,
                 )
                 vc.log(f"[injection] SQLi: {purl} param={param}", "SUCCESS")
@@ -6130,16 +8258,16 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 r = sess.post(action, data=data, timeout=timeout) if method == "POST" \
                     else sess.get(action, params=data, timeout=timeout)
                 if _SQL_ERROR_RE.search(r.text):
-                    _rq, _rp = _save_http_evidence(out, phase, f"sqli_form_{pname}", r)
+                    _rq, _rp = _save_http_evidence(out, phase, f"sqli_form_{pname}", r, endpoint_url=action, method=method)
                     out.add_finding(
-                        title="SQL Injection in Form (Error-Based)",
+                        title="SQL Injection (Error-Based)",
                         url=action, port=target["port"], risk="CRITICAL",
-                        description=f"SQLi in form field '{pname}' at {action}.",
+                        description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
                         output=f"Form: {action}\nField: {pname}",
                         output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=action, owasp="A03:2025 Injection", nist="SI-10",
-                        remediation="Use parameterised queries. Validate all inputs.",
+                        remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                         http_code=r.status_code,
                     )
             except Exception:
@@ -6167,11 +8295,11 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     out.add_finding(
                         title="SQL Injection Confirmed by sqlmap",
                         url=sample_url, port=target["port"], risk="CRITICAL",
-                        description="sqlmap confirmed SQL injection.",
+                        description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
                         output=stdout[:2000], sources="sqlmap",
                         service=target["scheme"],
                         owasp="A03:2025 Injection", nist="SI-10",
-                        remediation="Use parameterised queries across the application.",
+                        remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                     )
             except Exception as e:
                 out.log_error("sqlmap", cmd, str(e))
@@ -6184,16 +8312,16 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             for payload in _XSS_PAYLOADS[:3]:
                 r = _qs_inject(purl, param, payload, sess, timeout)
                 if r and _xss_confirmed(payload, r):
-                    _rq, _rp = _save_http_evidence(out, phase, f"xss_{param}", r)
+                    _rq, _rp = _save_http_evidence(out, phase, f"xss_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
                         title="Reflected Cross-Site Scripting (XSS)",
                         url=purl, port=target["port"], risk="HIGH",
-                        description=f"Reflected XSS in parameter '{param}'.",
+                        description="User-controlled input is reflected or stored and rendered in a browser context without proper encoding, enabling arbitrary script execution.",
                         output=f"Parameter: {param}\nPayload: {payload}",
                         output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
-                        remediation="Encode all user output. Implement CSP.",
+                        remediation="Encode all output contextually (HTML, JS, URL, CSS), sanitise stored input server-side, and enforce a strict Content-Security-Policy.",
                         http_code=r.status_code,
                     )
                     vc.log(f"[injection] XSS: {purl} param={param}", "SUCCESS")
@@ -6241,16 +8369,16 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                              urllib.parse.quote_plus(payload)):
                     _ssti_body = _ssti_body.replace(_enc, "")
                 if expected in _ssti_body:
-                    _rq, _rp = _save_http_evidence(out, phase, f"ssti_{param}", r)
+                    _rq, _rp = _save_http_evidence(out, phase, f"ssti_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
                         title="Server-Side Template Injection (SSTI)",
                         url=purl, port=target["port"], risk="CRITICAL",
-                        description=f"SSTI in parameter '{param}'. Payload '{payload}' evaluated server-side.",
+                        description="User-controlled input is evaluated as template syntax by a server-side template engine (e.g., Jinja2, Twig, Freemarker), enabling arbitrary server-side code execution.",
                         output=f"Parameter: {param}\nPayload: {payload} → {expected}",
                         output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
-                        remediation="Never pass user input to template engines unsanitised.",
+                        remediation="Never pass user input directly to template rendering functions; treat user data as context variables only and use sandboxed or logic-less template engines where user-controlled content must appear in templates.",
                         http_code=r.status_code,
                     )
                     vc.log(f"[injection] SSTI: {purl} param={param}", "SUCCESS")
@@ -6263,16 +8391,16 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             for cmd_pay, cmd_pat in _CMD_PAYLOADS:
                 r = _qs_inject(purl, param, "test" + cmd_pay, sess, timeout)
                 if r and cmd_pat.search(r.text):
-                    _rq, _rp = _save_http_evidence(out, phase, f"cmdi_{param}", r)
+                    _rq, _rp = _save_http_evidence(out, phase, f"cmdi_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
                         title="OS Command Injection",
                         url=purl, port=target["port"], risk="CRITICAL",
-                        description=f"Command injection in parameter '{param}'.",
+                        description="User-controlled input is passed unsanitised to a system shell or OS command execution function, allowing an attacker to execute arbitrary commands on the host.",
                         output=f"Parameter: {param}\nPayload: {cmd_pay}",
                         output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
-                        remediation="Never pass user input to OS calls.",
+                        remediation="Eliminate shell calls that incorporate user input; use language-native library functions instead; where shell invocation is unavoidable, apply strict allowlist validation on all input values.",
                         http_code=r.status_code,
                     )
                     vc.log(f"[injection] CMDi: {purl} param={param}", "SUCCESS")
@@ -6283,17 +8411,17 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         purl = entry["url"]
         for param in entry["params"]:
             r = _qs_inject(purl, param, _CRLF_PAYLOAD, sess, timeout)
-            if r and ("X-Injected-Fracture" in r.text or "X-Injected-Fracture" in str(r.headers)):
-                _rq, _rp = _save_http_evidence(out, phase, f"crlf_{param}", r)
+            if r and "X-Injected-Fracture" in str(r.headers):
+                _rq, _rp = _save_http_evidence(out, phase, f"crlf_{param}", r, endpoint_url=purl, method="GET")
                 out.add_finding(
                     title="CRLF Injection",
-                    url=purl, port=target["port"], risk="HIGH",
-                    description=f"CRLF injection in parameter '{param}'.",
+                    url=purl, port=target["port"], risk="MEDIUM",
+                    description="User-supplied carriage-return and line-feed characters are reflected into HTTP response headers, allowing an attacker to inject arbitrary headers, split responses, or set malicious cookies.",
                     output=f"Parameter: {param}\nPayload: {_CRLF_PAYLOAD}",
                     output_file=f"{_rq},{_rp}",
                     sources="fracture-injection", service=target["scheme"],
                     owasp="A03:2025 Injection", nist="SI-10",
-                    remediation="Strip CRLF characters from input used in HTTP headers.",
+                    remediation="Filter or reject CR (\\r) and LF (\\n) characters from any user-supplied value before it is written into an HTTP response header; use framework-level header APIs that prevent raw header injection.",
                     http_code=r.status_code,
                 )
 
@@ -6308,7 +8436,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             r = sess.post(action, data=_xxe_payload, timeout=timeout,
                           headers={"Content-Type": "application/xml"})
             if re.search(r'root:.*:/bin/', r.text):
-                _rq, _rp = _save_http_evidence(out, phase, "xxe", r)
+                _rq, _rp = _save_http_evidence(out, phase, "xxe", r, endpoint_url=action, method="POST")
                 out.add_finding(
                     title="XML External Entity (XXE) Injection",
                     url=action, port=target["port"], risk="CRITICAL",
@@ -6339,7 +8467,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 sess.post(action, data=data, timeout=timeout)
                 r2 = sess.get(action, timeout=timeout)
                 if r2 and _SQL_ERROR_RE.search(r2.text):
-                    _rq, _rp = _save_http_evidence(out, phase, f"sqli_so_{pname}", r2)
+                    _rq, _rp = _save_http_evidence(out, phase, f"sqli_so_{pname}", r2, endpoint_url=action, method="POST")
                     out.add_finding(
                         title="Second-Order SQL Injection",
                         url=action, port=target["port"], risk="CRITICAL",
@@ -6374,9 +8502,17 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             data[pname] = _CSV_INJECT_PAYLOADS[0]
             try:
                 r = sess.post(action, data=data, timeout=timeout)
-                if r and r.status_code in (200, 201, 302):
+                _csv_marker = "fracture'!A0"
+                _csv_body = r.text if r else ""
+                _csv_body = re.sub(
+                    r'(?:href|src|action|content|data(?:-[a-z][a-z0-9-]*)?)(?:\s*)=(?:\s*)["\'][^"\']*'
+                    + re.escape(urllib.parse.quote(_csv_marker, safe=''))
+                    + r'[^"\']*["\']',
+                    '', _csv_body, flags=re.I)
+                if (r and r.status_code in (200, 201, 302)
+                        and _csv_marker in urllib.parse.unquote(_csv_body)):
                     _csv_found_forms.add(action)
-                    _rq, _rp = _save_http_evidence(out, phase, f"csv_{pname}", r)
+                    _rq, _rp = _save_http_evidence(out, phase, f"csv_{pname}", r, endpoint_url=action, method="POST")
                     out.add_finding(
                         title="CSV / Formula Injection",
                         url=action, port=target["port"], risk="HIGH",
@@ -6405,19 +8541,18 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         for param in entry["params"]:
             for nosql_pay, nosql_err in _NOSQL_PAYLOADS:
                 r = _qs_inject(purl, param, nosql_pay, sess, timeout)
-                if r and (nosql_err.search(r.text) or r.status_code == 500):
-                    _rq, _rp = _save_http_evidence(out, phase, f"nosql_{param}", r)
+                _nosql_body = _strip_url_echo(r.text, r, [nosql_pay]) if r else ""
+                if r and nosql_err.search(_nosql_body):
+                    _rq, _rp = _save_http_evidence(out, phase, f"nosql_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
                         title="NoSQL Injection",
                         url=purl, port=target["port"], risk="CRITICAL",
-                        description=(f"NoSQL injection detected in parameter '{param}'. Payload "
-                                     f"'{nosql_pay}' produced an error response consistent with "
-                                     f"unhandled MongoDB/NoSQL operator injection."),
+                        description="User-supplied input is incorporated into NoSQL query documents without type or operator validation, allowing an attacker to manipulate query logic and bypass authentication or exfiltrate data.",
                         output=f"Parameter: {param}\nPayload: {nosql_pay}\nResponse ({r.status_code}): {r.text[:300]}",
                         output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
-                        remediation="Strip or reject operator characters ($, {, [) from user input before NoSQL queries.",
+                        remediation="Use parameterised query APIs or ODM/ORM frameworks that reject user-supplied operator tokens; enforce strict type validation on all inputs used in query construction.",
                         http_code=r.status_code,
                     )
                     vc.log(f"[injection] NoSQL injection: {purl} param={param}", "SUCCESS")
@@ -6430,18 +8565,23 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         for param in entry["params"]:
             for ldap_pay, ldap_err in _LDAP_PAYLOADS:
                 r = _qs_inject(purl, param, ldap_pay, sess, timeout)
-                if r and (ldap_err.search(r.text) or r.status_code == 500):
-                    _rq, _rp = _save_http_evidence(out, phase, f"ldap_{param}", r)
+                _ldap_body = _strip_url_echo(r.text, r, [ldap_pay]) if r else ""
+                _ldap_body = re.sub(
+                    r'(?:href|src|action|content|data(?:-[a-z][a-z0-9-]*)?)(?:\s*)=(?:\s*)["\'][^"\']*'
+                    + re.escape(ldap_pay)
+                    + r'[^"\']*["\']',
+                    '', _ldap_body, flags=re.I)
+                if r and ldap_err.search(_ldap_body):
+                    _rq, _rp = _save_http_evidence(out, phase, f"ldap_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
                         title="LDAP Injection",
                         url=purl, port=target["port"], risk="HIGH",
-                        description=(f"LDAP injection detected in parameter '{param}' with payload "
-                                     f"'{ldap_pay}'. Error response reveals LDAP query construction."),
+                        description="User-supplied input is concatenated into LDAP search filters without proper escaping, allowing an attacker to manipulate query logic, bypass authentication, or enumerate directory contents.",
                         output=f"Parameter: {param}\nPayload: {ldap_pay}\nResponse ({r.status_code}): {r.text[:300]}",
                         output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
-                        remediation="Escape all LDAP special characters. Use an LDAP-safe query library with parameterised filters.",
+                        remediation="Escape all user-supplied values using RFC 4515-compliant LDAP encoding before incorporating them into LDAP filter strings.",
                         http_code=r.status_code,
                     )
                     vc.log(f"[injection] LDAP injection: {purl} param={param}", "SUCCESS")
@@ -6454,8 +8594,8 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         for param in entry["params"]:
             for xpath_pay, xpath_err in _XPATH_PAYLOADS:
                 r = _qs_inject(purl, param, xpath_pay, sess, timeout)
-                if r and (xpath_err.search(r.text) or r.status_code == 500):
-                    _rq, _rp = _save_http_evidence(out, phase, f"xpath_{param}", r)
+                if r and xpath_err.search(r.text):
+                    _rq, _rp = _save_http_evidence(out, phase, f"xpath_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
                         title="XPath Injection",
                         url=purl, port=target["port"], risk="HIGH",
@@ -6480,9 +8620,10 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             if purl in _log_found:
                 continue
             r = _qs_inject(purl, param, _LOG_INJECT_PAYLOAD, sess, timeout)
-            if r and r.status_code in (200, 201, 400, 422, 500):
+            _log_body = _strip_url_echo(r.text, r, [_LOG_INJECT_PAYLOAD, "fracture_log_inject_SUCCESS"]) if r else ""
+            if r and "fracture_log_inject_SUCCESS" in urllib.parse.unquote(_log_body):
                 _log_found.add(purl)
-                _rq, _rp = _save_http_evidence(out, phase, f"loginject_{param}", r)
+                _rq, _rp = _save_http_evidence(out, phase, f"loginject_{param}", r, endpoint_url=purl, method="GET")
                 out.add_finding(
                     title="Log Injection / CRLF in Log Entries",
                     url=purl, port=target["port"], risk="MEDIUM",
@@ -6515,8 +8656,15 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                    urllib.parse.unquote(hpp_url),
                                    urllib.parse.unquote_plus(hpp_url)):
                         _hpp_body = _hpp_body.replace(_strip, "")
+                    # Strip the probe marker from URL-type attribute values (href/src/action/content).
+                    # CMSes such as WordPress propagate the resolved parameter value into pagination
+                    # and navigation link hrefs — this is URL echo, not HPP exploitation.
+                    _hpp_body = re.sub(
+                        r'(?:href|src|action|content|data(?:-[a-z][a-z0-9-]*)?)(?:\s*)=(?:\s*)["\'][^"\']*'
+                        r'fracture_hpp_probe[^"\']*["\']',
+                        '', _hpp_body, flags=re.I)
                     if "fracture_hpp_probe" in _hpp_body:
-                        _rq, _rp = _save_http_evidence(out, phase, f"hpp_{param}", r)
+                        _rq, _rp = _save_http_evidence(out, phase, f"hpp_{param}", r, endpoint_url=purl, method="GET")
                         out.add_finding(
                             title="HTTP Parameter Pollution (HPP)",
                             url=purl, port=target["port"], risk="MEDIUM",
@@ -6575,7 +8723,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         + _pat_core + r'[^"\']*["\']',
                         '', _ci_body, flags=re.I)
                 if ci_pat.search(_ci_body):
-                    _rq, _rp = _save_http_evidence(out, phase, f"codeinject_{param}", r)
+                    _rq, _rp = _save_http_evidence(out, phase, f"codeinject_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
                         title="Remote Code Execution via Code Injection",
                         url=purl, port=target["port"], risk="CRITICAL",
@@ -6616,18 +8764,16 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     r2 = sess.get(check_url, timeout=timeout)
                     if r2 and "fracture_sxss" in r2.text:
                         _stored_xss_found.add(action)
-                        _rq, _rp = _save_http_evidence(out, phase, f"sxss_{pname}", r2)
+                        _rq, _rp = _save_http_evidence(out, phase, f"sxss_{pname}", r2, endpoint_url=action, method="POST")
                         out.add_finding(
                             title="Stored Cross-Site Scripting (XSS)",
-                            url=action, port=target["port"], risk="HIGH",
-                            description=(f"Stored XSS detected via field '{pname}' at {action}. "
-                                         f"The injected payload was reflected at {check_url}, indicating "
-                                         f"the submitted value is stored and rendered without encoding."),
+                            url=action, port=target["port"], risk="CRITICAL",
+                            description="User-controlled input is reflected or stored and rendered in a browser context without proper encoding, enabling arbitrary script execution.",
                             output=f"Field: {pname}\nPayload: {_stored_xss_marker}\nReflected at: {check_url}",
                             output_file=f"{_rq},{_rp}",
                             sources="fracture-injection", service=target["scheme"],
                             affected=check_url, owasp="A03:2025 Injection", nist="SI-10",
-                            remediation="HTML-encode all stored user-supplied content before rendering. Implement a strict Content-Security-Policy.",
+                            remediation="Encode all output contextually (HTML, JS, URL, CSS), sanitise stored input server-side, and enforce a strict Content-Security-Policy.",
                             http_code=r2.status_code,
                         )
                         vc.log(f"[injection] Stored XSS at {action} field={pname}", "SUCCESS")
@@ -6652,18 +8798,13 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             if r and r.status_code == 200 and _dom_sink_re.search(r.text):
                 m = _dom_sink_re.search(r.text)
                 out.add_finding(
-                    title="DOM-Based Cross-Site Scripting (XSS) — Source/Sink Pattern",
+                    title="DOM-Based Cross-Site Scripting (XSS)",
                     url=js_url, port=target["port"], risk="HIGH",
-                    description=(f"A JavaScript file ({js_url}) contains a pattern where a DOM source "
-                                 f"(e.g. location.search, location.hash) is passed to a dangerous sink "
-                                 f"(e.g. innerHTML, eval). This indicates a potential DOM-based XSS vector."),
+                    description="User-controlled input is reflected or stored and rendered in a browser context without proper encoding, enabling arbitrary script execution.",
                     output=f"Pattern found near: ...{m.group(0)[:200]}...",
                     sources="fracture-injection", service=target["scheme"],
                     affected=js_url, owasp="A03:2025 Injection", nist="SI-10",
-                    remediation=(
-                        "Never pass URL-derived input to dangerous DOM sinks. "
-                        "Use textContent instead of innerHTML. Implement a strict CSP."
-                    ),
+                    remediation="Encode all output contextually (HTML, JS, URL, CSS), sanitise stored input server-side, and enforce a strict Content-Security-Policy.",
                     http_code=r.status_code,
                 )
                 vc.log(f"[injection] DOM XSS source/sink: {js_url}", "SUCCESS")
@@ -6679,8 +8820,9 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             r = _qs_inject(purl, cb_param, "fracture_jsonp_cb", sess, timeout)
             if r and r.status_code == 200:
                 ct = r.headers.get("content-type", "")
-                if ("javascript" in ct or "json" in ct or _jsonp_wrap_re.search(r.text[:100])):
-                    if "fracture_jsonp_cb" in r.text and _jsonp_wrap_re.search(r.text[:100]):
+                _jsonp_body = _strip_url_echo(r.text, r, ["fracture_jsonp_cb"])
+                if ("javascript" in ct or "json" in ct or _jsonp_wrap_re.search(_jsonp_body[:100])):
+                    if "fracture_jsonp_cb" in _jsonp_body and _jsonp_wrap_re.search(_jsonp_body[:100]):
                         out.add_finding(
                             title="JSONP Endpoint — Cross-Origin Data Leakage",
                             url=purl, port=target["port"], risk="HIGH",
@@ -6717,18 +8859,13 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     out.add_finding(
                         title="Blind SQL Injection (Boolean-Based)",
                         url=purl, port=target["port"], risk="CRITICAL",
-                        description=(
-                            f"Boolean-based blind SQL injection detected in parameter '{param}'. "
-                            f"TRUE condition response length ({len(r_true.text)}) differs "
-                            f"significantly from FALSE condition ({len(r_false.text)}), "
-                            f"indicating the SQL query result affects response content."
-                        ),
+                        description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
                         output=(f"Parameter: {param}\n"
                                 f"TRUE payload: {_bool_sqli_true} → {r_true.status_code} ({len(r_true.text)} bytes)\n"
                                 f"FALSE payload: {_bool_sqli_false} → {r_false.status_code} ({len(r_false.text)} bytes)"),
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
-                        remediation="Use parameterised queries. Boolean length differences confirm data-dependent SQL execution.",
+                        remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                     )
                     vc.log(f"[injection] Boolean blind SQLi: {purl} param={param}", "SUCCESS")
                     break
@@ -6756,16 +8893,12 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         out.add_finding(
                             title="Blind SQL Injection (Time-Based)",
                             url=purl, port=target["port"], risk="CRITICAL",
-                            description=(
-                                f"Time-based blind SQL injection in parameter '{param}'. "
-                                f"Payload '{tsql}' caused a {elapsed:.1f}s delay (expected ≥{delay}s), "
-                                f"confirming the database executed the injected SLEEP/delay function."
-                            ),
+                            description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
                             output=(f"Parameter: {param}\nPayload: {tsql}\n"
                                     f"Response time: {elapsed:.2f}s (threshold: {delay}s)"),
                             sources="fracture-injection", service=target["scheme"],
                             affected=purl, owasp="A03:2025 Injection", nist="SI-10",
-                            remediation="Use parameterised queries. Never concatenate user input into SQL.",
+                            remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                         )
                         vc.log(f"[injection] Time-based blind SQLi: {purl} param={param} ({elapsed:.1f}s)", "SUCCESS")
                         break
@@ -6815,12 +8948,12 @@ def _phase_traversal(target: dict, cfg: dict, pm: ProgressManager,
                     out.add_finding(
                         title="Path Traversal / Local File Inclusion",
                         url=purl, port=target["port"], risk="HIGH",
-                        description=f"Path traversal in parameter '{param}'. Payload caused file content disclosure.",
+                        description="User-supplied input is used in filesystem path construction without adequate sanitisation, allowing an attacker to read or include arbitrary files outside the intended directory.",
                         output=f"Parameter: {param}\nPayload: {payload}\nExcerpt: {r.text[:500]}",
                         sources="fracture-traversal", service=target["scheme"],
                         affected=f"{purl}?{param}=<traversal>",
                         owasp="A01:2025 Broken Access Control", nist="AC-3",
-                        remediation="Validate file path inputs. Use allow-lists. Never use raw user input in filesystem operations.",
+                        remediation="Canonicalise all user-supplied paths, resolve them against a fixed base directory, and reject any path that escapes the base; prefer indirect reference maps over direct path handling.",
                         http_code=r.status_code,
                     )
                     vc.log(f"[traversal] LFI: {purl} param={param}", "SUCCESS")
@@ -6851,7 +8984,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
     timeout = cfg.get("timeout", 10)
     forms   = crawl_data.get("forms", [])
     links   = crawl_data.get("links", [])
-    threads = min(cfg.get("threads", 10), 10)
+    threads = min(cfg.get("threads", _SCAN_SEM.limit), _SCAN_SEM.limit, 20)
 
     vc.status(phase, "Business Logic", "running", "Negative value injection", 0, 4)
 
@@ -7378,12 +9511,7 @@ def _probe_login_default_creds(login_url: str, target: dict,
             out.add_finding(
                 title="Weak or Default Credentials Accepted",
                 url=login_url, port=target["port"], risk="CRITICAL",
-                description=(
-                    f"Default credentials '{uname}'/'{pwd or '(blank)'}' were "
-                    f"accepted at {login_url}. "
-                    f"Auth method: {auth_method or 'form'}. "
-                    f"Application: {app_name or 'unknown'}."
-                ),
+                description="The target accepted well-known default or factory-set credentials, granting unauthorised access.",
                 output=(
                     f"Username: {uname}\nPassword: {pwd}\n"
                     f"Auth method: {auth_method}"
@@ -7392,10 +9520,7 @@ def _probe_login_default_creds(login_url: str, target: dict,
                 affected=login_url, output_file=str(auth_out),
                 owasp="A07:2025 Identification and Authentication Failures",
                 nist="IA-5",
-                remediation=(
-                    "Change default credentials immediately. "
-                    "Enforce a strong password policy and account lockout."
-                ),
+                remediation="Replace all default credentials with strong, unique secrets and enforce a password policy prior to any deployment.",
             )
             vc.log(f"[auth_bypass] Default creds accepted: {uname!r}/{pwd!r}",
                    "SUCCESS")
@@ -7543,13 +9668,13 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                         out.add_finding(
                             title="JWT None Algorithm Authentication Bypass",
                             url=url, port=target["port"], risk="CRITICAL",
-                            description="The application accepted a JWT with 'none' algorithm, bypassing signature verification.",
+                            description="The application accepts JSON Web Tokens specifying the alg:none algorithm, allowing an attacker to forge arbitrary tokens without possessing a signing key and bypass authentication entirely.",
                             output=f"Cookie: {cookie.name}\nToken: {none_token[:80]}",
                             sources="fracture-auth-bypass", service=target["scheme"],
                             output_file=str(auth_out),
                             owasp="A07:2025 Identification and Authentication Failures",
                             nist="IA-5",
-                            remediation="Explicitly reject JWTs with 'none' algorithm. Require a strong signing algorithm.",
+                            remediation="Enforce a strict server-side algorithm allowlist; reject any token where the alg header is none, empty, or not in the permitted set; never rely on the token header to select the verification algorithm.",
                             http_code=r.status_code,
                         )
                         vc.log("[auth_bypass] JWT none algorithm accepted!", "SUCCESS")
@@ -8004,8 +10129,11 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Auth Recon", "running", "Interesting endpoints", 1, 3)
 
     # Find admin-only endpoints
+    _ar_scope = {target.get("hostname") or urllib.parse.urlparse(url).hostname or ""}
     for link in set(auth_links):
-        if _INTERESTING_PATH_RE.search(link):
+        if (_INTERESTING_PATH_RE.search(link)
+                and _is_in_scope_url(link, _ar_scope)
+                and _is_valid_endpoint_url(link)):
             out.add_finding(
                 title="Authenticated Interesting Endpoint",
                 url=link, port=target["port"], risk="INFO",
@@ -8056,14 +10184,14 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
                 r = auth_sess.get(test_url, timeout=timeout)
                 if r.status_code == 200 and len(r.text) > 100:
                     out.add_finding(
-                        title="Insecure Direct Object Reference (IDOR)",
-                        url=test_url, port=target["port"], risk="HIGH",
-                        description=f"IDOR detected: resource ID {res_id} → {test_id} returned HTTP 200. Another user's data may be accessible.",
+                        title="Broken Object Level Authorization (IDOR / BOLA)",
+                        url=test_url, port=target["port"], risk="CRITICAL",
+                        description="The application or API exposes user-controlled object identifiers and does not verify whether the authenticated user has authorisation to access the referenced object, enabling horizontal privilege escalation.",
                         output=f"Original: {res_url}\nManipulated: {test_url}\nStatus: {r.status_code}",
                         sources="fracture-authorization", service=target["scheme"],
                         affected=test_url,
                         owasp="A01:2025 Broken Access Control", nist="AC-3",
-                        remediation="Implement object-level authorisation. Verify the requesting user owns each resource.",
+                        remediation="Enforce server-side authorisation checks for every object access request, verifying ownership or explicit permission before returning or modifying data; do not rely on obscure IDs as an access control mechanism.",
                         http_code=r.status_code,
                     )
                     vc.log(f"[authorization] IDOR: {test_url}", "SUCCESS")
@@ -8645,13 +10773,9 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
         if len(status_codes) >= 10:
             # All 10 requests succeeded without lockout
             out.add_finding(
-                title="Missing Account Lockout / Brute-Force Protection",
+                title="Missing Rate Limiting / Brute-Force Protection",
                 url=action, port=target["port"], risk="HIGH",
-                description=(
-                    f"Ten consecutive failed login attempts to {action} completed without "
-                    f"triggering account lockout, CAPTCHA, or rate limiting. "
-                    f"This allows online brute-force and credential stuffing attacks."
-                ),
+                description="Authentication and sensitive API endpoints do not enforce request rate limits, account lockout, or CAPTCHA, allowing unlimited brute-force or credential-stuffing attempts.",
                 output=(
                     f"Form: {action}\nAttempts: 10\n"
                     f"Status codes: {status_codes[:10]}"
@@ -8659,11 +10783,7 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                 sources="fracture-account-lockout", service=target["scheme"],
                 affected=action,
                 owasp="A07:2025 Identification and Authentication Failures", nist="AC-7",
-                remediation=(
-                    "Implement progressive account lockout (e.g. lock after 5 failures). "
-                    "Add CAPTCHA or TOTP for suspicious login patterns. "
-                    "Apply IP-based and user-based rate limiting on authentication endpoints."
-                ),
+                remediation="Implement per-IP and per-account rate limiting with progressive delays or lockout on all authentication endpoints; add CAPTCHA for interactive login flows; alert on anomalous request volumes.",
                 http_code=r.status_code,
             )
             vc.log(f"[account_lockout] No lockout: {action} ({len(status_codes)} attempts)", "SUCCESS")
@@ -8992,26 +11112,23 @@ def _phase_mass_assignment(target: dict, cfg: dict, pm: ProgressManager,
             aug_data[ma_field] = "1"
         try:
             r_aug = sess.post(action, data=aug_data, timeout=timeout)
-            # Heuristic: if augmented response contains the injected field name,
-            # the server accepted the extra parameter
-            if r_aug and any(f in r_aug.text for f in _MASS_ASSIGN_FIELDS):
-                reflected = [f for f in _MASS_ASSIGN_FIELDS if f in r_aug.text]
+            # Heuristic: field name must appear in the augmented response but NOT
+            # in the baseline response — eliminates FPs from ARIA role attributes,
+            # common English words (admin, role, verified) in page content, etc.
+            if r_aug and any(f in r_aug.text and f not in r_base.text
+                             for f in _MASS_ASSIGN_FIELDS):
+                reflected = [f for f in _MASS_ASSIGN_FIELDS
+                             if f in r_aug.text and f not in r_base.text]
                 _ma_found.add(action)
                 out.add_finding(
-                    title="Mass Assignment / Privilege Escalation",
+                    title="Mass Assignment / Privilege Escalation via Parameter Binding",
                     url=action, port=target["port"], risk="HIGH",
-                    description=(f"Mass assignment vulnerability at {action}. Injecting privileged "
-                                 f"fields ({', '.join(reflected)}) into the form submission caused "
-                                 f"them to appear in the server response, indicating they were accepted "
-                                 f"and potentially stored."),
+                    description="The application or API auto-binds request input properties to internal model objects without restricting which fields may be set, allowing an attacker to inject privileged fields (e.g., role, isAdmin) and escalate privileges.",
                     output=(f"Form: {action}\nInjected fields: {', '.join(reflected)}\n"
                             f"Response snippet: {r_aug.text[:400]}"),
                     sources="fracture-mass-assignment", service=target["scheme"],
                     affected=action, owasp="A01:2025 Broken Access Control", nist="AC-3",
-                    remediation=(
-                        "Use an explicit allowlist of bindable fields (DTO pattern). "
-                        "Never bind all request parameters directly to model objects."
-                    ),
+                    remediation="Define and enforce an explicit allowlist of bindable properties using DTOs or input validation schemas; reject or ignore any request field not explicitly permitted for the given operation.",
                 )
                 vc.log(f"[mass_assignment] Form mass assignment at {action}: {reflected}", "SUCCESS")
         except Exception:
@@ -9033,23 +11150,20 @@ def _phase_mass_assignment(target: dict, cfg: dict, pm: ProgressManager,
                 for f in _MASS_ASSIGN_FIELDS:
                     priv_payload[f] = True
                 r_priv = sess.put(jurl, json=priv_payload, timeout=timeout)
-                if r_priv and any(f in r_priv.text for f in _MASS_ASSIGN_FIELDS):
-                    reflected_j = [f for f in _MASS_ASSIGN_FIELDS if f in r_priv.text]
+                if r_priv and any(f in r_priv.text and f not in base_resp.text
+                                  for f in _MASS_ASSIGN_FIELDS):
+                    reflected_j = [f for f in _MASS_ASSIGN_FIELDS
+                                   if f in r_priv.text and f not in base_resp.text]
                     _ma_found.add(jurl)
                     out.add_finding(
-                        title="Mass Assignment / Privilege Escalation",
+                        title="Mass Assignment / Privilege Escalation via Parameter Binding",
                         url=jurl, port=target["port"], risk="HIGH",
-                        description=(f"Mass assignment via JSON body at {jpath}. Privileged fields "
-                                     f"({', '.join(reflected_j)}) were accepted by the server and "
-                                     f"reflected in the response."),
+                        description="The application or API auto-binds request input properties to internal model objects without restricting which fields may be set, allowing an attacker to inject privileged fields (e.g., role, isAdmin) and escalate privileges.",
                         output=(f"PUT {jpath}\nInjected: {list(priv_payload.keys())}\n"
                                 f"Reflected: {reflected_j}\nResponse: {r_priv.text[:400]}"),
                         sources="fracture-mass-assignment", service=target["scheme"],
                         affected=jurl, owasp="A01:2025 Broken Access Control", nist="AC-3",
-                        remediation=(
-                            "Use strict schema validation on all incoming JSON bodies. "
-                            "Maintain an explicit allowlist of fields that may be set via each endpoint."
-                        ),
+                        remediation="Define and enforce an explicit allowlist of bindable properties using DTOs or input validation schemas; reject or ignore any request field not explicitly permitted for the given operation.",
                     )
                     vc.log(f"[mass_assignment] JSON mass assignment at {jpath}: {reflected_j}", "SUCCESS")
         except Exception:
@@ -9215,7 +11329,12 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                                headers={"Accept": "text/html,application/json"})
                 access[role] = r.status_code
             except Exception:
-                access[role] = None
+                try:
+                    r = r_sess.head(url, timeout=max(timeout // 2, 3),
+                                    allow_redirects=False)
+                    access[role] = r.status_code
+                except Exception:
+                    access[role] = 0
         path_access.append({"path": rel, "url": url, "access": access})
         vc.status(phase, "Access Matrix", "running", f"Path {idx+1}/{len(crawled_paths)}", idx+1, len(crawled_paths))
 
@@ -9380,6 +11499,9 @@ def main() -> None:
     _redirect_discovered: set  = set()  # tracks redirect-discovered target URLs
     _pending_idx = 0
 
+    # Start adaptive concurrency monitor (adjusts _SCAN_SEM based on CPU/RAM)
+    _start_concurrency_monitor(_SCAN_SEM)
+
     while _pending_idx < len(_pending_urls):
         raw_url      = _pending_urls[_pending_idx]
         _pending_idx += 1
@@ -9416,6 +11538,28 @@ def main() -> None:
         auth_sess  = _build_auth_session(cfg, "auth", _scope_hostnames)
         auth2_sess = _build_auth_session(cfg, "auth2", _scope_hostnames)
 
+        # Pre-scan connectivity check — retry up to 5 times before proceeding
+        _alive_delays = [0, 5, 10, 15, 20]
+        for _alive_attempt, _alive_delay in enumerate(_alive_delays, 1):
+            if _alive_delay:
+                vc.log(
+                    f"[pre-scan] Target not responding — waiting {_alive_delay}s before "
+                    f"retry (attempt {_alive_attempt}/{len(_alive_delays)})...", "WARNING"
+                )
+                time.sleep(_alive_delay)
+            try:
+                _alive_r = sess.get(target["url"], timeout=10, allow_redirects=True)
+                vc.log(f"[pre-scan] Target reachable (HTTP {_alive_r.status_code})", "INFO")
+                break
+            except Exception as _alive_e:
+                if _alive_attempt == len(_alive_delays):
+                    vc.log(
+                        f"[pre-scan] Target did not respond after {len(_alive_delays)} "
+                        f"attempts — proceeding anyway", "WARNING"
+                    )
+                else:
+                    vc.log(f"[pre-scan] Attempt {_alive_attempt} failed: {_alive_e}", "WARNING")
+
         # Redirect tracking — accumulates in-scope redirect destinations found during this scan
         _in_scope_new: list = []
         _attach_redirect_hook(sess, _scope_hostnames, target, out, _in_scope_new)
@@ -9449,10 +11593,11 @@ def main() -> None:
 
         # Phase 0: recon
         wc_baseline = None
+        _wp_discovered_paths: list = []
         if not _skip("recon"):
             pm.set_phase_status("recon", "running", "HTTP Recon")
             try:
-                wc_baseline = _phase_recon(target, cfg, pm, out, sess)
+                wc_baseline, _wp_discovered_paths = _phase_recon(target, cfg, pm, out, sess)
                 pm.set_phase_status("recon", "complete", "HTTP Recon")
             except Exception as e:
                 vc.error(f"Phase recon error: {e}")
@@ -9518,23 +11663,36 @@ def main() -> None:
                 vc.error(f"Phase vulnscan error: {e}")
                 pm.set_phase_status("vulnscan", "error", detail=str(e))
 
-        # Collect gobuster/feroxbuster endpoints once (used by endpoint_tools per context)
+        # Collect gobuster/feroxbuster endpoints once (used by endpoint_tools per context).
+        # Apply _filter_buster_wildcards here so that wildcard-false-positive paths are
+        # removed before they enter the endpoint pipeline — this prevents gobuster from
+        # ever being called on a wildcard directory, even if per-endpoint _detect_wildcard
+        # fails, and avoids wasting max_ep slots on wildcard paths.
         _ep_base: list = []
-        _hostname = target["hostname"]
+        _hostname    = target["hostname"]
+        _ep_timeout  = cfg.get("timeout", 10)
         for _gob_name in [f"gobuster_{_hostname}", f"gobuster_files_{_hostname}"]:
             _gob_path = out.output_path("recon", _gob_name)
             if _gob_path.exists():
                 try:
-                    _ep_base.extend(_parse_gobuster_output(_gob_path, target["url"]))
+                    _raw_gob = _parse_gobuster_with_status(_gob_path, target["url"])
+                    _flt_gob = _filter_buster_wildcards(_raw_gob, sess, _ep_timeout)
+                    _ep_base.extend(u for u, _, _ in _flt_gob)
                 except Exception:
                     pass
         for _fer_name in [f"feroxbuster_{_hostname}", f"feroxbuster_files_{_hostname}"]:
             _fer_path = out.output_path("recon", _fer_name)
             if _fer_path.exists():
                 try:
-                    _ep_base.extend(_parse_feroxbuster_output(_fer_path))
+                    _raw_fer = _parse_feroxbuster_with_status(_fer_path)
+                    _flt_fer = _filter_buster_wildcards(_raw_fer, sess, _ep_timeout)
+                    _ep_base.extend(u for u, _, _ in _flt_fer)
                 except Exception:
                     pass
+        # Add WordPress-discovered paths (only in-scope, valid URLs)
+        for _wp_u in _wp_discovered_paths:
+            if _is_valid_endpoint_url(_wp_u) and _is_in_scope_url(_wp_u, _scope_hostnames):
+                _ep_base.append(_wp_u)
 
         # Build per-credential contexts
         _cred_contexts: list = []
@@ -9606,8 +11764,14 @@ def main() -> None:
                 pm.set_phase_status(f"shcheck#{_ctx_label}", "running", "shcheck Header Check")
                 try:
                     _extra = [u for u in target_urls if u != raw_url]
+                    # Also check discovered endpoints (gobuster / feroxbuster / wordpress)
+                    _ep_shcheck = [
+                        u for u in _ep_base
+                        if u.rstrip("/") != raw_url.rstrip("/") and u not in _extra
+                    ]
+                    _all_shcheck_extra = _extra + _ep_shcheck
                     _phase_shcheck(target, _ctx_cfg, pm, out, effective_auth,
-                                   extra_urls=_extra if _extra else None)
+                                   extra_urls=_all_shcheck_extra if _all_shcheck_extra else None)
                     pm.set_phase_status(f"shcheck#{_ctx_label}", "complete", "shcheck Header Check")
                 except Exception as e:
                     vc.error(f"Phase shcheck [{_ctx_label}] error: {e}")
@@ -9644,7 +11808,7 @@ def main() -> None:
             if _oos_links:
                 vc.log(
                     f"[scope] Dropped {_oos_links} out-of-scope link(s) from crawl data",
-                    "WARNING",
+                    "INFO",
                 )
             crawl_data = {
                 **crawl_data,
@@ -9665,8 +11829,117 @@ def main() -> None:
             # ── Phase 3c: endpoint tools ──
             _ep_discovered = [
                 u for u in list(_ep_base) + crawl_data.get("links", [])
-                if _is_in_scope_url(u, _scope_hostnames)
+                if _is_in_scope_url(u, _scope_hostnames) and _is_valid_endpoint_url(u)
             ]
+
+            # ── Probe security headers on discovered in-scope endpoints ──────────
+            # Runs the same checks as fracture-recon (missing security headers) and
+            # fracture-headers (data leakage headers) on each discovered endpoint URL.
+            _ep_probed: set = set()
+            _ep_path_statuses: dict = {}
+            for _ep_url in _ep_discovered:
+                if _ep_url.rstrip("/") == raw_url.rstrip("/") or _ep_url in _ep_probed:
+                    continue
+                _ep_probed.add(_ep_url)
+                try:
+                    _ep_resp = effective_auth.get(
+                        _ep_url, timeout=_ep_timeout, allow_redirects=True)
+                    _ep_path_statuses[_ep_url] = _ep_resp.status_code
+                    _ep_hdrs = _ep_resp.headers
+                    _ep_rel  = _url_rel_path(_ep_url, target["url"])
+                    _base_absent  = target.get("_base_sec_hdrs_absent",  set())
+                    _base_present = target.get("_base_sec_hdrs_present", set())
+                    for _hn, _hr, _, _hd, _hnist, _hremed in _SECURITY_HEADERS:
+                        if _hn == "Strict-Transport-Security" and not target["is_https"]:
+                            continue
+                        _ep_has = _hn in _ep_hdrs
+                        if not _ep_has:
+                            if _hn in _base_absent:
+                                # Also absent at base — already reported there; skip
+                                continue
+                            # Present at base but absent at this endpoint — report deviation
+                            out.add_finding(
+                                title=f"Missing Security Header: {_hn}",
+                                url=target["url"], port=target["port"],
+                                risk=_hr,
+                                description=(
+                                    f"The security header '{_hn}' is present on the "
+                                    f"base URL but absent from endpoint {_ep_rel}."
+                                ),
+                                output=f"Missing: {_hn}",
+                                affected=_ep_rel,
+                                sources="fracture-recon", service=target["scheme"],
+                                owasp="A05:2025 Security Misconfiguration", nist=_hnist,
+                                remediation=_hremed,
+                                http_code=_ep_resp.status_code,
+                            )
+                        elif _hn in _base_absent:
+                            # Absent at base but present at this endpoint — informational
+                            out.add_finding(
+                                title=f"Endpoint-Specific Security Header Found: {_hn}",
+                                url=target["url"], port=target["port"], risk="INFO",
+                                description=(
+                                    f"The security header '{_hn}' is present at "
+                                    f"endpoint {_ep_rel} but absent from the base URL. "
+                                    "This header appears to be applied to specific routes "
+                                    "only rather than globally."
+                                ),
+                                output=f"Present at endpoint: {_hn}: {_ep_hdrs.get(_hn, '')}",
+                                affected=_ep_rel,
+                                sources="fracture-recon", service=target["scheme"],
+                                owasp="A05:2025 Security Misconfiguration", nist=_hnist,
+                                remediation=(
+                                    "Ensure security headers are applied consistently "
+                                    "across all routes. Configure them globally at the "
+                                    "server or middleware level."
+                                ),
+                                http_code=_ep_resp.status_code,
+                            )
+                    _ep_svr = _ep_hdrs.get("Server", "")
+                    if _ep_svr:
+                        out.add_finding(
+                            title="Header Data Leakage: Server",
+                            url=target["url"], port=target["port"], risk="LOW",
+                            description="The HTTP Server response header reveals the web server software name and version, reducing the attacker's reconnaissance effort needed to identify version-specific vulnerabilities.",
+                            output=f"Server: {_ep_svr}",
+                            affected=_ep_rel,
+                            sources="fracture-headers", service=target["scheme"],
+                            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                            remediation="Remove or genericise the Server response header in the web server configuration (e.g., ServerTokens Prod in Apache; server_tokens off in nginx).",
+                            http_code=_ep_resp.status_code,
+                        )
+                    _ep_xpb = _ep_hdrs.get("X-Powered-By", "")
+                    if _ep_xpb:
+                        out.add_finding(
+                            title="Header Data Leakage: X-Powered-By",
+                            url=target["url"], port=target["port"], risk="LOW",
+                            description="The X-Powered-By response header discloses the application framework, language, or runtime version, reducing the attacker's effort needed to identify version-specific vulnerabilities.",
+                            output=f"X-Powered-By: {_ep_xpb}",
+                            affected=_ep_rel,
+                            sources="fracture-headers", service=target["scheme"],
+                            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                            remediation='Remove or suppress the X-Powered-By header at the application framework or reverse-proxy level (e.g., app.disable("x-powered-by") in Express; Header unset X-Powered-By in Apache).',
+                            http_code=_ep_resp.status_code,
+                        )
+                    _ep_aspnet = (
+                        _ep_hdrs.get("X-AspNet-Version", "")
+                        or _ep_hdrs.get("X-AspNetMvc-Version", "")
+                    )
+                    if _ep_aspnet:
+                        out.add_finding(
+                            title="Header Data Leakage: X-AspNet-Version",
+                            url=target["url"], port=target["port"], risk="LOW",
+                            description="The X-AspNet-Version response header reveals the exact ASP.NET framework version, aiding an attacker in identifying applicable CVEs or version-specific attack techniques.",
+                            output=f"X-AspNet-Version: {_ep_aspnet}",
+                            affected=_ep_rel,
+                            sources="fracture-headers", service=target["scheme"],
+                            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                            remediation='Disable the header by setting enableVersionHeader="false" in the httpRuntime element of web.config.',
+                            http_code=_ep_resp.status_code,
+                        )
+                except Exception:
+                    pass
+
             if _ep_discovered:
                 _et_key = f"endpoint_tools#{_ctx_label}"
                 if pm.is_phase_complete(_et_key):
@@ -9675,14 +11948,17 @@ def main() -> None:
                     pm.set_phase_status(_et_key, "running", "Endpoint Tools")
                     try:
                         _phase_endpoint_tools(_ep_discovered, target, _ctx_cfg, pm, out,
-                                              effective_auth, wc_baseline=wc_baseline)
+                                              effective_auth, wc_baseline=wc_baseline,
+                                              scope_hostnames=_scope_hostnames)
                         pm.set_phase_status(_et_key, "complete", "Endpoint Tools")
                     except Exception as e:
                         vc.error(f"Phase endpoint_tools [{_ctx_label}] error: {e}")
                         pm.set_phase_status(_et_key, "error", detail=str(e))
-                # Update structure map with endpoint_tools-discovered URLs
+                # Update structure map with endpoint_tools-discovered URLs and their HTTP status codes
                 try:
-                    _write_structure_map(out, target, extra_urls=_ep_discovered)
+                    _write_structure_map(out, target,
+                                        path_statuses=_ep_path_statuses,
+                                        extra_urls=_ep_discovered)
                 except Exception:
                     pass
 

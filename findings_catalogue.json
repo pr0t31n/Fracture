@@ -1,0 +1,2973 @@
+[
+  {
+    "id": "FR-001",
+    "title": "Internal Redirect: Trailing Slash Mismatch",
+    "risk": "INFO",
+    "owasp": "A05:2025",
+    "nist": "SC-7",
+    "sources": [
+      "fracture-redirect"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The server issued an internal redirect due to a trailing slash mismatch on the target URL. This may expose URL normalization behavior.",
+    "remediation": "Ensure consistent URL handling and redirect policies are configured on the web server."
+  },
+  {
+    "id": "FR-002",
+    "title": "HTTP Redirect to In-Scope URL",
+    "risk": "INFO",
+    "owasp": "A04:2025",
+    "nist": "SC-7",
+    "sources": [
+      "fracture-redirect"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The target URL issues an HTTP redirect to another in-scope URL. Redirect chains may expose internal routing logic.",
+    "remediation": "Review redirect configurations to ensure they are intentional and do not expose sensitive routing information."
+  },
+  {
+    "id": "FR-003",
+    "title": "HTTP Redirect to External URL",
+    "risk": "INFO",
+    "owasp": "A04:2025",
+    "nist": "SC-7",
+    "sources": [
+      "fracture-redirect"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The target URL issues an HTTP redirect to an external domain. This could be leveraged in open redirect or phishing scenarios.",
+    "remediation": "Validate and whitelist all redirect destinations. Avoid unvalidated redirects to external URLs."
+  },
+  {
+    "id": "FR-004",
+    "title": "WordPress readme.html Accessible",
+    "risk": "LOW",
+    "owasp": "A06:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The WordPress readme.html file is publicly accessible. This file may disclose the WordPress version and other installation details.",
+    "remediation": "Remove or restrict access to readme.html via web server configuration."
+  },
+  {
+    "id": "FR-005",
+    "title": "WordPress license.txt Accessible",
+    "risk": "INFO",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The WordPress license.txt file is publicly accessible. While not directly exploitable, it confirms a WordPress installation.",
+    "remediation": "Remove or restrict access to license.txt via web server configuration."
+  },
+  {
+    "id": "FR-006",
+    "title": "WordPress Version Detected",
+    "risk": "MEDIUM",
+    "owasp": "A06:2025",
+    "nist": "SI-2",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The WordPress version was identified from publicly accessible files or meta tags. A known version allows attackers to target specific vulnerabilities.",
+    "remediation": "Remove version disclosure from meta generator tags and restrict access to files that reveal version information. Keep WordPress updated."
+  },
+  {
+    "id": "FR-007",
+    "title": "WordPress Login Page Accessible",
+    "risk": "MEDIUM",
+    "owasp": "A07:2025",
+    "nist": "IA-5",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The WordPress admin login page (wp-login.php) is publicly accessible. This exposes the authentication endpoint to brute-force and credential stuffing attacks.",
+    "remediation": "Restrict access to wp-login.php by IP, add CAPTCHA, implement account lockout, or use a WAF rule to limit login attempts."
+  },
+  {
+    "id": "FR-008",
+    "title": "WordPress User Registration Enabled",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "IA-5",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "WordPress user self-registration is enabled. Attackers may create accounts to gain authenticated access or exploit subscriber-level vulnerabilities.",
+    "remediation": "Disable user registration if not required. If required, implement email verification and role restrictions for new registrations."
+  },
+  {
+    "id": "FR-009",
+    "title": "WordPress Password Reset Form Accessible",
+    "risk": "LOW",
+    "owasp": "A07:2025",
+    "nist": "IA-5",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The WordPress password reset form is accessible. Combined with user enumeration, this could facilitate account takeover via password reset abuse.",
+    "remediation": "Implement rate limiting on the password reset endpoint and ensure username/email enumeration is not possible through error messages."
+  },
+  {
+    "id": "FR-010",
+    "title": "WordPress X-Pingback Header Present",
+    "risk": "LOW",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The X-Pingback HTTP header is present, advertising the XML-RPC pingback endpoint. This confirms XML-RPC is enabled and may facilitate SSRF or DDoS amplification.",
+    "remediation": "Disable XML-RPC or remove the X-Pingback header via web server configuration if XML-RPC functionality is not required."
+  },
+  {
+    "id": "FR-011",
+    "title": "WordPress XML-RPC Interface Enabled",
+    "risk": "HIGH",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The WordPress XML-RPC interface (xmlrpc.php) is enabled and accessible. This legacy interface enables brute-force attacks, SSRF via pingback, and DDoS amplification.",
+    "remediation": "Disable XML-RPC entirely if not required. If required, restrict access by IP and disable the multicall method."
+  },
+  {
+    "id": "FR-012",
+    "title": "WordPress XML-RPC Multicall Brute-Force Vector",
+    "risk": "HIGH",
+    "owasp": "A07:2025",
+    "nist": "IA-5",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The XML-RPC system.multicall method is enabled, allowing an attacker to test hundreds of username/password combinations in a single HTTP request, bypassing standard rate limiting.",
+    "remediation": "Disable XML-RPC or specifically block the system.multicall method. Implement per-IP rate limiting at the web server level."
+  },
+  {
+    "id": "FR-013",
+    "title": "WordPress XML-RPC Pingback SSRF Vector",
+    "risk": "HIGH",
+    "owasp": "A10:2025",
+    "nist": "SC-7",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The XML-RPC pingback.ping method is accessible. An attacker can abuse this to perform Server-Side Request Forgery (SSRF) or use the WordPress server as a DDoS reflector.",
+    "remediation": "Disable XML-RPC or block the pingback.ping method. Implement egress filtering to restrict outbound requests from the web server."
+  },
+  {
+    "id": "FR-014",
+    "title": "WordPress XML-RPC Interface Accessible",
+    "risk": "HIGH",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The WordPress XML-RPC endpoint responds to requests. The full list of available methods was retrieved, confirming the attack surface exposed by this legacy interface.",
+    "remediation": "Disable xmlrpc.php entirely unless required. If required, restrict access by IP whitelist."
+  },
+  {
+    "id": "FR-015",
+    "title": "WordPress REST API Exposed",
+    "risk": "MEDIUM",
+    "owasp": "A01:2025",
+    "nist": "AC-3",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The WordPress REST API is publicly accessible without authentication. This may expose site structure, user data, and plugin information to unauthenticated users.",
+    "remediation": "Restrict REST API access to authenticated users where possible. Disable specific endpoints that expose sensitive data."
+  },
+  {
+    "id": "FR-016",
+    "title": "WordPress Users Exposed via REST API",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-3,IA-5",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The WordPress REST API /wp/v2/users endpoint returns a list of registered usernames and IDs without authentication. This facilitates targeted brute-force and social engineering attacks.",
+    "remediation": "Disable or restrict the /wp/v2/users endpoint. Use a security plugin or custom code to require authentication for user enumeration endpoints."
+  },
+  {
+    "id": "FR-017",
+    "title": "WordPress Media Files Enumerable via REST API",
+    "risk": "LOW",
+    "owasp": "A01:2025",
+    "nist": "AC-3",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The WordPress REST API /wp/v2/media endpoint exposes a list of uploaded media files without authentication, revealing site content structure and potentially sensitive file paths.",
+    "remediation": "Restrict the media REST API endpoint to authenticated users or disable it if not needed for public consumers."
+  },
+  {
+    "id": "FR-018",
+    "title": "WordPress User Enumeration via Author Archives",
+    "risk": "MEDIUM",
+    "owasp": "A07:2025",
+    "nist": "IA-5",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "WordPress author archive pages (/?author=N) redirect to /author/<username>/, disclosing valid usernames. Enumerated usernames can be used for targeted brute-force attacks.",
+    "remediation": "Disable author archive pages or suppress the username slug from archive URLs using a security plugin or custom rewrite rules."
+  },
+  {
+    "id": "FR-019",
+    "title": "WordPress Username Disclosed via oEmbed API",
+    "risk": "LOW",
+    "owasp": "A07:2025",
+    "nist": "IA-5",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The WordPress oEmbed endpoint discloses the site author username in its JSON response. This provides an additional username enumeration vector.",
+    "remediation": "Disable the oEmbed endpoint if not required, or customize the author name field to avoid exposing login usernames."
+  },
+  {
+    "id": "FR-020",
+    "title": "WordPress Configuration Backup Exposed",
+    "risk": "CRITICAL",
+    "owasp": "A01:2025",
+    "nist": "AC-3,IA-5",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "A WordPress configuration backup file (e.g., wp-config.php.bak, wp-config.php~) was found accessible on the web server. These files typically contain database credentials, authentication keys, and salts.",
+    "remediation": "Immediately remove all backup and temporary copies of wp-config.php from the web root. Rotate all credentials disclosed. Configure the web server to deny access to .bak, .swp, and ~ files."
+  },
+  {
+    "id": "FR-021",
+    "title": "WordPress Plugin Detected",
+    "risk": "INFO",
+    "owasp": "A06:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "One or more WordPress plugins were detected via static asset paths or readme files. Plugin names and versions may be used to identify known CVEs.",
+    "remediation": "Keep all plugins updated. Remove unused plugins. Restrict access to plugin readme.txt files."
+  },
+  {
+    "id": "FR-022",
+    "title": "WordPress Theme Detected",
+    "risk": "INFO",
+    "owasp": "A06:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The active WordPress theme was detected via static asset paths. Theme identification aids in locating theme-specific vulnerabilities.",
+    "remediation": "Keep themes updated. Remove inactive themes. Restrict access to theme readme and style.css version disclosures."
+  },
+  {
+    "id": "FR-023",
+    "title": "WordPress Debug Log Accessible",
+    "risk": "HIGH",
+    "owasp": "A09:2025",
+    "nist": "AU-9,SI-12",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The WordPress debug log file (wp-content/debug.log) is publicly accessible. Debug logs may contain PHP errors, stack traces, file paths, database queries, and credentials.",
+    "remediation": "Disable WP_DEBUG in production. Move the debug log outside the web root or restrict access via web server configuration."
+  },
+  {
+    "id": "FR-024",
+    "title": "WordPress uploads Directory Browsing Enabled",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "CM-7,AC-3",
+    "sources": [
+      "fracture-wordpress"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "Directory listing is enabled on the WordPress uploads directory. Attackers can enumerate all uploaded files, potentially finding sensitive documents or user data.",
+    "remediation": "Disable directory listing in the web server configuration. Add an Options -Indexes directive or equivalent."
+  },
+  {
+    "id": "FR-025",
+    "title": "Robots.txt Discloses Hidden Paths",
+    "risk": "INFO",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The robots.txt file contains Disallow directives that reveal hidden or sensitive application paths. These paths are often administrative interfaces, backup files, or unlinked endpoints.",
+    "remediation": "Review paths listed in robots.txt. Ensure sensitive paths are protected by authentication, not just excluded from crawlers."
+  },
+  {
+    "id": "FR-026",
+    "title": "Sitemap.xml Discovered",
+    "risk": "INFO",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "A sitemap.xml file was found. Sitemaps enumerate application URLs and can reveal non-linked endpoints and application structure.",
+    "remediation": "Review all URLs listed in sitemap.xml to ensure none expose sensitive functionality without proper access controls."
+  },
+  {
+    "id": "FR-027",
+    "title": "Server Banner Disclosure",
+    "risk": "LOW",
+    "owasp": "A05:2025",
+    "nist": "CM-7,SI-2",
+    "sources": [
+      "fracture-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The HTTP Server header discloses the web server software name and version. This information assists attackers in identifying applicable CVEs and exploit modules.",
+    "remediation": "Configure the web server to suppress or genericize the Server header. Remove version information from all HTTP response headers."
+  },
+  {
+    "id": "FR-028",
+    "title": "X-Powered-By Header Discloses Technology Stack",
+    "risk": "LOW",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The X-Powered-By HTTP response header discloses the backend technology (e.g., PHP version, ASP.NET version, Express). This aids fingerprinting and CVE targeting.",
+    "remediation": "Remove or suppress the X-Powered-By header in web server and application framework configuration."
+  },
+  {
+    "id": "FR-029",
+    "title": "Application Error Message Disclosure",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "SI-11,CM-7",
+    "sources": [
+      "fracture-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "Verbose error messages are returned by the application, potentially revealing stack traces, file paths, database queries, or framework internals.",
+    "remediation": "Configure custom error pages for all HTTP error codes. Ensure verbose errors are logged server-side only and not returned to clients."
+  },
+  {
+    "id": "FR-030",
+    "title": "Directory Listing Enabled",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "CM-7,AC-3",
+    "sources": [
+      "fracture-recon",
+      "fracture-ffuf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "Directory listing is enabled on one or more paths, allowing unauthenticated users to browse file and directory contents. This may expose source code, configuration files, or sensitive documents.",
+    "remediation": "Disable directory listing in web server configuration (Options -Indexes for Apache, autoindex off for Nginx)."
+  },
+  {
+    "id": "FR-031",
+    "title": "WSDL/WADL Service Description Exposed",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "CM-7,AC-3",
+    "sources": [
+      "fracture-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "A WSDL or WADL service description file is publicly accessible. These files describe all available service methods, parameters, and data types, providing a full attack surface map.",
+    "remediation": "Restrict access to WSDL/WADL files by IP or authentication. Remove them from public-facing endpoints in production."
+  },
+  {
+    "id": "FR-032",
+    "title": "GraphQL Endpoint Detected",
+    "risk": "INFO",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-recon",
+      "fracture-graphql"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "A GraphQL endpoint was detected. GraphQL endpoints expose a queryable schema and may be subject to introspection, batching attacks, and authorization bypass.",
+    "remediation": "Disable introspection in production. Implement query depth limiting, rate limiting, and field-level authorization checks."
+  },
+  {
+    "id": "FR-033",
+    "title": "Swagger/OpenAPI Documentation Exposed",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "CM-7,AC-3",
+    "sources": [
+      "fracture-recon",
+      "fracture-ffuf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "Swagger UI or OpenAPI specification files are publicly accessible without authentication. These documents expose the full API surface including endpoints, parameters, authentication schemes, and data models.",
+    "remediation": "Restrict access to API documentation in production. If public documentation is required, ensure it does not expose internal or administrative endpoints."
+  },
+  {
+    "id": "FR-034",
+    "title": "Admin Interface Exposed",
+    "risk": "HIGH",
+    "owasp": "A05:2025",
+    "nist": "AC-3,AC-17",
+    "sources": [
+      "fracture-ffuf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "webfiles",
+    "description": "An administrative interface was discovered at a predictable path. Admin interfaces exposed to the internet are high-value targets for brute-force, credential stuffing, and authentication bypass attacks.",
+    "remediation": "Restrict admin interface access by IP whitelist. Move admin interfaces to non-standard ports or behind a VPN. Enforce MFA on all administrative accounts."
+  },
+  {
+    "id": "FR-035",
+    "title": "Backup File Discovered",
+    "risk": "HIGH",
+    "owasp": "A05:2025",
+    "nist": "AC-3,CM-7",
+    "sources": [
+      "fracture-ffuf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "webfiles",
+    "description": "A backup file (e.g., .bak, .old, .orig, ~, .zip) was discovered in the web root. Backup files often contain source code, configuration, or credentials.",
+    "remediation": "Remove all backup files from the web root. Add web server rules to deny access to common backup file extensions."
+  },
+  {
+    "id": "FR-036",
+    "title": "Configuration File Exposed",
+    "risk": "CRITICAL",
+    "owasp": "A05:2025",
+    "nist": "AC-3,IA-5",
+    "sources": [
+      "fracture-ffuf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "webfiles",
+    "description": "A configuration file (e.g., .env, config.php, settings.py, database.yml) is publicly accessible. Configuration files typically contain database credentials, API keys, secret keys, and other sensitive values.",
+    "remediation": "Remove configuration files from the web root immediately. Store configuration outside the document root. Rotate all exposed credentials."
+  },
+  {
+    "id": "FR-037",
+    "title": "Git Repository Exposed",
+    "risk": "CRITICAL",
+    "owasp": "A05:2025",
+    "nist": "AC-3,SA-12",
+    "sources": [
+      "fracture-ffuf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "webfiles",
+    "description": "A .git directory or git repository index is accessible from the web root. An attacker can reconstruct the full source code, commit history, and any secrets ever committed.",
+    "remediation": "Immediately block access to .git directories via web server configuration. Rotate all credentials ever committed to the repository. Audit git history for secrets."
+  },
+  {
+    "id": "FR-038",
+    "title": "SVN/CVS Repository Exposed",
+    "risk": "HIGH",
+    "owasp": "A05:2025",
+    "nist": "AC-3,SA-12",
+    "sources": [
+      "fracture-ffuf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "webfiles",
+    "description": "A Subversion (.svn) or CVS repository directory is accessible from the web root. Repository metadata can be used to reconstruct source files.",
+    "remediation": "Block access to .svn and CVS directories via web server configuration. Remove version control directories from the web root."
+  },
+  {
+    "id": "FR-039",
+    "title": "Log File Accessible",
+    "risk": "HIGH",
+    "owasp": "A09:2025",
+    "nist": "AU-9,SI-12",
+    "sources": [
+      "fracture-ffuf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "webfiles",
+    "description": "An application or server log file is publicly accessible. Log files may contain IP addresses, usernames, session tokens, stack traces, and sensitive application data.",
+    "remediation": "Move log files outside the web root. Restrict access via web server configuration. Ensure log rotation is implemented."
+  },
+  {
+    "id": "FR-040",
+    "title": "Database File Exposed",
+    "risk": "CRITICAL",
+    "owasp": "A05:2025",
+    "nist": "AC-3,SC-28",
+    "sources": [
+      "fracture-ffuf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "webfiles",
+    "description": "A database file (e.g., .sqlite, .db, .mdb) is directly accessible from the web server. This exposes the entire database contents to unauthenticated download.",
+    "remediation": "Remove all database files from the web root immediately. Store database files outside the document root and restrict filesystem permissions."
+  },
+  {
+    "id": "FR-041",
+    "title": "TLS Certificate Expired",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-8,SC-17",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [],
+    "service": "https",
+    "phase": "tls",
+    "description": "The TLS certificate presented by the server has expired. Browser warnings will be displayed, and the certificate can no longer be trusted to guarantee the server's identity.",
+    "remediation": "Renew the TLS certificate immediately. Implement automated certificate renewal (e.g., Let's Encrypt with certbot or ACME protocol) to prevent future expirations."
+  },
+  {
+    "id": "FR-042",
+    "title": "TLS Certificate Not Yet Valid",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-8,SC-17",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [],
+    "service": "https",
+    "phase": "tls",
+    "description": "The TLS certificate presented by the server has a notBefore date in the future, meaning it is not yet valid. Clients may reject the connection.",
+    "remediation": "Ensure server time is synchronized via NTP. Verify the certificate was issued correctly and replace if the issue persists."
+  },
+  {
+    "id": "FR-043",
+    "title": "TLS Certificate Hostname Mismatch",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-8,SC-17",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [],
+    "service": "https",
+    "phase": "tls",
+    "description": "The Common Name or Subject Alternative Names in the TLS certificate do not match the hostname being accessed. This breaks trust validation and may indicate a misconfiguration or MITM condition.",
+    "remediation": "Obtain and install a certificate that matches the server's hostname. Use Subject Alternative Names (SANs) to cover all required hostnames."
+  },
+  {
+    "id": "FR-044",
+    "title": "TLS Certificate Self-Signed",
+    "risk": "MEDIUM",
+    "owasp": "A02:2025",
+    "nist": "SC-8,SC-17",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [],
+    "service": "https",
+    "phase": "tls",
+    "description": "The TLS certificate is self-signed and not issued by a trusted Certificate Authority. Clients cannot validate the server's identity, making the connection susceptible to MITM attacks.",
+    "remediation": "Replace the self-signed certificate with one issued by a trusted CA. Use Let's Encrypt for free, automatically renewed certificates."
+  },
+  {
+    "id": "FR-045",
+    "title": "Weak TLS Protocol Supported (SSLv2/SSLv3/TLS 1.0/TLS 1.1)",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-8,SC-28",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [
+      "CVE-2014-3566",
+      "CVE-2011-3389"
+    ],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server supports one or more deprecated TLS/SSL protocol versions (SSLv2, SSLv3, TLS 1.0, or TLS 1.1). These protocols have known cryptographic weaknesses exploitable by POODLE, BEAST, and similar attacks.",
+    "remediation": "Disable SSLv2, SSLv3, TLS 1.0, and TLS 1.1. Configure the server to support only TLS 1.2 and TLS 1.3."
+  },
+  {
+    "id": "FR-046",
+    "title": "Weak Cipher Suite Supported",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-8",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server supports weak cipher suites including NULL encryption, RC4, DES, 3DES, or export-grade ciphers. Weak ciphers can be exploited to decrypt TLS-protected traffic.",
+    "remediation": "Configure the server to support only strong cipher suites (AES-GCM, ChaCha20-Poly1305). Use Mozilla SSL Configuration Generator for recommended cipher lists."
+  },
+  {
+    "id": "FR-047",
+    "title": "TLS BEAST Vulnerability",
+    "risk": "MEDIUM",
+    "owasp": "A02:2025",
+    "nist": "SC-8",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [
+      "CVE-2011-3389"
+    ],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server is vulnerable to the BEAST (Browser Exploit Against SSL/TLS) attack due to the use of TLS 1.0 with CBC cipher suites. An attacker with network position can decrypt portions of encrypted traffic.",
+    "remediation": "Disable TLS 1.0. Prefer TLS 1.2+ with GCM cipher suites. Enable server-side cipher preference."
+  },
+  {
+    "id": "FR-048",
+    "title": "TLS POODLE Vulnerability",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-8",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [
+      "CVE-2014-3566"
+    ],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server supports SSLv3, making it vulnerable to the POODLE (Padding Oracle On Downgraded Legacy Encryption) attack. An attacker can force a downgrade to SSLv3 and decrypt session cookies.",
+    "remediation": "Disable SSLv3 entirely. Implement TLS_FALLBACK_SCSV to prevent protocol downgrade attacks."
+  },
+  {
+    "id": "FR-049",
+    "title": "TLS DROWN Vulnerability",
+    "risk": "CRITICAL",
+    "owasp": "A02:2025",
+    "nist": "SC-8",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [
+      "CVE-2016-0800"
+    ],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server supports SSLv2, making modern TLS connections vulnerable to the DROWN attack. An attacker can decrypt RSA-encrypted TLS sessions by exploiting SSLv2 export cipher weaknesses.",
+    "remediation": "Disable SSLv2 on all servers sharing the same private key. Regenerate private keys if SSLv2 was enabled."
+  },
+  {
+    "id": "FR-050",
+    "title": "TLS HEARTBLEED Vulnerability",
+    "risk": "CRITICAL",
+    "owasp": "A02:2025",
+    "nist": "SC-8,SI-2",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [
+      "CVE-2014-0160"
+    ],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server is running a version of OpenSSL vulnerable to Heartbleed (CVE-2014-0160). An attacker can read up to 64KB of server memory per request, potentially extracting private keys, session tokens, and credentials.",
+    "remediation": "Upgrade OpenSSL to 1.0.1g or later immediately. After patching, revoke and regenerate all TLS certificates and private keys. Invalidate all active sessions."
+  },
+  {
+    "id": "FR-051",
+    "title": "TLS LOGJAM Vulnerability",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-8",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [
+      "CVE-2015-4000"
+    ],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server supports DHE key exchange with weak (export-grade) Diffie-Hellman parameters (512-bit), making it vulnerable to the LOGJAM downgrade attack.",
+    "remediation": "Disable export-grade DHE cipher suites. Generate and configure strong (2048-bit or 4096-bit) DH parameters. Prefer ECDHE over DHE."
+  },
+  {
+    "id": "FR-052",
+    "title": "TLS FREAK Vulnerability",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-8",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [
+      "CVE-2015-0204"
+    ],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server supports RSA_EXPORT cipher suites, making it vulnerable to the FREAK (Factoring RSA Export Keys) attack. An attacker can force the use of weak 512-bit RSA keys.",
+    "remediation": "Disable all EXPORT cipher suites. Update OpenSSL to a patched version. Enforce server-side cipher preference."
+  },
+  {
+    "id": "FR-053",
+    "title": "TLS ROBOT Vulnerability",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-8",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [
+      "CVE-2017-13099"
+    ],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server is vulnerable to the ROBOT (Return Of Bleichenbacher's Oracle Threat) attack, allowing an attacker to perform RSA decryption and signing operations with the server's private key.",
+    "remediation": "Disable RSA key exchange cipher suites. Use ECDHE for forward secrecy. Patch the TLS library to a version with ROBOT mitigations."
+  },
+  {
+    "id": "FR-054",
+    "title": "TLS CCS Injection Vulnerability",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-8",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [
+      "CVE-2014-0224"
+    ],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server is vulnerable to the OpenSSL CCS Injection vulnerability (CVE-2014-0224). An attacker with MITM position can force the use of weak key material.",
+    "remediation": "Upgrade OpenSSL to 0.9.8za, 1.0.0m, or 1.0.1h or later. Restart the server after patching."
+  },
+  {
+    "id": "FR-055",
+    "title": "TLS Ticketbleed Vulnerability",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-8",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [
+      "CVE-2016-9244"
+    ],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server is vulnerable to Ticketbleed (CVE-2016-9244) in F5 BIG-IP TLS implementations, allowing an attacker to read up to 31 bytes of uninitialized memory via TLS session tickets.",
+    "remediation": "Apply the vendor patch from F5. Disable TLS session tickets as a temporary mitigation."
+  },
+  {
+    "id": "FR-056",
+    "title": "TLS SWEET32 Vulnerability",
+    "risk": "MEDIUM",
+    "owasp": "A02:2025",
+    "nist": "SC-8",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [
+      "CVE-2016-2183"
+    ],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server supports 3DES cipher suites, making long-lived TLS connections vulnerable to the SWEET32 birthday attack, which can recover plaintext from encrypted traffic.",
+    "remediation": "Disable 3DES (TRIPLE_DES, 3DES_EDE) cipher suites. Prefer AES-GCM cipher suites."
+  },
+  {
+    "id": "FR-057",
+    "title": "HTTP Strict Transport Security (HSTS) Not Enforced",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "SC-8,SC-23",
+    "sources": [
+      "fracture-tls",
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "https",
+    "phase": "tls",
+    "description": "The Strict-Transport-Security (HSTS) header is not present or has an insufficient max-age. Without HSTS, browsers may connect over HTTP, enabling SSL stripping attacks.",
+    "remediation": "Add the Strict-Transport-Security header with a max-age of at least 31536000 seconds (1 year), includeSubDomains, and preload directives."
+  },
+  {
+    "id": "FR-058",
+    "title": "TLS Certificate Uses Weak Signature Algorithm (MD5/SHA-1)",
+    "risk": "MEDIUM",
+    "owasp": "A02:2025",
+    "nist": "SC-17",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [],
+    "service": "https",
+    "phase": "tls",
+    "description": "The TLS certificate is signed with a weak signature algorithm (MD5 or SHA-1). SHA-1 certificates are deprecated by major browsers and CAs, and MD5 certificates are cryptographically broken.",
+    "remediation": "Replace the certificate with one using SHA-256 or stronger signature algorithm (SHA-2 family)."
+  },
+  {
+    "id": "FR-059",
+    "title": "TLS Certificate Short Key Length",
+    "risk": "MEDIUM",
+    "owasp": "A02:2025",
+    "nist": "SC-8,SC-17",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [],
+    "service": "https",
+    "phase": "tls",
+    "description": "The TLS certificate uses an RSA key shorter than 2048 bits. Short RSA keys are susceptible to factoring attacks with sufficient computational resources.",
+    "remediation": "Replace the certificate with one using at least 2048-bit RSA keys, or preferably 4096-bit RSA or ECDSA P-256/P-384."
+  },
+  {
+    "id": "FR-060",
+    "title": "Subdomain Takeover Vulnerability",
+    "risk": "HIGH",
+    "owasp": "A05:2025",
+    "nist": "SC-20,CM-7",
+    "sources": [
+      "fracture-subdomain-takeover"
+    ],
+    "cves": [],
+    "service": "dns",
+    "phase": "subdomain_takeover",
+    "description": "A subdomain DNS record points to an external service (e.g., GitHub Pages, S3, Heroku, Netlify) that is no longer claimed. An attacker can register the unclaimed resource and serve malicious content from the trusted subdomain.",
+    "remediation": "Remove dangling DNS records immediately. Claim or delete the referenced external resource. Implement DNS monitoring to detect future dangling records."
+  },
+  {
+    "id": "FR-061",
+    "title": "Missing Content-Security-Policy Header",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "SI-10,SC-23",
+    "sources": [
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "The Content-Security-Policy (CSP) header is absent. Without CSP, the application has no defense against Cross-Site Scripting (XSS) and data injection attacks through browser-enforced policy.",
+    "remediation": "Implement a restrictive Content-Security-Policy header. Start with a report-only policy, monitor violations, then enforce. Avoid 'unsafe-inline' and 'unsafe-eval' directives."
+  },
+  {
+    "id": "FR-062",
+    "title": "Missing X-Frame-Options Header",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "SI-10,SC-23",
+    "sources": [
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "The X-Frame-Options header is absent. Without this header, the page can be embedded in an iframe on any origin, enabling clickjacking attacks that trick users into performing unintended actions.",
+    "remediation": "Add 'X-Frame-Options: DENY' or 'X-Frame-Options: SAMEORIGIN'. Alternatively, use the CSP frame-ancestors directive."
+  },
+  {
+    "id": "FR-063",
+    "title": "Missing X-Content-Type-Options Header",
+    "risk": "LOW",
+    "owasp": "A05:2025",
+    "nist": "SI-10",
+    "sources": [
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "The X-Content-Type-Options header is absent. Without this header, browsers may perform MIME type sniffing, potentially executing uploaded files as scripts.",
+    "remediation": "Add 'X-Content-Type-Options: nosniff' to all HTTP responses."
+  },
+  {
+    "id": "FR-064",
+    "title": "Missing Referrer-Policy Header",
+    "risk": "LOW",
+    "owasp": "A05:2025",
+    "nist": "SI-10,SC-23",
+    "sources": [
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "The Referrer-Policy header is absent. Without this header, the browser's default behavior may leak the full URL (including query parameters and path) in the Referer header to third-party origins.",
+    "remediation": "Add 'Referrer-Policy: strict-origin-when-cross-origin' or a more restrictive policy to prevent sensitive URL data leakage."
+  },
+  {
+    "id": "FR-065",
+    "title": "Missing Permissions-Policy Header",
+    "risk": "LOW",
+    "owasp": "A05:2025",
+    "nist": "CM-7,SC-23",
+    "sources": [
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "The Permissions-Policy (formerly Feature-Policy) header is absent. This header controls which browser features and APIs are available to the page and embedded third-party content.",
+    "remediation": "Add a Permissions-Policy header that disables browser features not required by the application (e.g., camera, microphone, geolocation)."
+  },
+  {
+    "id": "FR-066",
+    "title": "Missing Strict-Transport-Security Header",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "SC-8,SC-23",
+    "sources": [
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "https",
+    "phase": "headers",
+    "description": "The HTTP Strict-Transport-Security (HSTS) header is absent. Without HSTS, browsers may connect over plain HTTP, and SSL stripping attacks can downgrade HTTPS connections to HTTP.",
+    "remediation": "Add 'Strict-Transport-Security: max-age=31536000; includeSubDomains; preload' to all HTTPS responses."
+  },
+  {
+    "id": "FR-067",
+    "title": "Insecure Content-Security-Policy (Unsafe-Inline Allowed)",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "SI-10",
+    "sources": [
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "The Content-Security-Policy header contains 'unsafe-inline', which negates XSS protection by allowing inline JavaScript and CSS. This is the most common CSP misconfiguration.",
+    "remediation": "Replace 'unsafe-inline' with nonce-based or hash-based CSP. Refactor inline scripts to external files."
+  },
+  {
+    "id": "FR-068",
+    "title": "Insecure Content-Security-Policy (Wildcard Source)",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "SI-10",
+    "sources": [
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "The Content-Security-Policy header contains a wildcard (*) source directive, allowing scripts or resources to be loaded from any origin. This effectively disables CSP's XSS protection.",
+    "remediation": "Replace wildcard sources with specific, trusted origin allowlists. Audit all third-party resource dependencies."
+  },
+  {
+    "id": "FR-069",
+    "title": "Session Cookie Missing Secure Flag",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-8,IA-8",
+    "sources": [
+      "fracture-headers",
+      "fracture-session"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "One or more session cookies are set without the Secure flag. Without the Secure flag, the cookie will be transmitted over unencrypted HTTP connections, exposing session tokens to network interception.",
+    "remediation": "Set the Secure flag on all session cookies. Ensure the application forces HTTPS for all authenticated requests."
+  },
+  {
+    "id": "FR-070",
+    "title": "Session Cookie Missing HttpOnly Flag",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SI-10,IA-8",
+    "sources": [
+      "fracture-headers",
+      "fracture-session"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "One or more session cookies are set without the HttpOnly flag. Without HttpOnly, client-side JavaScript can read the cookie value, enabling session token theft via XSS.",
+    "remediation": "Set the HttpOnly flag on all session and authentication cookies to prevent JavaScript access."
+  },
+  {
+    "id": "FR-071",
+    "title": "Session Cookie Missing SameSite Attribute",
+    "risk": "MEDIUM",
+    "owasp": "A01:2025",
+    "nist": "SC-23",
+    "sources": [
+      "fracture-headers",
+      "fracture-csrf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "Session cookies are set without the SameSite attribute, or with SameSite=None without Secure. This enables Cross-Site Request Forgery (CSRF) attacks in browsers that do not implement SameSite by default.",
+    "remediation": "Set SameSite=Strict or SameSite=Lax on all session cookies. Use SameSite=None only for legitimate cross-site cookie sharing, and always with Secure."
+  },
+  {
+    "id": "FR-072",
+    "title": "JWT Token in Local Storage",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "IA-8,SC-23",
+    "sources": [
+      "fracture-jwt"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "jwt",
+    "description": "JSON Web Tokens (JWTs) are stored in browser localStorage. localStorage is accessible to JavaScript, making JWT tokens vulnerable to theft via XSS attacks.",
+    "remediation": "Store JWTs in HttpOnly, Secure cookies instead of localStorage. This prevents JavaScript access and protects tokens from XSS-based theft."
+  },
+  {
+    "id": "FR-073",
+    "title": "JWT Algorithm Confusion (None Algorithm)",
+    "risk": "CRITICAL",
+    "owasp": "A02:2025",
+    "nist": "IA-8,SC-23",
+    "sources": [
+      "fracture-jwt"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "jwt",
+    "description": "The server accepts JWTs with the algorithm set to 'none', bypassing signature verification entirely. An attacker can forge arbitrary JWT payloads and impersonate any user.",
+    "remediation": "Explicitly validate the JWT algorithm on the server side. Reject tokens with 'alg: none'. Use a strict allowlist of permitted algorithms."
+  },
+  {
+    "id": "FR-074",
+    "title": "JWT Algorithm Confusion (RS256 to HS256)",
+    "risk": "CRITICAL",
+    "owasp": "A02:2025",
+    "nist": "IA-8,SC-23",
+    "sources": [
+      "fracture-jwt"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "jwt",
+    "description": "The server is vulnerable to JWT algorithm confusion. By changing the algorithm from RS256 to HS256 and signing the token with the public key as the HMAC secret, an attacker can forge valid JWTs.",
+    "remediation": "Enforce algorithm validation server-side. Use separate code paths for asymmetric (RS256) and symmetric (HS256) verification. Never use the public key as an HMAC secret."
+  },
+  {
+    "id": "FR-075",
+    "title": "JWT Weak HMAC Secret",
+    "risk": "CRITICAL",
+    "owasp": "A02:2025",
+    "nist": "IA-8,SC-12",
+    "sources": [
+      "fracture-jwt"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "jwt",
+    "description": "The JWT HMAC signing secret is weak or uses a common/guessable value. An attacker can brute-force the secret offline and forge arbitrary JWT tokens.",
+    "remediation": "Use a cryptographically random secret of at least 256 bits for HMAC-signed JWTs. Store the secret securely and rotate it periodically."
+  },
+  {
+    "id": "FR-076",
+    "title": "JWT Signature Not Verified",
+    "risk": "CRITICAL",
+    "owasp": "A02:2025",
+    "nist": "IA-8",
+    "sources": [
+      "fracture-jwt"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "jwt",
+    "description": "The server accepts JWTs with an invalid or tampered signature. The server is processing the JWT payload without verifying its integrity, allowing full token forgery.",
+    "remediation": "Ensure the JWT verification library is correctly configured to always verify the signature. Never decode without verification."
+  },
+  {
+    "id": "FR-077",
+    "title": "JWT Sensitive Data in Payload",
+    "risk": "MEDIUM",
+    "owasp": "A02:2025",
+    "nist": "SC-28,IA-8",
+    "sources": [
+      "fracture-jwt"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "jwt",
+    "description": "Sensitive data (e.g., passwords, PII, internal IDs) was found in the JWT payload. JWT payloads are base64-encoded but not encrypted, making them readable to any party with the token.",
+    "remediation": "Remove sensitive data from JWT payloads. Use JWE (JSON Web Encryption) if sensitive data must be embedded in tokens."
+  },
+  {
+    "id": "FR-078",
+    "title": "JWT Token Accepted After Expiry",
+    "risk": "HIGH",
+    "owasp": "A07:2025",
+    "nist": "IA-8,SC-23",
+    "sources": [
+      "fracture-jwt"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "jwt",
+    "description": "The server accepts JWT tokens after their 'exp' (expiration) claim has passed. This allows indefinite reuse of stolen or leaked tokens.",
+    "remediation": "Enforce 'exp' claim validation in JWT processing. Reject tokens with past expiration times. Use short token lifetimes with refresh token rotation."
+  },
+  {
+    "id": "FR-079",
+    "title": "JWT kid Header Injection",
+    "risk": "CRITICAL",
+    "owasp": "A02:2025",
+    "nist": "IA-8",
+    "sources": [
+      "fracture-jwt"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "jwt",
+    "description": "The JWT 'kid' (Key ID) header parameter is used in an unsafe SQL query or file path lookup without validation. An attacker can inject a SQL payload or path traversal sequence into the kid header to manipulate key selection.",
+    "remediation": "Validate and sanitize the 'kid' header value. Use a whitelist of known key IDs. Never use the kid value directly in SQL queries or file system lookups."
+  },
+  {
+    "id": "FR-080",
+    "title": "JWT jwk Header Injection",
+    "risk": "CRITICAL",
+    "owasp": "A02:2025",
+    "nist": "IA-8",
+    "sources": [
+      "fracture-jwt"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "jwt",
+    "description": "The server trusts the 'jwk' (JSON Web Key) header embedded in the JWT itself for signature verification. An attacker can embed their own public key in the jwk header and sign a forged token with the corresponding private key.",
+    "remediation": "Never trust keys embedded in the JWT header. Use only server-side trusted key stores for JWT verification. Ignore or reject tokens with 'jwk' or 'jku' headers unless explicitly required."
+  },
+  {
+    "id": "FR-081",
+    "title": "SQL Injection",
+    "risk": "CRITICAL",
+    "owasp": "A03:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "SQL injection was detected. User-supplied input is incorporated into SQL queries without proper parameterization or escaping. An attacker can manipulate database queries to extract, modify, or delete data, bypass authentication, or execute operating system commands.",
+    "remediation": "Use parameterized queries or prepared statements for all database interactions. Never concatenate user input into SQL strings. Apply the principle of least privilege to database accounts."
+  },
+  {
+    "id": "FR-082",
+    "title": "Blind SQL Injection (Boolean-Based)",
+    "risk": "CRITICAL",
+    "owasp": "A03:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "Boolean-based blind SQL injection was detected. The application does not return error messages, but its behavior changes based on the truth value of injected conditions, allowing data extraction through binary search.",
+    "remediation": "Use parameterized queries or prepared statements. Implement a WAF. Review all database query construction code for unsanitized input."
+  },
+  {
+    "id": "FR-083",
+    "title": "Blind SQL Injection (Time-Based)",
+    "risk": "CRITICAL",
+    "owasp": "A03:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "Time-based blind SQL injection was detected. The server introduces measurable response delays when injected time-delay SQL functions (e.g., SLEEP, WAITFOR DELAY) are executed, confirming SQL injection without visible output.",
+    "remediation": "Use parameterized queries or prepared statements. Implement query timeouts and anomaly detection. Review all database interaction code."
+  },
+  {
+    "id": "FR-084",
+    "title": "NoSQL Injection",
+    "risk": "CRITICAL",
+    "owasp": "A03:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "NoSQL injection was detected against a MongoDB, Elasticsearch, or similar NoSQL database. Unsanitized user input is used to construct NoSQL query objects, allowing query manipulation, authentication bypass, and data extraction.",
+    "remediation": "Validate and sanitize all user input before using it in NoSQL queries. Use typed query builders and avoid accepting raw operator objects (e.g., $where, $gt) from user input."
+  },
+  {
+    "id": "FR-085",
+    "title": "Command Injection (OS Command Injection)",
+    "risk": "CRITICAL",
+    "owasp": "A03:2025",
+    "nist": "SI-10,AC-6",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "Operating system command injection was detected. User-supplied input is passed to a system shell command without sanitization. An attacker can execute arbitrary OS commands with the privileges of the web server process.",
+    "remediation": "Avoid calling OS commands from web applications. If unavoidable, use a whitelist of allowed commands and never pass user input directly to shell functions. Use language-native APIs instead of shell commands."
+  },
+  {
+    "id": "FR-086",
+    "title": "Server-Side Template Injection (SSTI)",
+    "risk": "CRITICAL",
+    "owasp": "A03:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "Server-Side Template Injection was detected. User input is embedded directly into a server-side template (Jinja2, Freemarker, Twig, Velocity, Pebble, etc.) and executed. This can lead to remote code execution on the server.",
+    "remediation": "Never render user-controlled data as template code. Escape all user input before inserting into templates. Use sandboxed template environments."
+  },
+  {
+    "id": "FR-087",
+    "title": "Cross-Site Scripting (XSS) \u2014 Reflected",
+    "risk": "HIGH",
+    "owasp": "A03:2025",
+    "nist": "SI-10,SC-23",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "Reflected Cross-Site Scripting was detected. User-supplied input is returned in the HTTP response without proper encoding, allowing an attacker to inject client-side scripts that execute in the victim's browser.",
+    "remediation": "Encode all user-supplied data before rendering it in HTML context. Implement a strict Content-Security-Policy. Use a template engine with auto-escaping enabled."
+  },
+  {
+    "id": "FR-088",
+    "title": "Cross-Site Scripting (XSS) \u2014 Stored",
+    "risk": "HIGH",
+    "owasp": "A03:2025",
+    "nist": "SI-10,SC-23",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "Stored Cross-Site Scripting was detected. Malicious scripts submitted by an attacker are persisted in the application's data store and executed in the browser of every user who views the affected content.",
+    "remediation": "Encode all stored user data before rendering. Validate and sanitize input on write. Implement CSP with nonce-based script policy."
+  },
+  {
+    "id": "FR-089",
+    "title": "Cross-Site Scripting (XSS) \u2014 DOM-Based",
+    "risk": "HIGH",
+    "owasp": "A03:2025",
+    "nist": "SI-10,SC-23",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "DOM-based Cross-Site Scripting was detected. Client-side JavaScript reads attacker-controlled data (e.g., from URL fragments, postMessage, or localStorage) and writes it to a dangerous sink (innerHTML, eval, document.write) without sanitization.",
+    "remediation": "Review all client-side JavaScript for unsafe DOM manipulation. Use textContent instead of innerHTML. Validate and encode data before passing to DOM sinks."
+  },
+  {
+    "id": "FR-090",
+    "title": "LDAP Injection",
+    "risk": "HIGH",
+    "owasp": "A03:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "LDAP injection was detected. User input is incorporated into LDAP query filters without proper escaping. An attacker can manipulate LDAP queries to bypass authentication or extract directory entries.",
+    "remediation": "Use an LDAP library that supports parameterized queries. Escape all special LDAP characters (\\, *, (, ), NUL) in user-supplied input before using it in filters."
+  },
+  {
+    "id": "FR-091",
+    "title": "XPath Injection",
+    "risk": "HIGH",
+    "owasp": "A03:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "XPath injection was detected. User input is embedded in XPath query expressions without sanitization. An attacker can manipulate queries to extract unauthorized XML data or bypass authentication.",
+    "remediation": "Use parameterized XPath queries. Escape all user-supplied data used in XPath expressions. Validate input against a strict whitelist."
+  },
+  {
+    "id": "FR-092",
+    "title": "XML External Entity (XXE) Injection",
+    "risk": "CRITICAL",
+    "owasp": "A05:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "XML External Entity (XXE) injection was detected. The XML parser processes externally supplied entity references, allowing an attacker to read local files, perform SSRF, or cause denial of service.",
+    "remediation": "Disable external entity processing in the XML parser configuration. Use safe XML parsing libraries. If XML must be accepted, validate and strip external entities before parsing."
+  },
+  {
+    "id": "FR-093",
+    "title": "HTTP Parameter Pollution",
+    "risk": "MEDIUM",
+    "owasp": "A03:2025",
+    "nist": "SI-10",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "HTTP Parameter Pollution (HPP) was detected. Supplying duplicate parameters causes inconsistent behavior in the application, potentially bypassing input validation, WAF rules, or access controls.",
+    "remediation": "Normalize HTTP parameter handling. Define explicit behavior for duplicate parameters. Validate parameters server-side after normalization."
+  },
+  {
+    "id": "FR-094",
+    "title": "JavaScript Secret Disclosure",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "IA-5,SC-12",
+    "sources": [
+      "fracture-crawl"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "crawl",
+    "description": "Sensitive secrets (API keys, credentials, tokens, private keys) were found hardcoded in client-side JavaScript files. These secrets are visible to anyone who views the page source.",
+    "remediation": "Remove all hardcoded secrets from client-side JavaScript. Move sensitive keys to server-side configuration. Rotate any exposed secrets immediately. Implement secret scanning in the CI/CD pipeline."
+  },
+  {
+    "id": "FR-095",
+    "title": "Internal IP Address Disclosure in JavaScript",
+    "risk": "LOW",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-crawl"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "crawl",
+    "description": "Internal IP addresses or hostnames were found referenced in client-side JavaScript. This reveals internal network topology and may aid in SSRF attacks.",
+    "remediation": "Remove internal IP addresses from client-side code. Use relative URLs or environment-specific configuration injection to avoid hardcoded internal references."
+  },
+  {
+    "id": "FR-096",
+    "title": "Hidden Form Fields Disclose Sensitive Data",
+    "risk": "MEDIUM",
+    "owasp": "A01:2025",
+    "nist": "SC-23,AC-3",
+    "sources": [
+      "fracture-crawl"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "crawl",
+    "description": "Hidden HTML form fields contain sensitive data such as user IDs, prices, roles, or tokens that are not intended to be modified by the client but are submitted without server-side validation.",
+    "remediation": "Validate all form fields server-side regardless of whether they are hidden. Never rely on hidden fields for security-relevant data. Use server-side session state instead."
+  },
+  {
+    "id": "FR-097",
+    "title": "Client-Side Redirect via open() or location",
+    "risk": "MEDIUM",
+    "owasp": "A01:2025",
+    "nist": "SC-23",
+    "sources": [
+      "fracture-crawl"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "crawl",
+    "description": "JavaScript code uses window.location, window.open, or similar to redirect users based on URL parameters without validation. This may enable open redirect or DOM-based XSS attacks.",
+    "remediation": "Validate redirect destinations against a server-side whitelist. Avoid using unsanitized URL parameters in client-side redirects."
+  },
+  {
+    "id": "FR-098",
+    "title": "HTML Comment Discloses Sensitive Information",
+    "risk": "LOW",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-crawl"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "crawl",
+    "description": "HTML comments in the page source reveal sensitive information such as developer notes, TODO items, internal system names, credentials, or debug information.",
+    "remediation": "Remove all sensitive comments from HTML templates and responses before deployment. Implement a pre-deployment review process to catch information leakage."
+  },
+  {
+    "id": "FR-099",
+    "title": "Path Traversal / Local File Inclusion",
+    "risk": "CRITICAL",
+    "owasp": "A01:2025",
+    "nist": "AC-3,SI-10",
+    "sources": [
+      "fracture-traversal"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "traversal",
+    "description": "Path traversal (directory traversal) was detected. An attacker can use sequences like ../../ in user-supplied file path parameters to read files outside the intended directory, such as /etc/passwd, application configuration, or source code.",
+    "remediation": "Validate all file path inputs against a strict whitelist. Use canonical path resolution and verify the resolved path starts with the allowed base directory. Avoid user-controlled file paths entirely where possible."
+  },
+  {
+    "id": "FR-100",
+    "title": "Remote File Inclusion",
+    "risk": "CRITICAL",
+    "owasp": "A03:2025",
+    "nist": "AC-3,SI-10",
+    "sources": [
+      "fracture-traversal"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "traversal",
+    "description": "Remote File Inclusion (RFI) was detected. The application includes or requires files using a URL parameter that can be set to a remote URL, allowing an attacker to inject and execute remote PHP or server-side code.",
+    "remediation": "Disable allow_url_include in PHP configuration. Never pass user input to include(), require(), or equivalent file inclusion functions. Use a whitelist of allowed includes."
+  },
+  {
+    "id": "FR-101",
+    "title": "Server-Side Request Forgery (SSRF)",
+    "risk": "CRITICAL",
+    "owasp": "A10:2025",
+    "nist": "SC-7,AC-3",
+    "sources": [
+      "fracture-ssrf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "ssrf",
+    "description": "Server-Side Request Forgery (SSRF) was detected. The application fetches remote resources at a URL controlled by the attacker. This can be used to access internal services, cloud metadata endpoints (169.254.169.254), or exfiltrate data from internal networks.",
+    "remediation": "Validate and whitelist all URLs that the server is allowed to fetch. Block requests to private IP ranges, loopback addresses, and cloud metadata endpoints. Implement egress filtering at the network level."
+  },
+  {
+    "id": "FR-102",
+    "title": "SSRF via Cloud Metadata Endpoint Access",
+    "risk": "CRITICAL",
+    "owasp": "A10:2025",
+    "nist": "SC-7,AC-3",
+    "sources": [
+      "fracture-ssrf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "ssrf",
+    "description": "SSRF was exploited to access the cloud provider's instance metadata service (AWS 169.254.169.254, GCP metadata.google.internal, Azure metadata endpoint). This can expose IAM credentials, instance configuration, and other sensitive metadata.",
+    "remediation": "Block access to 169.254.169.254 and all cloud metadata endpoints at the network level. Use IMDSv2 on AWS (which requires session tokens). Implement SSRF mitigation with URL allowlisting."
+  },
+  {
+    "id": "FR-103",
+    "title": "SSRF via Internal Network Access",
+    "risk": "HIGH",
+    "owasp": "A10:2025",
+    "nist": "SC-7,AC-4",
+    "sources": [
+      "fracture-ssrf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "ssrf",
+    "description": "SSRF was exploited to access internal network services (RFC 1918 address ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16). The attacker can probe and interact with services not directly accessible from the internet.",
+    "remediation": "Implement a URL allowlist that explicitly blocks private IP ranges. Use network segmentation to prevent the web tier from accessing internal services unnecessarily."
+  },
+  {
+    "id": "FR-104",
+    "title": "Broken Authentication \u2014 Default Credentials",
+    "risk": "CRITICAL",
+    "owasp": "A07:2025",
+    "nist": "IA-5,AC-2",
+    "sources": [
+      "fracture-auth-bypass"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_bypass",
+    "description": "The application or an integrated component (CMS, framework, admin panel) uses default or well-known credentials (admin/admin, admin/password, etc.) that have not been changed.",
+    "remediation": "Change all default credentials immediately. Implement a policy requiring strong, unique credentials for all accounts. Enforce password complexity requirements."
+  },
+  {
+    "id": "FR-105",
+    "title": "Authentication Bypass via SQL Injection",
+    "risk": "CRITICAL",
+    "owasp": "A07:2025",
+    "nist": "IA-3,AC-3",
+    "sources": [
+      "fracture-auth-bypass"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_bypass",
+    "description": "The login form is vulnerable to SQL injection, allowing authentication bypass without valid credentials. Payloads such as ' OR '1'='1 successfully authenticate as arbitrary users.",
+    "remediation": "Use parameterized queries for all authentication-related SQL. Implement input validation on login forms. Review all authentication logic for injection vulnerabilities."
+  },
+  {
+    "id": "FR-106",
+    "title": "Authentication Bypass via Response Manipulation",
+    "risk": "CRITICAL",
+    "owasp": "A07:2025",
+    "nist": "IA-3,AC-3",
+    "sources": [
+      "fracture-auth-bypass"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_bypass",
+    "description": "Authentication can be bypassed by manipulating server responses (e.g., changing 'false' to 'true' in JSON responses, modifying HTTP status codes). The application relies on client-supplied success/failure signals instead of server-side session management.",
+    "remediation": "Implement server-side session management. Never rely on client-side responses to make authentication decisions. Validate authentication state server-side on every request."
+  },
+  {
+    "id": "FR-107",
+    "title": "Authentication Bypass via Direct URL Access",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-3,IA-3",
+    "sources": [
+      "fracture-auth-bypass"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_bypass",
+    "description": "Authenticated pages or resources are accessible by directly navigating to their URLs without an active session. Authentication enforcement is missing on the server side for certain endpoints.",
+    "remediation": "Enforce authentication middleware on all routes that require authentication. Implement a centralized authentication check that applies to every request."
+  },
+  {
+    "id": "FR-108",
+    "title": "Password Reset Token Weak or Predictable",
+    "risk": "HIGH",
+    "owasp": "A07:2025",
+    "nist": "IA-5,SC-12",
+    "sources": [
+      "fracture-auth-bypass",
+      "fracture-session"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_bypass",
+    "description": "Password reset tokens are short, sequential, or based on predictable data (timestamp, username hash, MD5). An attacker can enumerate or brute-force valid reset tokens to take over accounts.",
+    "remediation": "Generate password reset tokens using a cryptographically secure random number generator with at least 128 bits of entropy. Enforce token expiration and single-use consumption."
+  },
+  {
+    "id": "FR-109",
+    "title": "Sensitive File Exposed \u2014 /etc/passwd",
+    "risk": "CRITICAL",
+    "owasp": "A01:2025",
+    "nist": "AC-3,CM-7",
+    "sources": [
+      "fracture-files"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "files",
+    "description": "The /etc/passwd file is accessible via path traversal or misconfiguration. This file contains system user account information and can aid privilege escalation and targeted attacks.",
+    "remediation": "Fix the path traversal or misconfiguration that exposes this file. Restrict filesystem permissions and ensure the web server process cannot read sensitive system files."
+  },
+  {
+    "id": "FR-110",
+    "title": "Sensitive File Exposed \u2014 .env",
+    "risk": "CRITICAL",
+    "owasp": "A05:2025",
+    "nist": "IA-5,AC-3",
+    "sources": [
+      "fracture-files"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "files",
+    "description": "The .env environment configuration file is publicly accessible. This file typically contains database credentials, API keys, secret keys, and other application secrets.",
+    "remediation": "Immediately move .env files outside the web root. Block access to .env files via web server configuration. Rotate all exposed credentials."
+  },
+  {
+    "id": "FR-111",
+    "title": "Sensitive File Exposed \u2014 Private Key",
+    "risk": "CRITICAL",
+    "owasp": "A02:2025",
+    "nist": "SC-12,AC-3",
+    "sources": [
+      "fracture-files"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "files",
+    "description": "A private cryptographic key file (.pem, .key, .p12, .pfx) was found accessible on the web server. Exposure of private keys compromises the entire PKI trust chain and enables impersonation.",
+    "remediation": "Remove all private key files from the web root immediately. Revoke and reissue the associated certificates. Store private keys outside the web root with strict filesystem permissions."
+  },
+  {
+    "id": "FR-112",
+    "title": "Sensitive File Exposed \u2014 phpinfo()",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "CM-7,AC-3",
+    "sources": [
+      "fracture-files"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "files",
+    "description": "A phpinfo() page is publicly accessible. This page reveals PHP version, loaded modules, configuration settings, environment variables, file system paths, and potentially sensitive server configuration.",
+    "remediation": "Remove all phpinfo() calls from production code. Block access to any phpinfo scripts via web server configuration."
+  },
+  {
+    "id": "FR-113",
+    "title": "Sensitive File Exposed \u2014 Composer/NPM Metadata",
+    "risk": "LOW",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-files"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "files",
+    "description": "Package metadata files (composer.json, package.json, package-lock.json, composer.lock) are publicly accessible. These reveal application dependencies and versions, aiding in CVE identification.",
+    "remediation": "Block access to package metadata files via web server configuration. Move these files outside the web root or deny access to them."
+  },
+  {
+    "id": "FR-114",
+    "title": "Vulnerability Scanner Finding \u2014 Known CVE",
+    "risk": "HIGH",
+    "owasp": "A06:2025",
+    "nist": "SI-2,CM-7",
+    "sources": [
+      "fracture-vulnscan"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "vulnscan",
+    "description": "A vulnerability scanner (Nuclei) identified a known CVE in a component used by the application. The component version matches a published vulnerability with a known proof-of-concept or exploit.",
+    "remediation": "Update the vulnerable component to the patched version. Apply vendor security patches. Implement a patch management process with regular CVE monitoring."
+  },
+  {
+    "id": "FR-115",
+    "title": "Vulnerability Scanner Finding \u2014 Exposed Panel",
+    "risk": "HIGH",
+    "owasp": "A05:2025",
+    "nist": "AC-3,CM-7",
+    "sources": [
+      "fracture-vulnscan"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "vulnscan",
+    "description": "A Nuclei scan identified an exposed administrative or monitoring panel (e.g., Grafana, Kibana, Consul, Prometheus, Jenkins) without authentication or with default credentials.",
+    "remediation": "Restrict access to all administrative panels by IP whitelist or VPN. Enforce authentication and disable default credentials. Move panels off public-facing infrastructure."
+  },
+  {
+    "id": "FR-116",
+    "title": "Vulnerability Scanner Finding \u2014 Misconfiguration",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "CM-6,CM-7",
+    "sources": [
+      "fracture-vulnscan"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "vulnscan",
+    "description": "A Nuclei scan identified a security misconfiguration in the application or server. Common examples include debug endpoints enabled, HTTP methods unrestricted, or CORS policies allowing arbitrary origins.",
+    "remediation": "Review and remediate the specific misconfiguration identified. Implement a security hardening baseline and apply it consistently across all servers."
+  },
+  {
+    "id": "FR-117",
+    "title": "GraphQL Introspection Enabled",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "CM-7,AC-3",
+    "sources": [
+      "fracture-graphql"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "graphql",
+    "description": "GraphQL introspection is enabled in the production environment. Introspection allows any client to retrieve the full schema including all types, queries, mutations, and field definitions, providing a complete attack surface map.",
+    "remediation": "Disable GraphQL introspection in production environments. If introspection is required, restrict it to authenticated and authorized users."
+  },
+  {
+    "id": "FR-118",
+    "title": "GraphQL Batch Query Attack",
+    "risk": "HIGH",
+    "owasp": "A04:2025",
+    "nist": "SC-5,SI-10",
+    "sources": [
+      "fracture-graphql"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "graphql",
+    "description": "The GraphQL endpoint accepts batched queries, allowing multiple queries to be sent in a single HTTP request. This can be abused to bypass rate limiting and perform brute-force or enumeration attacks at scale.",
+    "remediation": "Implement query batching limits. Enforce per-query rate limiting that accounts for batched requests. Consider disabling batch query support if not required."
+  },
+  {
+    "id": "FR-119",
+    "title": "GraphQL Deeply Nested Query (DoS)",
+    "risk": "HIGH",
+    "owasp": "A04:2025",
+    "nist": "SC-5",
+    "sources": [
+      "fracture-graphql"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "graphql",
+    "description": "The GraphQL endpoint does not enforce query depth limits. An attacker can craft deeply nested queries that cause exponential resource consumption, leading to denial of service.",
+    "remediation": "Implement query depth limiting (e.g., max depth of 5-10 levels). Add query complexity analysis and reject queries above a complexity threshold."
+  },
+  {
+    "id": "FR-120",
+    "title": "GraphQL Field Suggestion Enabled",
+    "risk": "LOW",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-graphql"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "graphql",
+    "description": "The GraphQL server returns 'Did you mean X?' suggestions when querying non-existent fields. This allows schema enumeration even when introspection is disabled.",
+    "remediation": "Disable field suggestions in the GraphQL server configuration. In Apollo Server, set the 'debug' option to false."
+  },
+  {
+    "id": "FR-121",
+    "title": "Insufficient Logging and Monitoring",
+    "risk": "MEDIUM",
+    "owasp": "A09:2025",
+    "nist": "AU-2,AU-12",
+    "sources": [
+      "fracture-logging-monitoring"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "logging_monitoring",
+    "description": "The application fails to generate adequate log entries for security-relevant events such as failed logins, access control failures, or input validation errors. Without sufficient logging, attacks may go undetected.",
+    "remediation": "Implement comprehensive security logging for all authentication events, access control failures, and input validation errors. Forward logs to a centralized SIEM. Set up alerts for anomalous patterns."
+  },
+  {
+    "id": "FR-122",
+    "title": "Verbose Error Messages Logged to Client",
+    "risk": "MEDIUM",
+    "owasp": "A09:2025",
+    "nist": "SI-11,AU-3",
+    "sources": [
+      "fracture-logging-monitoring"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "logging_monitoring",
+    "description": "The application returns verbose error messages including stack traces, file paths, or internal state to the client. This information aids attackers in understanding the application's internals.",
+    "remediation": "Configure custom error pages in production. Log detailed errors server-side only. Never expose stack traces, framework-specific error messages, or internal paths to users."
+  },
+  {
+    "id": "FR-123",
+    "title": "No Account Lockout Mechanism",
+    "risk": "HIGH",
+    "owasp": "A07:2025",
+    "nist": "AC-7,IA-5",
+    "sources": [
+      "fracture-account-lockout"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "account_lockout",
+    "description": "The login endpoint does not implement account lockout or rate limiting after repeated failed authentication attempts. An attacker can conduct unlimited brute-force or credential stuffing attacks.",
+    "remediation": "Implement account lockout (temporary lock after N failed attempts) or progressive delays. Add CAPTCHA after a threshold of failures. Monitor for credential stuffing patterns."
+  },
+  {
+    "id": "FR-124",
+    "title": "Username Enumeration via Login Response",
+    "risk": "MEDIUM",
+    "owasp": "A07:2025",
+    "nist": "IA-5,AC-2",
+    "sources": [
+      "fracture-account-lockout",
+      "fracture-auth-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_recon",
+    "description": "The login form returns different error messages for invalid usernames versus invalid passwords ('User not found' vs 'Incorrect password'). This allows enumeration of valid usernames.",
+    "remediation": "Return a generic error message ('Invalid username or password') regardless of whether the username or password is incorrect. Apply consistent response timing to prevent timing-based enumeration."
+  },
+  {
+    "id": "FR-125",
+    "title": "Username Enumeration via Password Reset",
+    "risk": "MEDIUM",
+    "owasp": "A07:2025",
+    "nist": "IA-5,AC-2",
+    "sources": [
+      "fracture-auth-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_recon",
+    "description": "The password reset form reveals whether a submitted email or username exists in the system through different response messages or behaviors. This enables username/email enumeration.",
+    "remediation": "Always return the same response message for both registered and unregistered users ('If an account exists, a reset email has been sent'). Avoid timing differences that could leak account existence."
+  },
+  {
+    "id": "FR-126",
+    "title": "Username Enumeration via Registration",
+    "risk": "MEDIUM",
+    "owasp": "A07:2025",
+    "nist": "IA-5,AC-2",
+    "sources": [
+      "fracture-auth-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_recon",
+    "description": "The user registration form discloses whether a username or email is already registered, enabling enumeration of valid accounts.",
+    "remediation": "Implement email-based registration confirmation to avoid exposing account existence. Use consistent responses that do not distinguish between registered and unregistered identifiers."
+  },
+  {
+    "id": "FR-127",
+    "title": "Weak Password Policy",
+    "risk": "MEDIUM",
+    "owasp": "A07:2025",
+    "nist": "IA-5",
+    "sources": [
+      "fracture-auth-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_recon",
+    "description": "The application accepts passwords that are too short or lack complexity requirements. Weak passwords are trivially compromised through brute-force or dictionary attacks.",
+    "remediation": "Enforce a minimum password length of 12 characters. Check passwords against known breached password lists (e.g., HaveIBeenPwned API). Consider implementing NIST SP 800-63B password guidance."
+  },
+  {
+    "id": "FR-128",
+    "title": "Multi-Factor Authentication Not Enforced",
+    "risk": "MEDIUM",
+    "owasp": "A07:2025",
+    "nist": "IA-2",
+    "sources": [
+      "fracture-auth-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_recon",
+    "description": "Multi-factor authentication (MFA) is not available or not enforced for privileged accounts. Single-factor authentication is vulnerable to credential theft, phishing, and brute-force attacks.",
+    "remediation": "Implement and enforce MFA for all user accounts, especially administrative and privileged accounts. Use TOTP, hardware tokens, or push-based MFA."
+  },
+  {
+    "id": "FR-129",
+    "title": "Insecure Direct Object Reference (IDOR)",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-3,AC-4",
+    "sources": [
+      "fracture-authorization"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "authorization",
+    "description": "Insecure Direct Object Reference (IDOR) was detected. Direct references to internal objects (user IDs, record IDs, file names) are exposed in URLs or parameters without authorization checks, allowing access to other users' data by modifying the reference.",
+    "remediation": "Implement server-side authorization checks on every object access. Use indirect references (GUIDs, hashed IDs) instead of sequential integer IDs. Validate object ownership on every request."
+  },
+  {
+    "id": "FR-130",
+    "title": "Horizontal Privilege Escalation",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-3,AC-6",
+    "sources": [
+      "fracture-authorization"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "authorization",
+    "description": "Horizontal privilege escalation was detected. An authenticated user can access or modify another user's resources by manipulating user-specific identifiers in requests, without authorization validation.",
+    "remediation": "Enforce server-side ownership checks for all user-specific resources. Validate that the requesting user owns or has explicit permission to access the target resource."
+  },
+  {
+    "id": "FR-131",
+    "title": "Vertical Privilege Escalation",
+    "risk": "CRITICAL",
+    "owasp": "A01:2025",
+    "nist": "AC-3,AC-6",
+    "sources": [
+      "fracture-authorization"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "authorization",
+    "description": "Vertical privilege escalation was detected. A lower-privileged user can access administrative functionality or higher-privileged resources by directly accessing restricted endpoints or modifying role/permission parameters.",
+    "remediation": "Implement role-based access control (RBAC) enforced server-side. Never rely on client-supplied role or privilege parameters. Centralize authorization logic and apply it to every request."
+  },
+  {
+    "id": "FR-132",
+    "title": "Missing Function-Level Access Control",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-3,AC-6",
+    "sources": [
+      "fracture-authorization"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "authorization",
+    "description": "Application functions (APIs, admin actions) are protected only by hiding them from the UI but lack server-side access control enforcement. An attacker who discovers the endpoint URL can invoke restricted functionality.",
+    "remediation": "Implement server-side access control checks on every sensitive function endpoint. Security by obscurity (hiding URLs) is not a substitute for proper access control."
+  },
+  {
+    "id": "FR-133",
+    "title": "Session Fixation",
+    "risk": "HIGH",
+    "owasp": "A07:2025",
+    "nist": "SC-23,IA-8",
+    "sources": [
+      "fracture-session"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "session",
+    "description": "Session fixation was detected. The application does not generate a new session ID after successful authentication. An attacker who can set a victim's session ID can hijack the session after the victim authenticates.",
+    "remediation": "Generate a new session ID upon successful authentication. Invalidate pre-authentication session IDs. Never accept session IDs provided in URLs."
+  },
+  {
+    "id": "FR-134",
+    "title": "Session Token in URL",
+    "risk": "HIGH",
+    "owasp": "A07:2025",
+    "nist": "SC-23,IA-8",
+    "sources": [
+      "fracture-session"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "session",
+    "description": "Session tokens are transmitted in URL query parameters. Session tokens in URLs are exposed in browser history, referrer headers, server logs, and proxy logs, significantly increasing the risk of session hijacking.",
+    "remediation": "Transmit session tokens only via HttpOnly, Secure cookies. Never include session tokens in URLs or query parameters."
+  },
+  {
+    "id": "FR-135",
+    "title": "Long-Lived Session Without Expiration",
+    "risk": "MEDIUM",
+    "owasp": "A07:2025",
+    "nist": "SC-23,AC-12",
+    "sources": [
+      "fracture-session"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "session",
+    "description": "Session tokens remain valid indefinitely or for excessively long periods. Long-lived sessions increase the window of opportunity for session hijacking after token theft.",
+    "remediation": "Implement server-side session expiration. Set absolute session timeouts (e.g., 8 hours) and idle timeouts (e.g., 30 minutes). Require re-authentication for sensitive actions."
+  },
+  {
+    "id": "FR-136",
+    "title": "Session Not Invalidated on Logout",
+    "risk": "HIGH",
+    "owasp": "A07:2025",
+    "nist": "SC-23,AC-12",
+    "sources": [
+      "fracture-session"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "session",
+    "description": "Session tokens remain valid on the server after the user logs out. An attacker who captures a session token before logout can reuse it indefinitely.",
+    "remediation": "Invalidate session tokens server-side upon logout. Ensure the session store removes or expires the session record. Do not rely solely on clearing the client-side cookie."
+  },
+  {
+    "id": "FR-137",
+    "title": "Cross-Site Request Forgery (CSRF)",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "SC-23,SI-10",
+    "sources": [
+      "fracture-csrf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "csrf",
+    "description": "Cross-Site Request Forgery (CSRF) was detected. State-changing requests lack CSRF tokens or other anti-CSRF mechanisms. An attacker can craft a malicious page that triggers state-changing actions in the victim's authenticated session.",
+    "remediation": "Implement CSRF tokens (synchronizer token pattern or double-submit cookie). Use SameSite=Strict or SameSite=Lax cookies. Validate the Origin/Referer header for state-changing requests."
+  },
+  {
+    "id": "FR-138",
+    "title": "CSRF Token Not Validated Server-Side",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "SC-23",
+    "sources": [
+      "fracture-csrf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "csrf",
+    "description": "The application includes CSRF tokens in forms but does not validate them server-side, or accepts any non-empty value as valid. The CSRF protection mechanism is present but ineffective.",
+    "remediation": "Validate CSRF tokens server-side on every state-changing request. Reject requests with missing, empty, or invalid CSRF tokens. Ensure tokens are unpredictable and bound to the user session."
+  },
+  {
+    "id": "FR-139",
+    "title": "Cross-User Data Leakage",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-4,SC-23",
+    "sources": [
+      "fracture-cross-user"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "cross_user",
+    "description": "Data belonging to one user is visible to another user due to insufficient isolation in shared resources, caches, or multi-tenant data stores. This is a class of broken access control.",
+    "remediation": "Implement strict data isolation per user/tenant. Audit all data access paths for ownership validation. Review caching configurations to prevent cross-user cache poisoning."
+  },
+  {
+    "id": "FR-140",
+    "title": "Open Redirect",
+    "risk": "MEDIUM",
+    "owasp": "A01:2025",
+    "nist": "SC-23,SI-10",
+    "sources": [
+      "fracture-open-redirect"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "open_redirect",
+    "description": "An open redirect vulnerability was detected. The application redirects users to a URL specified in a request parameter without validation. Attackers can craft URLs that redirect victims to malicious sites, facilitating phishing.",
+    "remediation": "Validate redirect destinations against a strict whitelist of allowed URLs or origins. Avoid user-controlled redirect targets entirely. Use relative redirects where possible."
+  },
+  {
+    "id": "FR-141",
+    "title": "Insecure Deserialization",
+    "risk": "CRITICAL",
+    "owasp": "A08:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-deserialization"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "deserialization",
+    "description": "Insecure deserialization was detected. The application deserializes user-supplied data (via pickle, Java ObjectInputStream, PHP unserialize, YAML.load, etc.) without integrity verification. This can lead to remote code execution, authentication bypass, or denial of service.",
+    "remediation": "Do not deserialize data from untrusted sources. Sign serialized objects with an HMAC and verify the signature before deserialization. Use safe serialization formats (JSON) instead of language-native object serialization."
+  },
+  {
+    "id": "FR-142",
+    "title": "Java Deserialization via Gadget Chains",
+    "risk": "CRITICAL",
+    "owasp": "A08:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-deserialization"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "deserialization",
+    "description": "Java object deserialization was identified with known gadget chain exploitability. Exploitation of known gadget chains (Commons Collections, Spring, etc.) via ysoserial payloads can result in remote code execution.",
+    "remediation": "Upgrade all Java serialization libraries to patched versions. Implement a serialization filter (JEP 290). Use Contrast Security or similar RASP to detect deserialization attacks at runtime."
+  },
+  {
+    "id": "FR-143",
+    "title": "PHP Object Injection via unserialize()",
+    "risk": "CRITICAL",
+    "owasp": "A08:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-deserialization"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "deserialization",
+    "description": "PHP's unserialize() function is called on user-controlled input. If the application's autoloaded classes contain exploitable magic methods (__wakeup, __destruct, __toString), this can lead to arbitrary code execution via POP chains.",
+    "remediation": "Never call unserialize() on user-supplied input. Replace with JSON or other data formats. If unavoidable, use allowed_classes parameter to restrict which classes can be instantiated."
+  },
+  {
+    "id": "FR-144",
+    "title": "Unrestricted File Upload \u2014 Executable File",
+    "risk": "CRITICAL",
+    "owasp": "A04:2025",
+    "nist": "SI-3,AC-3",
+    "sources": [
+      "fracture-file-upload"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "file_upload_info",
+    "description": "The file upload functionality allows uploading of executable files (PHP, JSP, ASP, Python, etc.) without restriction. An attacker can upload a web shell and execute arbitrary commands on the server.",
+    "remediation": "Implement a strict file extension whitelist for uploads. Validate file content using magic bytes, not just extension. Store uploaded files outside the web root. Rename all uploaded files to remove their original extension."
+  },
+  {
+    "id": "FR-145",
+    "title": "Unrestricted File Upload \u2014 MIME Type Bypass",
+    "risk": "HIGH",
+    "owasp": "A04:2025",
+    "nist": "SI-3,AC-3",
+    "sources": [
+      "fracture-file-upload"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "file_upload_info",
+    "description": "The file upload validation relies solely on the Content-Type header or file extension, which can be manipulated by an attacker. Malicious file content can be uploaded while disguising it as a permitted MIME type.",
+    "remediation": "Validate files using server-side magic byte analysis (file signature), not MIME type headers or extensions supplied by the client. Use a library such as python-magic or libmagic."
+  },
+  {
+    "id": "FR-146",
+    "title": "File Upload \u2014 Path Traversal in Filename",
+    "risk": "HIGH",
+    "owasp": "A04:2025",
+    "nist": "SI-3,AC-3",
+    "sources": [
+      "fracture-file-upload"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "file_upload_info",
+    "description": "The file upload functionality uses the client-supplied filename in the server-side file path without sanitization. An attacker can supply a filename with path traversal sequences to write files to arbitrary server locations.",
+    "remediation": "Never use client-supplied filenames for server-side storage. Generate a random server-side filename for every uploaded file. Strip all path components from the original filename."
+  },
+  {
+    "id": "FR-147",
+    "title": "Mass Assignment Vulnerability",
+    "risk": "HIGH",
+    "owasp": "A04:2025",
+    "nist": "AC-3,SI-10",
+    "sources": [
+      "fracture-mass-assignment"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "mass_assignment",
+    "description": "Mass assignment (also known as auto-binding) was detected. The application binds HTTP request parameters directly to internal model attributes without filtering. An attacker can set privileged attributes (isAdmin, role, balance) by adding them to the request body.",
+    "remediation": "Implement an explicit allowlist of fields that can be mass-assigned from user input. Use Data Transfer Objects (DTOs) or explicit field binding rather than mapping all request parameters to model attributes."
+  },
+  {
+    "id": "FR-148",
+    "title": "Mass Assignment \u2014 Privilege Escalation via Role Field",
+    "risk": "CRITICAL",
+    "owasp": "A04:2025",
+    "nist": "AC-3,AC-6",
+    "sources": [
+      "fracture-mass-assignment"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "mass_assignment",
+    "description": "Mass assignment was exploited to modify a privileged field such as 'isAdmin', 'role', or 'permission_level' by including it in a user-controlled request body. This allows privilege escalation to administrator or higher-privileged roles.",
+    "remediation": "Block mass assignment of privilege-related fields. Explicitly whitelist only user-modifiable fields. Validate and enforce role changes through dedicated privileged endpoints."
+  },
+  {
+    "id": "FR-149",
+    "title": "Broken Object-Level Authorization (BOLA) in API",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-3,AC-6",
+    "sources": [
+      "fracture-authorization",
+      "fracture-access-matrix"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "access_matrix",
+    "description": "API endpoints expose object-level access without authorization validation. An authenticated user can access or modify another user's objects by substituting object IDs in API requests (equivalent to IDOR in APIs).",
+    "remediation": "Implement authorization checks at the object level for every API endpoint. Validate that the authenticated user has permission to access the specific object referenced in the request."
+  },
+  {
+    "id": "FR-150",
+    "title": "Broken Function-Level Authorization (BFLA) in API",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-3,AC-6",
+    "sources": [
+      "fracture-authorization",
+      "fracture-access-matrix"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "access_matrix",
+    "description": "API endpoints with administrative or privileged functionality are accessible to lower-privileged or unauthenticated users. Function-level access control is not enforced by the API.",
+    "remediation": "Enforce role-based access control at the function/endpoint level. Apply authorization middleware to every API route that requires privilege. Perform authorization checks server-side on every request."
+  },
+  {
+    "id": "FR-151",
+    "title": "HTTP Method Override Accepted",
+    "risk": "MEDIUM",
+    "owasp": "A01:2025",
+    "nist": "CM-7,SI-10",
+    "sources": [
+      "fracture-authorization"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "authorization",
+    "description": "The application accepts HTTP method override headers (X-HTTP-Method-Override, X-Method-Override) that substitute the actual HTTP method with a client-specified one. This may bypass access controls that rely on HTTP method restrictions.",
+    "remediation": "Disable HTTP method override support unless explicitly required. If required, restrict method overrides to authenticated users and validate that the overridden method is appropriate for the endpoint."
+  },
+  {
+    "id": "FR-152",
+    "title": "CORS Misconfiguration \u2014 Arbitrary Origin Reflected",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "SC-23,AC-3",
+    "sources": [
+      "fracture-headers",
+      "fracture-authorization"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "The server reflects the request's Origin header in the Access-Control-Allow-Origin response header and includes Access-Control-Allow-Credentials: true. This allows any origin to make credentialed cross-origin requests and read responses, bypassing the Same-Origin Policy.",
+    "remediation": "Maintain an explicit whitelist of allowed origins. Never reflect the request Origin blindly. Do not combine Access-Control-Allow-Credentials: true with dynamic origin reflection or wildcard origins."
+  },
+  {
+    "id": "FR-153",
+    "title": "CORS Misconfiguration \u2014 Null Origin Allowed",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "SC-23,AC-3",
+    "sources": [
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "The server includes 'Access-Control-Allow-Origin: null' in its response. This allows sandboxed iframes, redirects, and local file requests to make credentialed cross-origin requests to the API.",
+    "remediation": "Remove 'null' from the allowed origins list. Use an explicit origin whitelist instead."
+  },
+  {
+    "id": "FR-154",
+    "title": "Business Logic Flaw \u2014 Negative Value Accepted",
+    "risk": "HIGH",
+    "owasp": "A04:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-business-logic"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "business_logic",
+    "description": "The application accepts negative numeric values in business-critical fields (quantity, price, payment amount). This can be exploited to inflate balances, receive credit for purchases, or bypass monetary validation.",
+    "remediation": "Validate that all numeric inputs are within expected positive ranges. Apply server-side bounds checking for all quantity, price, and amount fields."
+  },
+  {
+    "id": "FR-155",
+    "title": "Business Logic Flaw \u2014 Price Manipulation",
+    "risk": "HIGH",
+    "owasp": "A04:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-business-logic"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "business_logic",
+    "description": "The application trusts client-submitted pricing data without server-side verification. An attacker can manipulate price parameters to purchase items at an arbitrary price.",
+    "remediation": "Never trust client-submitted prices. Fetch prices from the server-side data store using product IDs and compute totals server-side. Treat price as a read-only server-computed field."
+  },
+  {
+    "id": "FR-156",
+    "title": "Business Logic Flaw \u2014 Coupon/Discount Abuse",
+    "risk": "MEDIUM",
+    "owasp": "A04:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-business-logic"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "business_logic",
+    "description": "Coupon or discount codes can be applied multiple times per order, stacked beyond intended limits, or applied to ineligible items. Insufficient validation allows financial loss through discount abuse.",
+    "remediation": "Enforce server-side usage limits per coupon and per user. Validate coupon applicability rules on the server. Implement transactional locks to prevent race condition exploitation."
+  },
+  {
+    "id": "FR-157",
+    "title": "Business Logic Flaw \u2014 Workflow Step Bypass",
+    "risk": "HIGH",
+    "owasp": "A04:2025",
+    "nist": "AC-3,SI-10",
+    "sources": [
+      "fracture-business-logic"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "business_logic",
+    "description": "Multi-step workflows (checkout, verification, approval) can be bypassed by directly accessing later steps without completing earlier steps. Server-side workflow state is not enforced.",
+    "remediation": "Track workflow state server-side and enforce step ordering. Verify prerequisites are complete before allowing advancement to subsequent steps."
+  },
+  {
+    "id": "FR-158",
+    "title": "Business Logic Flaw \u2014 Race Condition",
+    "risk": "HIGH",
+    "owasp": "A04:2025",
+    "nist": "SC-5,SI-10",
+    "sources": [
+      "fracture-business-logic"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "business_logic",
+    "description": "A race condition was detected in a critical business operation (e.g., balance check-then-debit, coupon redemption, token verification). Concurrent requests can cause the operation to be performed multiple times before state is updated.",
+    "remediation": "Implement database-level row locking or optimistic concurrency control for critical operations. Use atomic transactions. Implement idempotency keys to prevent duplicate processing."
+  },
+  {
+    "id": "FR-159",
+    "title": "Rate Limiting Not Enforced on Sensitive Endpoint",
+    "risk": "MEDIUM",
+    "owasp": "A04:2025",
+    "nist": "SC-5,AC-7",
+    "sources": [
+      "fracture-account-lockout",
+      "fracture-business-logic"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "business_logic",
+    "description": "No rate limiting is applied to sensitive endpoints such as OTP verification, coupon redemption, password reset, or API calls. Attackers can make unlimited requests to brute-force codes or automate abuse.",
+    "remediation": "Implement per-IP and per-user rate limiting on all sensitive endpoints. Use exponential backoff or CAPTCHA challenges after threshold violations."
+  },
+  {
+    "id": "FR-160",
+    "title": "Insecure Direct Object Reference in File Download",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-3,SC-28",
+    "sources": [
+      "fracture-authorization",
+      "fracture-traversal"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "authorization",
+    "description": "File download endpoints use user-supplied filenames or IDs to retrieve files without ownership validation or path sanitization. Users can download files belonging to other users or access arbitrary files on the filesystem.",
+    "remediation": "Validate file ownership on every download request. Use indirect file references (GUIDs) instead of filesystem paths. Sanitize filenames and resolve canonical paths before access."
+  },
+  {
+    "id": "FR-161",
+    "title": "Screenshot Captured \u2014 Web Application Surface",
+    "risk": "INFO",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-screenshot"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "screenshot",
+    "description": "A screenshot of the target web application was captured. This records the visual surface of the application for documentation and change tracking purposes.",
+    "remediation": "No remediation required. Informational finding for documentation purposes."
+  },
+  {
+    "id": "FR-162",
+    "title": "FFUF Directory/File Discovered",
+    "risk": "INFO",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-ffuf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "webfiles",
+    "description": "Content discovery via ffuf identified a directory or file not linked from the main application. Hidden paths may contain sensitive functionality, backups, or configuration files.",
+    "remediation": "Review discovered paths and apply appropriate access controls. Remove any paths that expose sensitive content or unused functionality."
+  },
+  {
+    "id": "FR-163",
+    "title": "FFUF \u2014 Administrative Path Discovered",
+    "risk": "HIGH",
+    "owasp": "A05:2025",
+    "nist": "AC-3,CM-7",
+    "sources": [
+      "fracture-ffuf"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "webfiles",
+    "description": "ffuf content discovery identified an administrative interface or control panel at a predictable path. Administrative paths accessible without authentication represent a critical security risk.",
+    "remediation": "Restrict access to administrative paths by IP whitelist, VPN, or network segmentation. Enforce strong authentication on all administrative endpoints."
+  },
+  {
+    "id": "FR-164",
+    "title": "shcheck \u2014 Missing Security Header",
+    "risk": "LOW",
+    "owasp": "A05:2025",
+    "nist": "CM-6,SC-23",
+    "sources": [
+      "fracture-shcheck"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "shcheck",
+    "description": "Security header analysis via shcheck identified one or more missing or misconfigured HTTP security headers. Missing security headers increase exposure to common browser-based attacks.",
+    "remediation": "Implement the missing security headers identified by shcheck. Refer to the OWASP Secure Headers Project for recommended header values and configurations."
+  },
+  {
+    "id": "FR-165",
+    "title": "Crawl \u2014 Undocumented Endpoint Discovered",
+    "risk": "INFO",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-crawl"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "crawl",
+    "description": "Application crawling discovered an endpoint not listed in sitemap.xml, robots.txt, or API documentation. Undocumented endpoints may contain legacy, debug, or unprotected functionality.",
+    "remediation": "Review all discovered endpoints and ensure they are properly secured and documented. Remove or disable any endpoints that are no longer required."
+  },
+  {
+    "id": "FR-166",
+    "title": "Crawl \u2014 External Domain Reference Found",
+    "risk": "INFO",
+    "owasp": "A06:2025",
+    "nist": "SC-7,CM-7",
+    "sources": [
+      "fracture-crawl"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "crawl",
+    "description": "The application references external domains for resources (CDNs, third-party scripts, fonts). External dependencies introduce supply chain risk if those domains are compromised or the resources are modified.",
+    "remediation": "Audit all external resource dependencies. Use Subresource Integrity (SRI) hashes for external scripts and stylesheets. Consider self-hosting critical dependencies."
+  },
+  {
+    "id": "FR-167",
+    "title": "TLS Certificate Transparency Log Entry",
+    "risk": "INFO",
+    "owasp": "A05:2025",
+    "nist": "SC-17",
+    "sources": [
+      "fracture-subdomain-takeover",
+      "fracture-recon"
+    ],
+    "cves": [],
+    "service": "https",
+    "phase": "subdomain_takeover",
+    "description": "Certificate Transparency logs reveal all certificates issued for the target domain and its subdomains. This information exposes the full scope of the application's TLS-protected surface.",
+    "remediation": "Informational. Review discovered subdomains for security implications. Ensure all discovered subdomains are accounted for and secured."
+  },
+  {
+    "id": "FR-168",
+    "title": "Authentication \u2014 Concurrent Session Not Restricted",
+    "risk": "MEDIUM",
+    "owasp": "A07:2025",
+    "nist": "AC-10,SC-23",
+    "sources": [
+      "fracture-session"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "session",
+    "description": "The application allows unlimited concurrent sessions for a single user account. This makes it impossible to detect or prevent session sharing or account compromise based on active session count.",
+    "remediation": "Implement concurrent session controls with configurable limits. Notify users of new sessions and provide session management (view and terminate active sessions)."
+  },
+  {
+    "id": "FR-169",
+    "title": "HTTP Methods \u2014 Dangerous Methods Enabled (PUT/DELETE/TRACE)",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "CM-7,AC-3",
+    "sources": [
+      "fracture-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The web server responds to dangerous HTTP methods including PUT (file upload), DELETE (file deletion), or TRACE (XST \u2014 Cross-Site Tracing). These methods may enable unauthorized modification of server content or session token theft.",
+    "remediation": "Disable unused HTTP methods at the web server level. Explicitly allow only the HTTP methods required by the application. Disable TRACE globally."
+  },
+  {
+    "id": "FR-170",
+    "title": "Clickjacking Vulnerability",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "SI-10,SC-23",
+    "sources": [
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "The application does not implement anti-clickjacking protections (X-Frame-Options or CSP frame-ancestors). The page can be embedded in an attacker-controlled iframe to trick users into performing unintended actions.",
+    "remediation": "Add 'X-Frame-Options: DENY' or 'Content-Security-Policy: frame-ancestors none' to all application responses. Use the CSP frame-ancestors directive for more granular control."
+  },
+  {
+    "id": "FR-171",
+    "title": "Sensitive Data Exposure \u2014 PII in Response",
+    "risk": "HIGH",
+    "owasp": "A02:2025",
+    "nist": "SC-28,AC-3",
+    "sources": [
+      "fracture-authorization",
+      "fracture-crawl"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "authorization",
+    "description": "API responses or page content expose personally identifiable information (PII) such as email addresses, phone numbers, SSNs, or financial data that should not be visible to the requesting user or at all.",
+    "remediation": "Implement response filtering to include only fields necessary for the requesting user's context. Apply data minimization principles. Ensure sensitive fields are encrypted at rest and masked in API responses."
+  },
+  {
+    "id": "FR-172",
+    "title": "Insecure Password Storage (Cleartext or Weak Hash)",
+    "risk": "CRITICAL",
+    "owasp": "A02:2025",
+    "nist": "IA-5,SC-28",
+    "sources": [
+      "fracture-auth-bypass",
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_bypass",
+    "description": "Evidence suggests passwords are stored in cleartext, as reversible encryption, or using a weak unsalted hash algorithm (MD5, SHA-1). Password compromise leads to immediate credential exposure.",
+    "remediation": "Store passwords using a modern adaptive hashing algorithm (bcrypt, Argon2id, or scrypt) with an appropriate cost factor. Never store passwords in cleartext or using reversible encryption."
+  },
+  {
+    "id": "FR-173",
+    "title": "Subdomain Takeover \u2014 S3 Bucket Not Found",
+    "risk": "HIGH",
+    "owasp": "A05:2025",
+    "nist": "SC-20,CM-7",
+    "sources": [
+      "fracture-subdomain-takeover"
+    ],
+    "cves": [],
+    "service": "dns",
+    "phase": "subdomain_takeover",
+    "description": "A subdomain's DNS CNAME points to an AWS S3 bucket that returns a NoSuchBucket error. An attacker can create an S3 bucket with the matching name and serve content from the trusted subdomain.",
+    "remediation": "Delete the dangling CNAME record or create and properly configure the S3 bucket. Implement S3 bucket name reservation for subdomains."
+  },
+  {
+    "id": "FR-174",
+    "title": "Subdomain Takeover \u2014 GitHub Pages",
+    "risk": "HIGH",
+    "owasp": "A05:2025",
+    "nist": "SC-20,CM-7",
+    "sources": [
+      "fracture-subdomain-takeover"
+    ],
+    "cves": [],
+    "service": "dns",
+    "phase": "subdomain_takeover",
+    "description": "A subdomain's DNS CNAME points to a GitHub Pages site that no longer exists or is unclaimed. An attacker can create a matching GitHub repository with Pages enabled to take over the subdomain.",
+    "remediation": "Remove the dangling CNAME record. If GitHub Pages are still required, recreate the repository and verify the custom domain configuration."
+  },
+  {
+    "id": "FR-175",
+    "title": "Subdomain Takeover \u2014 Heroku",
+    "risk": "HIGH",
+    "owasp": "A05:2025",
+    "nist": "SC-20,CM-7",
+    "sources": [
+      "fracture-subdomain-takeover"
+    ],
+    "cves": [],
+    "service": "dns",
+    "phase": "subdomain_takeover",
+    "description": "A subdomain's DNS CNAME points to a Heroku application that has been deleted or is unclaimed. An attacker can provision a new Heroku app with the matching domain to take over the subdomain.",
+    "remediation": "Remove the dangling DNS record. If the Heroku app is still required, redeploy it and verify the custom domain binding."
+  },
+  {
+    "id": "FR-176",
+    "title": "Prototype Pollution in JavaScript",
+    "risk": "HIGH",
+    "owasp": "A03:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "Prototype pollution was detected. User-controlled JSON or query parameter keys such as __proto__, constructor, or prototype are merged into application objects, potentially polluting the JavaScript prototype chain and affecting all objects.",
+    "remediation": "Sanitize keys before merging user-supplied objects. Use Object.create(null) for dictionaries. Validate that __proto__ and constructor keys are rejected in user input."
+  },
+  {
+    "id": "FR-177",
+    "title": "HTTP Request Smuggling",
+    "risk": "CRITICAL",
+    "owasp": "A05:2025",
+    "nist": "SC-5,SI-10",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "HTTP request smuggling was detected due to inconsistent interpretation of Content-Length and Transfer-Encoding headers between the front-end proxy and back-end server. This can enable cache poisoning, request hijacking, or security control bypass.",
+    "remediation": "Ensure consistent HTTP parsing between all front-end and back-end components. Normalize ambiguous Transfer-Encoding headers at the edge. Upgrade to HTTP/2 where possible."
+  },
+  {
+    "id": "FR-178",
+    "title": "Web Cache Poisoning",
+    "risk": "HIGH",
+    "owasp": "A03:2025",
+    "nist": "SI-10,SC-5",
+    "sources": [
+      "fracture-injection"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "injection",
+    "description": "Web cache poisoning was detected. The caching layer reflects unkeyed request headers (X-Forwarded-Host, X-Original-URL) into cached responses. An attacker can poison the cache to serve malicious content to all users.",
+    "remediation": "Review cache key configuration to include all headers that influence response content. Validate and sanitize headers before reflecting them in responses."
+  },
+  {
+    "id": "FR-179",
+    "title": "GraphQL Authorization Bypass",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-3,AC-6",
+    "sources": [
+      "fracture-graphql"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "graphql",
+    "description": "GraphQL queries can access data from unauthorized objects or users by bypassing field-level authorization. Inline fragment spreading or alias tricks may circumvent per-field permission checks.",
+    "remediation": "Implement field-level authorization checks using a library such as graphql-shield. Apply authorization at the resolver level, not just the query level."
+  },
+  {
+    "id": "FR-180",
+    "title": "Information Disclosure \u2014 Internal Path in Response",
+    "risk": "LOW",
+    "owasp": "A05:2025",
+    "nist": "CM-7",
+    "sources": [
+      "fracture-recon",
+      "fracture-crawl"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "Internal filesystem paths (e.g., /var/www/html/, C:\\inetpub\\wwwroot\\) are disclosed in HTTP responses, error pages, or HTTP headers. These paths aid attackers in fingerprinting the server environment.",
+    "remediation": "Configure custom error pages. Remove all internal path references from HTTP responses. Review template and error handling code for inadvertent path disclosure."
+  },
+  {
+    "id": "FR-181",
+    "title": "Access Matrix \u2014 Unauthenticated Access to Authenticated Endpoint",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-3,IA-3",
+    "sources": [
+      "fracture-access-matrix"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "access_matrix",
+    "description": "An endpoint designated as requiring authentication is accessible without any session token or authentication credentials. Authentication enforcement is missing for this route.",
+    "remediation": "Implement authentication middleware that applies to all routes requiring login. Use a deny-by-default access control policy where routes must be explicitly marked as public."
+  },
+  {
+    "id": "FR-182",
+    "title": "Access Matrix \u2014 Lower-Role Access to Higher-Role Endpoint",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-3,AC-6",
+    "sources": [
+      "fracture-access-matrix"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "access_matrix",
+    "description": "An endpoint restricted to a higher-privileged role (admin, manager) is accessible by a lower-privileged authenticated user. Role-based access control enforcement is missing or inadequate for this endpoint.",
+    "remediation": "Enforce role-based authorization on all privileged endpoints. Validate the user's role server-side on every request. Implement centralized authorization that cannot be bypassed."
+  },
+  {
+    "id": "FR-183",
+    "title": "Access Matrix \u2014 User A Can Read User B Data",
+    "risk": "HIGH",
+    "owasp": "A01:2025",
+    "nist": "AC-3,AC-4",
+    "sources": [
+      "fracture-access-matrix"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "access_matrix",
+    "description": "Authenticated user A can read data owned by user B by manipulating object identifiers in API requests. Object-level authorization is not enforced for read operations.",
+    "remediation": "Validate object ownership on every read operation. Implement server-side checks that confirm the requesting user is authorized to view the specific object."
+  },
+  {
+    "id": "FR-184",
+    "title": "Access Matrix \u2014 User A Can Modify User B Data",
+    "risk": "CRITICAL",
+    "owasp": "A01:2025",
+    "nist": "AC-3,AC-6",
+    "sources": [
+      "fracture-access-matrix"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "access_matrix",
+    "description": "Authenticated user A can modify or delete data owned by user B by manipulating object identifiers in API requests. Object-level authorization is not enforced for write operations.",
+    "remediation": "Validate object ownership on every write and delete operation. Require explicit ownership or permission grants before allowing modifications to another user's data."
+  },
+  {
+    "id": "FR-185",
+    "title": "Access Matrix \u2014 Admin Functionality Accessible by Regular User",
+    "risk": "CRITICAL",
+    "owasp": "A01:2025",
+    "nist": "AC-3,AC-6",
+    "sources": [
+      "fracture-access-matrix"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "access_matrix",
+    "description": "Administrative functions (user management, system configuration, data export) are accessible to regular authenticated users without elevated privileges. The access control matrix has gaps in administrative endpoint protection.",
+    "remediation": "Implement strict role-based access control with a separate administrative role. Enforce role checks at the API handler level for all administrative operations."
+  },
+  {
+    "id": "FR-186",
+    "title": "HTTP Security Header \u2014 X-Frame-Options Incorrectly Configured",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "SI-10,SC-23",
+    "sources": [
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "The X-Frame-Options header is present but misconfigured (e.g., set to ALLOWALL or using an invalid value). An incorrect configuration may still allow the page to be framed, enabling clickjacking attacks.",
+    "remediation": "Set X-Frame-Options to 'DENY' or 'SAMEORIGIN'. Validate the header value is correctly parsed by target browsers."
+  },
+  {
+    "id": "FR-187",
+    "title": "Content-Security-Policy \u2014 Unsafe-Eval Allowed",
+    "risk": "MEDIUM",
+    "owasp": "A05:2025",
+    "nist": "SI-10",
+    "sources": [
+      "fracture-headers"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "headers",
+    "description": "The Content-Security-Policy header contains 'unsafe-eval', which allows the use of eval(), setTimeout(), setInterval() with string arguments, and new Function(). This significantly weakens XSS protections.",
+    "remediation": "Remove 'unsafe-eval' from the CSP. Refactor code that relies on eval() to use safer alternatives. Review all dynamic code execution patterns."
+  },
+  {
+    "id": "FR-188",
+    "title": "TLS Forward Secrecy Not Supported",
+    "risk": "MEDIUM",
+    "owasp": "A02:2025",
+    "nist": "SC-8",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server does not support cipher suites that provide Perfect Forward Secrecy (PFS). Without PFS, a compromise of the server's private key allows decryption of all previously captured TLS sessions.",
+    "remediation": "Enable ECDHE (Elliptic Curve Diffie-Hellman Ephemeral) cipher suites. Disable static RSA key exchange. Prefer ECDHE-RSA or ECDHE-ECDSA cipher suites."
+  },
+  {
+    "id": "FR-189",
+    "title": "TLS OCSP Stapling Not Configured",
+    "risk": "LOW",
+    "owasp": "A02:2025",
+    "nist": "SC-17",
+    "sources": [
+      "fracture-tls"
+    ],
+    "cves": [],
+    "service": "https",
+    "phase": "tls",
+    "description": "OCSP stapling is not configured on the server. Without stapling, clients must query the OCSP responder directly to check certificate revocation status, introducing latency and potential privacy leakage.",
+    "remediation": "Enable OCSP stapling in the web server configuration (ssl_stapling on in Nginx; SSLUseStapling on in Apache). Include the OCSP stapling cache configuration."
+  },
+  {
+    "id": "FR-190",
+    "title": "GraphQL SQL Injection via Argument",
+    "risk": "CRITICAL",
+    "owasp": "A03:2025",
+    "nist": "SI-10,AC-3",
+    "sources": [
+      "fracture-graphql"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "graphql",
+    "description": "SQL injection was detected via GraphQL query arguments. Unsanitized argument values are passed to underlying database queries without parameterization.",
+    "remediation": "Use parameterized queries or ORM methods in all GraphQL resolvers. Sanitize and validate all argument values. Apply input type constraints at the GraphQL schema level."
+  },
+  {
+    "id": "FR-191",
+    "title": "Sensitive Data in GET Request Parameters",
+    "risk": "MEDIUM",
+    "owasp": "A02:2025",
+    "nist": "SC-28,AC-3",
+    "sources": [
+      "fracture-session",
+      "fracture-crawl"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "session",
+    "description": "Sensitive data (passwords, session tokens, personal information) is transmitted in GET request query parameters. GET parameters are logged in server logs, browser history, and Referer headers, exposing sensitive values.",
+    "remediation": "Transmit sensitive data via POST request bodies over HTTPS. Never include credentials, session tokens, or sensitive identifiers in URL query parameters."
+  },
+  {
+    "id": "FR-192",
+    "title": "Missing Rate Limiting on Password Reset",
+    "risk": "MEDIUM",
+    "owasp": "A07:2025",
+    "nist": "AC-7,IA-5",
+    "sources": [
+      "fracture-auth-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_recon",
+    "description": "The password reset endpoint does not enforce rate limiting. An attacker can repeatedly request password resets for target accounts, potentially triggering email flooding or token enumeration.",
+    "remediation": "Implement rate limiting on the password reset endpoint (per IP and per account). Add CAPTCHA after a threshold of requests."
+  },
+  {
+    "id": "FR-193",
+    "title": "Insecure Redirect After Authentication",
+    "risk": "MEDIUM",
+    "owasp": "A01:2025",
+    "nist": "SC-23,SI-10",
+    "sources": [
+      "fracture-auth-bypass",
+      "fracture-open-redirect"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "auth_bypass",
+    "description": "The post-authentication redirect URL is controlled by a user-supplied parameter (e.g., next=, redirect=, returnUrl=) without validation. An attacker can craft a phishing URL that redirects users to a malicious site after successful login.",
+    "remediation": "Validate post-login redirect URLs against a whitelist. Use relative paths for redirects. Never redirect to externally supplied URLs without validation."
+  },
+  {
+    "id": "FR-194",
+    "title": "Lack of Security.txt File",
+    "risk": "INFO",
+    "owasp": "A05:2025",
+    "nist": "IR-7",
+    "sources": [
+      "fracture-recon"
+    ],
+    "cves": [],
+    "service": "http",
+    "phase": "recon",
+    "description": "The application does not have a security.txt file at /.well-known/security.txt. The security.txt standard (RFC 9116) allows security researchers to identify and report vulnerabilities responsibly.",
+    "remediation": "Create a security.txt file at /.well-known/security.txt specifying contact information, disclosure policy, and PGP keys for secure communications."
+  },
+  {
+    "id": "FR-195",
+    "title": "HTTP/2 Rapid Reset Attack Exposure",
+    "risk": "HIGH",
+    "owasp": "A04:2025",
+    "nist": "SC-5",
+    "sources": [
+      "fracture-tls",
+      "fracture-recon"
+    ],
+    "cves": [
+      "CVE-2023-44487"
+    ],
+    "service": "https",
+    "phase": "tls",
+    "description": "The server supports HTTP/2 and may be vulnerable to the HTTP/2 Rapid Reset attack (CVE-2023-44487). An attacker can open and cancel streams at high speed to cause resource exhaustion and denial of service.",
+    "remediation": "Apply patches from the web server vendor for CVE-2023-44487. Implement HTTP/2 stream limits and reset rate limiting. Update to a patched version of the HTTP/2 implementation."
+  }
+]
