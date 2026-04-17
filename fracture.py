@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.8.0"
+VERSION = "2.8.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1793,17 +1793,25 @@ class OutputManager:
         """Convert each line of `raw` that is a same-origin full URL to a
         relative path, using self.base_url as the origin anchor.
         Lines that are not HTTP URLs (paths, names, cipher strings, etc.)
-        are returned unchanged.  Falls back to `raw` if base_url is unset."""
+        are returned unchanged.  Falls back to `raw` if base_url is unset.
+        Paths containing unencoded quote characters or other junk are filtered out."""
+        _PATH_JUNK = frozenset('"\'<> \t\r\n\x00')
         if not self.base_url or not raw:
             return raw
         lines = raw.split("\n")
         result = []
         for line in lines:
             stripped = line.strip()
+            if not stripped:
+                continue
             if stripped.startswith("http"):
-                result.append(_url_rel_path(stripped, self.base_url))
+                rel = _url_rel_path(stripped, self.base_url)
             else:
-                result.append(line)
+                rel = stripped
+            # Drop any entry that resolves to a path with invalid URL characters
+            if rel.startswith("/") and any(c in rel for c in _PATH_JUNK):
+                continue
+            result.append(rel)
         return "\n".join(result)
 
     def add_finding(
@@ -1916,9 +1924,13 @@ class OutputManager:
                     # caller passes affected="" (e.g. header findings from other phases)
                     _ex_aff = set(a.strip() for a in (ex.get("affected") or "").split("\n") if a.strip())
                     if _is_global:
-                        _ex_aff.add(url.strip())
+                        _ex_aff.add(self._rel_affected(url.strip()))
                     if affected:
-                        _ex_aff |= set(a.strip() for a in affected.split("\n") if a.strip())
+                        _ex_aff |= set(
+                            self._rel_affected(a.strip())
+                            for a in affected.split("\n") if a.strip()
+                        )
+                    _ex_aff.discard("")
                     if _ex_aff:
                         ex["affected"] = "\n".join(sorted(_ex_aff))
                     # merge output_file — handle JSON array ({url,req,resp}) and
@@ -7481,12 +7493,13 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     max_pages = cfg.get("crawl_max_pages", 500)
     vc.status(phase, "Crawl", "running", "Crawling", 0, max_pages)
 
-    visited:     set  = set()
-    queue_urls:  list = [(url, 0)]
-    all_forms:   list = []
-    all_js:      list = []
-    all_links:   list = []
-    page_count         = 0
+    visited:              set  = set()
+    queue_urls:           list = [(url, 0)]
+    all_forms:            list = []
+    all_js:               list = []
+    all_links:            list = []
+    _crawl_path_statuses: dict = {}
+    page_count                 = 0
 
     while queue_urls and page_count < max_pages:
         current_url, depth = queue_urls.pop(0)
@@ -7499,6 +7512,9 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         data = _crawl_page(current_url, sess, timeout, url)
         if data["error"]:
             continue
+        _cr = data.get("response")
+        if _cr is not None:
+            _crawl_path_statuses[current_url] = _cr.status_code
         all_forms.extend(data["forms"])
         all_js.extend(data["js_files"])
         all_links.extend(data["links"])
@@ -7508,6 +7524,16 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                     queue_urls.append((link, depth + 1))
 
     vc.log(f"[crawl] Visited {page_count} pages, {len(all_forms)} forms, {len(all_js)} JS files", "INFO")
+
+    # Persist the HTTP status code of every page the crawl actually fetched.
+    # This ensures crawl-visited pages show a status code in the structure map
+    # even if they're not re-probed by the endpoint tools phase.
+    if _crawl_path_statuses:
+        try:
+            _write_structure_map(out, target, path_statuses=_crawl_path_statuses)
+        except Exception:
+            pass
+
     crawl_out = out.output_path(phase, "crawl_results_" + target["hostname"])
     crawl_out.write_text(
         json.dumps({
@@ -8148,7 +8174,7 @@ def _write_structure_map(out: "OutputManager", target: dict,
             if "://" in path or not path.startswith("/"):
                 return
             # Reject paths containing characters that are never valid unencoded in URL paths
-            _BAD = frozenset(['"', '<', '>', '\\', '^', '{', '}', '|', '`',
+            _BAD = frozenset(['"', "'", '<', '>', '\\', '^', '{', '}', '|', '`',
                                ' ', '\t', '\r', '\n', '\x00', ','])
             if any(c in _BAD for c in path):
                 return
