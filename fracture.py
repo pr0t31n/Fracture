@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1707,6 +1707,8 @@ class OutputManager:
         self.findings_csv     = self.root / "findings.csv"
         self.summary_json     = self.root / "summary.json"
         self._current_accounts: list = []
+        # Set by the scan loop after instantiation; used to relativize affected URLs
+        self.base_url: str = ""
         self._setup_dirs()
 
     def _setup_dirs(self) -> None:
@@ -1787,6 +1789,23 @@ class OutputManager:
         """Set the active auth context for subsequent add_finding calls."""
         self._current_accounts = list(accounts)
 
+    def _rel_affected(self, raw: str) -> str:
+        """Convert each line of `raw` that is a same-origin full URL to a
+        relative path, using self.base_url as the origin anchor.
+        Lines that are not HTTP URLs (paths, names, cipher strings, etc.)
+        are returned unchanged.  Falls back to `raw` if base_url is unset."""
+        if not self.base_url or not raw:
+            return raw
+        lines = raw.split("\n")
+        result = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("http"):
+                result.append(_url_rel_path(stripped, self.base_url))
+            else:
+                result.append(line)
+        return "\n".join(result)
+
     def add_finding(
         self,
         title: str,
@@ -1835,7 +1854,7 @@ class OutputManager:
             "sources":        sources or "",
             "service":        _svc,
             "output_file":    output_file or "",
-            "affected":       affected or url,
+            "affected":       self._rel_affected(affected or url),
             "exploitdb":      False,
             "metasploit":     False,
             "exploit_details": [],
@@ -11559,6 +11578,7 @@ def main() -> None:
             project_dir = project_dir / safe_host
 
         out = OutputManager(str(project_dir))
+        out.base_url = target["url"]
         pm  = ProgressManager(project_dir / "checkpoint.json")
         eng = settings.get("engagement", {})
         _write_project_meta(
