@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.8.1"
+VERSION = "2.8.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2152,7 +2152,9 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
     auth = cfg.get(auth_key, {})
     if not auth.get("enabled"):
         return None
-    sess    = _make_session(cfg, scope_hostnames)
+    # Auth uses an unscoped session so that login_url on a different host is reachable.
+    # Cookies and auth headers are transferred to the scoped scan session at the end.
+    sess    = _make_session(cfg, None)
     timeout = cfg.get("timeout", 10)
     method  = (auth.get("method") or auth.get("auth_type") or "form_login").strip().lower()
 
@@ -2516,6 +2518,19 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             sess.auth = HTTPKerberosAuth(**kw)
         except ImportError:
             vc.err("[auth] Kerberos delegation requires: pip install requests-kerberos")
+
+    # Transfer auth state (cookies + key headers) to a scoped session for scanning.
+    # This lets login_url be on a different host while scan requests remain scope-enforced.
+    if scope_hostnames is not None:
+        scoped = _make_session(cfg, scope_hostnames)
+        scoped.cookies.update(sess.cookies)
+        for _hk, _hv in sess.headers.items():
+            if _hk.lower() in ("authorization", "x-auth-token", "x-csrf-token",
+                               "x-api-key", "cookie"):
+                scoped.headers[_hk] = _hv
+        if sess.auth is not None:
+            scoped.auth = sess.auth
+        sess = scoped
 
     return sess
 
