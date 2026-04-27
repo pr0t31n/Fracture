@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.19"
+VERSION = "2.9.20"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3266,10 +3266,24 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
 
         # ── Display check (browser auth requires a visible window) ───────────────
         if _sys.platform.startswith("linux"):
-            _has_display = bool(
+            _display = (
                 _os.environ.get("DISPLAY") or _os.environ.get("WAYLAND_DISPLAY")
             )
-            if not _has_display:
+            if not _display:
+                import glob as _glob
+                # Root terminals often strip DISPLAY — probe X11 sockets directly
+                _x_sockets = sorted(_glob.glob("/tmp/.X11-unix/X*"))
+                if _x_sockets:
+                    _display = ":" + _x_sockets[0].rsplit("X", 1)[-1]
+                    _os.environ["DISPLAY"] = _display
+                    vc.log(f"[auth] DISPLAY not set — using detected display {_display}", "INFO")
+                else:
+                    _wl_sockets = sorted(_glob.glob("/run/user/*/wayland-*"))
+                    if _wl_sockets:
+                        _display = _wl_sockets[0].split("/")[-1]
+                        _os.environ["WAYLAND_DISPLAY"] = _display
+                        vc.log(f"[auth] WAYLAND_DISPLAY not set — using detected display {_display}", "INFO")
+            if not _display:
                 vc.log(
                     "[auth] No display detected (DISPLAY/WAYLAND_DISPLAY not set). "
                     "Browser-assisted login requires a desktop environment. "
