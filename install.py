@@ -159,7 +159,6 @@ APT_PACKAGES = [
     "gobuster", "nikto", "sqlmap", "sslscan", "whatweb",
     "feroxbuster", "ffuf", "exploitdb",
     "python3-pip", "python3-dev",
-    "python3-selenium",
     "git", "golang-go",
     "ruby", "ruby-dev", "ruby-bundler",
     "libssl-dev", "libcurl4-openssl-dev",
@@ -167,7 +166,6 @@ APT_PACKAGES = [
 DNF_PACKAGES = [
     "nikto", "sqlmap", "sslscan", "whatweb", "ffuf",
     "python3-pip", "python3-devel",
-    "python3-selenium",
     "git", "golang",
     "ruby", "ruby-devel",
     "openssl-devel", "libcurl-devel",
@@ -216,12 +214,10 @@ def install_selenium():
     """
     Install the Selenium Python binding using the best available method.
 
-    Priority order (per CLAUDE.md §5a):
-      1. apt-get  (Debian / Ubuntu / Kali)
-      2. dnf      (RHEL / CentOS / Fedora / Rocky)
-      3. zypper   (openSUSE)
-      4. pip      — last resort on all platforms, including macOS / Windows
-                    (no official brew formula for the Python selenium binding)
+    Priority order:
+      1. GitHub source — pip install git+https://github.com/seleniumhq/selenium.git#subdirectory=py
+      2. pip (PyPI)    — pip install selenium>=4.0.0
+      3. System pkg    — apt-get / dnf / zypper (last resort)
 
     webdriver-manager is not available in any system repo; it is always
     installed via pip after the Selenium binding is in place.
@@ -237,51 +233,67 @@ def install_selenium():
         _sel_installed = False
 
     if not _sel_installed:
-        _pkg_installed = False
+        _installed = False
 
-        if OS == "apt" and shutil.which("apt-get"):
-            info("Trying python3-selenium via apt-get ...")
-            global _apt_updated
-            if not _apt_updated:
-                run(["apt-get", "update", "-y"], check=False)
-                _apt_updated = True
+        # 1. GitHub source
+        info("Trying selenium from GitHub source ...")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--break-system-packages",
+             "git+https://github.com/seleniumhq/selenium.git#subdirectory=py"],
+            check=False,
+        )
+        if result.returncode == 0:
+            _installed = True
+            info("selenium installed from GitHub source")
+
+        # 2. pip (PyPI)
+        if not _installed:
+            warn("GitHub source install failed — trying pip (PyPI) ...")
             result = subprocess.run(
-                ["apt-get", "install", "-y", "python3-selenium"],
+                [sys.executable, "-m", "pip", "install", "--break-system-packages",
+                 "selenium>=4.0.0"],
                 check=False,
             )
-            _pkg_installed = result.returncode == 0
+            if result.returncode == 0:
+                _installed = True
+                info("selenium installed via pip (PyPI)")
 
-        elif OS == "dnf" and shutil.which("dnf"):
-            info("Trying python3-selenium via dnf ...")
-            result = subprocess.run(
-                ["dnf", "install", "-y", "python3-selenium"],
-                check=False,
-            )
-            _pkg_installed = result.returncode == 0
+        # 3. System package manager (last resort)
+        if not _installed:
+            if OS == "apt" and shutil.which("apt-get"):
+                warn("pip install failed — trying apt-get (last resort) ...")
+                global _apt_updated
+                if not _apt_updated:
+                    run(["apt-get", "update", "-y"], check=False)
+                    _apt_updated = True
+                result = subprocess.run(
+                    ["apt-get", "install", "-y", "python3-selenium"],
+                    check=False,
+                )
+                if result.returncode == 0:
+                    _installed = True
+                    info("python3-selenium installed via apt-get")
+            elif OS == "dnf" and shutil.which("dnf"):
+                warn("pip install failed — trying dnf (last resort) ...")
+                result = subprocess.run(
+                    ["dnf", "install", "-y", "python3-selenium"],
+                    check=False,
+                )
+                if result.returncode == 0:
+                    _installed = True
+                    info("python3-selenium installed via dnf")
+            elif OS == "zypper" and shutil.which("zypper"):
+                warn("pip install failed — trying zypper (last resort) ...")
+                result = subprocess.run(
+                    ["zypper", "install", "-y", "python3-selenium"],
+                    check=False,
+                )
+                if result.returncode == 0:
+                    _installed = True
+                    info("python3-selenium installed via zypper")
 
-        elif OS == "zypper" and shutil.which("zypper"):
-            info("Trying python3-selenium via zypper ...")
-            result = subprocess.run(
-                ["zypper", "install", "-y", "python3-selenium"],
-                check=False,
-            )
-            _pkg_installed = result.returncode == 0
-
-        else:
-            if OS not in ("apt", "dnf", "zypper"):
-                info(f"No system package manager support for selenium on {OS} — using pip")
-
-        if _pkg_installed:
-            info("python3-selenium installed via system package manager")
-        else:
-            if OS in ("apt", "dnf", "zypper"):
-                warn("System package install failed — falling back to pip")
-            info("Installing selenium via pip ...")
-            run(
-                [sys.executable, "-m", "pip", "install",
-                 "--break-system-packages", "selenium>=4.0.0"],
-                check=False,
-            )
+        if not _installed:
+            warn("All selenium install methods failed — browser-assisted login will be unavailable")
 
     # webdriver-manager is pip-only (not in any system repo)
     try:
