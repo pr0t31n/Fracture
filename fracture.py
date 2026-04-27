@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.20"
+VERSION = "2.9.21"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3252,6 +3252,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             from selenium.webdriver.firefox.options import Options as _FO
             from selenium.webdriver.firefox.service import Service as _FS
             opts = _FO()
+            opts.add_argument("-no-remote")
             if bin_path:
                 opts.binary_location = bin_path
             if drv_path:
@@ -3266,11 +3267,11 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
 
         # ── Display check (browser auth requires a visible window) ───────────────
         if _sys.platform.startswith("linux"):
+            import glob as _glob
             _display = (
                 _os.environ.get("DISPLAY") or _os.environ.get("WAYLAND_DISPLAY")
             )
             if not _display:
-                import glob as _glob
                 # Root terminals often strip DISPLAY — probe X11 sockets directly
                 _x_sockets = sorted(_glob.glob("/tmp/.X11-unix/X*"))
                 if _x_sockets:
@@ -3291,6 +3292,21 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     "ERROR",
                 )
                 return None
+            # XAUTHORITY is also stripped in root terminals — find the cookie file
+            # for the desktop user so Firefox can authenticate to the X server
+            if not _os.environ.get("XAUTHORITY"):
+                _xauth_candidates = (
+                    [_os.path.expanduser("~/.Xauthority")]
+                    + sorted(_glob.glob("/home/*/.Xauthority"))
+                    + sorted(_glob.glob("/tmp/.gdm-xauth-*"))
+                    + sorted(_glob.glob("/tmp/.xauth*"))
+                    + sorted(_glob.glob("/run/user/*/.mutter-Xwaylandauth.*"))
+                )
+                for _xauth in _xauth_candidates:
+                    if _os.path.isfile(_xauth):
+                        _os.environ["XAUTHORITY"] = _xauth
+                        vc.log(f"[auth] XAUTHORITY not set — using {_xauth}", "INFO")
+                        break
 
         # ── Driver / browser resolution ───────────────────────────────────────
         _explicit_drv = (
