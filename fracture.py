@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.17"
+VERSION = "2.9.19"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3263,6 +3263,20 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 except Exception:
                     svc = None
             return _wd.Firefox(service=svc, options=opts) if svc else _wd.Firefox(options=opts)
+
+        # ── Display check (browser auth requires a visible window) ───────────────
+        if _sys.platform.startswith("linux"):
+            _has_display = bool(
+                _os.environ.get("DISPLAY") or _os.environ.get("WAYLAND_DISPLAY")
+            )
+            if not _has_display:
+                vc.log(
+                    "[auth] No display detected (DISPLAY/WAYLAND_DISPLAY not set). "
+                    "Browser-assisted login requires a desktop environment. "
+                    "Run Fracture from a graphical terminal, or use a different auth method.",
+                    "ERROR",
+                )
+                return None
 
         # ── Driver / browser resolution ───────────────────────────────────────
         _explicit_drv = (
