@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.25"
+VERSION = "2.9.26"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3309,17 +3309,22 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     "ERROR",
                 )
                 return None
-            # XAUTHORITY is also stripped in root terminals — find the cookie file
-            # for the desktop user so Firefox can authenticate to the X server.
-            # When running as root, Firefox refuses to use an XAUTHORITY file owned
-            # by another user.  Copy the whole file into a root-owned temp file so
-            # the ownership check passes while all display entries remain intact.
-            # (xauth extract is avoided because entries may be keyed by hostname:N,
-            # not bare :N, causing an invalid-cookie error even when the copy works.)
-            if not _os.environ.get("XAUTHORITY"):
-                import tempfile as _tf3
+            # Firefox refuses to use an XAUTHORITY file owned by another user when
+            # running as root.  A root terminal inside a GUI session inherits
+            # XAUTHORITY=/home/kali/.Xauthority from the desktop — it IS set but is
+            # not root-owned.  Check ownership regardless of whether the var is set,
+            # and copy the whole file into a root-owned temp file when needed.
+            import tempfile as _tf3
+            _cur_xauth = _os.environ.get("XAUTHORITY", "")
+            _xauth_needs_fix = (
+                not _cur_xauth
+                or not _os.path.isfile(_cur_xauth)
+                or _os.stat(_cur_xauth).st_uid != 0
+            )
+            if _xauth_needs_fix:
                 _xauth_sources = (
-                    [_os.path.expanduser("~/.Xauthority")]
+                    ([_cur_xauth] if _cur_xauth and _os.path.isfile(_cur_xauth) else [])
+                    + [_os.path.expanduser("~/.Xauthority")]
                     + sorted(_glob.glob("/home/*/.Xauthority"))
                     + sorted(_glob.glob("/tmp/.gdm-xauth-*"))
                     + sorted(_glob.glob("/tmp/.xauth*"))
@@ -3329,12 +3334,13 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     if not _os.path.isfile(_xauth_src):
                         continue
                     if _os.stat(_xauth_src).st_uid == 0:
-                        # Already root-owned — use directly
                         _os.environ["XAUTHORITY"] = _xauth_src
-                        vc.log(f"[auth] XAUTHORITY not set — using {_xauth_src}", "INFO")
+                        vc.log(f"[auth] XAUTHORITY → {_xauth_src} (root-owned)", "INFO")
                         break
                     # Owned by another user — copy entire file into a root-owned temp
-                    # file so Firefox's ownership check passes without key-format issues
+                    # file.  Full copy preserves all display entries including
+                    # hostname-keyed ones; xauth extract is avoided because its key
+                    # lookup requires an exact match that bare ":N" often fails.
                     try:
                         _xa_fd, _xa_path = _tf3.mkstemp(prefix="fracture_xauth_")
                         _os.close(_xa_fd)
@@ -3342,7 +3348,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         with open(_xauth_src, "rb") as _xf_in, open(_xa_path, "wb") as _xf_out:
                             _xf_out.write(_xf_in.read())
                         _os.environ["XAUTHORITY"] = _xa_path
-                        vc.log(f"[auth] Copied X11 auth from {_xauth_src} → {_xa_path}", "INFO")
+                        vc.log(f"[auth] Copied X11 auth {_xauth_src} → {_xa_path}", "INFO")
                         break
                     except Exception:
                         try:
