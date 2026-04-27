@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.0"
+VERSION = "2.9.3"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2198,23 +2198,67 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         Inspect all forms on a page and classify what is present.
 
         Returns a dict with keys:
-          has_password   – True if any form contains a password input
-          has_username   – True if any form contains a text/email/tel input
-          has_checkbox   – True if any form contains a checkbox
-          checkbox_forms – list of dicts {action, fields} for forms that have
-                           a checkbox but NO password field — i.e. gate pages
-          login_form     – dict {action, hidden} for the first form with a
-                           password field, or None
+          has_password      – True if any form contains a password input
+          has_username      – True if any form contains a text/email/tel input
+          has_checkbox      – True if any form contains a checkbox
+          checkbox_forms    – list of dicts {action, fields} for forms that have
+                             a checkbox but NO password field — i.e. gate pages
+          login_form        – dict {action, hidden} for the first form with a
+                             password field, or None
+          affirmative_links – list of {url, text, type, fields} for navigation
+                             buttons/links whose label suggests forward progress
+                             (Login, Accept, Continue, …) but excludes backward/
+                             negative labels (Cancel, Decline, Back, …)
         """
         import re as _re3
         from urllib.parse import urljoin as _uj3
+
+        # Affirmative button/link label patterns
+        _AFFIRM_RE = _re3.compile(
+            r'\b(log[\s\-]?in|sign[\s\-]?in|login|signin|accept|agree|'
+            r'i\s+agree|continue|proceed|next|access|enter|'
+            r'get\s+started|start|go|ok)\b',
+            _re3.IGNORECASE,
+        )
+        # Labels that indicate backward/negative navigation — exclude these
+        _DENY_RE = _re3.compile(
+            r'\b(cancel|back|decline|reject|close|skip|return|exit|'
+            r'log[\s\-]?out|sign[\s\-]?out|logout|logoff|'
+            r'forgot|reset|register|sign[\s\-]?up|create\s+account|no\b)\b',
+            _re3.IGNORECASE,
+        )
+
+        def _strip_tags(s: str) -> str:
+            return _re3.sub(r'<[^>]+>', '', s).strip()
+
+        def _is_affirmative(text: str) -> bool:
+            t = _strip_tags(text)
+            return bool(t) and bool(_AFFIRM_RE.search(t)) and not _DENY_RE.search(t)
+
+        def _collect_hidden(form_body: str) -> "dict":
+            """Return {name: value} for all hidden inputs in a form body."""
+            hid: dict = {}
+            for inp in _re3.finditer(r"<input[^>]+>", form_body, _re3.IGNORECASE):
+                tag = inp.group(0)
+                t_m = _re3.search(r'\btype=["\']?(\w+)["\']?', tag, _re3.IGNORECASE)
+                if not t_m or t_m.group(1).lower() != "hidden":
+                    continue
+                n_m = _re3.search(r'\bname=["\']([^"\']+)["\']', tag, _re3.IGNORECASE)
+                v_m = _re3.search(r'\bvalue=["\']([^"\']*)["\']', tag, _re3.IGNORECASE)
+                if n_m:
+                    hid[n_m.group(1)] = v_m.group(1) if v_m else ""
+            return hid
+
         result: dict = {
-            "has_password":   False,
-            "has_username":   False,
-            "has_checkbox":   False,
-            "checkbox_forms": [],
-            "login_form":     None,
+            "has_password":      False,
+            "has_username":      False,
+            "has_checkbox":      False,
+            "checkbox_forms":    [],
+            "login_form":        None,
+            "affirmative_links": [],
         }
+
+        # ── Scan forms ────────────────────────────────────────────────────────
         for form_m in _re3.finditer(r"(?s)<form[^>]*>(.+?)</form>", html, _re3.IGNORECASE):
             form_tag  = form_m.group(0)
             form_body = form_m.group(1)
@@ -2225,24 +2269,14 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 act_raw = act_m.group(1).strip()
             action = _uj3(page_url, act_raw) if act_raw else page_url
 
-            has_pw  = bool(_re3.search(r'<input[^>]+type=["\']?password["\']?',     form_body, _re3.IGNORECASE))
+            has_pw  = bool(_re3.search(r'<input[^>]+type=["\']?password["\']?',       form_body, _re3.IGNORECASE))
             has_txt = bool(_re3.search(r'<input[^>]+type=["\']?(text|email|tel)["\']?', form_body, _re3.IGNORECASE))
-            has_cb  = bool(_re3.search(r'<input[^>]+type=["\']?checkbox["\']?',      form_body, _re3.IGNORECASE))
+            has_cb  = bool(_re3.search(r'<input[^>]+type=["\']?checkbox["\']?',        form_body, _re3.IGNORECASE))
 
             if has_pw:
                 result["has_password"] = True
                 if result["login_form"] is None:
-                    hidden: dict = {}
-                    for inp in _re3.finditer(r"<input[^>]+>", form_body, _re3.IGNORECASE):
-                        tag = inp.group(0)
-                        t_m = _re3.search(r'\btype=["\']?(\w+)["\']?', tag, _re3.IGNORECASE)
-                        if not t_m or t_m.group(1).lower() != "hidden":
-                            continue
-                        n_m = _re3.search(r'\bname=["\']([^"\']+)["\']', tag, _re3.IGNORECASE)
-                        v_m = _re3.search(r'\bvalue=["\']([^"\']*)["\']', tag, _re3.IGNORECASE)
-                        if n_m:
-                            hidden[n_m.group(1)] = v_m.group(1) if v_m else ""
-                    result["login_form"] = {"action": action, "hidden": hidden}
+                    result["login_form"] = {"action": action, "hidden": _collect_hidden(form_body)}
             if has_txt:
                 result["has_username"] = True
             if has_cb:
@@ -2273,24 +2307,87 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         if opt_m and sel_name not in fields:
                             fields[sel_name] = opt_m.group(1)
                     result["checkbox_forms"].append({"action": action, "fields": fields})
+
+            # ── Affirmative submit buttons in non-password forms ──────────────
+            # (password forms are the target — we don't treat them as nav buttons)
+            if not has_pw:
+                _found_affirm_btn = False
+                # <input type="submit" value="Login"> style
+                for sub_m in _re3.finditer(
+                        r'<input[^>]+type=["\']?submit["\']?[^>]*>', form_body, _re3.IGNORECASE):
+                    v_m = _re3.search(r'\bvalue=["\']([^"\']+)["\']', sub_m.group(0), _re3.IGNORECASE)
+                    if v_m and _is_affirmative(v_m.group(1)):
+                        result["affirmative_links"].append({
+                            "url":    action,
+                            "text":   v_m.group(1),
+                            "type":   "form_submit",
+                            "fields": _collect_hidden(form_body),
+                        })
+                        _found_affirm_btn = True
+                        break
+                if not _found_affirm_btn:
+                    # <button type="submit">Accept</button> style
+                    for btn_m in _re3.finditer(
+                            r'<button\b([^>]*)>(.*?)</button>', form_body,
+                            _re3.IGNORECASE | _re3.DOTALL):
+                        btn_attrs = btn_m.group(1)
+                        btn_text  = _strip_tags(btn_m.group(2))
+                        t_m = _re3.search(r'\btype=["\']?(\w+)["\']?', btn_attrs, _re3.IGNORECASE)
+                        btn_type = t_m.group(1).lower() if t_m else "submit"
+                        if btn_type in ("submit", "button") and _is_affirmative(btn_text):
+                            result["affirmative_links"].append({
+                                "url":    action,
+                                "text":   btn_text,
+                                "type":   "form_submit",
+                                "fields": _collect_hidden(form_body),
+                            })
+                            break
+
+        # ── Affirmative navigation links (<a href="…">) ───────────────────────
+        for link_m in _re3.finditer(
+                r'<a\b([^>]+)>(.*?)</a>', html, _re3.IGNORECASE | _re3.DOTALL):
+            attrs     = link_m.group(1)
+            link_text = _strip_tags(link_m.group(2))
+            if not _is_affirmative(link_text):
+                continue
+            href_m = _re3.search(r'\bhref=["\']([^"\']*)["\']', attrs, _re3.IGNORECASE)
+            if not href_m:
+                continue
+            href_raw = href_m.group(1).strip()
+            # Skip non-navigable hrefs
+            if href_raw.lower().startswith(("javascript:", "mailto:", "tel:")):
+                continue
+            resolved = _uj3(page_url, href_raw) if href_raw else page_url
+            result["affirmative_links"].append({
+                "url":    resolved,
+                "text":   link_text,
+                "type":   "link",
+                "fields": {},
+            })
+
         return result
 
     # ── Step through gate pages to reach the real login form ─────────────────
     def _step_to_login_form(start_url: str) -> "str":
         """
-        Walk through checkbox/consent gate pages until a username+password form
-        is found or the step limit is reached.  Returns the resolved login URL.
+        Walk through pre-login flow pages until a username+password form is
+        found or the step limit is reached.  Returns the resolved login URL.
 
-        Steps taken:
-          1. GET the current URL and analyse forms.
-          2. If a login form (has password field) is found → return current URL.
-          3. If only gate forms (checkbox, no password) are found → POST them
-             (all checkboxes checked, hidden fields included) and follow to the
-             next page, then repeat from step 1.
-          4. If neither is found → return the original start_url unchanged.
+        Steps taken each iteration:
+          1. GET the current URL and analyse forms / navigation.
+          2. Login form (has password field) found → return current URL.
+          3. Checkbox gate form (checkbox, no password) → POST it and follow.
+          4. Affirmative navigation button/link (Login, Accept, Continue, …
+             but NOT Cancel, Back, Decline, …) → follow it (POST for form
+             submits, GET for links).  Fragment-only hrefs (#) are tried once;
+             if they resolve to an already-visited base URL they are skipped.
+          5. Nothing actionable found → return current URL with a warning.
         """
+        from urllib.parse import urldefrag as _udf3
         _MAX_STEPS = 6
         current_url = start_url
+        # Track visited base URLs (fragment stripped) to prevent infinite loops
+        _visited_bases: "set[str]" = {_udf3(start_url)[0]}
         vc.log(f"[auth] Inspecting login page: {current_url}", "INFO")
 
         for _step in range(_MAX_STEPS):
@@ -2303,9 +2400,11 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             if resp.url != current_url:
                 vc.log(f"[auth] Redirected to: {resp.url}", "INFO")
                 current_url = resp.url
+            _visited_bases.add(_udf3(current_url)[0])
 
             page = _analyse_form_page(resp.text, current_url)
 
+            # ── Priority 1: real login form ───────────────────────────────────
             if page["login_form"]:
                 vc.log(
                     f"[auth] Step {_step + 1}: Login form detected "
@@ -2315,6 +2414,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 )
                 return current_url
 
+            # ── Priority 2: checkbox gate form ────────────────────────────────
             if page["checkbox_forms"]:
                 gate = page["checkbox_forms"][0]
                 vc.log(
@@ -2335,15 +2435,425 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     return current_url
                 continue
 
-            # No recognisable form found on this page
+            # ── Priority 3: affirmative navigation button / link ──────────────
+            if page["affirmative_links"]:
+                # Pick the first link whose base URL has not been visited yet
+                nav = None
+                for _cand in page["affirmative_links"]:
+                    _cand_base, _ = _udf3(_cand["url"])
+                    if _cand_base not in _visited_bases:
+                        nav = _cand
+                        break
+                if nav is None:
+                    vc.log(
+                        f"[auth] Step {_step + 1}: Affirmative button(s) found but all "
+                        f"target already-visited pages — stopping here",
+                        "WARNING",
+                    )
+                    return current_url
+
+                _nav_base, _ = _udf3(nav["url"])
+                _visited_bases.add(_nav_base)
+
+                if nav["type"] == "form_submit":
+                    vc.log(
+                        f"[auth] Step {_step + 1}: Affirmative button '{nav['text']}' — "
+                        f"submitting form to {nav['url']}",
+                        "INFO",
+                    )
+                    try:
+                        post_resp = sess.post(
+                            _nav_base, data=nav.get("fields", {}),
+                            timeout=timeout, allow_redirects=True,
+                        )
+                        next_url = post_resp.url
+                        vc.log(
+                            f"[auth] Affirmative form submitted → {next_url} "
+                            f"(HTTP {post_resp.status_code})",
+                            "INFO",
+                        )
+                        current_url = next_url
+                    except Exception as _e:
+                        vc.log(f"[auth] Affirmative form submission failed: {_e}", "WARNING")
+                        return current_url
+                else:
+                    vc.log(
+                        f"[auth] Step {_step + 1}: Following affirmative link "
+                        f"'{nav['text']}' → {nav['url']}",
+                        "INFO",
+                    )
+                    current_url = nav["url"]
+                continue
+
+            # ── Nothing actionable found ──────────────────────────────────────
             vc.log(
-                f"[auth] Step {_step + 1}: No login form or gate form found at {current_url}",
+                f"[auth] Step {_step + 1}: No login form, gate form, or affirmative "
+                f"navigation found at {current_url}",
                 "WARNING",
             )
             return current_url
 
-        vc.log(f"[auth] Reached step limit ({_MAX_STEPS}) without finding a login form — using {current_url}", "WARNING")
+        vc.log(
+            f"[auth] Reached step limit ({_MAX_STEPS}) without finding a login form — "
+            f"using {current_url}",
+            "WARNING",
+        )
         return current_url
+
+    # ── Browser-assisted interactive login ────────────────────────────────────
+    def _browser_assisted_login(login_url: str) -> "requests.Session | None":
+        """
+        Open a visible browser window to login_url, let the user authenticate
+        manually, then capture all browser cookies and return a pre-loaded
+        requests.Session.  Returns None if Selenium is unavailable or no
+        supported browser can be launched.
+
+        Browser detection order (first working browser wins):
+          Chrome → Brave → Chromium → Edge → Firefox → Iceweasel → Waterfox
+                                                       → LibreWolf → Pale Moon
+
+        Driver resolution for each candidate (in order):
+          1. --chromedriver CLI flag / cfg["chromedriver_path"]    (Chrome only)
+          2. FRACTURE_CHROMEDRIVER env var                         (Chrome only)
+          3. WebDriver binary on $PATH (chromedriver / geckodriver / msedgedriver)
+          4. Selenium's built-in driver manager (Selenium 4.6+)
+        """
+        import shutil as _shutil, os as _os, sys as _sys
+
+        try:
+            from selenium import webdriver as _wd
+        except ImportError:
+            vc.log(
+                "[auth] selenium is not installed — cannot use browser-assisted login. "
+                "Install with: pip3 install selenium",
+                "WARNING",
+            )
+            return None
+
+        _plat = (
+            "darwin"  if _sys.platform == "darwin"
+            else "win" if _sys.platform.startswith("win")
+            else "linux"
+        )
+
+        # ── Browser candidate table ───────────────────────────────────────────
+        # engine:      "chrome" | "firefox" | "edge"
+        # path_names:  basenames for shutil.which() lookup (all platforms)
+        # abs_paths:   absolute install paths per platform (checked if which fails)
+        # driver_names: WebDriver binary names for shutil.which()
+        _BROWSERS = [
+            {
+                "name":        "Chrome",
+                "engine":      "chrome",
+                "path_names":  ["google-chrome", "google-chrome-stable",
+                                 "google-chrome-beta", "chrome"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                    ],
+                    "linux":  [
+                        "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+                        "/usr/local/bin/google-chrome",
+                        "/opt/google/chrome/google-chrome",
+                    ],
+                    "win":    [
+                        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                        _os.path.expandvars(
+                            r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+                    ],
+                },
+                "driver_names": ["chromedriver"],
+            },
+            {
+                "name":        "Brave",
+                "engine":      "chrome",
+                "path_names":  ["brave-browser", "brave", "brave-browser-stable"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                    ],
+                    "linux":  [
+                        "/usr/bin/brave-browser", "/usr/bin/brave",
+                        "/usr/local/bin/brave-browser",
+                        "/opt/brave.com/brave/brave-browser",
+                    ],
+                    "win":    [
+                        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                        _os.path.expandvars(
+                            r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+                    ],
+                },
+                "driver_names": ["chromedriver"],
+            },
+            {
+                "name":        "Chromium",
+                "engine":      "chrome",
+                "path_names":  ["chromium-browser", "chromium", "chromium-freeworld"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                    ],
+                    "linux":  [
+                        "/usr/bin/chromium-browser", "/usr/bin/chromium",
+                        "/usr/local/bin/chromium",
+                        "/snap/bin/chromium",
+                    ],
+                    "win":    [
+                        r"C:\Program Files\Chromium\Application\chrome.exe",
+                    ],
+                },
+                "driver_names": ["chromedriver", "chromium-chromedriver",
+                                  "chromium.chromedriver"],
+            },
+            {
+                "name":        "Edge",
+                "engine":      "edge",
+                "path_names":  ["microsoft-edge", "microsoft-edge-stable",
+                                 "msedge", "edge"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                    ],
+                    "linux":  [
+                        "/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable",
+                        "/usr/bin/msedge",
+                        "/opt/microsoft/msedge/msedge",
+                    ],
+                    "win":    [
+                        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                    ],
+                },
+                "driver_names": ["msedgedriver", "msedgedriver.exe"],
+            },
+            {
+                "name":        "Firefox",
+                "engine":      "firefox",
+                "path_names":  ["firefox", "firefox-esr", "firefox-bin"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Firefox.app/Contents/MacOS/firefox",
+                        "/Applications/Firefox.app/Contents/MacOS/firefox-bin",
+                    ],
+                    "linux":  [
+                        "/usr/bin/firefox", "/usr/bin/firefox-esr",
+                        "/usr/local/bin/firefox",
+                        "/snap/bin/firefox",
+                        "/opt/firefox/firefox",
+                    ],
+                    "win":    [
+                        r"C:\Program Files\Mozilla Firefox\firefox.exe",
+                        r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+                    ],
+                },
+                "driver_names": ["geckodriver"],
+            },
+            {
+                "name":        "Iceweasel",
+                "engine":      "firefox",
+                "path_names":  ["iceweasel"],
+                "abs_paths": {
+                    "linux": ["/usr/bin/iceweasel"],
+                },
+                "driver_names": ["geckodriver"],
+            },
+            {
+                "name":        "LibreWolf",
+                "engine":      "firefox",
+                "path_names":  ["librewolf"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/LibreWolf.app/Contents/MacOS/librewolf",
+                    ],
+                    "linux":  [
+                        "/usr/bin/librewolf", "/usr/local/bin/librewolf",
+                        "/opt/librewolf/librewolf",
+                    ],
+                    "win":    [
+                        r"C:\Program Files\LibreWolf\librewolf.exe",
+                    ],
+                },
+                "driver_names": ["geckodriver"],
+            },
+            {
+                "name":        "Waterfox",
+                "engine":      "firefox",
+                "path_names":  ["waterfox"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Waterfox.app/Contents/MacOS/waterfox",
+                    ],
+                    "linux":  ["/usr/bin/waterfox", "/opt/waterfox/waterfox"],
+                    "win":    [
+                        r"C:\Program Files\Waterfox\waterfox.exe",
+                    ],
+                },
+                "driver_names": ["geckodriver"],
+            },
+            {
+                "name":        "Pale Moon",
+                "engine":      "firefox",
+                "path_names":  ["palemoon", "pale-moon"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Pale Moon.app/Contents/MacOS/pale-moon",
+                    ],
+                    "linux":  ["/usr/bin/palemoon", "/opt/palemoon/palemoon"],
+                    "win":    [
+                        r"C:\Program Files\Pale Moon\palemoon.exe",
+                    ],
+                },
+                "driver_names": ["geckodriver"],
+            },
+        ]
+
+        def _locate_binary(browser: dict) -> str:
+            """Return path to browser executable or empty string."""
+            for name in browser.get("path_names", []):
+                found = _shutil.which(name)
+                if found:
+                    return found
+            for p in browser.get("abs_paths", {}).get(_plat, []):
+                if p and _os.path.isfile(p):
+                    return p
+            return ""
+
+        def _locate_driver(browser: dict) -> str:
+            """Return path to WebDriver binary or empty string."""
+            for name in browser.get("driver_names", []):
+                found = _shutil.which(name)
+                if found:
+                    return found
+            return ""
+
+        def _launch_chrome_engine(bin_path: str, drv_path: str) -> "object":
+            from selenium.webdriver.chrome.options import Options as _CO
+            from selenium.webdriver.chrome.service import Service as _CS
+            opts = _CO()
+            opts.add_argument("--no-sandbox")
+            opts.add_argument("--disable-dev-shm-usage")
+            opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+            opts.add_experimental_option("useAutomationExtension", False)
+            if bin_path:
+                opts.binary_location = bin_path
+            svc = _CS(executable_path=drv_path) if drv_path else None
+            return _wd.Chrome(service=svc, options=opts) if svc else _wd.Chrome(options=opts)
+
+        def _launch_edge_engine(bin_path: str, drv_path: str) -> "object":
+            from selenium.webdriver.edge.options import Options as _EO
+            from selenium.webdriver.edge.service import Service as _ES
+            opts = _EO()
+            opts.add_argument("--no-sandbox")
+            opts.add_argument("--disable-dev-shm-usage")
+            if bin_path:
+                opts.binary_location = bin_path
+            svc = _ES(executable_path=drv_path) if drv_path else None
+            return _wd.Edge(service=svc, options=opts) if svc else _wd.Edge(options=opts)
+
+        def _launch_firefox_engine(bin_path: str, drv_path: str) -> "object":
+            from selenium.webdriver.firefox.options import Options as _FO
+            from selenium.webdriver.firefox.service import Service as _FS
+            opts = _FO()
+            if bin_path:
+                opts.binary_location = bin_path
+            svc = _FS(executable_path=drv_path) if drv_path else None
+            return _wd.Firefox(service=svc, options=opts) if svc else _wd.Firefox(options=opts)
+
+        # ── Driver / browser resolution ───────────────────────────────────────
+        _explicit_drv = (
+            cfg.get("chromedriver_path")
+            or _os.environ.get("FRACTURE_CHROMEDRIVER", "")
+        )
+
+        driver      = None
+        _used_name  = ""
+
+        # If an explicit driver path was provided, honour it and go straight to Chrome
+        if _explicit_drv:
+            vc.log(f"[auth] Using specified WebDriver: {_explicit_drv}", "INFO")
+            try:
+                driver     = _launch_chrome_engine("", _explicit_drv)
+                _used_name = "Chrome (explicit driver)"
+            except Exception as _e:
+                vc.log(f"[auth] Specified driver failed ({_e}) — falling back to auto-detect", "WARNING")
+
+        if driver is None:
+            for _b in _BROWSERS:
+                _bin  = _locate_binary(_b)
+                _drv  = _locate_driver(_b)
+                # Chrome engine can rely on Selenium's built-in driver manager even
+                # without a found binary/driver; all other engines need at least the binary.
+                if not _bin and _b["engine"] != "chrome":
+                    continue
+                _bin_lbl = _bin or "(default install)"
+                _drv_lbl = _drv or "(selenium-manager)"
+                vc.log(
+                    f"[auth] Trying {_b['name']}: "
+                    f"binary={_bin_lbl}  driver={_drv_lbl}",
+                    "INFO",
+                )
+                try:
+                    engine = _b["engine"]
+                    if engine == "chrome":
+                        driver = _launch_chrome_engine(_bin, _drv)
+                    elif engine == "edge":
+                        driver = _launch_edge_engine(_bin, _drv)
+                    else:
+                        driver = _launch_firefox_engine(_bin, _drv)
+                    _used_name = _b["name"]
+                    break
+                except Exception as _e:
+                    vc.log(f"[auth] {_b['name']} unavailable: {_e}", "WARNING")
+                    continue
+
+        if driver is None:
+            vc.log(
+                "[auth] No supported browser could be launched. Install Chrome, Firefox, "
+                "or Edge along with the matching WebDriver (chromedriver / geckodriver / "
+                "msedgedriver), or specify the driver with --chromedriver <path>.",
+                "ERROR",
+            )
+            return None
+
+        # ── Interactive session capture ───────────────────────────────────────
+        try:
+            vc.log(f"[auth] {_used_name} opened — navigate to {login_url} and log in", "INFO")
+            driver.get(login_url)
+            vc.log(
+                "[auth] Complete login in the browser window, then press Enter here "
+                "to capture the session and continue …",
+                "INFO",
+            )
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                pass
+
+            captured_url    = driver.current_url
+            browser_cookies = driver.get_cookies()
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+        if not browser_cookies:
+            vc.log("[auth] No cookies captured from browser — cannot build session", "WARNING")
+            return None
+
+        # Transfer cookies into a fresh scoped session
+        new_sess = _make_session(cfg, _scope_hostnames)
+        for ck in browser_cookies:
+            domain = ck.get("domain", "").lstrip(".")
+            new_sess.cookies.set(ck["name"], ck["value"], domain=domain or None)
+
+        vc.log(
+            f"[auth] Captured {len(browser_cookies)} cookie(s) via {_used_name} "
+            f"(browser was at {captured_url})",
+            "SUCCESS",
+        )
+        return new_sess
 
     # ── Login URL discovery ───────────────────────────────────────────────────
     _LOGIN_CANDIDATE_PATHS = [
@@ -3163,6 +3673,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--no-vulnscan",   action="store_true", help="Skip nuclei vulnscan")
     parser.add_argument("--no-ffuf",       action="store_true", help="Skip ffuf vhost and parameter fuzzing")
     parser.add_argument("--no-auth",       action="store_true", help="Skip all authenticated phases")
+    parser.add_argument("--browser-auth",  action="store_true", help="Fall back to interactive browser login if automated auth fails")
+    parser.add_argument("--chromedriver",  metavar="PATH", help="Path to chromedriver binary (used with --browser-auth)")
     parser.add_argument("--list-phases",   action="store_true", help="Print phases and exit")
     parser.add_argument("--username",      metavar="USER", help="Auth username")
     parser.add_argument("--password",      metavar="PASS", help="Auth password")
@@ -11814,6 +12326,10 @@ def main() -> None:
     if args.no_auth:
         for auth_phase in ("auth_recon", "authorization", "session", "csrf", "cross_user"):
             cfg["phases"][auth_phase] = False
+    if args.browser_auth:
+        cfg["browser_auth"] = True
+    if args.chromedriver:
+        cfg["chromedriver_path"] = args.chromedriver
 
     # CLI auth overrides
     if args.username:
@@ -11909,17 +12425,16 @@ def main() -> None:
 
         def _report_auth_status(sess_obj: "requests.Session | None",
                                 auth_cfg: dict, label: str,
-                                primary_enabled: bool = False) -> None:
-            """Log whether authentication was attempted and whether it succeeded."""
+                                primary_enabled: bool = False) -> bool:
+            """Log auth result. Returns True if session carries auth signals."""
             if not auth_cfg.get("enabled"):
-                # Suppress "not attempted" for secondary when primary creds were provided
                 if label == "secondary" and primary_enabled:
-                    return
+                    return False
                 vc.log(f"[auth:{label}] Authentication not attempted", "INFO")
-                return
+                return False
             if sess_obj is None:
                 vc.log(f"[auth:{label}] Authentication failed — continuing with unauthenticated testing only", "ERROR")
-                return
+                return False
             _has_cookie  = bool(sess_obj.cookies)
             _has_header  = any(
                 k.lower() in ("authorization", "x-auth-token", "x-api-key",
@@ -11929,13 +12444,38 @@ def main() -> None:
             _has_auth    = sess_obj.auth is not None
             if _has_cookie or _has_header or _has_auth:
                 vc.log(f"[auth:{label}] Authentication successful", "SUCCESS")
-            else:
-                vc.log(f"[auth:{label}] Authentication failed — continuing with unauthenticated testing only", "ERROR")
+                return True
+            vc.log(f"[auth:{label}] Authentication failed — continuing with unauthenticated testing only", "ERROR")
+            return False
 
         _primary_auth_enabled = bool(cfg.get("auth", {}).get("enabled"))
-        _report_auth_status(auth_sess,  cfg.get("auth",  {}), "primary")
+        _primary_ok  = _report_auth_status(auth_sess,  cfg.get("auth",  {}), "primary")
         _report_auth_status(auth2_sess, cfg.get("auth2", {}), "secondary",
                             primary_enabled=_primary_auth_enabled)
+
+        # ── Browser-assisted login fallback ───────────────────────────────────
+        # Triggered when: --browser-auth is set, primary auth was configured,
+        # and automated auth did not produce a valid session.
+        if cfg.get("browser_auth") and _primary_auth_enabled and not _primary_ok:
+            _bl_url = (
+                cfg.get("auth", {}).get("login_url", "").strip()
+                or (cfg.get("target_url", "") or "").rstrip("/")
+                or ((cfg.get("target_urls") or [""])[0] or "").rstrip("/")
+            )
+            if _bl_url:
+                vc.log(
+                    "[auth] Automated authentication failed — launching browser for "
+                    "interactive login",
+                    "INFO",
+                )
+                _b_sess = _browser_assisted_login(_bl_url)
+                if _b_sess is not None:
+                    auth_sess = _b_sess
+                    vc.log("[auth:primary] Browser-assisted login successful — session captured", "SUCCESS")
+                else:
+                    vc.log("[auth] Browser-assisted login did not produce a session — proceeding unauthenticated", "WARNING")
+            else:
+                vc.log("[auth] --browser-auth set but no login URL could be determined", "WARNING")
 
         # Pre-scan connectivity check — retry up to 5 times before proceeding
         _alive_delays = [0, 5, 10, 15, 20]
