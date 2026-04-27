@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.27"
+VERSION = "2.9.28"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3006,8 +3006,8 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         supported browser can be launched.
 
         Browser detection order (first working browser wins):
-          Chrome → Brave → Chromium → Edge → Firefox → Iceweasel → Waterfox
-                                                       → LibreWolf → Pale Moon
+          Firefox → Iceweasel → LibreWolf → Waterfox → Pale Moon
+                  → Chrome → Brave → Chromium → Edge
 
         Driver resolution for each candidate (in order):
           1. --chromedriver CLI flag / cfg["chromedriver_path"]    (Chrome only)
@@ -3039,6 +3039,85 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         # abs_paths:   absolute install paths per platform (checked if which fails)
         # driver_names: WebDriver binary names for shutil.which()
         _BROWSERS = [
+            {
+                "name":        "Firefox",
+                "engine":      "firefox",
+                "path_names":  ["firefox", "firefox-esr", "firefox-bin"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Firefox.app/Contents/MacOS/firefox",
+                        "/Applications/Firefox.app/Contents/MacOS/firefox-bin",
+                    ],
+                    "linux":  [
+                        "/usr/bin/firefox", "/usr/bin/firefox-esr",
+                        "/usr/local/bin/firefox",
+                        "/snap/bin/firefox",
+                        "/opt/firefox/firefox",
+                    ],
+                    "win":    [
+                        r"C:\Program Files\Mozilla Firefox\firefox.exe",
+                        r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+                    ],
+                },
+                "driver_names": ["geckodriver"],
+            },
+            {
+                "name":        "Iceweasel",
+                "engine":      "firefox",
+                "path_names":  ["iceweasel"],
+                "abs_paths": {
+                    "linux": ["/usr/bin/iceweasel"],
+                },
+                "driver_names": ["geckodriver"],
+            },
+            {
+                "name":        "LibreWolf",
+                "engine":      "firefox",
+                "path_names":  ["librewolf"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/LibreWolf.app/Contents/MacOS/librewolf",
+                    ],
+                    "linux":  [
+                        "/usr/bin/librewolf", "/usr/local/bin/librewolf",
+                        "/opt/librewolf/librewolf",
+                    ],
+                    "win":    [
+                        r"C:\Program Files\LibreWolf\librewolf.exe",
+                    ],
+                },
+                "driver_names": ["geckodriver"],
+            },
+            {
+                "name":        "Waterfox",
+                "engine":      "firefox",
+                "path_names":  ["waterfox"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Waterfox.app/Contents/MacOS/waterfox",
+                    ],
+                    "linux":  ["/usr/bin/waterfox", "/opt/waterfox/waterfox"],
+                    "win":    [
+                        r"C:\Program Files\Waterfox\waterfox.exe",
+                    ],
+                },
+                "driver_names": ["geckodriver"],
+            },
+            {
+                "name":        "Pale Moon",
+                "engine":      "firefox",
+                "path_names":  ["palemoon", "pale-moon"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Pale Moon.app/Contents/MacOS/pale-moon",
+                    ],
+                    "linux":  ["/usr/bin/palemoon", "/opt/palemoon/palemoon"],
+                    "win":    [
+                        r"C:\Program Files\Pale Moon\palemoon.exe",
+                    ],
+                },
+                "driver_names": ["geckodriver"],
+            },
             {
                 "name":        "Chrome",
                 "engine":      "chrome",
@@ -3123,85 +3202,6 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     ],
                 },
                 "driver_names": ["msedgedriver", "msedgedriver.exe"],
-            },
-            {
-                "name":        "Firefox",
-                "engine":      "firefox",
-                "path_names":  ["firefox", "firefox-esr", "firefox-bin"],
-                "abs_paths": {
-                    "darwin": [
-                        "/Applications/Firefox.app/Contents/MacOS/firefox",
-                        "/Applications/Firefox.app/Contents/MacOS/firefox-bin",
-                    ],
-                    "linux":  [
-                        "/usr/bin/firefox", "/usr/bin/firefox-esr",
-                        "/usr/local/bin/firefox",
-                        "/snap/bin/firefox",
-                        "/opt/firefox/firefox",
-                    ],
-                    "win":    [
-                        r"C:\Program Files\Mozilla Firefox\firefox.exe",
-                        r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
-                    ],
-                },
-                "driver_names": ["geckodriver"],
-            },
-            {
-                "name":        "Iceweasel",
-                "engine":      "firefox",
-                "path_names":  ["iceweasel"],
-                "abs_paths": {
-                    "linux": ["/usr/bin/iceweasel"],
-                },
-                "driver_names": ["geckodriver"],
-            },
-            {
-                "name":        "LibreWolf",
-                "engine":      "firefox",
-                "path_names":  ["librewolf"],
-                "abs_paths": {
-                    "darwin": [
-                        "/Applications/LibreWolf.app/Contents/MacOS/librewolf",
-                    ],
-                    "linux":  [
-                        "/usr/bin/librewolf", "/usr/local/bin/librewolf",
-                        "/opt/librewolf/librewolf",
-                    ],
-                    "win":    [
-                        r"C:\Program Files\LibreWolf\librewolf.exe",
-                    ],
-                },
-                "driver_names": ["geckodriver"],
-            },
-            {
-                "name":        "Waterfox",
-                "engine":      "firefox",
-                "path_names":  ["waterfox"],
-                "abs_paths": {
-                    "darwin": [
-                        "/Applications/Waterfox.app/Contents/MacOS/waterfox",
-                    ],
-                    "linux":  ["/usr/bin/waterfox", "/opt/waterfox/waterfox"],
-                    "win":    [
-                        r"C:\Program Files\Waterfox\waterfox.exe",
-                    ],
-                },
-                "driver_names": ["geckodriver"],
-            },
-            {
-                "name":        "Pale Moon",
-                "engine":      "firefox",
-                "path_names":  ["palemoon", "pale-moon"],
-                "abs_paths": {
-                    "darwin": [
-                        "/Applications/Pale Moon.app/Contents/MacOS/pale-moon",
-                    ],
-                    "linux":  ["/usr/bin/palemoon", "/opt/palemoon/palemoon"],
-                    "win":    [
-                        r"C:\Program Files\Pale Moon\palemoon.exe",
-                    ],
-                },
-                "driver_names": ["geckodriver"],
             },
         ]
 
