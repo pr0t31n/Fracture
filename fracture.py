@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.31"
+VERSION = "2.9.32"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3016,6 +3016,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
           4. Selenium's built-in driver manager (Selenium 4.6+)
         """
         import shutil as _shutil, os as _os, sys as _sys
+        _scope_hostnames = scope_hostnames or set()
 
         try:
             from selenium import webdriver as _wd
