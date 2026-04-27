@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.6"
+VERSION = "2.9.7"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2327,11 +2327,16 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             # ── Affirmative submit buttons in non-password forms ──────────────
             # (password forms are the target — we don't treat them as nav buttons)
             if not has_pw:
+                _form_method_m = _re3.search(
+                    r'\bmethod=["\']?(\w+)["\']?', form_tag, _re3.IGNORECASE)
+                _form_method = (_form_method_m.group(1).lower()
+                                if _form_method_m else "post")
+
                 # If the form has no real interactive inputs (text/email/checkbox/
-                # select/textarea) — i.e. it is purely a navigation step — treat
-                # the button as a GET link, not a POST form_submit.  This prevents
-                # a "Login" button on a landing page from being mistaken for a
-                # credential submission target.
+                # select/textarea) — i.e. it is purely a navigation step — type
+                # depends on the form method.  POST navigation forms (common in
+                # Java .action / .do apps) use "form_submit" so they are correctly
+                # POSTed; GET navigation forms use "link" for a plain GET.
                 _form_has_inputs = bool(_re3.search(
                     r'<input[^>]+type=["\']?(?:text|email|tel|number|search|'
                     r'checkbox|radio|password)["\']?',
@@ -2339,7 +2344,23 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 )) or bool(_re3.search(
                     r'<(?:textarea|select)\b', form_body, _re3.IGNORECASE,
                 ))
-                _affirm_type = "form_submit" if _form_has_inputs else "link"
+                _affirm_type = (
+                    "form_submit"
+                    if (_form_has_inputs or _form_method == "post")
+                    else "link"
+                )
+
+                # Also treat the form as affirmative if the action URL itself
+                # contains login-hint keywords or known framework path patterns.
+                # This catches forms like <form action="Login.action"> even when
+                # the button text is blank or an icon.
+                _ACTION_HINT_RE = _re3.compile(
+                    r'(?:login|signin|sign.in|logon|signon|auth(?:enticate)?'
+                    r'|j_security_check|j_spring_security_check'
+                    r'|credential)',
+                    _re3.IGNORECASE,
+                )
+                _action_is_login_hint = bool(_ACTION_HINT_RE.search(action))
 
                 _found_affirm_btn = False
                 # <input type="submit" value="Login"> style
@@ -2348,11 +2369,12 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     _stag  = sub_m.group(0)
                     _sv_m  = _re3.search(r'\bvalue=["\']([^"\']+)["\']', _stag, _re3.IGNORECASE)
                     _sval  = _sv_m.group(1) if _sv_m else ""
-                    if _elem_is_affirmative(_stag, _sval):
+                    if _elem_is_affirmative(_stag, _sval) or _action_is_login_hint:
                         result["affirmative_links"].append({
                             "url":    action,
                             "text":   _sval or "(submit)",
                             "type":   _affirm_type,
+                            "method": _form_method,
                             "fields": _collect_hidden(form_body),
                         })
                         _found_affirm_btn = True
@@ -2366,11 +2388,14 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         btn_text  = _strip_tags(btn_m.group(2))
                         t_m       = _re3.search(r'\btype=["\']?(\w+)["\']?', btn_attrs, _re3.IGNORECASE)
                         btn_type  = t_m.group(1).lower() if t_m else "submit"
-                        if btn_type in ("submit", "button") and _elem_is_affirmative(btn_attrs, btn_text):
+                        if (btn_type in ("submit", "button")
+                                and (_elem_is_affirmative(btn_attrs, btn_text)
+                                     or _action_is_login_hint)):
                             result["affirmative_links"].append({
                                 "url":    action,
                                 "text":   btn_text or "(button)",
                                 "type":   _affirm_type,
+                                "method": _form_method,
                                 "fields": _collect_hidden(form_body),
                             })
                             break
@@ -2489,20 +2514,27 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 _visited_bases.add(_nav_base)
 
                 if nav["type"] == "form_submit":
+                    _nav_method = nav.get("method", "post")
                     vc.log(
                         f"[auth] Step {_step + 1}: Affirmative button '{nav['text']}' — "
-                        f"submitting form to {nav['url']}",
+                        f"{_nav_method.upper()} form to {nav['url']}",
                         "INFO",
                     )
                     try:
-                        post_resp = sess.post(
-                            _nav_base, data=nav.get("fields", {}),
-                            timeout=timeout, allow_redirects=True,
-                        )
-                        next_url = post_resp.url
+                        if _nav_method == "get":
+                            _nav_resp = sess.get(
+                                _nav_base, params=nav.get("fields", {}),
+                                timeout=timeout, allow_redirects=True,
+                            )
+                        else:
+                            _nav_resp = sess.post(
+                                _nav_base, data=nav.get("fields", {}),
+                                timeout=timeout, allow_redirects=True,
+                            )
+                        next_url = _nav_resp.url
                         vc.log(
                             f"[auth] Affirmative form submitted → {next_url} "
-                            f"(HTTP {post_resp.status_code})",
+                            f"(HTTP {_nav_resp.status_code})",
                             "INFO",
                         )
                         current_url = next_url
@@ -2890,15 +2922,39 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
 
     # ── Login URL discovery ───────────────────────────────────────────────────
     _LOGIN_CANDIDATE_PATHS = [
-        "/login", "/signin", "/sign-in", "/log-in",
-        "/auth", "/auth/login", "/auth/signin",
+        # Generic
+        "/login", "/signin", "/sign-in", "/log-in", "/logon", "/signon",
+        "/auth", "/auth/login", "/auth/signin", "/authenticate",
         "/user/login", "/users/login", "/user/sign_in",
         "/account/login", "/account/signin",
         "/admin/login", "/wp-login.php",
         "/portal/login", "/portal", "/sso/login",
         "/api/auth/login", "/api/login", "/api/signin",
+        # Static extensions
         "/login.php", "/login.html", "/login.aspx", "/login.jsp",
         "/signin.php", "/signin.html",
+        "/login.cfm", "/login.cgi",
+        # Java Struts / Spring MVC / generic .action
+        "/login.action", "/signin.action", "/logon.action", "/signon.action",
+        "/auth.action", "/authenticate.action",
+        "/Login.action", "/SignIn.action", "/Logon.action",
+        "/user/login.action", "/account/login.action",
+        "/admin/login.action",
+        # Java Servlet (.do)
+        "/login.do", "/signin.do", "/logon.do", "/auth.do",
+        "/Login.do", "/SignIn.do", "/Logon.do",
+        # Java EE / J2EE container auth
+        "/j_security_check",
+        # Spring Security
+        "/j_spring_security_check",
+        # JSF / Facelets
+        "/login.jsf", "/signin.jsf", "/login.faces", "/signin.faces",
+        "/login.xhtml", "/signin.xhtml",
+        # ColdFusion
+        "/login.cfm", "/signin.cfm",
+        # ASP.NET additional
+        "/login.aspx", "/signin.aspx", "/Account/Login",
+        "/Identity/Account/Login",
     ]
 
     def _discover_login_url(base_url: str) -> "str":
@@ -2933,6 +2989,49 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         import re as _re4
         _base_host = _up4(base).netloc
 
+        # Hint keywords for queue prioritisation
+        _LOGIN_HINTS = (
+            "login", "signin", "sign-in", "log-in", "logon", "signon",
+            "auth", "authenticate", "authentication",
+            "sso", "portal", "session", "credential",
+            # Java-specific
+            "j_security", "j_spring", "struts",
+        )
+        # Server-side page framework extensions that indicate dynamic pages
+        _ACTION_EXTS = (".action", ".do", ".jsf", ".faces", ".xhtml",
+                        ".cfm", ".cgi", ".asp", ".aspx", ".jsp", ".php",
+                        ".html", ".htm")
+
+        def _is_login_hint(url_norm: str) -> bool:
+            _lc = url_norm.lower()
+            return any(h in _lc for h in _LOGIN_HINTS)
+
+        def _extract_spider_urls(html: str, base_r_url: str) -> "list[str]":
+            """
+            Collect candidate navigation URLs from a page.
+            Covers: <a href>, <form action>, onclick/data-* URL values.
+            """
+            _cands: list = []
+            # Standard href links
+            for _h in _re4.findall(r'href=["\']([^"\']+)["\']', html, _re4.IGNORECASE):
+                _cands.append(_h)
+            # Form action attributes — critical for .action / .do / .jsf pages
+            for _a in _re4.findall(
+                    r'<form\b[^>]+\baction=["\']([^"\']+)["\']', html, _re4.IGNORECASE):
+                _cands.append(_a)
+            # onclick / data-href / data-url / data-action containing URL-like values
+            for _attr_val in _re4.findall(
+                    r'(?:onclick|data-href|data-url|data-action|data-link)\s*='
+                    r'\s*["\']([^"\']+)["\']',
+                    html, _re4.IGNORECASE):
+                # Pull out anything that looks like a relative/absolute page path
+                for _m in _re4.finditer(
+                        r'["\']?([/\w\-\.%]+\.(?:action|do|jsf|faces|xhtml|cfm'
+                        r'|asp|aspx|jsp|php|html?))["\']?',
+                        _attr_val, _re4.IGNORECASE):
+                    _cands.append(_m.group(1))
+            return _cands
+
         while _queue:
             cur_url, depth = _queue.pop(0)
             if depth > 3:
@@ -2950,8 +3049,11 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 return r.url
 
             if depth < 3:
-                for href in _re4.findall(r'href=["\']([^"\'#?][^"\']*)["\']', r.text, _re4.IGNORECASE):
-                    candidate = _uj4(r.url, href)
+                for raw_url in _extract_spider_urls(r.text, r.url):
+                    if raw_url.lower().startswith(
+                            ("javascript:", "mailto:", "tel:", "#", "data:")):
+                        continue
+                    candidate = _uj4(r.url, raw_url)
                     parsed    = _up4(candidate)
                     if parsed.netloc != _base_host:
                         continue
@@ -2959,9 +3061,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     if norm in _visited:
                         continue
                     _visited.add(norm)
-                    # Prioritise links whose path suggests login
-                    _login_hints = ("login", "signin", "sign-in", "log-in", "auth", "sso", "portal")
-                    if any(h in norm.lower() for h in _login_hints):
+                    if _is_login_hint(norm):
                         _queue.insert(0, (candidate, depth + 1))
                     else:
                         _queue.append((candidate, depth + 1))
@@ -3357,21 +3457,37 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         #     username/password form before attempting credential submission.
         #     This prevents false-positive auth on pages that have an
         #     affirmative button (e.g. "Login") but no credential fields.
+        #
+        #     Leniency rules:
+        #       – If GET returns 4xx/5xx: skip the guard and proceed.
+        #         Many server-side endpoints (.action, .do, .jsf, etc.) only
+        #         serve HTML for GET; a 405/404 is NOT evidence there is no form.
+        #       – If redirect occurs during GET: adopt the final URL.
+        #       – Only block when GET returns 200 with NO password field.
         if _login_url:
             try:
                 _guard_r = sess.get(_login_url, timeout=timeout, allow_redirects=True)
-                _guard_p = _analyse_form_page(_guard_r.text, _guard_r.url)
-                if not _guard_p["login_form"]:
+                if _guard_r.status_code >= 400:
+                    # Non-2xx/3xx: endpoint may only accept POST — trust the
+                    # prior analysis and proceed.
                     vc.log(
-                        f"[auth] Resolved URL has no username/password form — "
-                        f"cannot submit credentials ({_login_url})",
-                        "WARNING",
+                        f"[auth] Guard GET returned HTTP {_guard_r.status_code} for "
+                        f"{_login_url} — proceeding without form verification",
+                        "INFO",
                     )
-                    _login_url = ""
-                elif _guard_r.url != _login_url:
-                    # Redirect during guard GET — use final URL
-                    _login_url = _guard_r.url
-                    auth["login_url"] = _login_url
+                else:
+                    _guard_p = _analyse_form_page(_guard_r.text, _guard_r.url)
+                    if not _guard_p["login_form"]:
+                        vc.log(
+                            f"[auth] Resolved URL has no username/password form — "
+                            f"cannot submit credentials ({_login_url})",
+                            "WARNING",
+                        )
+                        _login_url = ""
+                    elif _guard_r.url != _login_url:
+                        # Redirect during guard GET — use final URL
+                        _login_url = _guard_r.url
+                        auth["login_url"] = _login_url
             except Exception as _ge:
                 vc.log(f"[auth] Could not verify login form at {_login_url}: {_ge}", "WARNING")
 
