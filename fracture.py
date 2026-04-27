@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.8.3"
+VERSION = "2.8.4"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -11642,6 +11642,30 @@ def main() -> None:
         sess       = _make_session(cfg, _scope_hostnames)
         auth_sess  = _build_auth_session(cfg, "auth", _scope_hostnames)
         auth2_sess = _build_auth_session(cfg, "auth2", _scope_hostnames)
+
+        def _report_auth_status(sess_obj: "requests.Session | None",
+                                auth_cfg: dict, label: str) -> None:
+            """Log whether authentication was attempted and whether it succeeded."""
+            if not auth_cfg.get("enabled"):
+                vc.log(f"[auth:{label}] Authentication not attempted", "INFO")
+                return
+            if sess_obj is None:
+                vc.log(f"[auth:{label}] Authentication failed — session could not be built", "ERROR")
+                return
+            _has_cookie  = bool(sess_obj.cookies)
+            _has_header  = any(
+                k.lower() in ("authorization", "x-auth-token", "x-api-key",
+                               "x-csrf-token", "cookie")
+                for k in sess_obj.headers
+            )
+            _has_auth    = sess_obj.auth is not None
+            if _has_cookie or _has_header or _has_auth:
+                vc.log(f"[auth:{label}] Authentication successful", "SUCCESS")
+            else:
+                vc.log(f"[auth:{label}] Authentication failed — no credentials were applied to the session", "ERROR")
+
+        _report_auth_status(auth_sess,  cfg.get("auth",  {}), "primary")
+        _report_auth_status(auth2_sess, cfg.get("auth2", {}), "secondary")
 
         # Pre-scan connectivity check — retry up to 5 times before proceeding
         _alive_delays = [0, 5, 10, 15, 20]
