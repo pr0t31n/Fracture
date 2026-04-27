@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.22"
+VERSION = "2.9.23"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3251,19 +3251,36 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         def _launch_firefox_engine(bin_path: str, drv_path: str) -> "object":
             from selenium.webdriver.firefox.options import Options as _FO
             from selenium.webdriver.firefox.service import Service as _FS
+            import tempfile as _tf2
             opts = _FO()
             opts.add_argument("-no-remote")
             if bin_path:
                 opts.binary_location = bin_path
+            _log_fd, _log_path = _tf2.mkstemp(prefix="fracture_gd_", suffix=".log")
+            _os.close(_log_fd)
             if drv_path:
-                svc = _FS(executable_path=drv_path)
+                svc = _FS(executable_path=drv_path, log_output=_log_path)
             else:
                 try:
                     from webdriver_manager.firefox import GeckoDriverManager as _GDM
-                    svc = _FS(executable_path=_GDM().install())
+                    svc = _FS(executable_path=_GDM().install(), log_output=_log_path)
                 except Exception:
                     svc = None
-            return _wd.Firefox(service=svc, options=opts) if svc else _wd.Firefox(options=opts)
+            try:
+                return _wd.Firefox(service=svc, options=opts) if svc else _wd.Firefox(options=opts)
+            except Exception as _fe:
+                try:
+                    _gd_out = open(_log_path).read().strip()
+                    if _gd_out:
+                        vc.log(f"[auth] geckodriver log:\n{_gd_out[-3000:]}", "WARNING")
+                except Exception:
+                    pass
+                raise _fe
+            finally:
+                try:
+                    _os.unlink(_log_path)
+                except Exception:
+                    pass
 
         # ── Display check (browser auth requires a visible window) ───────────────
         if _sys.platform.startswith("linux"):
@@ -3318,6 +3335,17 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     if _os.path.exists(_dbus):
                         _os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={_dbus}"
                         vc.log(f"[auth] DBUS_SESSION_BUS_ADDRESS not set — using {_dbus}", "INFO")
+                        break
+            # XDG_RUNTIME_DIR — Firefox uses this for runtime socket/lock files
+            if not _os.environ.get("XDG_RUNTIME_DIR"):
+                _xdg_candidates = (
+                    ["/run/user/0"]
+                    + sorted(_glob.glob("/run/user/[0-9]*"))
+                )
+                for _xdg in _xdg_candidates:
+                    if _os.path.isdir(_xdg):
+                        _os.environ["XDG_RUNTIME_DIR"] = _xdg
+                        vc.log(f"[auth] XDG_RUNTIME_DIR not set — using {_xdg}", "INFO")
                         break
 
         # ── Driver / browser resolution ───────────────────────────────────────
