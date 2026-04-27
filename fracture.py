@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.8.4"
+VERSION = "2.9.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2161,8 +2161,8 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
     # ── CSRF prefetch helper (used by form_login / totp_mfa) ─────────────────
     def _csrf_prefetch(url: str) -> "tuple[str, dict]":
         """GET login page; return (form_action_url, hidden_input_fields)."""
-        import re
-        from urllib.parse import urljoin
+        import re as _re2
+        from urllib.parse import urljoin as _urljoin2
         try:
             r    = sess.get(url, timeout=timeout)
             html = r.text
@@ -2170,32 +2170,265 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             return "", {}
         hidden: dict = {}
         form_action  = ""
-        for form_m in re.finditer(r"(?s)<form[^>]*>(.+?)</form>", html, re.IGNORECASE):
+        for form_m in _re2.finditer(r"(?s)<form[^>]*>(.+?)</form>", html, _re2.IGNORECASE):
             form_tag  = form_m.group(0)
             form_body = form_m.group(1)
-            if not re.search(r'<input[^>]+type=["\']?password["\']?', form_body, re.IGNORECASE):
+            if not _re2.search(r'<input[^>]+type=["\']?password["\']?', form_body, _re2.IGNORECASE):
                 continue
-            act_m = re.search(r'\baction=["\']([^"\']*)["\']', form_tag, re.IGNORECASE)
+            act_m = _re2.search(r'\baction=["\']([^"\']*)["\']', form_tag, _re2.IGNORECASE)
             if act_m:
                 raw = act_m.group(1).strip()
                 if raw:
-                    form_action = urljoin(url, raw)
-            for inp in re.finditer(r"<input[^>]+>", form_body, re.IGNORECASE):
+                    form_action = _urljoin2(url, raw)
+            for inp in _re2.finditer(r"<input[^>]+>", form_body, _re2.IGNORECASE):
                 tag = inp.group(0)
-                t_m = re.search(r'\btype=["\']?(\w+)["\']?', tag, re.IGNORECASE)
+                t_m = _re2.search(r'\btype=["\']?(\w+)["\']?', tag, _re2.IGNORECASE)
                 if not t_m or t_m.group(1).lower() != "hidden":
                     continue
-                n_m = re.search(r'\bname=["\']([^"\']+)["\']', tag, re.IGNORECASE)
-                v_m = re.search(r'\bvalue=["\']([^"\']*)["\']', tag, re.IGNORECASE)
+                n_m = _re2.search(r'\bname=["\']([^"\']+)["\']', tag, _re2.IGNORECASE)
+                v_m = _re2.search(r'\bvalue=["\']([^"\']*)["\']', tag, _re2.IGNORECASE)
                 if n_m:
                     hidden[n_m.group(1)] = v_m.group(1) if v_m else ""
             break
         return form_action, hidden
 
+    # ── Form page analyser ────────────────────────────────────────────────────
+    def _analyse_form_page(html: str, page_url: str) -> "dict":
+        """
+        Inspect all forms on a page and classify what is present.
+
+        Returns a dict with keys:
+          has_password   – True if any form contains a password input
+          has_username   – True if any form contains a text/email/tel input
+          has_checkbox   – True if any form contains a checkbox
+          checkbox_forms – list of dicts {action, fields} for forms that have
+                           a checkbox but NO password field — i.e. gate pages
+          login_form     – dict {action, hidden} for the first form with a
+                           password field, or None
+        """
+        import re as _re3
+        from urllib.parse import urljoin as _uj3
+        result: dict = {
+            "has_password":   False,
+            "has_username":   False,
+            "has_checkbox":   False,
+            "checkbox_forms": [],
+            "login_form":     None,
+        }
+        for form_m in _re3.finditer(r"(?s)<form[^>]*>(.+?)</form>", html, _re3.IGNORECASE):
+            form_tag  = form_m.group(0)
+            form_body = form_m.group(1)
+
+            act_raw = ""
+            act_m   = _re3.search(r'\baction=["\']([^"\']*)["\']', form_tag, _re3.IGNORECASE)
+            if act_m:
+                act_raw = act_m.group(1).strip()
+            action = _uj3(page_url, act_raw) if act_raw else page_url
+
+            has_pw  = bool(_re3.search(r'<input[^>]+type=["\']?password["\']?',     form_body, _re3.IGNORECASE))
+            has_txt = bool(_re3.search(r'<input[^>]+type=["\']?(text|email|tel)["\']?', form_body, _re3.IGNORECASE))
+            has_cb  = bool(_re3.search(r'<input[^>]+type=["\']?checkbox["\']?',      form_body, _re3.IGNORECASE))
+
+            if has_pw:
+                result["has_password"] = True
+                if result["login_form"] is None:
+                    hidden: dict = {}
+                    for inp in _re3.finditer(r"<input[^>]+>", form_body, _re3.IGNORECASE):
+                        tag = inp.group(0)
+                        t_m = _re3.search(r'\btype=["\']?(\w+)["\']?', tag, _re3.IGNORECASE)
+                        if not t_m or t_m.group(1).lower() != "hidden":
+                            continue
+                        n_m = _re3.search(r'\bname=["\']([^"\']+)["\']', tag, _re3.IGNORECASE)
+                        v_m = _re3.search(r'\bvalue=["\']([^"\']*)["\']', tag, _re3.IGNORECASE)
+                        if n_m:
+                            hidden[n_m.group(1)] = v_m.group(1) if v_m else ""
+                    result["login_form"] = {"action": action, "hidden": hidden}
+            if has_txt:
+                result["has_username"] = True
+            if has_cb:
+                result["has_checkbox"] = True
+                if not has_pw:
+                    # Collect all named fields (checkboxes, hidden, selects) for the gate POST
+                    fields: dict = {}
+                    for inp in _re3.finditer(r"<input[^>]+>", form_body, _re3.IGNORECASE):
+                        tag  = inp.group(0)
+                        t_m  = _re3.search(r'\btype=["\']?(\w+)["\']?',    tag, _re3.IGNORECASE)
+                        n_m  = _re3.search(r'\bname=["\']([^"\']+)["\']',  tag, _re3.IGNORECASE)
+                        v_m  = _re3.search(r'\bvalue=["\']([^"\']*)["\']', tag, _re3.IGNORECASE)
+                        if not n_m:
+                            continue
+                        itype = t_m.group(1).lower() if t_m else "text"
+                        val   = v_m.group(1) if v_m else ""
+                        if itype == "checkbox":
+                            fields[n_m.group(1)] = val or "on"   # checked
+                        elif itype not in ("submit", "image", "reset", "button"):
+                            fields[n_m.group(1)] = val
+                    # Also pick up any <select> defaults
+                    for sel_m in _re3.finditer(
+                            r'<select[^>]+name=["\']([^"\']+)["\'][^>]*>(.*?)</select>',
+                            form_body, _re3.IGNORECASE | _re3.DOTALL):
+                        sel_name = sel_m.group(1)
+                        opt_m = _re3.search(
+                            r'<option[^>]+value=["\']([^"\']*)["\'][^>]*>', sel_m.group(2), _re3.IGNORECASE)
+                        if opt_m and sel_name not in fields:
+                            fields[sel_name] = opt_m.group(1)
+                    result["checkbox_forms"].append({"action": action, "fields": fields})
+        return result
+
+    # ── Step through gate pages to reach the real login form ─────────────────
+    def _step_to_login_form(start_url: str) -> "str":
+        """
+        Walk through checkbox/consent gate pages until a username+password form
+        is found or the step limit is reached.  Returns the resolved login URL.
+
+        Steps taken:
+          1. GET the current URL and analyse forms.
+          2. If a login form (has password field) is found → return current URL.
+          3. If only gate forms (checkbox, no password) are found → POST them
+             (all checkboxes checked, hidden fields included) and follow to the
+             next page, then repeat from step 1.
+          4. If neither is found → return the original start_url unchanged.
+        """
+        _MAX_STEPS = 6
+        current_url = start_url
+        vc.log(f"[auth] Inspecting login page: {current_url}", "INFO")
+
+        for _step in range(_MAX_STEPS):
+            try:
+                resp = sess.get(current_url, timeout=timeout, allow_redirects=True)
+            except Exception as _e:
+                vc.log(f"[auth] Could not reach {current_url}: {_e}", "WARNING")
+                return start_url
+
+            if resp.url != current_url:
+                vc.log(f"[auth] Redirected to: {resp.url}", "INFO")
+                current_url = resp.url
+
+            page = _analyse_form_page(resp.text, current_url)
+
+            if page["login_form"]:
+                vc.log(
+                    f"[auth] Step {_step + 1}: Login form detected "
+                    f"(username={'yes' if page['has_username'] else 'no'}, password=yes) "
+                    f"at {current_url}",
+                    "SUCCESS",
+                )
+                return current_url
+
+            if page["checkbox_forms"]:
+                gate = page["checkbox_forms"][0]
+                vc.log(
+                    f"[auth] Step {_step + 1}: Gate page detected (checkbox, no password) — "
+                    f"submitting acceptance form at {current_url}",
+                    "INFO",
+                )
+                try:
+                    gate_resp = sess.post(
+                        gate["action"], data=gate["fields"],
+                        timeout=timeout, allow_redirects=True,
+                    )
+                    next_url = gate_resp.url
+                    vc.log(f"[auth] Gate submitted → {next_url} (HTTP {gate_resp.status_code})", "INFO")
+                    current_url = next_url
+                except Exception as _e:
+                    vc.log(f"[auth] Gate form submission failed: {_e} — using {current_url}", "WARNING")
+                    return current_url
+                continue
+
+            # No recognisable form found on this page
+            vc.log(
+                f"[auth] Step {_step + 1}: No login form or gate form found at {current_url}",
+                "WARNING",
+            )
+            return current_url
+
+        vc.log(f"[auth] Reached step limit ({_MAX_STEPS}) without finding a login form — using {current_url}", "WARNING")
+        return current_url
+
+    # ── Login URL discovery ───────────────────────────────────────────────────
+    _LOGIN_CANDIDATE_PATHS = [
+        "/login", "/signin", "/sign-in", "/log-in",
+        "/auth", "/auth/login", "/auth/signin",
+        "/user/login", "/users/login", "/user/sign_in",
+        "/account/login", "/account/signin",
+        "/admin/login", "/wp-login.php",
+        "/portal/login", "/portal", "/sso/login",
+        "/api/auth/login", "/api/login", "/api/signin",
+        "/login.php", "/login.html", "/login.aspx", "/login.jsp",
+        "/signin.php", "/signin.html",
+    ]
+
+    def _discover_login_url(base_url: str) -> "str":
+        """
+        Try common login paths against base_url, then spider up to depth 3
+        to locate a form with username + password fields.  Returns the
+        discovered URL or empty string if none found.
+        """
+        from urllib.parse import urljoin as _uj4, urlparse as _up4
+        base = base_url.rstrip("/")
+
+        vc.log(f"[auth] No login-url configured — probing common login paths on {base}", "INFO")
+
+        # 1. Common paths
+        for path in _LOGIN_CANDIDATE_PATHS:
+            probe = base + path
+            try:
+                r = sess.get(probe, timeout=timeout, allow_redirects=True)
+                if r.status_code not in (200, 302, 301):
+                    continue
+                page = _analyse_form_page(r.text, r.url)
+                if page["login_form"] or (page["has_username"] and page["has_checkbox"]):
+                    vc.log(f"[auth] Login form found at common path: {r.url}", "SUCCESS")
+                    return r.url
+            except Exception:
+                continue
+
+        # 2. Spider up to depth 3
+        vc.log(f"[auth] Common paths yielded no login form — spidering {base} (depth 3)", "INFO")
+        _visited: set = {base, base + "/"}
+        _queue:   list = [(base, 0)]
+        import re as _re4
+        _base_host = _up4(base).netloc
+
+        while _queue:
+            cur_url, depth = _queue.pop(0)
+            if depth > 3:
+                continue
+            try:
+                r = sess.get(cur_url, timeout=timeout, allow_redirects=True)
+            except Exception:
+                continue
+            if r.status_code != 200:
+                continue
+
+            page = _analyse_form_page(r.text, r.url)
+            if page["login_form"] or (page["has_username"] and page["has_checkbox"]):
+                vc.log(f"[auth] Login form found via spider at: {r.url}", "SUCCESS")
+                return r.url
+
+            if depth < 3:
+                for href in _re4.findall(r'href=["\']([^"\'#?][^"\']*)["\']', r.text, _re4.IGNORECASE):
+                    candidate = _uj4(r.url, href)
+                    parsed    = _up4(candidate)
+                    if parsed.netloc != _base_host:
+                        continue
+                    norm = candidate.split("?")[0].rstrip("/")
+                    if norm in _visited:
+                        continue
+                    _visited.add(norm)
+                    # Prioritise links whose path suggests login
+                    _login_hints = ("login", "signin", "sign-in", "log-in", "auth", "sso", "portal")
+                    if any(h in norm.lower() for h in _login_hints):
+                        _queue.insert(0, (candidate, depth + 1))
+                    else:
+                        _queue.append((candidate, depth + 1))
+
+        vc.log(f"[auth] Could not locate a login form via spidering", "WARNING")
+        return ""
+
     # ── Login POST helper ─────────────────────────────────────────────────────
-    def _login_post() -> "tuple[requests.Response | None, str]":
+    def _login_post(base_url: str) -> "tuple[requests.Response | None, str]":
         """CSRF prefetch + POST credentials to resolved form action. Returns (resp, post_url)."""
-        base_url   = auth.get("login_url", "")
         if not base_url:
             return None, ""
         login_mode = auth.get("login_mode", "fields")
@@ -2235,7 +2468,38 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
 
     # ── Form Login ────────────────────────────────────────────────────────────
     if method in ("form_login", "form"):
-        _login_post()  # session cookies captured automatically
+        _configured_login_url = auth.get("login_url", "").strip()
+        _base_target_url = (
+            cfg.get("target_url", "") or
+            (cfg.get("target_urls", [None]) or [None])[0] or ""
+        ).rstrip("/")
+
+        # 1. Resolve login URL: configured → discover from target
+        if _configured_login_url:
+            vc.log(f"[auth] Using configured login URL: {_configured_login_url}", "INFO")
+            _login_url = _configured_login_url
+        elif _base_target_url:
+            _login_url = _discover_login_url(_base_target_url)
+            if _login_url:
+                # Persist so _login_post and _csrf_prefetch can use it
+                auth["login_url"] = _login_url
+            else:
+                vc.log("[auth] No login form located — form_login cannot proceed", "WARNING")
+                _login_url = ""
+        else:
+            _login_url = ""
+
+        # 2. Walk through gate/checkbox pages to reach the real login form
+        if _login_url:
+            _login_url = _step_to_login_form(_login_url)
+            auth["login_url"] = _login_url
+
+        # 3. POST credentials
+        if _login_url:
+            vc.log(f"[auth] Submitting credentials to: {_login_url}", "INFO")
+            _login_post(_login_url)  # session cookies captured automatically
+        else:
+            vc.log("[auth] Skipping credential submission — no login URL available", "WARNING")
 
     # ── HTTP Basic ────────────────────────────────────────────────────────────
     elif method == "basic":
@@ -11644,13 +11908,17 @@ def main() -> None:
         auth2_sess = _build_auth_session(cfg, "auth2", _scope_hostnames)
 
         def _report_auth_status(sess_obj: "requests.Session | None",
-                                auth_cfg: dict, label: str) -> None:
+                                auth_cfg: dict, label: str,
+                                primary_enabled: bool = False) -> None:
             """Log whether authentication was attempted and whether it succeeded."""
             if not auth_cfg.get("enabled"):
+                # Suppress "not attempted" for secondary when primary creds were provided
+                if label == "secondary" and primary_enabled:
+                    return
                 vc.log(f"[auth:{label}] Authentication not attempted", "INFO")
                 return
             if sess_obj is None:
-                vc.log(f"[auth:{label}] Authentication failed — session could not be built", "ERROR")
+                vc.log(f"[auth:{label}] Authentication failed — continuing with unauthenticated testing only", "ERROR")
                 return
             _has_cookie  = bool(sess_obj.cookies)
             _has_header  = any(
@@ -11662,10 +11930,12 @@ def main() -> None:
             if _has_cookie or _has_header or _has_auth:
                 vc.log(f"[auth:{label}] Authentication successful", "SUCCESS")
             else:
-                vc.log(f"[auth:{label}] Authentication failed — no credentials were applied to the session", "ERROR")
+                vc.log(f"[auth:{label}] Authentication failed — continuing with unauthenticated testing only", "ERROR")
 
+        _primary_auth_enabled = bool(cfg.get("auth", {}).get("enabled"))
         _report_auth_status(auth_sess,  cfg.get("auth",  {}), "primary")
-        _report_auth_status(auth2_sess, cfg.get("auth2", {}), "secondary")
+        _report_auth_status(auth2_sess, cfg.get("auth2", {}), "secondary",
+                            primary_enabled=_primary_auth_enabled)
 
         # Pre-scan connectivity check — retry up to 5 times before proceeding
         _alive_delays = [0, 5, 10, 15, 20]
