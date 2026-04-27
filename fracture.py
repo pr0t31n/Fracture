@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.21"
+VERSION = "2.9.22"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3306,6 +3306,18 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     if _os.path.isfile(_xauth):
                         _os.environ["XAUTHORITY"] = _xauth
                         vc.log(f"[auth] XAUTHORITY not set — using {_xauth}", "INFO")
+                        break
+            # DBUS_SESSION_BUS_ADDRESS — Firefox requires DBus for IPC; without it
+            # the browser process exits immediately with status 1
+            if not _os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+                _dbus_candidates = (
+                    sorted(_glob.glob("/run/user/0/bus"))          # root session
+                    + sorted(_glob.glob("/run/user/[0-9]*/bus"))   # any user session
+                )
+                for _dbus in _dbus_candidates:
+                    if _os.path.exists(_dbus):
+                        _os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={_dbus}"
+                        vc.log(f"[auth] DBUS_SESSION_BUS_ADDRESS not set — using {_dbus}", "INFO")
                         break
 
         # ── Driver / browser resolution ───────────────────────────────────────
