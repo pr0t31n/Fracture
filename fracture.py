@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.8"
+VERSION = "2.9.9"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2570,6 +2570,172 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
 
         return result
 
+    # ── JS onclick automation — try everything before requiring a browser ─────
+    def _try_automate_js_onclick(onclick_val: str,
+                                  page_html: str,
+                                  page_url: str) -> "dict | None":
+        """
+        Attempt to extract an automatable action from a JS onclick handler.
+
+        Strategies applied in order:
+          1. Build a complete script corpus:
+               a. All inline <script> blocks on the page
+               b. Up to 5 same-host external <script src="…"> files (fetched)
+          2. Locate the called function's body using brace-counting (handles
+             nested braces unlike a simple regex).
+          3. Scan the function body (or full corpus if body not found) for:
+               • location.href / window.location assignment    → GET url
+               • window.location.assign/replace(url)          → GET url
+               • fetch(url, {method, body})                   → POST/GET + data
+               • $.post / $.get / $.ajax                      → POST/GET + data
+               • XMLHttpRequest .open(method, url)             → POST/GET
+               • document.cookie = 'name=value'               → cookie to set
+               • form.action = url; … .submit()               → POST form url
+          4. Returns {url, method, data, cookies} or None if nothing found.
+        """
+        import re as _re8, json as _json8
+        from urllib.parse import urljoin as _uj8, urlparse as _up8
+
+        _base_host = _up8(page_url).netloc
+
+        # ── 1a. Inline scripts ────────────────────────────────────────────
+        _corpus = "\n".join(_re8.findall(
+            r'<script\b[^>]*>([\s\S]*?)</script>', page_html, _re8.IGNORECASE))
+
+        # ── 1b. External scripts (same host, up to 5) ─────────────────────
+        _ext_srcs = _re8.findall(
+            r'<script\b[^>]+\bsrc=["\']([^"\']+)["\']', page_html, _re8.IGNORECASE)
+        _fetched = 0
+        for _src in _ext_srcs:
+            if _fetched >= 5:
+                break
+            _abs = _uj8(page_url, _src)
+            if _up8(_abs).netloc != _base_host:
+                continue
+            try:
+                _sr = sess.get(_abs, timeout=timeout)
+                if _sr.status_code == 200:
+                    _corpus += "\n" + _sr.text
+                    _fetched += 1
+            except Exception:
+                continue
+
+        # ── 2. Locate function body via brace-counting ────────────────────
+        _fn_m = _re8.match(r'\s*(\w+)\s*\(', onclick_val)
+        _fn_body = ""
+        if _fn_m and _corpus:
+            _fn_name = _re8.escape(_fn_m.group(1))
+            _fn_hdr  = _re8.search(
+                r'function\s+' + _fn_name + r'\s*\([^)]*\)\s*\{',
+                _corpus, _re8.IGNORECASE)
+            if _fn_hdr:
+                _depth = 0
+                _end_pos = _fn_hdr.end() - 1
+                for _ci, _ch in enumerate(_corpus[_fn_hdr.end() - 1:],
+                                          _fn_hdr.end() - 1):
+                    if _ch == '{':
+                        _depth += 1
+                    elif _ch == '}':
+                        _depth -= 1
+                        if _depth == 0:
+                            _end_pos = _ci
+                            break
+                _fn_body = _corpus[_fn_hdr.end(): _end_pos]
+
+        _scan = _fn_body if _fn_body else _corpus
+
+        # ── 3. Extract automatable signals ────────────────────────────────
+        _found_url: str    = ""
+        _found_method: str = "get"
+        _found_data: dict  = {}
+        _found_cookies: dict = {}
+
+        # location.href / window.location assignment
+        _lhref = _re8.search(
+            r'''(?:location\.href|window\.location(?:\.href)?)\s*=\s*['"]([^'"]+)['"]''',
+            _scan, _re8.IGNORECASE)
+        if _lhref:
+            _found_url, _found_method = _lhref.group(1), "get"
+
+        # window.location.assign / replace
+        if not _found_url:
+            _loc_fn = _re8.search(
+                r'''window\.location\.(?:assign|replace)\s*\(\s*['"]([^'"]+)['"]\s*\)''',
+                _scan, _re8.IGNORECASE)
+            if _loc_fn:
+                _found_url, _found_method = _loc_fn.group(1), "get"
+
+        # fetch(url, options)
+        if not _found_url:
+            _fetch_m = _re8.search(
+                r'''fetch\s*\(\s*['"]([^'"]+)['"]\s*(?:,\s*(\{[\s\S]*?\}))?\s*\)''',
+                _scan, _re8.IGNORECASE)
+            if _fetch_m:
+                _found_url  = _fetch_m.group(1)
+                _opts       = _fetch_m.group(2) or ""
+                _meth_m2    = _re8.search(r'''method\s*:\s*['"](\w+)['"]''', _opts, _re8.IGNORECASE)
+                _found_method = _meth_m2.group(1).lower() if _meth_m2 else "get"
+                _body_m     = _re8.search(
+                    r'''body\s*:\s*JSON\.stringify\s*\((\{[^)]+\})\)''', _opts, _re8.IGNORECASE)
+                if _body_m:
+                    try:
+                        _found_data = _json8.loads(_body_m.group(1))
+                    except Exception:
+                        pass
+
+        # jQuery $.post / $.get
+        if not _found_url:
+            _jqp = _re8.search(r'''\$\.post\s*\(\s*['"]([^'"]+)['"]''', _scan, _re8.IGNORECASE)
+            if _jqp:
+                _found_url, _found_method = _jqp.group(1), "post"
+        if not _found_url:
+            _jqg = _re8.search(r'''\$\.get\s*\(\s*['"]([^'"]+)['"]''', _scan, _re8.IGNORECASE)
+            if _jqg:
+                _found_url, _found_method = _jqg.group(1), "get"
+
+        # jQuery $.ajax
+        if not _found_url:
+            _jqa = _re8.search(r'''\$\.ajax\s*\(\s*\{([\s\S]*?)\}\s*\)''', _scan, _re8.IGNORECASE)
+            if _jqa:
+                _ab  = _jqa.group(1)
+                _au2 = _re8.search(r'''url\s*:\s*['"]([^'"]+)['"]''',           _ab, _re8.IGNORECASE)
+                _am2 = _re8.search(r'''(?:type|method)\s*:\s*['"](\w+)['"]''',  _ab, _re8.IGNORECASE)
+                if _au2:
+                    _found_url    = _au2.group(1)
+                    _found_method = _am2.group(1).lower() if _am2 else "post"
+
+        # XMLHttpRequest .open(method, url)
+        if not _found_url:
+            _xhr = _re8.search(
+                r'''\.open\s*\(\s*['"](\w+)['"]\s*,\s*['"]([^'"]+)['"]''',
+                _scan, _re8.IGNORECASE)
+            if _xhr:
+                _found_url, _found_method = _xhr.group(2), _xhr.group(1).lower()
+
+        # form.action = url; form.submit()  (or document.getElementById(...).submit())
+        if not _found_url and _re8.search(r'\.submit\s*\(\s*\)', _scan):
+            _fa = _re8.search(
+                r'''(?:\.action|form\.action)\s*=\s*['"]([^'"]+)['"]''',
+                _scan, _re8.IGNORECASE)
+            if _fa:
+                _found_url, _found_method = _fa.group(1), "post"
+
+        # document.cookie = 'name=value'
+        for _cm in _re8.finditer(
+                r'''document\.cookie\s*=\s*['"]([A-Za-z_]\w*)=([^;'"]+)''',
+                _scan, _re8.IGNORECASE):
+            _found_cookies[_cm.group(1).strip()] = _cm.group(2).strip()
+
+        if not _found_url and not _found_cookies:
+            return None
+
+        return {
+            "url":     _uj8(page_url, _found_url) if _found_url else "",
+            "method":  _found_method,
+            "data":    _found_data,
+            "cookies": _found_cookies,
+        }
+
     # ── Step through gate pages to reach the real login form ─────────────────
     def _step_to_login_form(start_url: str) -> "str":
         """
@@ -2670,26 +2836,111 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
 
                 # ── JS-driven navigation (onclick, href="#") ──────────────────
                 if nav["type"] == "js_onclick":
+                    import sys as _sys_jo
                     _onclick_val = nav.get("onclick", "")
                     vc.log(
                         f"[auth] Step {_step + 1}: Affirmative JS button detected "
                         f"'{nav['text']}' — onclick: {_onclick_val[:80]}",
+                        "INFO",
+                    )
+
+                    # ── Try automated resolution first ────────────────────────
+                    vc.log(
+                        "[auth] Attempting to resolve JS navigation automatically "
+                        "(inline scripts, external scripts, XHR/fetch patterns) …",
+                        "INFO",
+                    )
+                    _auto = _try_automate_js_onclick(_onclick_val, resp.text, current_url)
+
+                    if _auto:
+                        # Apply any document.cookie assignments
+                        if _auto["cookies"]:
+                            for _ck_n, _ck_v in _auto["cookies"].items():
+                                sess.cookies.set(_ck_n, _ck_v)
+                            vc.log(
+                                f"[auth] JS cookie(s) applied: "
+                                f"{list(_auto['cookies'].keys())}",
+                                "INFO",
+                            )
+                        if _auto["url"]:
+                            vc.log(
+                                f"[auth] JS navigation resolved → {_auto['url']} "
+                                f"({_auto['method'].upper()})",
+                                "INFO",
+                            )
+                            try:
+                                if _auto["method"] == "post":
+                                    _auto_r = sess.post(
+                                        _auto["url"],
+                                        data=_auto.get("data", {}),
+                                        timeout=timeout,
+                                        allow_redirects=True,
+                                    )
+                                else:
+                                    _auto_r = sess.get(
+                                        _auto["url"],
+                                        params=_auto.get("data", {}),
+                                        timeout=timeout,
+                                        allow_redirects=True,
+                                    )
+                                vc.log(
+                                    f"[auth] JS request completed → {_auto_r.url} "
+                                    f"(HTTP {_auto_r.status_code})",
+                                    "INFO",
+                                )
+                                current_url = _auto_r.url
+                                continue
+                            except Exception as _ae:
+                                vc.log(
+                                    f"[auth] JS-resolved request failed: {_ae}",
+                                    "WARNING",
+                                )
+                        elif _auto["cookies"]:
+                            # Cookies applied, no navigation target — move on
+                            vc.log(
+                                "[auth] JS cookies applied, no navigation — continuing",
+                                "INFO",
+                            )
+                            continue
+
+                    # ── Automation exhausted — escalate ───────────────────────
+                    vc.log(
+                        "[auth] Could not automate JS navigation — browser "
+                        "interaction is required for this login flow.",
                         "WARNING",
                     )
+
+                    # --browser-auth already set → switch immediately
                     if cfg.get("browser_auth"):
                         vc.log(
-                            "[auth] JS-driven login detected — switching to "
-                            "browser-assisted login",
+                            "[auth] --browser-auth set — switching to browser-assisted login",
                             "INFO",
                         )
-                        # Signal caller to use browser-auth by returning a sentinel
                         return "__BROWSER_AUTH__"
-                    vc.log(
-                        "[auth] Cannot follow JS-only navigation without a browser. "
-                        "Re-run with --browser-auth to handle this login flow.",
-                        "WARNING",
-                    )
-                    return current_url
+
+                    # Interactive TTY → ask the user
+                    if _sys_jo.stdin.isatty():
+                        vc.log(
+                            "[auth] Open a browser window to complete login manually? [Y/n]: ",
+                            "INFO",
+                        )
+                        try:
+                            _br_choice = input("  > ").strip().lower()
+                        except EOFError:
+                            _br_choice = "n"
+                        if _br_choice != "n":
+                            return "__BROWSER_AUTH__"
+                        vc.log(
+                            "[auth] Browser login declined — continuing without authentication",
+                            "WARNING",
+                        )
+                    else:
+                        vc.log(
+                            "[auth] Non-interactive session — re-run with "
+                            "--browser-auth to handle this login flow.",
+                            "WARNING",
+                        )
+                    return ""
 
                 _nav_base, _ = _udf3(nav["url"])
                 _visited_bases.add(_nav_base)
