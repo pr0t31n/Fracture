@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.28"
+VERSION = "2.9.29"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3310,18 +3310,18 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 )
                 return None
             # X11 auth fix for root running inside another user's desktop session.
-            # Two-stage approach:
+            # Two-stage approach (both always run):
             #  1. xhost — run `xhost +SI:localuser:root` as the display owner via su.
             #             Root can always su to other users without a password on Kali.
-            #             This bypasses cookie auth entirely: the X server trusts UID 0
-            #             on the Unix socket regardless of what XAUTHORITY contains.
-            #             Clear XAUTHORITY afterwards so the X client sends no cookie
-            #             (a stale/wrong cookie would still cause rejection even with xhost).
-            #  2. xauth add — fallback if xhost fails.  Parse the display owner's
-            #             Xauthority with `xauth list`, extract the cookie for this
-            #             display, and write it under the bare ":N" key into a new
-            #             root-owned temp file.  A bare ":N" key is always matched by
-            #             libX11 for local Unix-socket connections regardless of hostname.
+            #             This grants the X server permission to accept UID-0 connections.
+            #  2. xauth add — always runs after xhost regardless of outcome.  Parses
+            #             the display owner's Xauthority with `xauth list`, extracts the
+            #             cookie for this display, and writes it under the bare ":N" key
+            #             into a new root-owned temp file.  A bare ":N" key is always
+            #             matched by libX11 for local Unix-socket connections regardless
+            #             of hostname.  XAUTHORITY must remain set to a root-owned file —
+            #             clearing it causes Firefox to fall back to ~/.Xauthority or skip
+            #             display setup entirely, resulting in a window that never appears.
             import tempfile as _tf3
             import pwd as _pwd2
             _cur_xauth = _os.environ.get("XAUTHORITY", "")
@@ -3367,61 +3367,57 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                                     )
                                     if _xh.returncode == 0:
                                         vc.log(
-                                            f"[auth] xhost {_xh_arg} granted "
-                                            f"({_x_owner}) — cleared XAUTHORITY",
+                                            f"[auth] xhost {_xh_arg} granted ({_x_owner})",
                                             "INFO",
                                         )
-                                        _os.environ.pop("XAUTHORITY", None)
-                                        _fixed = True
                                         break
                         except Exception as _xhe:
                             vc.log(f"[auth] xhost grant failed: {_xhe}", "WARNING")
 
-                # ── Stage 2: xauth add with bare :N key ───────────────────────
-                if not _fixed:
-                    for _xauth_src in _xauth_sources:
-                        if not _os.path.isfile(_xauth_src):
-                            continue
-                        if _os.stat(_xauth_src).st_uid == 0:
-                            _os.environ["XAUTHORITY"] = _xauth_src
-                            vc.log(f"[auth] XAUTHORITY → {_xauth_src} (root-owned)", "INFO")
-                            _fixed = True
-                            break
-                        _list = subprocess.run(
-                            ["xauth", "-f", _xauth_src, "list"],
-                            capture_output=True, text=True,
+                # ── Stage 2: xauth add with bare :N key (always runs) ────────
+                for _xauth_src in _xauth_sources:
+                    if not _os.path.isfile(_xauth_src):
+                        continue
+                    if _os.stat(_xauth_src).st_uid == 0:
+                        _os.environ["XAUTHORITY"] = _xauth_src
+                        vc.log(f"[auth] XAUTHORITY → {_xauth_src} (root-owned)", "INFO")
+                        _fixed = True
+                        break
+                    _list = subprocess.run(
+                        ["xauth", "-f", _xauth_src, "list"],
+                        capture_output=True, text=True,
+                    )
+                    _cookie_line = None
+                    for _ln in _list.stdout.splitlines():
+                        if f":{_disp_num}" in _ln:
+                            _parts = _ln.strip().split()
+                            if len(_parts) >= 3:
+                                _cookie_line = _parts
+                                break
+                    if not _cookie_line:
+                        continue
+                    try:
+                        _xa_fd, _xa_path = _tf3.mkstemp(prefix="fracture_xauth_")
+                        _os.close(_xa_fd)
+                        _os.chmod(_xa_path, 0o600)
+                        subprocess.run(
+                            ["xauth", "-f", _xa_path, "add",
+                             f":{_disp_num}", _cookie_line[1], _cookie_line[2]],
+                            capture_output=True,
                         )
-                        _cookie_line = None
-                        for _ln in _list.stdout.splitlines():
-                            if f":{_disp_num}" in _ln:
-                                _parts = _ln.strip().split()
-                                if len(_parts) >= 3:
-                                    _cookie_line = _parts
-                                    break
-                        if not _cookie_line:
-                            continue
+                        _os.environ["XAUTHORITY"] = _xa_path
+                        vc.log(
+                            f"[auth] XAUTHORITY → {_xa_path} "
+                            f"(:{_disp_num} from {_xauth_src})",
+                            "INFO",
+                        )
+                        _fixed = True
+                        break
+                    except Exception:
                         try:
-                            _xa_fd, _xa_path = _tf3.mkstemp(prefix="fracture_xauth_")
-                            _os.close(_xa_fd)
-                            _os.chmod(_xa_path, 0o600)
-                            subprocess.run(
-                                ["xauth", "-f", _xa_path, "add",
-                                 f":{_disp_num}", _cookie_line[1], _cookie_line[2]],
-                                capture_output=True,
-                            )
-                            _os.environ["XAUTHORITY"] = _xa_path
-                            vc.log(
-                                f"[auth] XAUTHORITY → {_xa_path} "
-                                f"(:{_disp_num} from {_xauth_src})",
-                                "INFO",
-                            )
-                            _fixed = True
-                            break
+                            _os.unlink(_xa_path)
                         except Exception:
-                            try:
-                                _os.unlink(_xa_path)
-                            except Exception:
-                                pass
+                            pass
 
                 if not _fixed:
                     vc.log("[auth] Could not fix X11 auth — Firefox may fail", "WARNING")
@@ -3448,6 +3444,13 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         _os.environ["XDG_RUNTIME_DIR"] = _xdg
                         vc.log(f"[auth] XDG_RUNTIME_DIR not set — using {_xdg}", "INFO")
                         break
+
+            # HOME — if sudo or su didn't reset HOME, it may still point to the
+            # original user's directory.  Firefox uses HOME to locate its profile
+            # cache; if HOME is not writable by root the window never appears.
+            if _os.getuid() == 0 and not _os.environ.get("HOME", "").startswith("/root"):
+                _os.environ["HOME"] = "/root"
+                vc.log("[auth] HOME reset to /root for root process", "INFO")
 
         # ── Driver / browser resolution ───────────────────────────────────────
         _explicit_drv = (
