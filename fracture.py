@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.5"
+VERSION = "2.9.6"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2235,6 +2235,22 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             t = _strip_tags(text)
             return bool(t) and bool(_AFFIRM_RE.search(t)) and not _DENY_RE.search(t)
 
+        # Check element attributes (id, aria-label, name, title) in addition to
+        # visible text/value.  Returns True if ANY signal is affirmative and
+        # NONE of the signals are negative.
+        def _elem_is_affirmative(tag_attrs: str, visible_text: str) -> bool:
+            """Visible text + id + aria-label + name + title checked together."""
+            _signals: list = [_strip_tags(visible_text)]
+            for _attr in ("id", "aria-label", "aria-labelledby", "name", "title",
+                          "data-label", "data-text"):
+                _am = _re3.search(
+                    r'\b' + _attr + r'=["\']([^"\']+)["\']', tag_attrs, _re3.IGNORECASE)
+                if _am:
+                    _signals.append(_am.group(1))
+            _any_affirm = any(bool(s) and bool(_AFFIRM_RE.search(s)) for s in _signals)
+            _any_deny   = any(_DENY_RE.search(s) for s in _signals if s)
+            return _any_affirm and not _any_deny
+
         def _collect_hidden(form_body: str) -> "dict":
             """Return {name: value} for all hidden inputs in a form body."""
             hid: dict = {}
@@ -2311,16 +2327,32 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             # ── Affirmative submit buttons in non-password forms ──────────────
             # (password forms are the target — we don't treat them as nav buttons)
             if not has_pw:
+                # If the form has no real interactive inputs (text/email/checkbox/
+                # select/textarea) — i.e. it is purely a navigation step — treat
+                # the button as a GET link, not a POST form_submit.  This prevents
+                # a "Login" button on a landing page from being mistaken for a
+                # credential submission target.
+                _form_has_inputs = bool(_re3.search(
+                    r'<input[^>]+type=["\']?(?:text|email|tel|number|search|'
+                    r'checkbox|radio|password)["\']?',
+                    form_body, _re3.IGNORECASE,
+                )) or bool(_re3.search(
+                    r'<(?:textarea|select)\b', form_body, _re3.IGNORECASE,
+                ))
+                _affirm_type = "form_submit" if _form_has_inputs else "link"
+
                 _found_affirm_btn = False
                 # <input type="submit" value="Login"> style
                 for sub_m in _re3.finditer(
                         r'<input[^>]+type=["\']?submit["\']?[^>]*>', form_body, _re3.IGNORECASE):
-                    v_m = _re3.search(r'\bvalue=["\']([^"\']+)["\']', sub_m.group(0), _re3.IGNORECASE)
-                    if v_m and _is_affirmative(v_m.group(1)):
+                    _stag  = sub_m.group(0)
+                    _sv_m  = _re3.search(r'\bvalue=["\']([^"\']+)["\']', _stag, _re3.IGNORECASE)
+                    _sval  = _sv_m.group(1) if _sv_m else ""
+                    if _elem_is_affirmative(_stag, _sval):
                         result["affirmative_links"].append({
                             "url":    action,
-                            "text":   v_m.group(1),
-                            "type":   "form_submit",
+                            "text":   _sval or "(submit)",
+                            "type":   _affirm_type,
                             "fields": _collect_hidden(form_body),
                         })
                         _found_affirm_btn = True
@@ -2332,13 +2364,13 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                             _re3.IGNORECASE | _re3.DOTALL):
                         btn_attrs = btn_m.group(1)
                         btn_text  = _strip_tags(btn_m.group(2))
-                        t_m = _re3.search(r'\btype=["\']?(\w+)["\']?', btn_attrs, _re3.IGNORECASE)
-                        btn_type = t_m.group(1).lower() if t_m else "submit"
-                        if btn_type in ("submit", "button") and _is_affirmative(btn_text):
+                        t_m       = _re3.search(r'\btype=["\']?(\w+)["\']?', btn_attrs, _re3.IGNORECASE)
+                        btn_type  = t_m.group(1).lower() if t_m else "submit"
+                        if btn_type in ("submit", "button") and _elem_is_affirmative(btn_attrs, btn_text):
                             result["affirmative_links"].append({
                                 "url":    action,
-                                "text":   btn_text,
-                                "type":   "form_submit",
+                                "text":   btn_text or "(button)",
+                                "type":   _affirm_type,
                                 "fields": _collect_hidden(form_body),
                             })
                             break
@@ -2348,7 +2380,8 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 r'<a\b([^>]+)>(.*?)</a>', html, _re3.IGNORECASE | _re3.DOTALL):
             attrs     = link_m.group(1)
             link_text = _strip_tags(link_m.group(2))
-            if not _is_affirmative(link_text):
+            # Check visible text AND element attributes (id, aria-label, title, etc.)
+            if not _elem_is_affirmative(attrs, link_text):
                 continue
             href_m = _re3.search(r'\bhref=["\']([^"\']*)["\']', attrs, _re3.IGNORECASE)
             if not href_m:
@@ -2360,7 +2393,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             resolved = _uj3(page_url, href_raw) if href_raw else page_url
             result["affirmative_links"].append({
                 "url":    resolved,
-                "text":   link_text,
+                "text":   link_text or attrs[:60],
                 "type":   "link",
                 "fields": {},
             })
@@ -3319,6 +3352,28 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         if _login_url:
             _login_url = _step_to_login_form(_login_url)
             auth["login_url"] = _login_url
+
+        # 2b. Guard: confirm the resolved URL actually contains a
+        #     username/password form before attempting credential submission.
+        #     This prevents false-positive auth on pages that have an
+        #     affirmative button (e.g. "Login") but no credential fields.
+        if _login_url:
+            try:
+                _guard_r = sess.get(_login_url, timeout=timeout, allow_redirects=True)
+                _guard_p = _analyse_form_page(_guard_r.text, _guard_r.url)
+                if not _guard_p["login_form"]:
+                    vc.log(
+                        f"[auth] Resolved URL has no username/password form — "
+                        f"cannot submit credentials ({_login_url})",
+                        "WARNING",
+                    )
+                    _login_url = ""
+                elif _guard_r.url != _login_url:
+                    # Redirect during guard GET — use final URL
+                    _login_url = _guard_r.url
+                    auth["login_url"] = _login_url
+            except Exception as _ge:
+                vc.log(f"[auth] Could not verify login form at {_login_url}: {_ge}", "WARNING")
 
         # 3. POST credentials, then handle any post-login pages
         if _login_url:
