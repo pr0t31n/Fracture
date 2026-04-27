@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.7"
+VERSION = "2.9.8"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2231,22 +2231,78 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         def _strip_tags(s: str) -> str:
             return _re3.sub(r'<[^>]+>', '', s).strip()
 
+        def _extract_content_signals(html_inner: str) -> "list[str]":
+            """
+            Pull every human-readable signal out of an element's inner HTML:
+              - visible text (tags stripped)
+              - alt= from every <img>
+              - title= from every tag
+              - value= from <input type="button|submit">
+              - placeholder= from any input
+            Returns a list of non-empty strings.
+            """
+            _sigs: list = []
+            # Visible text
+            _vt = _re3.sub(r'<[^>]+>', '', html_inner).strip()
+            if _vt:
+                _sigs.append(_vt)
+            # Attributes from inner tags
+            for _inner_tag in _re3.finditer(r'<[a-zA-Z][^>]*>', html_inner, _re3.IGNORECASE):
+                _t = _inner_tag.group(0)
+                for _attr_name in ("alt", "title", "value", "placeholder",
+                                   "aria-label", "data-label", "data-text"):
+                    _am = _re3.search(
+                        r'\b' + _attr_name + r'\s*=\s*["\']([^"\']+)["\']',
+                        _t, _re3.IGNORECASE)
+                    if _am:
+                        _sigs.append(_am.group(1))
+            return _sigs
+
+        def _attr_signals(tag_attrs: str) -> "list[str]":
+            """
+            Extract human-readable values from an element's own attribute string.
+
+            Handles both well-formed attributes and malformed HTML where an id or
+            class value contains unescaped quotes, e.g.:
+              id="fsa_ButtonLoginToRules"
+            Strategy: parse each known attribute normally first, then fall back to
+            a raw word-extraction scan of the entire attrs string so that substrings
+            like "LoginToRules" inside a malformed value are still checked.
+            """
+            _sigs: list = []
+            for _attr in ("id", "aria-label", "aria-labelledby", "name", "title",
+                          "data-label", "data-text", "value", "alt", "placeholder"):
+                _am = _re3.search(
+                    r'\b' + _attr + r'\s*=\s*["\']([^"\']+)["\']',
+                    tag_attrs, _re3.IGNORECASE)
+                if _am:
+                    _sigs.append(_am.group(1))
+            # Fallback: split raw attrs on quote/space/= boundaries and check each
+            # token.  This catches malformed id="foo"BarBaz" where only "foo" is
+            # captured by the regex above but "BarBaz" is still in the string.
+            for _tok in _re3.split(r'[\s"\'=<>/]+', tag_attrs):
+                if len(_tok) > 2 and _tok not in _sigs:
+                    _sigs.append(_tok)
+            return _sigs
+
         def _is_affirmative(text: str) -> bool:
             t = _strip_tags(text)
             return bool(t) and bool(_AFFIRM_RE.search(t)) and not _DENY_RE.search(t)
 
-        # Check element attributes (id, aria-label, name, title) in addition to
-        # visible text/value.  Returns True if ANY signal is affirmative and
-        # NONE of the signals are negative.
-        def _elem_is_affirmative(tag_attrs: str, visible_text: str) -> bool:
-            """Visible text + id + aria-label + name + title checked together."""
-            _signals: list = [_strip_tags(visible_text)]
-            for _attr in ("id", "aria-label", "aria-labelledby", "name", "title",
-                          "data-label", "data-text"):
-                _am = _re3.search(
-                    r'\b' + _attr + r'=["\']([^"\']+)["\']', tag_attrs, _re3.IGNORECASE)
-                if _am:
-                    _signals.append(_am.group(1))
+        def _elem_is_affirmative(tag_attrs: str, visible_text: str,
+                                  content_html: str = "") -> bool:
+            """
+            Returns True if ANY signal from the element is affirmative AND none
+            are negative.  Checks:
+              - visible_text (after tag stripping)
+              - img alt / inner-tag title / value / placeholder from content_html
+              - id, aria-label, name, title, data-* from tag_attrs
+              - raw token scan of tag_attrs (handles malformed attribute quotes)
+            """
+            _signals: list = list(_extract_content_signals(visible_text))
+            if content_html:
+                _signals.extend(_extract_content_signals(content_html))
+            _signals.extend(_attr_signals(tag_attrs))
             _any_affirm = any(bool(s) and bool(_AFFIRM_RE.search(s)) for s in _signals)
             _any_deny   = any(_DENY_RE.search(s) for s in _signals if s)
             return _any_affirm and not _any_deny
@@ -2400,22 +2456,111 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                             })
                             break
 
+        # ── Inline script content — used for onclick function body lookup ────────
+        _script_blocks: list = _re3.findall(
+            r'<script\b[^>]*>([\s\S]*?)</script>', html, _re3.IGNORECASE)
+        _all_scripts = "\n".join(_script_blocks)
+
+        def _resolve_onclick_url(onclick_val: str) -> str:
+            """
+            Given an onclick attribute value, try to resolve a navigable URL.
+
+            Strategies (in order):
+              1. Direct URL literal in the onclick string (e.g. onclick="location.href='/login'")
+              2. Function call (e.g. onclick="rulesOfBehavior(true)") — look the
+                 function up in inline <script> blocks and extract the first URL-
+                 like string literal from its body.
+            Returns a URL string or "" if none found.
+            """
+            # 1. Inline href assignment
+            _direct = _re3.search(
+                r'''(?:location\.href|window\.location(?:\.href)?)\s*=\s*['"]([\w/\-.%?=&#]+)['"]''',
+                onclick_val, _re3.IGNORECASE)
+            if _direct:
+                return _direct.group(1)
+            # 2. String literal that looks like a URL path
+            for _lit in _re3.findall(r'''['"]((?:/[\w\-.%]+)+(?:\?[^'"]*)?)['"']''',
+                                      onclick_val):
+                if "/" in _lit:
+                    return _lit
+            # 3. Function name → look up body in inline scripts
+            _fn_m = _re3.match(r'\s*(\w+)\s*\(', onclick_val)
+            if _fn_m and _all_scripts:
+                _fn_name = _re3.escape(_fn_m.group(1))
+                _fn_body_m = _re3.search(
+                    r'function\s+' + _fn_name +
+                    r'\s*\([^)]*\)\s*\{([\s\S]*?)\}',
+                    _all_scripts, _re3.IGNORECASE)
+                if _fn_body_m:
+                    _body = _fn_body_m.group(1)
+                    # href assignment inside body
+                    _href_m = _re3.search(
+                        r'''(?:location\.href|window\.location(?:\.href)?)\s*=\s*['"]([\w/\-.%?=&#]+)['"]''',
+                        _body, _re3.IGNORECASE)
+                    if _href_m:
+                        return _href_m.group(1)
+                    # Any URL-like string literal in body
+                    for _lit in _re3.findall(r'''['"]([^'"]*(?:\.action|\.do|\.jsf|/login|/auth)[^'"]*)['"]''',
+                                              _body, _re3.IGNORECASE):
+                        return _lit
+                    # Any string containing a path separator
+                    for _lit in _re3.findall(r'''['"]([^'"]{3,})['"']''', _body):
+                        if "/" in _lit and not _lit.startswith(("//", "http")):
+                            return _lit
+            return ""
+
         # ── Affirmative navigation links (<a href="…">) ───────────────────────
         for link_m in _re3.finditer(
-                r'<a\b([^>]+)>(.*?)</a>', html, _re3.IGNORECASE | _re3.DOTALL):
-            attrs     = link_m.group(1)
-            link_text = _strip_tags(link_m.group(2))
-            # Check visible text AND element attributes (id, aria-label, title, etc.)
-            if not _elem_is_affirmative(attrs, link_text):
+                r'<a\b([^>]+)>([\s\S]*?)</a>', html, _re3.IGNORECASE | _re3.DOTALL):
+            attrs        = link_m.group(1)
+            inner_html   = link_m.group(2)
+            link_text    = _strip_tags(inner_html)
+
+            # Check visible text AND content signals (img alt, etc.) AND attrs
+            if not _elem_is_affirmative(attrs, link_text, inner_html):
                 continue
-            href_m = _re3.search(r'\bhref=["\']([^"\']*)["\']', attrs, _re3.IGNORECASE)
-            if not href_m:
+
+            href_m   = _re3.search(r'\bhref=["\']([^"\']*)["\']', attrs, _re3.IGNORECASE)
+            href_raw = href_m.group(1).strip() if href_m else ""
+
+            # Skip hard non-navigable hrefs (but NOT plain "#" — those may have onclick)
+            if href_raw.lower().startswith(("javascript:void", "mailto:", "tel:")):
                 continue
-            href_raw = href_m.group(1).strip()
-            # Skip non-navigable hrefs
-            if href_raw.lower().startswith(("javascript:", "mailto:", "tel:")):
+
+            onclick_m   = _re3.search(r'\bonclick=["\']([^"\']+)["\']', attrs, _re3.IGNORECASE)
+            onclick_val = onclick_m.group(1) if onclick_m else ""
+
+            # ── href="#" or empty + onclick → JS-driven navigation ───────────
+            _is_fragment_href = (not href_raw or href_raw == "#"
+                                  or href_raw.lower().startswith("javascript:"))
+            if _is_fragment_href and onclick_val:
+                _resolved_from_js = _resolve_onclick_url(onclick_val)
+                if _resolved_from_js:
+                    resolved = _uj3(page_url, _resolved_from_js)
+                    vc_label = _strip_tags(inner_html) or onclick_val[:60]
+                    result["affirmative_links"].append({
+                        "url":     resolved,
+                        "text":    vc_label,
+                        "type":    "link",
+                        "fields":  {},
+                    })
+                else:
+                    # Can't resolve URL from JS — record as js_onclick so
+                    # _step_to_login_form can decide to fall back to browser-auth.
+                    vc_label = _strip_tags(inner_html) or onclick_val[:60]
+                    result["affirmative_links"].append({
+                        "url":     page_url,   # stay on page; stepper must handle
+                        "text":    vc_label,
+                        "type":    "js_onclick",
+                        "onclick": onclick_val,
+                        "fields":  {},
+                    })
                 continue
-            resolved = _uj3(page_url, href_raw) if href_raw else page_url
+
+            # ── Normal navigable href ─────────────────────────────────────────
+            if _is_fragment_href:
+                continue  # no onclick either — nothing to follow
+            resolved = _uj3(page_url, href_raw)
             result["affirmative_links"].append({
                 "url":    resolved,
                 "text":   link_text or attrs[:60],
@@ -2495,17 +2640,53 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
 
             # ── Priority 3: affirmative navigation button / link ──────────────
             if page["affirmative_links"]:
-                # Pick the first link whose base URL has not been visited yet
+                # js_onclick links have url == current_url (unresolvable); they
+                # must be picked regardless of the visited-base check, and
+                # handled via browser-auth fallback.  Regular links are filtered
+                # by visited-base to prevent loops.
                 nav = None
+                _js_nav = None
                 for _cand in page["affirmative_links"]:
+                    if _cand["type"] == "js_onclick":
+                        if _js_nav is None:
+                            _js_nav = _cand   # keep first js_onclick as fallback
+                        continue
                     _cand_base, _ = _udf3(_cand["url"])
                     if _cand_base not in _visited_bases:
                         nav = _cand
                         break
+
+                # Prefer a resolvable link; fall back to js_onclick
+                if nav is None:
+                    nav = _js_nav
+
                 if nav is None:
                     vc.log(
                         f"[auth] Step {_step + 1}: Affirmative button(s) found but all "
                         f"target already-visited pages — stopping here",
+                        "WARNING",
+                    )
+                    return current_url
+
+                # ── JS-driven navigation (onclick, href="#") ──────────────────
+                if nav["type"] == "js_onclick":
+                    _onclick_val = nav.get("onclick", "")
+                    vc.log(
+                        f"[auth] Step {_step + 1}: Affirmative JS button detected "
+                        f"'{nav['text']}' — onclick: {_onclick_val[:80]}",
+                        "WARNING",
+                    )
+                    if cfg.get("browser_auth"):
+                        vc.log(
+                            "[auth] JS-driven login detected — switching to "
+                            "browser-assisted login",
+                            "INFO",
+                        )
+                        # Signal caller to use browser-auth by returning a sentinel
+                        return "__BROWSER_AUTH__"
+                    vc.log(
+                        "[auth] Cannot follow JS-only navigation without a browser. "
+                        "Re-run with --browser-auth to handle this login flow.",
                         "WARNING",
                     )
                     return current_url
@@ -3448,9 +3629,20 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         else:
             _login_url = ""
 
-        # 2. Walk through gate/checkbox pages to reach the real login form
+        # 2. Walk through gate/checkbox/JS-nav pages to reach the real login form
+        _login_post_called = False
         if _login_url:
-            _login_url = _step_to_login_form(_login_url)
+            _stepped = _step_to_login_form(_login_url)
+
+            # Sentinel: JS-driven button detected and --browser-auth is set
+            if _stepped == "__BROWSER_AUTH__":
+                _b_sess = _browser_assisted_login(
+                    auth.get("login_url", "").strip() or _login_url)
+                if _b_sess is not None:
+                    return _b_sess
+                return None
+
+            _login_url = _stepped
             auth["login_url"] = _login_url
 
         # 2b. Guard: confirm the resolved URL actually contains a
@@ -3468,8 +3660,6 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             try:
                 _guard_r = sess.get(_login_url, timeout=timeout, allow_redirects=True)
                 if _guard_r.status_code >= 400:
-                    # Non-2xx/3xx: endpoint may only accept POST — trust the
-                    # prior analysis and proceed.
                     vc.log(
                         f"[auth] Guard GET returned HTTP {_guard_r.status_code} for "
                         f"{_login_url} — proceeding without form verification",
@@ -3485,7 +3675,6 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         )
                         _login_url = ""
                     elif _guard_r.url != _login_url:
-                        # Redirect during guard GET — use final URL
                         _login_url = _guard_r.url
                         auth["login_url"] = _login_url
             except Exception as _ge:
@@ -3495,10 +3684,19 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         if _login_url:
             vc.log(f"[auth] Submitting credentials to: {_login_url}", "INFO")
             _post_resp, _ = _login_post(_login_url)
+            _login_post_called = True
             if _post_resp is not None:
                 _handle_post_login_page(_post_resp)
         else:
             vc.log("[auth] Skipping credential submission — no login URL available", "WARNING")
+
+        # ── False-positive guard ───────────────────────────────────────────────
+        # If credentials were never submitted, any cookies on sess were set by
+        # probe/spider GETs — not by authentication.  Return None so the caller
+        # correctly reports "Authentication failed" instead of seeing probe
+        # cookies and reporting success.
+        if not _login_post_called:
+            return None
 
     # ── HTTP Basic ────────────────────────────────────────────────────────────
     elif method == "basic":
