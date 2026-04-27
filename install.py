@@ -201,6 +201,7 @@ PIP_PACKAGES = [
     "colorama>=0.4.6",
     "beautifulsoup4>=4.12.0",
     "sqlmap",
+    "git+https://github.com/seleniumhq/selenium.git#subdirectory=py",
 ]
 
 
@@ -728,10 +729,11 @@ def main():
 
     if not args.skip_pip:
         install_pip()
-        install_selenium()
     else:
         skips.add("pip")
         warn("Skipping pip packages.")
+
+    install_selenium()
 
     if not args.skip_go:
         install_go()
