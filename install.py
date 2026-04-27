@@ -203,11 +203,94 @@ PIP_PACKAGES = [
     "sqlmap",
 ]
 
+OFFLINE_BUNDLE_URLS = {
+    "beautifulsoup4": "https://raw.githubusercontent.com/pr0t31n/OfflineInstallers/main/beautifulsoup4_offline_kali.tar.gz",
+    "selenium":       "https://raw.githubusercontent.com/pr0t31n/OfflineInstallers/main/selenium_offline_kali.tar.gz",
+    "sqlmap":         "https://raw.githubusercontent.com/pr0t31n/OfflineInstallers/main/sqlmap_offline_kali.tar.gz",
+}
+
+
+def _install_from_bundle(pkg_name: str, url: str) -> bool:
+    """Download a pre-built offline bundle from GitHub and run install_offline.sh.
+    Handles both single .tar.gz files and split .part.* files."""
+    info(f"Downloading offline bundle for {pkg_name} ...")
+    _tmp = f"/tmp/_offline_bundle_{pkg_name}"
+    if os.path.isdir(_tmp):
+        shutil.rmtree(_tmp, ignore_errors=True)
+    os.makedirs(_tmp)
+    _tarball = os.path.join(_tmp, f"{pkg_name}_offline_kali.tar.gz")
+    _downloaded = False
+
+    try:
+        urllib.request.urlretrieve(url, _tarball)
+        _downloaded = True
+    except Exception:
+        # Single file unavailable — try split parts (.part.aa, .part.ab, ...)
+        _base = url.rsplit("/", 1)[0]
+        _parts = []
+        for _a in "abcdefghijklmnopqrstuvwxyz":
+            for _b in "abcdefghijklmnopqrstuvwxyz":
+                _sfx = _a + _b
+                _pu = f"{_base}/{pkg_name}_offline_kali.part.{_sfx}"
+                _pp = os.path.join(_tmp, f"part.{_sfx}")
+                try:
+                    urllib.request.urlretrieve(_pu, _pp)
+                    _parts.append(_pp)
+                except Exception:
+                    break
+        if _parts:
+            info(f"  Reassembling {len(_parts)} part(s) ...")
+            with open(_tarball, "wb") as _out:
+                for _p in sorted(_parts):
+                    with open(_p, "rb") as _f:
+                        _out.write(_f.read())
+            _downloaded = True
+
+    if not _downloaded:
+        warn(f"Could not download offline bundle for {pkg_name}")
+        shutil.rmtree(_tmp, ignore_errors=True)
+        return False
+
+    if subprocess.run(["tar", "xzf", _tarball, "-C", _tmp], check=False).returncode != 0:
+        warn(f"Failed to extract offline bundle for {pkg_name}")
+        shutil.rmtree(_tmp, ignore_errors=True)
+        return False
+
+    _install_sh = None
+    for _root, _dirs, _files in os.walk(_tmp):
+        if "install_offline.sh" in _files:
+            _install_sh = os.path.join(_root, "install_offline.sh")
+            break
+
+    if not _install_sh:
+        warn(f"install_offline.sh not found in {pkg_name} bundle")
+        shutil.rmtree(_tmp, ignore_errors=True)
+        return False
+
+    os.chmod(_install_sh, 0o755)
+    _ok = subprocess.run(["bash", _install_sh], check=False).returncode == 0
+    shutil.rmtree(_tmp, ignore_errors=True)
+    if _ok:
+        info(f"{pkg_name} installed from offline bundle")
+    else:
+        warn(f"Offline bundle install failed for {pkg_name}")
+    return _ok
+
 
 def install_pip():
     banner("Phase: pip packages")
-    run([sys.executable, "-m", "pip", "install", "--break-system-packages"] + PIP_PACKAGES,
-        check=False)
+    for _pkg in PIP_PACKAGES:
+        _r = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--break-system-packages", _pkg],
+            check=False,
+        )
+        if _r.returncode != 0:
+            _name = _pkg.split(">=")[0].split("==")[0].split("[")[0].strip()
+            if _name in OFFLINE_BUNDLE_URLS:
+                warn(f"pip install failed for {_name} — trying offline bundle ...")
+                _install_from_bundle(_name, OFFLINE_BUNDLE_URLS[_name])
+            else:
+                warn(f"pip install failed for {_name}")
 
 
 def install_selenium():
@@ -313,7 +396,10 @@ def install_selenium():
                     info("python3-selenium installed via zypper")
 
         if not _installed:
-            warn("All selenium install methods failed — browser-assisted login will be unavailable")
+            warn("All selenium install methods failed — trying offline bundle ...")
+            _installed = _install_from_bundle("selenium", OFFLINE_BUNDLE_URLS["selenium"])
+        if not _installed:
+            warn("selenium unavailable — browser-assisted login will not work")
 
     # webdriver-manager is pip-only (not in any system repo)
     try:
