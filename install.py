@@ -201,6 +201,7 @@ PIP_PACKAGES = [
     "colorama>=0.4.6",
     "beautifulsoup4>=4.12.0",
     "sqlmap",
+    "termcolor>=2.0.0",
 ]
 
 OFFLINE_BUNDLE_URLS = {
@@ -211,6 +212,37 @@ OFFLINE_BUNDLE_URLS = {
 
 _OFFLINE_REPO_DIR = "/opt/OfflineInstallers"
 _OFFLINE_REPO_URL = "https://github.com/pr0t31n/OfflineInstallers"
+
+GIT_PIP_URLS = {
+    "termcolor": "https://github.com/termcolor/termcolor",
+}
+
+
+def _install_from_git_pip(pkg_name: str, repo_url: str) -> bool:
+    """Clone a Python package from GitHub and install it with pip."""
+    _git = shutil.which("git")
+    if not _git:
+        warn(f"git not found — cannot install {pkg_name} from source")
+        return False
+    info(f"Installing {pkg_name} from git source ...")
+    _clone_dir = f"/tmp/_gitpip_{pkg_name}"
+    if os.path.isdir(_clone_dir):
+        shutil.rmtree(_clone_dir, ignore_errors=True)
+    r_clone = subprocess.run([_git, "clone", "--depth=1", repo_url, _clone_dir], check=False)
+    if r_clone.returncode != 0:
+        warn(f"git clone failed for {pkg_name}")
+        shutil.rmtree(_clone_dir, ignore_errors=True)
+        return False
+    r_pip = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--break-system-packages", _clone_dir],
+        check=False,
+    )
+    shutil.rmtree(_clone_dir, ignore_errors=True)
+    if r_pip.returncode == 0:
+        info(f"{pkg_name} installed from git source")
+        return True
+    warn(f"git source install failed for {pkg_name}")
+    return False
 
 
 def _install_from_local_repo(pkg_name: str, tarball: str) -> bool:
@@ -334,6 +366,9 @@ def install_pip():
             if _name in OFFLINE_BUNDLE_URLS:
                 warn(f"pip install failed for {_name} — trying offline bundle ...")
                 _install_from_bundle(_name, OFFLINE_BUNDLE_URLS[_name])
+            elif _name in GIT_PIP_URLS:
+                warn(f"pip install failed for {_name} — trying git source ...")
+                _install_from_git_pip(_name, GIT_PIP_URLS[_name])
             else:
                 warn(f"pip install failed for {_name}")
 
@@ -452,11 +487,14 @@ def install_selenium():
         info("webdriver-manager already installed — skipping")
     except ImportError:
         info("Installing webdriver-manager via pip ...")
-        run(
+        _wdm_r = subprocess.run(
             [sys.executable, "-m", "pip", "install",
              "--break-system-packages", "webdriver-manager>=4.0.0"],
             check=False,
         )
+        if _wdm_r.returncode != 0:
+            warn("pip install failed for webdriver-manager — trying selenium offline bundle ...")
+            _install_from_bundle("selenium", OFFLINE_BUNDLE_URLS["selenium"])
 
 
 # ---------------------------------------------------------------------------
@@ -579,35 +617,22 @@ def _install_whatweb_git():
     _bundle_install("/opt/whatweb")
 
 
-def _install_wpscan_git():
-    """Clone WPScan from GitHub into /opt/wpscan and symlink."""
-    info("Installing wpscan via git ...")
-    git_clone_or_update("https://github.com/wpscanteam/wpscan.git", "/opt/wpscan")
-    wpscan_bin = "/opt/wpscan/bin/wpscan"
-    if not os.path.isfile(wpscan_bin):
-        warn("WPScan binary not found at /opt/wpscan/bin/wpscan — check the clone.")
-        return
-    os.chmod(wpscan_bin, 0o755)
-    symlink_force(wpscan_bin, "/usr/local/bin/wpscan")
-    info("wpscan symlinked to /usr/local/bin/wpscan")
-    _bundle_install("/opt/wpscan", without="test")
-
-
 def install_gems():
     banner("Phase: Ruby tools")
     if OS == "macos":
         # macOS ships Ruby 2.6 which can't satisfy modern gem requirements.
-        # Install whatweb and wpscan from source via git instead.
+        # Install whatweb from source via git instead.
         _install_whatweb_git()
-        _install_wpscan_git()
         return
     gem = shutil.which("gem")
     if not gem:
-        warn("gem not found — skipping Ruby gem installation.")
+        warn("gem not found — falling back to git install for whatweb ...")
+        _install_whatweb_git()
         return
-    for gem_name in ["wpscan", "whatweb"]:
-        info(f"Installing {gem_name} ...")
-        run([gem, "install", gem_name], check=False)
+    _r = run([gem, "install", "whatweb"], check=False)
+    if _r.returncode != 0:
+        warn("gem install failed for whatweb — falling back to git ...")
+        _install_whatweb_git()
 
 
 # ---------------------------------------------------------------------------
@@ -736,8 +761,8 @@ def install_wordlists():
 # ---------------------------------------------------------------------------
 # Symlinks
 # ---------------------------------------------------------------------------
-APP_DIR  = "/Users/pr0t31n/Fracture"
-APP_FILE = f"{APP_DIR}/fracture.py"
+APP_DIR  = os.path.dirname(os.path.abspath(__file__))
+APP_FILE = os.path.join(APP_DIR, "fracture.py")
 SYMLINKS = {
     "/usr/local/bin/fracture": APP_FILE,
 }
@@ -768,10 +793,10 @@ def install_symlinks():
 # ---------------------------------------------------------------------------
 VERIFY_TOOLS = [
     "gobuster", "nikto", "sqlmap", "nuclei", "dalfox",
-    "wpscan", "sslscan", "testssl.sh", "tplmap",
+    "sslscan", "testssl.sh", "tplmap",
     "whatweb", "ffuf", "feroxbuster", "searchsploit", "jwt_tool",
 ]
-VERIFY_PYTHON = ["requests", "colorama", "bs4", "selenium"]
+VERIFY_PYTHON = ["requests", "colorama", "bs4", "selenium", "termcolor"]
 
 
 def run_check():
@@ -797,15 +822,19 @@ def run_check():
         ("/opt/testssl.sh",        "testssl.sh"),
         ("/opt/tplmap",            "tplmap"),
         ("/opt/jwt_tool",          "jwt_tool"),
-        ("/opt/exploitdb",         "exploitdb (searchsploit)"),
         ("/opt/nuclei-templates",  "nuclei-templates"),
         ("/opt/whatweb",           "whatweb (macOS git install)"),
-        ("/opt/wpscan",            "wpscan  (macOS git install)"),
     ]:
         if os.path.isdir(path):
             info(f"{label:30s} {G}PRESENT{W} ({path})")
         else:
             warn(f"{label:30s} {Y}NOT FOUND{W}")
+    # exploitdb: may be installed via apt (searchsploit on PATH) or git clone
+    _ss = shutil.which("searchsploit") or ("" if not os.path.isdir("/opt/exploitdb") else "/opt/exploitdb")
+    if _ss:
+        info(f"{'exploitdb (searchsploit)':30s} {G}PRESENT{W} ({_ss})")
+    else:
+        warn(f"{'exploitdb (searchsploit)':30s} {Y}NOT FOUND{W}")
 
     print(f"\n{C}Wordlists ({wordlists_dir()}):{W}")
     for _, filename in _WORDLIST_URLS:
@@ -840,7 +869,6 @@ def print_summary(skips):
     warn("feroxbuster: apt/brew only — install manually on dnf/other systems (cargo install feroxbuster).")
     if OS == "macos":
         warn("whatweb: installed from git (/opt/whatweb) — requires bundler (gem install bundler).")
-        warn("wpscan:  installed from git (/opt/wpscan)  — requires bundler (gem install bundler).")
     info(f"Wordlists  : installed to {wordlists_dir()}")
 
 
