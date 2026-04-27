@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.23"
+VERSION = "2.9.24"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3310,20 +3310,41 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 )
                 return None
             # XAUTHORITY is also stripped in root terminals — find the cookie file
-            # for the desktop user so Firefox can authenticate to the X server
+            # for the desktop user so Firefox can authenticate to the X server.
+            # When running as root, Firefox refuses to use an XAUTHORITY file owned
+            # by another user.  If the candidate file is not root-owned, extract just
+            # the relevant display cookie into a root-owned temp file via xauth.
             if not _os.environ.get("XAUTHORITY"):
-                _xauth_candidates = (
+                import tempfile as _tf3
+                _disp_key = _os.environ.get("DISPLAY", ":0")
+                _xauth_sources = (
                     [_os.path.expanduser("~/.Xauthority")]
                     + sorted(_glob.glob("/home/*/.Xauthority"))
                     + sorted(_glob.glob("/tmp/.gdm-xauth-*"))
                     + sorted(_glob.glob("/tmp/.xauth*"))
                     + sorted(_glob.glob("/run/user/*/.mutter-Xwaylandauth.*"))
                 )
-                for _xauth in _xauth_candidates:
-                    if _os.path.isfile(_xauth):
-                        _os.environ["XAUTHORITY"] = _xauth
-                        vc.log(f"[auth] XAUTHORITY not set — using {_xauth}", "INFO")
+                for _xauth_src in _xauth_sources:
+                    if not _os.path.isfile(_xauth_src):
+                        continue
+                    if _os.stat(_xauth_src).st_uid == 0:
+                        # Already root-owned — use directly
+                        _os.environ["XAUTHORITY"] = _xauth_src
+                        vc.log(f"[auth] XAUTHORITY not set — using {_xauth_src}", "INFO")
                         break
+                    # Owned by another user — extract cookie into a root-owned temp file
+                    _xa_fd, _xa_path = _tf3.mkstemp(prefix="fracture_xauth_")
+                    _os.close(_xa_fd)
+                    _os.chmod(_xa_path, 0o600)
+                    _xr = subprocess.run(
+                        ["xauth", "-f", _xauth_src, "extract", _xa_path, _disp_key],
+                        capture_output=True,
+                    )
+                    if _xr.returncode == 0 and _os.path.getsize(_xa_path) > 0:
+                        _os.environ["XAUTHORITY"] = _xa_path
+                        vc.log(f"[auth] Extracted X11 auth from {_xauth_src} → {_xa_path}", "INFO")
+                        break
+                    _os.unlink(_xa_path)
             # DBUS_SESSION_BUS_ADDRESS — Firefox requires DBus for IPC; without it
             # the browser process exits immediately with status 1
             if not _os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
