@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.29"
+VERSION = "2.9.30"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3285,22 +3285,74 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         # ── Display check (browser auth requires a visible window) ───────────────
         if _sys.platform.startswith("linux"):
             import glob as _glob
-            _display = (
-                _os.environ.get("DISPLAY") or _os.environ.get("WAYLAND_DISPLAY")
-            )
+            import tempfile as _tf3
+            import pwd as _pwd2
+
+            # ── Step 1: find the desktop session owner's environment ──────────
+            # `sudo su -` creates a clean root login shell with no DISPLAY,
+            # XAUTHORITY, DBUS_SESSION_BUS_ADDRESS, or XDG_RUNTIME_DIR.
+            # The most reliable source of truth is the session owner's (kali's)
+            # running processes: root can read /proc/*/environ for any process.
+            # We scan for a non-root process that has DISPLAY set and read its
+            # full session environment directly.
+            _sess = {}   # session owner's env: DISPLAY, XAUTHORITY, DBUS, XDG
+            _sess_uid = None
+            try:
+                for _ef in sorted(_glob.glob("/proc/*/environ")):
+                    try:
+                        _uid = _os.stat(_ef).st_uid
+                        if _uid == 0:
+                            continue
+                        _raw = open(_ef, "rb").read().decode("utf-8", errors="replace")
+                        _penv = {}
+                        for _e in _raw.split("\x00"):
+                            if "=" in _e:
+                                _pk, _, _pv = _e.partition("=")
+                                _penv[_pk] = _pv
+                        if "DISPLAY" not in _penv:
+                            continue
+                        # Prefer processes that also have DBUS set (proper desktop session)
+                        if "DBUS_SESSION_BUS_ADDRESS" in _penv or not _sess:
+                            _sess = _penv
+                            _sess_uid = _uid
+                            if "DBUS_SESSION_BUS_ADDRESS" in _penv:
+                                break   # good enough — full session found
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # ── Step 2: apply session environment to this process ─────────────
+            _display = _os.environ.get("DISPLAY") or _os.environ.get("WAYLAND_DISPLAY")
+
+            if not _display and _sess.get("DISPLAY"):
+                _display = _sess["DISPLAY"]
+                _os.environ["DISPLAY"] = _display
+                vc.log(f"[auth] DISPLAY set from session owner → {_display}", "INFO")
+            elif not _display and _sess.get("WAYLAND_DISPLAY"):
+                _display = _sess["WAYLAND_DISPLAY"]
+                _os.environ["WAYLAND_DISPLAY"] = _display
+                vc.log(f"[auth] WAYLAND_DISPLAY set from session owner → {_display}", "INFO")
+
             if not _display:
-                # Root terminals often strip DISPLAY — probe X11 sockets directly
+                # Last resort: probe X11 sockets — prefer sockets owned by non-root
                 _x_sockets = sorted(_glob.glob("/tmp/.X11-unix/X*"))
-                if _x_sockets:
-                    _display = ":" + _x_sockets[0].rsplit("X", 1)[-1]
+                _best_sock = next(
+                    (s for s in _x_sockets
+                     if _os.path.exists(s) and _os.stat(s).st_uid != 0),
+                    _x_sockets[0] if _x_sockets else None,
+                )
+                if _best_sock:
+                    _display = ":" + _best_sock.rsplit("X", 1)[-1]
                     _os.environ["DISPLAY"] = _display
-                    vc.log(f"[auth] DISPLAY not set — using detected display {_display}", "INFO")
+                    vc.log(f"[auth] DISPLAY not set — detected {_display} from socket", "INFO")
                 else:
-                    _wl_sockets = sorted(_glob.glob("/run/user/*/wayland-*"))
-                    if _wl_sockets:
-                        _display = _wl_sockets[0].split("/")[-1]
+                    _wl = sorted(_glob.glob("/run/user/*/wayland-*"))
+                    if _wl:
+                        _display = _wl[0].split("/")[-1]
                         _os.environ["WAYLAND_DISPLAY"] = _display
-                        vc.log(f"[auth] WAYLAND_DISPLAY not set — using detected display {_display}", "INFO")
+                        vc.log(f"[auth] WAYLAND_DISPLAY not set — detected {_display}", "INFO")
+
             if not _display:
                 vc.log(
                     "[auth] No display detected (DISPLAY/WAYLAND_DISPLAY not set). "
@@ -3309,21 +3361,13 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     "ERROR",
                 )
                 return None
-            # X11 auth fix for root running inside another user's desktop session.
-            # Two-stage approach (both always run):
-            #  1. xhost — run `xhost +SI:localuser:root` as the display owner via su.
-            #             Root can always su to other users without a password on Kali.
-            #             This grants the X server permission to accept UID-0 connections.
-            #  2. xauth add — always runs after xhost regardless of outcome.  Parses
-            #             the display owner's Xauthority with `xauth list`, extracts the
-            #             cookie for this display, and writes it under the bare ":N" key
-            #             into a new root-owned temp file.  A bare ":N" key is always
-            #             matched by libX11 for local Unix-socket connections regardless
-            #             of hostname.  XAUTHORITY must remain set to a root-owned file —
-            #             clearing it causes Firefox to fall back to ~/.Xauthority or skip
-            #             display setup entirely, resulting in a window that never appears.
-            import tempfile as _tf3
-            import pwd as _pwd2
+
+            # ── Step 3: XAUTHORITY — must be root-owned ───────────────────────
+            # The session owner's XAUTHORITY is not usable directly by root
+            # (Firefox rejects it).  Build a root-owned copy via two methods:
+            #  a) xhost +SI:localuser:root — grants X server permission for UID 0
+            #  b) xauth add :N — writes the cookie under a bare display key that
+            #     libX11 will always find regardless of stored hostname form
             _cur_xauth = _os.environ.get("XAUTHORITY", "")
             _xauth_needs_fix = (
                 not _cur_xauth
@@ -3332,49 +3376,59 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             )
             if _xauth_needs_fix:
                 _disp_num = _display.lstrip(":")
+                # Candidate sources: session owner's XAUTHORITY first
+                _sess_xauth = _sess.get("XAUTHORITY", "")
                 _xauth_sources = (
-                    ([_cur_xauth] if _cur_xauth and _os.path.isfile(_cur_xauth) else [])
+                    ([_sess_xauth] if _sess_xauth and _os.path.isfile(_sess_xauth) else [])
+                    + ([_cur_xauth] if _cur_xauth and _os.path.isfile(_cur_xauth) else [])
                     + [_os.path.expanduser("~/.Xauthority")]
                     + sorted(_glob.glob("/home/*/.Xauthority"))
                     + sorted(_glob.glob("/tmp/.gdm-xauth-*"))
                     + sorted(_glob.glob("/tmp/.xauth*"))
                     + sorted(_glob.glob("/run/user/*/.mutter-Xwaylandauth.*"))
                 )
-                _fixed = False
 
-                # ── Stage 1: xhost ────────────────────────────────────────────
+                # a) xhost grant (best-effort)
                 _x_socket = f"/tmp/.X11-unix/X{_disp_num}"
-                if _os.path.exists(_x_socket):
+                _x_owner = None
+                _src_for_xhost = None
+                if _sess_uid:
+                    try:
+                        _x_owner = _pwd2.getpwuid(_sess_uid).pw_name
+                        _src_for_xhost = _sess_xauth if (_sess_xauth and _os.path.isfile(_sess_xauth)) else None
+                    except Exception:
+                        pass
+                if not _x_owner and _os.path.exists(_x_socket):
                     _sock_uid = _os.stat(_x_socket).st_uid
                     if _sock_uid != 0:
                         try:
                             _x_owner = _pwd2.getpwuid(_sock_uid).pw_name
-                            # Find that user's Xauthority so xhost can authenticate
-                            _src_for_xhost = next(
-                                (s for s in _xauth_sources
-                                 if _os.path.isfile(s)
-                                 and _os.stat(s).st_uid == _sock_uid),
-                                None,
+                        except Exception:
+                            pass
+                if not _src_for_xhost:
+                    _src_for_xhost = next(
+                        (s for s in _xauth_sources
+                         if _os.path.isfile(s) and _os.stat(s).st_uid != 0),
+                        None,
+                    )
+                if _x_owner and _src_for_xhost:
+                    for _xh_arg in ["+SI:localuser:root", "+local:"]:
+                        try:
+                            _xh = subprocess.run(
+                                ["su", _x_owner, "-c",
+                                 f"DISPLAY={_display} "
+                                 f"XAUTHORITY={_src_for_xhost} "
+                                 f"xhost {_xh_arg}"],
+                                capture_output=True, timeout=5,
                             )
-                            if _src_for_xhost:
-                                for _xh_arg in ["+SI:localuser:root", "+local:"]:
-                                    _xh = subprocess.run(
-                                        ["su", _x_owner, "-c",
-                                         f"DISPLAY={_display} "
-                                         f"XAUTHORITY={_src_for_xhost} "
-                                         f"xhost {_xh_arg}"],
-                                        capture_output=True, timeout=5,
-                                    )
-                                    if _xh.returncode == 0:
-                                        vc.log(
-                                            f"[auth] xhost {_xh_arg} granted ({_x_owner})",
-                                            "INFO",
-                                        )
-                                        break
+                            if _xh.returncode == 0:
+                                vc.log(f"[auth] xhost {_xh_arg} granted ({_x_owner})", "INFO")
+                                break
                         except Exception as _xhe:
                             vc.log(f"[auth] xhost grant failed: {_xhe}", "WARNING")
 
-                # ── Stage 2: xauth add with bare :N key (always runs) ────────
+                # b) xauth add — always runs; creates root-owned XAUTHORITY
+                _fixed = False
                 for _xauth_src in _xauth_sources:
                     if not _os.path.isfile(_xauth_src):
                         continue
@@ -3383,12 +3437,12 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         vc.log(f"[auth] XAUTHORITY → {_xauth_src} (root-owned)", "INFO")
                         _fixed = True
                         break
-                    _list = subprocess.run(
+                    _xlist = subprocess.run(
                         ["xauth", "-f", _xauth_src, "list"],
                         capture_output=True, text=True,
                     )
                     _cookie_line = None
-                    for _ln in _list.stdout.splitlines():
+                    for _ln in _xlist.stdout.splitlines():
                         if f":{_disp_num}" in _ln:
                             _parts = _ln.strip().split()
                             if len(_parts) >= 3:
@@ -3418,39 +3472,46 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                             _os.unlink(_xa_path)
                         except Exception:
                             pass
-
                 if not _fixed:
                     vc.log("[auth] Could not fix X11 auth — Firefox may fail", "WARNING")
-            # DBUS_SESSION_BUS_ADDRESS — Firefox requires DBus for IPC; without it
-            # the browser process exits immediately with status 1
-            if not _os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
-                _dbus_candidates = (
-                    sorted(_glob.glob("/run/user/0/bus"))          # root session
-                    + sorted(_glob.glob("/run/user/[0-9]*/bus"))   # any user session
-                )
-                for _dbus in _dbus_candidates:
-                    if _os.path.exists(_dbus):
-                        _os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={_dbus}"
-                        vc.log(f"[auth] DBUS_SESSION_BUS_ADDRESS not set — using {_dbus}", "INFO")
-                        break
-            # XDG_RUNTIME_DIR — Firefox uses this for runtime socket/lock files
-            if not _os.environ.get("XDG_RUNTIME_DIR"):
-                _xdg_candidates = (
-                    ["/run/user/0"]
-                    + sorted(_glob.glob("/run/user/[0-9]*"))
-                )
-                for _xdg in _xdg_candidates:
-                    if _os.path.isdir(_xdg):
-                        _os.environ["XDG_RUNTIME_DIR"] = _xdg
-                        vc.log(f"[auth] XDG_RUNTIME_DIR not set — using {_xdg}", "INFO")
-                        break
 
-            # HOME — if sudo or su didn't reset HOME, it may still point to the
-            # original user's directory.  Firefox uses HOME to locate its profile
-            # cache; if HOME is not writable by root the window never appears.
+            # ── Step 4: DBUS / XDG_RUNTIME_DIR / HOME ────────────────────────
+            # Use the session owner's values directly — these are the live values
+            # for the running desktop.  `sudo su -` strips them; reading /proc
+            # gives us the exact strings the session is using.
+            if not _os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+                _dbus = _sess.get("DBUS_SESSION_BUS_ADDRESS", "")
+                if not _dbus:
+                    # Fall back to probing known socket paths
+                    for _dp in (
+                        sorted(_glob.glob("/run/user/[1-9]*/bus"))   # non-root first
+                        + sorted(_glob.glob("/run/user/0/bus"))
+                    ):
+                        if _os.path.exists(_dp):
+                            _dbus = f"unix:path={_dp}"
+                            break
+                if _dbus:
+                    _os.environ["DBUS_SESSION_BUS_ADDRESS"] = _dbus
+                    vc.log(f"[auth] DBUS_SESSION_BUS_ADDRESS → {_dbus}", "INFO")
+
+            if not _os.environ.get("XDG_RUNTIME_DIR"):
+                _xdg = _sess.get("XDG_RUNTIME_DIR", "")
+                if not _xdg:
+                    for _xp in (
+                        ([f"/run/user/{_sess_uid}"] if _sess_uid else [])
+                        + ["/run/user/0"]
+                        + sorted(_glob.glob("/run/user/[0-9]*"))
+                    ):
+                        if _os.path.isdir(_xp):
+                            _xdg = _xp
+                            break
+                if _xdg:
+                    _os.environ["XDG_RUNTIME_DIR"] = _xdg
+                    vc.log(f"[auth] XDG_RUNTIME_DIR → {_xdg}", "INFO")
+
             if _os.getuid() == 0 and not _os.environ.get("HOME", "").startswith("/root"):
                 _os.environ["HOME"] = "/root"
-                vc.log("[auth] HOME reset to /root for root process", "INFO")
+                vc.log("[auth] HOME reset to /root", "INFO")
 
         # ── Driver / browser resolution ───────────────────────────────────────
         _explicit_drv = (
