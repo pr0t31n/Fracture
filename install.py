@@ -201,7 +201,6 @@ PIP_PACKAGES = [
     "colorama>=0.4.6",
     "beautifulsoup4>=4.12.0",
     "sqlmap",
-    "git+https://github.com/seleniumhq/selenium.git#subdirectory=py",
 ]
 
 
@@ -236,16 +235,36 @@ def install_selenium():
     if not _sel_installed:
         _installed = False
 
-        # 1. GitHub source
-        info("Trying selenium from GitHub source ...")
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--break-system-packages",
-             "git+https://github.com/seleniumhq/selenium.git#subdirectory=py"],
-            check=False,
-        )
-        if result.returncode == 0:
-            _installed = True
-            info("selenium installed from GitHub source")
+        # 1. GitHub source via git clone → pip install local py/ subdir
+        _git = shutil.which("git")
+        if _git:
+            info("Trying selenium from GitHub source (git clone) ...")
+            _clone_dir = "/tmp/_selenium_src"
+            if os.path.isdir(_clone_dir):
+                shutil.rmtree(_clone_dir, ignore_errors=True)
+            r_clone = subprocess.run(
+                [_git, "clone", "--depth=1",
+                 "https://github.com/seleniumhq/selenium.git", _clone_dir],
+                check=False,
+            )
+            if r_clone.returncode == 0:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install",
+                     "--break-system-packages", "--quiet", "hatchling"],
+                    check=False,
+                )
+                r_pip = subprocess.run(
+                    [sys.executable, "-m", "pip", "install",
+                     "--break-system-packages",
+                     os.path.join(_clone_dir, "py")],
+                    check=False,
+                )
+                if r_pip.returncode == 0:
+                    _installed = True
+                    info("selenium installed from GitHub source")
+            shutil.rmtree(_clone_dir, ignore_errors=True)
+        else:
+            warn("git not found — skipping GitHub source install")
 
         # 2. pip (PyPI)
         if not _installed:
