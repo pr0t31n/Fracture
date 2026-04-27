@@ -159,6 +159,7 @@ APT_PACKAGES = [
     "gobuster", "nikto", "sqlmap", "sslscan", "whatweb",
     "feroxbuster", "ffuf", "exploitdb",
     "python3-pip", "python3-dev",
+    "python3-selenium",
     "git", "golang-go",
     "ruby", "ruby-dev", "ruby-bundler",
     "libssl-dev", "libcurl4-openssl-dev",
@@ -166,6 +167,7 @@ APT_PACKAGES = [
 DNF_PACKAGES = [
     "nikto", "sqlmap", "sslscan", "whatweb", "ffuf",
     "python3-pip", "python3-devel",
+    "python3-selenium",
     "git", "golang",
     "ruby", "ruby-devel",
     "openssl-devel", "libcurl-devel",
@@ -201,8 +203,6 @@ PIP_PACKAGES = [
     "colorama>=0.4.6",
     "beautifulsoup4>=4.12.0",
     "sqlmap",
-    "selenium>=4.0.0",
-    "webdriver-manager>=4.0.0",
 ]
 
 
@@ -210,6 +210,90 @@ def install_pip():
     banner("Phase: pip packages")
     run([sys.executable, "-m", "pip", "install", "--break-system-packages"] + PIP_PACKAGES,
         check=False)
+
+
+def install_selenium():
+    """
+    Install the Selenium Python binding using the best available method.
+
+    Priority order (per CLAUDE.md §5a):
+      1. apt-get  (Debian / Ubuntu / Kali)
+      2. dnf      (RHEL / CentOS / Fedora / Rocky)
+      3. zypper   (openSUSE)
+      4. pip      — last resort on all platforms, including macOS / Windows
+                    (no official brew formula for the Python selenium binding)
+
+    webdriver-manager is not available in any system repo; it is always
+    installed via pip after the Selenium binding is in place.
+    """
+    banner("Phase: Selenium (browser-assisted login)")
+
+    # Check if already importable
+    try:
+        import selenium as _sel
+        info(f"selenium already installed ({_sel.__version__}) — checking webdriver-manager")
+        _sel_installed = True
+    except ImportError:
+        _sel_installed = False
+
+    if not _sel_installed:
+        _pkg_installed = False
+
+        if OS == "apt" and shutil.which("apt-get"):
+            info("Trying python3-selenium via apt-get ...")
+            global _apt_updated
+            if not _apt_updated:
+                run(["apt-get", "update", "-y"], check=False)
+                _apt_updated = True
+            result = subprocess.run(
+                ["apt-get", "install", "-y", "python3-selenium"],
+                check=False,
+            )
+            _pkg_installed = result.returncode == 0
+
+        elif OS == "dnf" and shutil.which("dnf"):
+            info("Trying python3-selenium via dnf ...")
+            result = subprocess.run(
+                ["dnf", "install", "-y", "python3-selenium"],
+                check=False,
+            )
+            _pkg_installed = result.returncode == 0
+
+        elif OS == "zypper" and shutil.which("zypper"):
+            info("Trying python3-selenium via zypper ...")
+            result = subprocess.run(
+                ["zypper", "install", "-y", "python3-selenium"],
+                check=False,
+            )
+            _pkg_installed = result.returncode == 0
+
+        else:
+            if OS not in ("apt", "dnf", "zypper"):
+                info(f"No system package manager support for selenium on {OS} — using pip")
+
+        if _pkg_installed:
+            info("python3-selenium installed via system package manager")
+        else:
+            if OS in ("apt", "dnf", "zypper"):
+                warn("System package install failed — falling back to pip")
+            info("Installing selenium via pip ...")
+            run(
+                [sys.executable, "-m", "pip", "install",
+                 "--break-system-packages", "selenium>=4.0.0"],
+                check=False,
+            )
+
+    # webdriver-manager is pip-only (not in any system repo)
+    try:
+        import webdriver_manager  # noqa: F401
+        info("webdriver-manager already installed — skipping")
+    except ImportError:
+        info("Installing webdriver-manager via pip ...")
+        run(
+            [sys.executable, "-m", "pip", "install",
+             "--break-system-packages", "webdriver-manager>=4.0.0"],
+            check=False,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -524,7 +608,7 @@ VERIFY_TOOLS = [
     "wpscan", "sslscan", "testssl.sh", "tplmap",
     "whatweb", "ffuf", "feroxbuster", "searchsploit", "jwt_tool",
 ]
-VERIFY_PYTHON = ["requests", "colorama", "bs4"]
+VERIFY_PYTHON = ["requests", "colorama", "bs4", "selenium"]
 
 
 def run_check():
@@ -632,6 +716,7 @@ def main():
 
     if not args.skip_pip:
         install_pip()
+        install_selenium()
     else:
         skips.add("pip")
         warn("Skipping pip packages.")

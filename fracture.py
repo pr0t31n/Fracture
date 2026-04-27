@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.9"
+VERSION = "2.9.10"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3254,7 +3254,14 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             opts = _FO()
             if bin_path:
                 opts.binary_location = bin_path
-            svc = _FS(executable_path=drv_path) if drv_path else None
+            if drv_path:
+                svc = _FS(executable_path=drv_path)
+            else:
+                try:
+                    from webdriver_manager.firefox import GeckoDriverManager as _GDM
+                    svc = _FS(executable_path=_GDM().install())
+                except Exception:
+                    svc = None
             return _wd.Firefox(service=svc, options=opts) if svc else _wd.Firefox(options=opts)
 
         # ── Driver / browser resolution ───────────────────────────────────────
