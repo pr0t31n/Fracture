@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.30"
+VERSION = "2.9.31"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3282,78 +3282,82 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 except Exception:
                     pass
 
-        # ── Display check (browser auth requires a visible window) ───────────────
+        # ── Display / session discovery ───────────────────────────────────────────
+        # One session dict per unique DISPLAY value found in /proc/*/environ.
+        # Each dict carries the keys the browser process needs, plus helpers:
+        #   _display, _uid, _xauth_file (root-owned Xauthority path)
+        _all_sessions = []   # populated on Linux; left as [{}] on other platforms
+
         if _sys.platform.startswith("linux"):
             import glob as _glob
             import tempfile as _tf3
             import pwd as _pwd2
 
-            # ── Step 1: find the desktop session owner's environment ──────────
-            # `sudo su -` creates a clean root login shell with no DISPLAY,
-            # XAUTHORITY, DBUS_SESSION_BUS_ADDRESS, or XDG_RUNTIME_DIR.
-            # The most reliable source of truth is the session owner's (kali's)
-            # running processes: root can read /proc/*/environ for any process.
-            # We scan for a non-root process that has DISPLAY set and read its
-            # full session environment directly.
-            _sess = {}   # session owner's env: DISPLAY, XAUTHORITY, DBUS, XDG
-            _sess_uid = None
+            # ── Scan /proc for every active desktop session ───────────────────
+            # Root can read any process's /proc/<pid>/environ.  This is the only
+            # reliable source after `sudo su -` strips all display-related vars.
+            # Sessions are deduplicated by DISPLAY value; entries with
+            # DBUS_SESSION_BUS_ADDRESS are promoted to the front (full sessions).
+            _seen_displays: set = set()
             try:
                 for _ef in sorted(_glob.glob("/proc/*/environ")):
                     try:
                         _uid = _os.stat(_ef).st_uid
-                        if _uid == 0:
-                            continue
                         _raw = open(_ef, "rb").read().decode("utf-8", errors="replace")
-                        _penv = {}
+                        _penv: dict = {}
                         for _e in _raw.split("\x00"):
                             if "=" in _e:
                                 _pk, _, _pv = _e.partition("=")
                                 _penv[_pk] = _pv
-                        if "DISPLAY" not in _penv:
+                        _disp = _penv.get("DISPLAY") or _penv.get("WAYLAND_DISPLAY", "")
+                        if not _disp or _disp in _seen_displays:
                             continue
-                        # Prefer processes that also have DBUS set (proper desktop session)
-                        if "DBUS_SESSION_BUS_ADDRESS" in _penv or not _sess:
-                            _sess = _penv
-                            _sess_uid = _uid
-                            if "DBUS_SESSION_BUS_ADDRESS" in _penv:
-                                break   # good enough — full session found
+                        _seen_displays.add(_disp)
+                        _penv["_uid"] = _uid
+                        _penv["_display"] = _disp
+                        if "DBUS_SESSION_BUS_ADDRESS" in _penv:
+                            _all_sessions.insert(0, _penv)   # full session → front
+                        else:
+                            _all_sessions.append(_penv)
                     except Exception:
                         pass
             except Exception:
                 pass
 
-            # ── Step 2: apply session environment to this process ─────────────
-            _display = _os.environ.get("DISPLAY") or _os.environ.get("WAYLAND_DISPLAY")
+            # If /proc scan missed the current shell's DISPLAY, add it
+            _cur_disp = _os.environ.get("DISPLAY") or _os.environ.get("WAYLAND_DISPLAY", "")
+            if _cur_disp and _cur_disp not in _seen_displays:
+                _all_sessions.insert(0, {
+                    "_display": _cur_disp,
+                    "DISPLAY": _cur_disp,
+                    "_uid": _os.getuid(),
+                })
+                _seen_displays.add(_cur_disp)
 
-            if not _display and _sess.get("DISPLAY"):
-                _display = _sess["DISPLAY"]
-                _os.environ["DISPLAY"] = _display
-                vc.log(f"[auth] DISPLAY set from session owner → {_display}", "INFO")
-            elif not _display and _sess.get("WAYLAND_DISPLAY"):
-                _display = _sess["WAYLAND_DISPLAY"]
-                _os.environ["WAYLAND_DISPLAY"] = _display
-                vc.log(f"[auth] WAYLAND_DISPLAY set from session owner → {_display}", "INFO")
-
-            if not _display:
-                # Last resort: probe X11 sockets — prefer sockets owned by non-root
+            # Fall back to X11 socket probing if /proc found nothing
+            if not _all_sessions:
                 _x_sockets = sorted(_glob.glob("/tmp/.X11-unix/X*"))
-                _best_sock = next(
+                _best = next(
                     (s for s in _x_sockets
                      if _os.path.exists(s) and _os.stat(s).st_uid != 0),
                     _x_sockets[0] if _x_sockets else None,
                 )
-                if _best_sock:
-                    _display = ":" + _best_sock.rsplit("X", 1)[-1]
-                    _os.environ["DISPLAY"] = _display
-                    vc.log(f"[auth] DISPLAY not set — detected {_display} from socket", "INFO")
+                if _best:
+                    _fb_d = ":" + _best.rsplit("X", 1)[-1]
+                    _all_sessions.append({
+                        "_display": _fb_d, "DISPLAY": _fb_d,
+                        "_uid": _os.stat(_best).st_uid,
+                    })
                 else:
                     _wl = sorted(_glob.glob("/run/user/*/wayland-*"))
                     if _wl:
-                        _display = _wl[0].split("/")[-1]
-                        _os.environ["WAYLAND_DISPLAY"] = _display
-                        vc.log(f"[auth] WAYLAND_DISPLAY not set — detected {_display}", "INFO")
+                        _fb_d = _wl[0].split("/")[-1]
+                        _all_sessions.append({
+                            "_display": _fb_d, "WAYLAND_DISPLAY": _fb_d,
+                            "_uid": 0,
+                        })
 
-            if not _display:
+            if not _all_sessions:
                 vc.log(
                     "[auth] No display detected (DISPLAY/WAYLAND_DISPLAY not set). "
                     "Browser-assisted login requires a desktop environment. "
@@ -3362,156 +3366,161 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 )
                 return None
 
-            # ── Step 3: XAUTHORITY — must be root-owned ───────────────────────
-            # The session owner's XAUTHORITY is not usable directly by root
-            # (Firefox rejects it).  Build a root-owned copy via two methods:
-            #  a) xhost +SI:localuser:root — grants X server permission for UID 0
-            #  b) xauth add :N — writes the cookie under a bare display key that
-            #     libX11 will always find regardless of stored hostname form
-            _cur_xauth = _os.environ.get("XAUTHORITY", "")
-            _xauth_needs_fix = (
-                not _cur_xauth
-                or not _os.path.isfile(_cur_xauth)
-                or _os.stat(_cur_xauth).st_uid != 0
+            vc.log(
+                f"[auth] {len(_all_sessions)} session(s) found: "
+                + ", ".join(s["_display"] for s in _all_sessions),
+                "INFO",
             )
-            if _xauth_needs_fix:
-                _disp_num = _display.lstrip(":")
-                # Candidate sources: session owner's XAUTHORITY first
-                _sess_xauth = _sess.get("XAUTHORITY", "")
-                _xauth_sources = (
-                    ([_sess_xauth] if _sess_xauth and _os.path.isfile(_sess_xauth) else [])
-                    + ([_cur_xauth] if _cur_xauth and _os.path.isfile(_cur_xauth) else [])
+
+            # ── Per-session XAUTHORITY prep ───────────────────────────────────
+            # For each session, build a root-owned XAUTHORITY and run xhost so
+            # the X server accepts UID-0 connections on that display.
+            # Results are stored in the session dict as "_xauth_file".
+            def _prep_xauth(sess: dict) -> None:
+                _d   = sess["_display"]
+                _dn  = _d.lstrip(":")
+                _uid = sess.get("_uid", 0)
+                _sxa = sess.get("XAUTHORITY", "")
+                if _sxa and _os.path.isfile(_sxa) and _os.stat(_sxa).st_uid == 0:
+                    sess["_xauth_file"] = _sxa
+                    return
+                _sources = (
+                    ([_sxa] if _sxa and _os.path.isfile(_sxa) else [])
                     + [_os.path.expanduser("~/.Xauthority")]
                     + sorted(_glob.glob("/home/*/.Xauthority"))
                     + sorted(_glob.glob("/tmp/.gdm-xauth-*"))
                     + sorted(_glob.glob("/tmp/.xauth*"))
                     + sorted(_glob.glob("/run/user/*/.mutter-Xwaylandauth.*"))
                 )
-
-                # a) xhost grant (best-effort)
-                _x_socket = f"/tmp/.X11-unix/X{_disp_num}"
-                _x_owner = None
-                _src_for_xhost = None
-                if _sess_uid:
+                # xhost grant (best-effort)
+                _owner = None
+                _xhost_src = _sxa if (_sxa and _os.path.isfile(_sxa)) else next(
+                    (s for s in _sources
+                     if _os.path.isfile(s) and _os.stat(s).st_uid != 0),
+                    None,
+                )
+                if _uid and _uid != 0:
                     try:
-                        _x_owner = _pwd2.getpwuid(_sess_uid).pw_name
-                        _src_for_xhost = _sess_xauth if (_sess_xauth and _os.path.isfile(_sess_xauth)) else None
+                        _owner = _pwd2.getpwuid(_uid).pw_name
                     except Exception:
                         pass
-                if not _x_owner and _os.path.exists(_x_socket):
-                    _sock_uid = _os.stat(_x_socket).st_uid
-                    if _sock_uid != 0:
+                if not _owner:
+                    _xsock = f"/tmp/.X11-unix/X{_dn}"
+                    if _os.path.exists(_xsock):
+                        _su = _os.stat(_xsock).st_uid
+                        if _su and _su != 0:
+                            try:
+                                _owner = _pwd2.getpwuid(_su).pw_name
+                            except Exception:
+                                pass
+                if _owner and _xhost_src:
+                    for _arg in ["+SI:localuser:root", "+local:"]:
                         try:
-                            _x_owner = _pwd2.getpwuid(_sock_uid).pw_name
-                        except Exception:
-                            pass
-                if not _src_for_xhost:
-                    _src_for_xhost = next(
-                        (s for s in _xauth_sources
-                         if _os.path.isfile(s) and _os.stat(s).st_uid != 0),
-                        None,
-                    )
-                if _x_owner and _src_for_xhost:
-                    for _xh_arg in ["+SI:localuser:root", "+local:"]:
-                        try:
-                            _xh = subprocess.run(
-                                ["su", _x_owner, "-c",
-                                 f"DISPLAY={_display} "
-                                 f"XAUTHORITY={_src_for_xhost} "
-                                 f"xhost {_xh_arg}"],
+                            _r = subprocess.run(
+                                ["su", _owner, "-c",
+                                 f"DISPLAY={_d} XAUTHORITY={_xhost_src} xhost {_arg}"],
                                 capture_output=True, timeout=5,
                             )
-                            if _xh.returncode == 0:
-                                vc.log(f"[auth] xhost {_xh_arg} granted ({_x_owner})", "INFO")
+                            if _r.returncode == 0:
+                                vc.log(f"[auth] xhost {_arg} granted for {_d} ({_owner})", "INFO")
                                 break
-                        except Exception as _xhe:
-                            vc.log(f"[auth] xhost grant failed: {_xhe}", "WARNING")
-
-                # b) xauth add — always runs; creates root-owned XAUTHORITY
-                _fixed = False
-                for _xauth_src in _xauth_sources:
-                    if not _os.path.isfile(_xauth_src):
-                        continue
-                    if _os.stat(_xauth_src).st_uid == 0:
-                        _os.environ["XAUTHORITY"] = _xauth_src
-                        vc.log(f"[auth] XAUTHORITY → {_xauth_src} (root-owned)", "INFO")
-                        _fixed = True
-                        break
-                    _xlist = subprocess.run(
-                        ["xauth", "-f", _xauth_src, "list"],
-                        capture_output=True, text=True,
-                    )
-                    _cookie_line = None
-                    for _ln in _xlist.stdout.splitlines():
-                        if f":{_disp_num}" in _ln:
-                            _parts = _ln.strip().split()
-                            if len(_parts) >= 3:
-                                _cookie_line = _parts
-                                break
-                    if not _cookie_line:
-                        continue
-                    try:
-                        _xa_fd, _xa_path = _tf3.mkstemp(prefix="fracture_xauth_")
-                        _os.close(_xa_fd)
-                        _os.chmod(_xa_path, 0o600)
-                        subprocess.run(
-                            ["xauth", "-f", _xa_path, "add",
-                             f":{_disp_num}", _cookie_line[1], _cookie_line[2]],
-                            capture_output=True,
-                        )
-                        _os.environ["XAUTHORITY"] = _xa_path
-                        vc.log(
-                            f"[auth] XAUTHORITY → {_xa_path} "
-                            f"(:{_disp_num} from {_xauth_src})",
-                            "INFO",
-                        )
-                        _fixed = True
-                        break
-                    except Exception:
-                        try:
-                            _os.unlink(_xa_path)
                         except Exception:
                             pass
-                if not _fixed:
-                    vc.log("[auth] Could not fix X11 auth — Firefox may fail", "WARNING")
+                # xauth add — create root-owned XAUTHORITY
+                for _xs in _sources:
+                    if not _os.path.isfile(_xs):
+                        continue
+                    if _os.stat(_xs).st_uid == 0:
+                        sess["_xauth_file"] = _xs
+                        return
+                    _xl = subprocess.run(
+                        ["xauth", "-f", _xs, "list"], capture_output=True, text=True,
+                    )
+                    _cl = None
+                    for _ln in _xl.stdout.splitlines():
+                        if f":{_dn}" in _ln:
+                            _p = _ln.strip().split()
+                            if len(_p) >= 3:
+                                _cl = _p
+                                break
+                    if not _cl:
+                        continue
+                    try:
+                        _fd, _xp = _tf3.mkstemp(prefix="fracture_xauth_")
+                        _os.close(_fd)
+                        _os.chmod(_xp, 0o600)
+                        subprocess.run(
+                            ["xauth", "-f", _xp, "add", f":{_dn}", _cl[1], _cl[2]],
+                            capture_output=True,
+                        )
+                        sess["_xauth_file"] = _xp
+                        vc.log(f"[auth] XAUTHORITY for {_d} → {_xp}", "INFO")
+                        return
+                    except Exception:
+                        pass
+                vc.log(f"[auth] Could not build XAUTHORITY for {_d} — may fail", "WARNING")
 
-            # ── Step 4: DBUS / XDG_RUNTIME_DIR / HOME ────────────────────────
-            # Use the session owner's values directly — these are the live values
-            # for the running desktop.  `sudo su -` strips them; reading /proc
-            # gives us the exact strings the session is using.
-            if not _os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
-                _dbus = _sess.get("DBUS_SESSION_BUS_ADDRESS", "")
-                if not _dbus:
-                    # Fall back to probing known socket paths
-                    for _dp in (
-                        sorted(_glob.glob("/run/user/[1-9]*/bus"))   # non-root first
-                        + sorted(_glob.glob("/run/user/0/bus"))
-                    ):
-                        if _os.path.exists(_dp):
-                            _dbus = f"unix:path={_dp}"
-                            break
-                if _dbus:
-                    _os.environ["DBUS_SESSION_BUS_ADDRESS"] = _dbus
-                    vc.log(f"[auth] DBUS_SESSION_BUS_ADDRESS → {_dbus}", "INFO")
+            for _s in _all_sessions:
+                _prep_xauth(_s)
 
-            if not _os.environ.get("XDG_RUNTIME_DIR"):
-                _xdg = _sess.get("XDG_RUNTIME_DIR", "")
-                if not _xdg:
-                    for _xp in (
-                        ([f"/run/user/{_sess_uid}"] if _sess_uid else [])
-                        + ["/run/user/0"]
-                        + sorted(_glob.glob("/run/user/[0-9]*"))
-                    ):
-                        if _os.path.isdir(_xp):
-                            _xdg = _xp
-                            break
-                if _xdg:
-                    _os.environ["XDG_RUNTIME_DIR"] = _xdg
-                    vc.log(f"[auth] XDG_RUNTIME_DIR → {_xdg}", "INFO")
-
+            # HOME fix (once, not per-session)
             if _os.getuid() == 0 and not _os.environ.get("HOME", "").startswith("/root"):
                 _os.environ["HOME"] = "/root"
                 vc.log("[auth] HOME reset to /root", "INFO")
+
+        else:
+            # Non-Linux: no session management needed; one empty session acts as
+            # a pass-through so the browser loop below iterates exactly once
+            _all_sessions = [{}]
+
+        # ── Session selection ─────────────────────────────────────────────────────
+        # If multiple sessions were found, offer the user a choice before
+        # attempting any browser launch.  This avoids silently using the wrong
+        # display when several desktops are active.
+        if len(_all_sessions) > 1:
+            vc.log("[auth] Multiple active sessions detected:", "INFO")
+            for _si, _ss in enumerate(_all_sessions, 1):
+                _sd = _ss.get("_display", "?")
+                _so = ""
+                if _sys.platform.startswith("linux") and _ss.get("_uid"):
+                    try:
+                        import pwd as _pwd3
+                        _so = f"  user={_pwd3.getpwuid(_ss['_uid']).pw_name}"
+                    except Exception:
+                        pass
+                vc.log(f"  [{_si}]  {_sd}{_so}", "INFO")
+            try:
+                _choice = input(
+                    f"[auth] Select session [1-{len(_all_sessions)}]"
+                    " or press Enter to try all: "
+                ).strip()
+                if _choice.isdigit():
+                    _ci = int(_choice) - 1
+                    if 0 <= _ci < len(_all_sessions):
+                        _all_sessions = [_all_sessions[_ci]]
+                        vc.log(f"[auth] Using session: {_all_sessions[0]['_display']}", "INFO")
+            except Exception:
+                pass
+
+        # Helper: apply one session's env vars before a browser launch attempt.
+        # XAUTHORITY must be root-owned for Firefox; if no root-owned file was
+        # prepared for this session, remove the var so Firefox's ownership check
+        # sees nothing rather than a non-root-owned file.
+        def _apply_sess(sc: dict) -> None:
+            if sc.get("DISPLAY"):
+                _os.environ["DISPLAY"] = sc["DISPLAY"]
+            if sc.get("WAYLAND_DISPLAY"):
+                _os.environ["WAYLAND_DISPLAY"] = sc["WAYLAND_DISPLAY"]
+            if sc.get("DBUS_SESSION_BUS_ADDRESS"):
+                _os.environ["DBUS_SESSION_BUS_ADDRESS"] = sc["DBUS_SESSION_BUS_ADDRESS"]
+            if sc.get("XDG_RUNTIME_DIR"):
+                _os.environ["XDG_RUNTIME_DIR"] = sc["XDG_RUNTIME_DIR"]
+            if sc.get("_xauth_file"):
+                _os.environ["XAUTHORITY"] = sc["_xauth_file"]
+            else:
+                _xa = _os.environ.get("XAUTHORITY", "")
+                if _xa and _os.path.isfile(_xa) and _os.stat(_xa).st_uid != 0:
+                    _os.environ.pop("XAUTHORITY", None)
 
         # ── Driver / browser resolution ───────────────────────────────────────
         _explicit_drv = (
@@ -3522,14 +3531,22 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         driver      = None
         _used_name  = ""
 
-        # If an explicit driver path was provided, honour it and go straight to Chrome
+        # If an explicit driver path was provided, try it across all sessions
         if _explicit_drv:
             vc.log(f"[auth] Using specified WebDriver: {_explicit_drv}", "INFO")
-            try:
-                driver     = _launch_chrome_engine("", _explicit_drv)
-                _used_name = "Chrome (explicit driver)"
-            except Exception as _e:
-                vc.log(f"[auth] Specified driver failed ({_e}) — falling back to auto-detect", "WARNING")
+            for _sc in _all_sessions:
+                _apply_sess(_sc)
+                _sc_lbl = f" [{_sc['_display']}]" if _sc.get("_display") else ""
+                try:
+                    driver     = _launch_chrome_engine("", _explicit_drv)
+                    _used_name = f"Chrome (explicit driver){_sc_lbl}"
+                    break
+                except Exception as _e:
+                    vc.log(
+                        f"[auth] Specified driver failed{_sc_lbl} ({_e})"
+                        " — trying next session",
+                        "WARNING",
+                    )
 
         if driver is None:
             for _b in _BROWSERS:
@@ -3541,24 +3558,31 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     continue
                 _bin_lbl = _bin or "(default install)"
                 _drv_lbl = _drv or "(selenium-manager)"
-                vc.log(
-                    f"[auth] Trying {_b['name']}: "
-                    f"binary={_bin_lbl}  driver={_drv_lbl}",
-                    "INFO",
-                )
-                try:
-                    engine = _b["engine"]
-                    if engine == "chrome":
-                        driver = _launch_chrome_engine(_bin, _drv)
-                    elif engine == "edge":
-                        driver = _launch_edge_engine(_bin, _drv)
-                    else:
-                        driver = _launch_firefox_engine(_bin, _drv)
-                    _used_name = _b["name"]
+                for _sc in _all_sessions:
+                    _apply_sess(_sc)
+                    _sc_lbl = f" [{_sc['_display']}]" if _sc.get("_display") else ""
+                    vc.log(
+                        f"[auth] Trying {_b['name']}{_sc_lbl}: "
+                        f"binary={_bin_lbl}  driver={_drv_lbl}",
+                        "INFO",
+                    )
+                    try:
+                        engine = _b["engine"]
+                        if engine == "chrome":
+                            driver = _launch_chrome_engine(_bin, _drv)
+                        elif engine == "edge":
+                            driver = _launch_edge_engine(_bin, _drv)
+                        else:
+                            driver = _launch_firefox_engine(_bin, _drv)
+                        _used_name = f"{_b['name']}{_sc_lbl}"
+                        break
+                    except Exception as _e:
+                        vc.log(
+                            f"[auth] {_b['name']}{_sc_lbl} unavailable: {_e}",
+                            "WARNING",
+                        )
+                if driver:
                     break
-                except Exception as _e:
-                    vc.log(f"[auth] {_b['name']} unavailable: {_e}", "WARNING")
-                    continue
 
         if driver is None:
             vc.log(
