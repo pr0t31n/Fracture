@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.3"
+VERSION = "2.9.5"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2976,6 +2976,322 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         except Exception:
             return None, post_url
 
+    # ── Post-login interactive form finder ───────────────────────────────────
+    def _find_interactive_forms(html: str, page_url: str) -> "list":
+        """
+        Find forms on a page that contain interactive (non-password) fields.
+        Returns a list of form dicts:
+          {action, method, hidden, fields}
+        where each field is:
+          {name, type, label, value, checked, options}
+        Skips forms that contain a password input (those are login forms).
+        """
+        import re as _re6
+        from urllib.parse import urljoin as _uj6
+
+        _INTERACTIVE = frozenset({
+            "text", "email", "tel", "number", "search",
+            "checkbox", "radio", "select", "password", "otp",
+        })
+
+        # Build label map: input-id / input-name → label text
+        _label_map: dict = {}
+        for _lm in _re6.finditer(
+                r'<label\b[^>]*\bfor=["\']([^"\']+)["\'][^>]*>(.*?)</label>',
+                html, _re6.IGNORECASE | _re6.DOTALL):
+            _label_map[_lm.group(1)] = _re6.sub(r'<[^>]+>', '', _lm.group(2)).strip()
+
+        forms: list = []
+        for _fm in _re6.finditer(r'(?s)<form\b[^>]*>(.+?)</form>', html, _re6.IGNORECASE):
+            _ftag  = _fm.group(0)
+            _fbody = _fm.group(1)
+
+            _am = _re6.search(r'\baction=["\']([^"\']*)["\']', _ftag, _re6.IGNORECASE)
+            _mm = _re6.search(r'\bmethod=["\']([^"\']*)["\']', _ftag, _re6.IGNORECASE)
+            _action = _uj6(page_url, _am.group(1).strip()) if _am else page_url
+            _method = _mm.group(1).strip().lower() if _mm else "post"
+
+            _has_pw = bool(_re6.search(
+                r'<input[^>]+type=["\']?password["\']?', _fbody, _re6.IGNORECASE))
+
+            _hidden: dict = {}
+            _fields: list = []
+
+            # ── <input> tags ─────────────────────────────────────────────────
+            for _inp in _re6.finditer(r'<input\b([^>]*)/?>', _fbody, _re6.IGNORECASE):
+                _a    = _inp.group(1)
+                _t    = (_re6.search(r'\btype=["\']?(\w+)["\']?',     _a, _re6.IGNORECASE) or
+                         type('_', (), {'group': lambda s, n: ''})()).group(1).lower() or "text"
+                _n_m  = _re6.search(r'\bname=["\']([^"\']+)["\']',    _a, _re6.IGNORECASE)
+                _id_m = _re6.search(r'\bid=["\']([^"\']+)["\']',      _a, _re6.IGNORECASE)
+                _v_m  = _re6.search(r'\bvalue=["\']([^"\']*)["\']',   _a, _re6.IGNORECASE)
+                _ph_m = _re6.search(r'\bplaceholder=["\']([^"\']+)["\']', _a, _re6.IGNORECASE)
+                _chk  = bool(_re6.search(r'\bchecked\b',              _a, _re6.IGNORECASE))
+                if not _n_m:
+                    continue
+                _iname = _n_m.group(1)
+                _iid   = _id_m.group(1) if _id_m else ""
+                _ival  = _v_m.group(1)  if _v_m  else ""
+                _iph   = _ph_m.group(1) if _ph_m else ""
+                if _t == "hidden":
+                    _hidden[_iname] = _ival
+                    continue
+                if _t in ("submit", "image", "reset", "button"):
+                    continue
+                _ilabel = _label_map.get(_iid) or _label_map.get(_iname) or _iph or _iname
+                _fields.append({
+                    "name": _iname, "type": _t, "label": _ilabel,
+                    "value": _ival,  "checked": _chk, "options": [],
+                })
+
+            # ── <select> tags ─────────────────────────────────────────────────
+            for _sm in _re6.finditer(
+                    r'<select\b([^>]*)>(.*?)</select>', _fbody,
+                    _re6.IGNORECASE | _re6.DOTALL):
+                _sa   = _sm.group(1)
+                _sb   = _sm.group(2)
+                _n_m  = _re6.search(r'\bname=["\']([^"\']+)["\']', _sa, _re6.IGNORECASE)
+                _id_m = _re6.search(r'\bid=["\']([^"\']+)["\']',   _sa, _re6.IGNORECASE)
+                if not _n_m:
+                    continue
+                _sname  = _n_m.group(1)
+                _sid    = _id_m.group(1) if _id_m else ""
+                _slabel = _label_map.get(_sid) or _label_map.get(_sname) or _sname
+                _opts: list = []
+                for _om in _re6.finditer(
+                        r'<option\b([^>]*)>(.*?)</option>', _sb,
+                        _re6.IGNORECASE | _re6.DOTALL):
+                    _ov_m  = _re6.search(r'\bvalue=["\']([^"\']*)["\']', _om.group(1), _re6.IGNORECASE)
+                    _otext = _re6.sub(r'<[^>]+>', '', _om.group(2)).strip()
+                    _oval  = _ov_m.group(1) if _ov_m else _otext
+                    _opts.append((_oval, _otext))
+                _fields.append({
+                    "name": _sname, "type": "select", "label": _slabel,
+                    "value": _opts[0][0] if _opts else "", "checked": False, "options": _opts,
+                })
+
+            # ── <textarea> tags ───────────────────────────────────────────────
+            for _tam in _re6.finditer(
+                    r'<textarea\b([^>]*)>(.*?)</textarea>', _fbody,
+                    _re6.IGNORECASE | _re6.DOTALL):
+                _ta_a  = _tam.group(1)
+                _n_m   = _re6.search(r'\bname=["\']([^"\']+)["\']', _ta_a, _re6.IGNORECASE)
+                _id_m  = _re6.search(r'\bid=["\']([^"\']+)["\']',   _ta_a, _re6.IGNORECASE)
+                _ph_m  = _re6.search(r'\bplaceholder=["\']([^"\']+)["\']', _ta_a, _re6.IGNORECASE)
+                if not _n_m:
+                    continue
+                _taname  = _n_m.group(1)
+                _taid    = _id_m.group(1) if _id_m else ""
+                _taph    = _ph_m.group(1) if _ph_m else ""
+                _talabel = _label_map.get(_taid) or _label_map.get(_taname) or _taph or _taname
+                _fields.append({
+                    "name": _taname, "type": "text", "label": _talabel,
+                    "value": _re6.sub(r'<[^>]+>', '', _tam.group(2)).strip(),
+                    "checked": False, "options": [],
+                })
+
+            _interactive = [f for f in _fields if f["type"] in _INTERACTIVE]
+            if _interactive and not _has_pw:
+                forms.append({
+                    "action": _action, "method": _method,
+                    "hidden": _hidden, "fields": _interactive,
+                })
+        return forms
+
+    # ── Post-login page handler ───────────────────────────────────────────────
+    def _handle_post_login_page(initial_resp: "requests.Response") -> None:
+        """
+        After credential submission:
+          1. Log the URL the server redirected to.
+          2. Scan for error messages and warn if found.
+          3. Detect any interactive forms (MFA, consent, security questions, etc.).
+          4. Present those prompts to the user via terminal and wait for responses.
+          5. Submit the completed form and repeat up to _POST_MAX_STEPS times.
+        """
+        import re as _re7, sys as _sys7
+
+        _POST_MAX_STEPS = 6
+
+        # CSS class names that typically contain error messages
+        _ERR_CLS_PAT = _re7.compile(
+            r'\b(?:error|danger|alert-danger|alert-error|form-error|is-invalid|'
+            r'has-error|invalid-feedback|login-error|error-message|flash-error|'
+            r'flash-danger|text-danger|text-error|validation-error)\b',
+            _re7.IGNORECASE,
+        )
+        # Phrase patterns that indicate login failure
+        _ERR_TEXT_PAT = _re7.compile(
+            r'\b(?:'
+            r'invalid\s+(?:password|credentials?|username|e?mail|login)'
+            r'|incorrect\s+(?:password|credentials?|username|e?mail)'
+            r'|(?:login|sign.?in|authentication)\s+(?:failed|unsuccessful|error|invalid)'
+            r'|(?:password|credentials?)\s+(?:is\s+)?(?:wrong|incorrect|invalid)'
+            r'|too\s+many\s+(?:failed\s+)?(?:attempts?|tries|logins?)'
+            r'|account\s+(?:locked|suspended|disabled|blocked|not\s+found)'
+            r'|user\s+not\s+found'
+            r'|access\s+denied'
+            r'|captcha\s+(?:required|failed|incorrect)'
+            r')\b',
+            _re7.IGNORECASE,
+        )
+
+        def _extract_errors(html: str) -> "list[str]":
+            errs: list = []
+            # Pass 1: elements whose class attribute contains error keywords
+            for _m in _re7.finditer(
+                    r'<(?:div|p|span|li|td|h[1-6]|section|aside|article|ul)\b[^>]*'
+                    r'class=["\'][^"\']*(?:error|danger|invalid|warning|alert)[^"\']*["\'][^>]*>'
+                    r'([\s\S]*?)'
+                    r'</(?:div|p|span|li|td|h[1-6]|section|aside|article|ul)>',
+                    html, _re7.IGNORECASE):
+                txt = _re7.sub(r'<[^>]+>', ' ', _m.group(1))
+                txt = _re7.sub(r'\s+', ' ', txt).strip()
+                if 4 < len(txt) < 300 and txt not in errs:
+                    if _ERR_CLS_PAT.search(_m.group(0)[:_m.group(0).index('>')]):
+                        errs.append(txt)
+            # Pass 2: fallback — scan stripped text for error phrases
+            if not errs:
+                _vis = _re7.sub(r'<[^>]+>', ' ', html)
+                for _m in _re7.finditer(_ERR_TEXT_PAT, _vis):
+                    _s = max(0, _m.start() - 60)
+                    _e = min(len(_vis), _m.end() + 60)
+                    ctx = _re7.sub(r'\s+', ' ', _vis[_s:_e]).strip()
+                    if ctx and ctx not in errs:
+                        errs.append(ctx)
+            return errs
+
+        _is_tty = _sys7.stdin.isatty()
+        current_resp = initial_resp
+
+        for _step in range(_POST_MAX_STEPS):
+            if current_resp is None:
+                break
+
+            _url  = current_resp.url
+            _html = current_resp.text
+
+            # ── 1. Log landing / redirect URL ─────────────────────────────────
+            if _step == 0:
+                vc.log(f"[auth] Post-login landing URL: {_url}", "INFO")
+            else:
+                vc.log(f"[auth] Post-login step {_step + 1} URL: {_url}", "INFO")
+
+            # ── 2. HTTP error status ───────────────────────────────────────────
+            if current_resp.status_code in (401, 403):
+                vc.log(
+                    f"[auth] Server returned HTTP {current_resp.status_code} "
+                    "after credential submission — authentication likely rejected",
+                    "WARNING",
+                )
+
+            # ── 3. Error message detection ─────────────────────────────────────
+            for _err in _extract_errors(_html):
+                vc.log(f"[auth] Page error detected: {_err}", "WARNING")
+
+            # ── 4. Interactive prompt detection ────────────────────────────────
+            _forms = _find_interactive_forms(_html, _url)
+            if not _forms:
+                vc.log(f"[auth] Post-login page appears clean at: {_url}", "INFO")
+                break
+
+            if not _is_tty:
+                vc.log(
+                    f"[auth] Post-login page has {len(_forms)} interactive form(s) "
+                    "but stdin is not a TTY — cannot prompt for input; "
+                    "use --browser-auth for interactive sessions",
+                    "WARNING",
+                )
+                break
+
+            # ── 5. Present form to user ────────────────────────────────────────
+            _form = _forms[0]
+            vc.log(
+                f"[auth] Post-login page requires input "
+                f"({len(_form['fields'])} field(s)) — please respond below:",
+                "INFO",
+            )
+
+            _filled: dict = dict(_form["hidden"])
+            _radio_done: set = set()
+
+            for _field in _form["fields"]:
+                _ft    = _field["type"]
+                _fn    = _field["name"]
+                _flbl  = _field["label"] or _fn
+
+                if _ft == "radio":
+                    if _fn in _radio_done:
+                        continue
+                    _radio_done.add(_fn)
+                    _opts = [f for f in _form["fields"] if f["name"] == _fn and f["type"] == "radio"]
+                    vc.log(f"[auth]   {_flbl}:", "INFO")
+                    for _i, _opt in enumerate(_opts, 1):
+                        vc.log(f"[auth]     {_i}. {_opt['label'] or _opt['value']}", "INFO")
+                    try:
+                        _ans = input(f"    Enter number [1-{len(_opts)}]: ").strip()
+                        _idx = int(_ans) - 1
+                        _filled[_fn] = _opts[_idx]["value"] if 0 <= _idx < len(_opts) else _opts[0]["value"]
+                    except (ValueError, EOFError, IndexError):
+                        _filled[_fn] = _opts[0]["value"]
+
+                elif _ft == "checkbox":
+                    _state = "checked" if _field["checked"] else "unchecked"
+                    vc.log(f"[auth]   {_flbl}  [{_state}]", "INFO")
+                    try:
+                        _ans = input("    Check this box? [Y/n]: ").strip().lower()
+                        if _ans != "n":
+                            _filled[_fn] = _field["value"] or "on"
+                        # unchecked → omit from POST (standard HTML behaviour)
+                    except EOFError:
+                        _filled[_fn] = _field["value"] or "on"
+
+                elif _ft == "select":
+                    _opts = _field.get("options", [])
+                    vc.log(f"[auth]   {_flbl}:", "INFO")
+                    for _i, (_oval, _otxt) in enumerate(_opts, 1):
+                        vc.log(f"[auth]     {_i}. {_otxt}", "INFO")
+                    try:
+                        _ans = input(f"    Enter number [1-{len(_opts)}]: ").strip()
+                        _idx = int(_ans) - 1
+                        _filled[_fn] = _opts[_idx][0] if 0 <= _idx < len(_opts) else (_opts[0][0] if _opts else "")
+                    except (ValueError, EOFError, IndexError):
+                        _filled[_fn] = _opts[0][0] if _opts else ""
+
+                elif _ft == "password":
+                    try:
+                        import getpass as _gp7
+                        _filled[_fn] = _gp7.getpass(f"    {_flbl}: ")
+                    except EOFError:
+                        _filled[_fn] = ""
+
+                else:  # text, email, tel, number, search, otp, textarea
+                    vc.log(f"[auth]   {_flbl}:", "INFO")
+                    try:
+                        _filled[_fn] = input("    > ").strip()
+                    except EOFError:
+                        _filled[_fn] = ""
+
+            # ── 6. Submit completed form ───────────────────────────────────────
+            vc.log(f"[auth] Submitting post-login form → {_form['action']}", "INFO")
+            try:
+                if _form["method"] == "get":
+                    current_resp = sess.get(
+                        _form["action"], params=_filled,
+                        timeout=timeout, allow_redirects=True,
+                    )
+                else:
+                    current_resp = sess.post(
+                        _form["action"], data=_filled,
+                        timeout=timeout, allow_redirects=True,
+                    )
+                vc.log(
+                    f"[auth] → {current_resp.url} (HTTP {current_resp.status_code})",
+                    "INFO",
+                )
+            except Exception as _e:
+                vc.log(f"[auth] Post-login form submission failed: {_e}", "WARNING")
+                break
+
     # ── Form Login ────────────────────────────────────────────────────────────
     if method in ("form_login", "form"):
         _configured_login_url = auth.get("login_url", "").strip()
@@ -3004,10 +3320,12 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             _login_url = _step_to_login_form(_login_url)
             auth["login_url"] = _login_url
 
-        # 3. POST credentials
+        # 3. POST credentials, then handle any post-login pages
         if _login_url:
             vc.log(f"[auth] Submitting credentials to: {_login_url}", "INFO")
-            _login_post(_login_url)  # session cookies captured automatically
+            _post_resp, _ = _login_post(_login_url)
+            if _post_resp is not None:
+                _handle_post_login_page(_post_resp)
         else:
             vc.log("[auth] Skipping credential submission — no login URL available", "WARNING")
 
@@ -12423,6 +12741,59 @@ def main() -> None:
         auth_sess  = _build_auth_session(cfg, "auth", _scope_hostnames)
         auth2_sess = _build_auth_session(cfg, "auth2", _scope_hostnames)
 
+        _AUTH_HDR_NAMES = frozenset({
+            "authorization", "x-auth-token", "x-api-key", "x-csrf-token",
+            "x-access-token", "x-session-token", "token",
+        })
+        _SESSION_TRUNC = 72   # max chars before value is truncated in output
+
+        def _log_session_info(sess_obj: "requests.Session", label: str) -> None:
+            """Print cookies, auth headers, and basic-auth in a readable format."""
+            def _trunc(v: str) -> str:
+                return v if len(v) <= _SESSION_TRUNC else v[:_SESSION_TRUNC] + "…"
+
+            cookies = list(sess_obj.cookies)
+            if cookies:
+                vc.log(f"[auth:{label}]   Cookies ({len(cookies)}):", "INFO")
+                for ck in cookies:
+                    flags: list = []
+                    if ck.domain:
+                        flags.append(ck.domain)
+                    if ck.path and ck.path != "/":
+                        flags.append(f"path={ck.path}")
+                    if ck.secure:
+                        flags.append("secure")
+                    try:
+                        if ck.has_nonstandard_attr("HttpOnly"):
+                            flags.append("httponly")
+                    except Exception:
+                        pass
+                    flag_str = f"  ({', '.join(flags)})" if flags else ""
+                    vc.log(
+                        f"[auth:{label}]     ◦ {ck.name} = "
+                        f"{_trunc(ck.value or '')}{flag_str}",
+                        "INFO",
+                    )
+
+            auth_hdrs = [
+                (k, v) for k, v in sess_obj.headers.items()
+                if k.lower() in _AUTH_HDR_NAMES
+            ]
+            if auth_hdrs:
+                vc.log(f"[auth:{label}]   Headers:", "INFO")
+                for k, v in auth_hdrs:
+                    vc.log(f"[auth:{label}]     ◦ {k}: {_trunc(v)}", "INFO")
+
+            if sess_obj.auth is not None:
+                try:
+                    _u, _p = sess_obj.auth
+                    vc.log(
+                        f"[auth:{label}]   Basic auth: {_u} / {'*' * min(len(_p), 8)}",
+                        "INFO",
+                    )
+                except Exception:
+                    vc.log(f"[auth:{label}]   Basic auth: (set)", "INFO")
+
         def _report_auth_status(sess_obj: "requests.Session | None",
                                 auth_cfg: dict, label: str,
                                 primary_enabled: bool = False) -> bool:
@@ -12437,13 +12808,13 @@ def main() -> None:
                 return False
             _has_cookie  = bool(sess_obj.cookies)
             _has_header  = any(
-                k.lower() in ("authorization", "x-auth-token", "x-api-key",
-                               "x-csrf-token", "cookie")
+                k.lower() in _AUTH_HDR_NAMES
                 for k in sess_obj.headers
             )
             _has_auth    = sess_obj.auth is not None
             if _has_cookie or _has_header or _has_auth:
                 vc.log(f"[auth:{label}] Authentication successful", "SUCCESS")
+                _log_session_info(sess_obj, label)
                 return True
             vc.log(f"[auth:{label}] Authentication failed — continuing with unauthenticated testing only", "ERROR")
             return False
