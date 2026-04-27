@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.26"
+VERSION = "2.9.27"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3309,12 +3309,21 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     "ERROR",
                 )
                 return None
-            # Firefox refuses to use an XAUTHORITY file owned by another user when
-            # running as root.  A root terminal inside a GUI session inherits
-            # XAUTHORITY=/home/kali/.Xauthority from the desktop — it IS set but is
-            # not root-owned.  Check ownership regardless of whether the var is set,
-            # and copy the whole file into a root-owned temp file when needed.
+            # X11 auth fix for root running inside another user's desktop session.
+            # Two-stage approach:
+            #  1. xhost — run `xhost +SI:localuser:root` as the display owner via su.
+            #             Root can always su to other users without a password on Kali.
+            #             This bypasses cookie auth entirely: the X server trusts UID 0
+            #             on the Unix socket regardless of what XAUTHORITY contains.
+            #             Clear XAUTHORITY afterwards so the X client sends no cookie
+            #             (a stale/wrong cookie would still cause rejection even with xhost).
+            #  2. xauth add — fallback if xhost fails.  Parse the display owner's
+            #             Xauthority with `xauth list`, extract the cookie for this
+            #             display, and write it under the bare ":N" key into a new
+            #             root-owned temp file.  A bare ":N" key is always matched by
+            #             libX11 for local Unix-socket connections regardless of hostname.
             import tempfile as _tf3
+            import pwd as _pwd2
             _cur_xauth = _os.environ.get("XAUTHORITY", "")
             _xauth_needs_fix = (
                 not _cur_xauth
@@ -3322,6 +3331,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 or _os.stat(_cur_xauth).st_uid != 0
             )
             if _xauth_needs_fix:
+                _disp_num = _display.lstrip(":")
                 _xauth_sources = (
                     ([_cur_xauth] if _cur_xauth and _os.path.isfile(_cur_xauth) else [])
                     + [_os.path.expanduser("~/.Xauthority")]
@@ -3330,31 +3340,91 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     + sorted(_glob.glob("/tmp/.xauth*"))
                     + sorted(_glob.glob("/run/user/*/.mutter-Xwaylandauth.*"))
                 )
-                for _xauth_src in _xauth_sources:
-                    if not _os.path.isfile(_xauth_src):
-                        continue
-                    if _os.stat(_xauth_src).st_uid == 0:
-                        _os.environ["XAUTHORITY"] = _xauth_src
-                        vc.log(f"[auth] XAUTHORITY → {_xauth_src} (root-owned)", "INFO")
-                        break
-                    # Owned by another user — copy entire file into a root-owned temp
-                    # file.  Full copy preserves all display entries including
-                    # hostname-keyed ones; xauth extract is avoided because its key
-                    # lookup requires an exact match that bare ":N" often fails.
-                    try:
-                        _xa_fd, _xa_path = _tf3.mkstemp(prefix="fracture_xauth_")
-                        _os.close(_xa_fd)
-                        _os.chmod(_xa_path, 0o600)
-                        with open(_xauth_src, "rb") as _xf_in, open(_xa_path, "wb") as _xf_out:
-                            _xf_out.write(_xf_in.read())
-                        _os.environ["XAUTHORITY"] = _xa_path
-                        vc.log(f"[auth] Copied X11 auth {_xauth_src} → {_xa_path}", "INFO")
-                        break
-                    except Exception:
+                _fixed = False
+
+                # ── Stage 1: xhost ────────────────────────────────────────────
+                _x_socket = f"/tmp/.X11-unix/X{_disp_num}"
+                if _os.path.exists(_x_socket):
+                    _sock_uid = _os.stat(_x_socket).st_uid
+                    if _sock_uid != 0:
                         try:
-                            _os.unlink(_xa_path)
+                            _x_owner = _pwd2.getpwuid(_sock_uid).pw_name
+                            # Find that user's Xauthority so xhost can authenticate
+                            _src_for_xhost = next(
+                                (s for s in _xauth_sources
+                                 if _os.path.isfile(s)
+                                 and _os.stat(s).st_uid == _sock_uid),
+                                None,
+                            )
+                            if _src_for_xhost:
+                                for _xh_arg in ["+SI:localuser:root", "+local:"]:
+                                    _xh = subprocess.run(
+                                        ["su", _x_owner, "-c",
+                                         f"DISPLAY={_display} "
+                                         f"XAUTHORITY={_src_for_xhost} "
+                                         f"xhost {_xh_arg}"],
+                                        capture_output=True, timeout=5,
+                                    )
+                                    if _xh.returncode == 0:
+                                        vc.log(
+                                            f"[auth] xhost {_xh_arg} granted "
+                                            f"({_x_owner}) — cleared XAUTHORITY",
+                                            "INFO",
+                                        )
+                                        _os.environ.pop("XAUTHORITY", None)
+                                        _fixed = True
+                                        break
+                        except Exception as _xhe:
+                            vc.log(f"[auth] xhost grant failed: {_xhe}", "WARNING")
+
+                # ── Stage 2: xauth add with bare :N key ───────────────────────
+                if not _fixed:
+                    for _xauth_src in _xauth_sources:
+                        if not _os.path.isfile(_xauth_src):
+                            continue
+                        if _os.stat(_xauth_src).st_uid == 0:
+                            _os.environ["XAUTHORITY"] = _xauth_src
+                            vc.log(f"[auth] XAUTHORITY → {_xauth_src} (root-owned)", "INFO")
+                            _fixed = True
+                            break
+                        _list = subprocess.run(
+                            ["xauth", "-f", _xauth_src, "list"],
+                            capture_output=True, text=True,
+                        )
+                        _cookie_line = None
+                        for _ln in _list.stdout.splitlines():
+                            if f":{_disp_num}" in _ln:
+                                _parts = _ln.strip().split()
+                                if len(_parts) >= 3:
+                                    _cookie_line = _parts
+                                    break
+                        if not _cookie_line:
+                            continue
+                        try:
+                            _xa_fd, _xa_path = _tf3.mkstemp(prefix="fracture_xauth_")
+                            _os.close(_xa_fd)
+                            _os.chmod(_xa_path, 0o600)
+                            subprocess.run(
+                                ["xauth", "-f", _xa_path, "add",
+                                 f":{_disp_num}", _cookie_line[1], _cookie_line[2]],
+                                capture_output=True,
+                            )
+                            _os.environ["XAUTHORITY"] = _xa_path
+                            vc.log(
+                                f"[auth] XAUTHORITY → {_xa_path} "
+                                f"(:{_disp_num} from {_xauth_src})",
+                                "INFO",
+                            )
+                            _fixed = True
+                            break
                         except Exception:
-                            pass
+                            try:
+                                _os.unlink(_xa_path)
+                            except Exception:
+                                pass
+
+                if not _fixed:
+                    vc.log("[auth] Could not fix X11 auth — Firefox may fail", "WARNING")
             # DBUS_SESSION_BUS_ADDRESS — Firefox requires DBus for IPC; without it
             # the browser process exits immediately with status 1
             if not _os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
