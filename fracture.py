@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.8.2"
+VERSION = "2.8.3"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2897,6 +2897,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--resume",        action="store_true", help="Resume from checkpoint")
     parser.add_argument("--no-injection",  action="store_true", help="Skip injection phase")
     parser.add_argument("--no-vulnscan",   action="store_true", help="Skip nuclei vulnscan")
+    parser.add_argument("--no-ffuf",       action="store_true", help="Skip ffuf vhost and parameter fuzzing")
     parser.add_argument("--no-auth",       action="store_true", help="Skip all authenticated phases")
     parser.add_argument("--list-phases",   action="store_true", help="Print phases and exit")
     parser.add_argument("--username",      metavar="USER", help="Auth username")
@@ -11544,6 +11545,8 @@ def main() -> None:
         cfg["phases"]["injection"] = False
     if args.no_vulnscan:
         cfg["phases"]["vulnscan"] = False
+    if args.no_ffuf:
+        cfg["phases"]["ffuf"] = False
     if args.no_auth:
         for auth_phase in ("auth_recon", "authorization", "session", "csrf", "cross_user"):
             cfg["phases"][auth_phase] = False
