@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.40"
+VERSION = "2.9.41"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3476,17 +3476,18 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         # display when several desktops are active.
         if len(_all_sessions) > 1:
             vc.log("[auth] Multiple active sessions detected:", "INFO")
+            _sess_labels = []
             for _si, _ss in enumerate(_all_sessions, 1):
                 _sd = _ss.get("_display", "?")
-                _so = ""
+                _slbl = _sd
                 if _sys.platform.startswith("linux") and _ss.get("_uid"):
                     try:
                         import pwd as _pwd3
-                        _so = f"  user={_pwd3.getpwuid(_ss['_uid']).pw_name}"
+                        _slbl = f"{_sd} ({_pwd3.getpwuid(_ss['_uid']).pw_name})"
                     except Exception:
                         pass
-                vc.log(f"  [{_si}]  {_sd}{_so}", "INFO")
-            _sess_labels = [s["_display"] for s in _all_sessions]
+                _sess_labels.append(_slbl)
+                vc.log(f"  [{_si}]  {_slbl}", "INFO")
             _choice = vc.prompt(
                 f"Select display session [1-{len(_all_sessions)}] or leave empty to try all",
                 prompt_type="text",
@@ -13647,13 +13648,16 @@ def _prompt_multi_role_setup(auth_cfg: dict) -> int:
     if not _has_creds:
         _uname = vc.prompt("Username (most permissive user — role 1)", prompt_type="text").strip()
         _pwd   = vc.prompt("Password (most permissive user — role 1)", prompt_type="password")
-        _lbl   = vc.prompt("Role label (e.g. admin)", prompt_type="text").strip() or "elevated"
         auth_cfg["enabled"]      = True
         auth_cfg["username"]     = _uname
         auth_cfg["password"]     = _pwd
-        auth_cfg["_role_label"]  = _lbl
-    elif not auth_cfg.get("_role_label"):
-        auth_cfg["_role_label"] = auth_cfg.get("username") or "role_1"
+
+    # Always ask for role name — required for both TTY and Crucible modal context
+    _lbl = vc.prompt(
+        "Role name for role 1 (e.g. Admin, Editor, Staff)",
+        prompt_type="text",
+    ).strip() or "elevated"
+    auth_cfg["_role_label"] = _lbl
 
     return n
 
@@ -13667,7 +13671,10 @@ def _prompt_next_role_creds(role_num: int, total: int) -> dict:
         f"Username (role {role_num}/{total})", prompt_type="text"
     ).strip() or f"user{role_num}"
     _pwd  = vc.prompt(f"Password (role {role_num}/{total})", prompt_type="password")
-    _lbl  = vc.prompt(f"Role label", prompt_type="text").strip() or f"user{role_num}"
+    _lbl  = vc.prompt(
+        f"Role name for role {role_num} (e.g. User, Manager, Viewer)",
+        prompt_type="text",
+    ).strip() or f"user{role_num}"
     return {"role": _lbl, "username": _uname, "password": _pwd}
 
 
@@ -13835,8 +13842,9 @@ def main() -> None:
         vc.log(f"Output directory: {project_dir}", "INFO")
 
         # Build sessions — all sessions are scope-enforcing
+        _r1_label  = _collected_roles[0]["role"] if _collected_roles else ""
         sess       = _make_session(cfg, _scope_hostnames)
-        auth_sess  = _build_auth_session(cfg, "auth", _scope_hostnames)
+        auth_sess  = _build_auth_session(cfg, "auth", _scope_hostnames, role_label=_r1_label)
         auth2_sess = _build_auth_session(cfg, "auth2", _scope_hostnames)
 
         _AUTH_HDR_NAMES = frozenset({
