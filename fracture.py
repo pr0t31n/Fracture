@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.39"
+VERSION = "2.9.40"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1548,7 +1548,8 @@ class VantageConsole:
                 sys.stdout.flush()
 
     def prompt(self, question: str, prompt_type: str = "text",
-               options: list = None, skippable: bool = False) -> str:
+               options: list = None, skippable: bool = False,
+               role: str = "") -> str:
         """Request user input. Blocks until an answer is received."""
         if self._managed:
             payload = {
@@ -1558,6 +1559,8 @@ class VantageConsole:
                 "options":   options or [],
                 "skippable": skippable,
             }
+            if role:
+                payload["role"] = role
             with self._lock:
                 sys.stdout.write(_VP_PROMPT + json.dumps(payload) + "\n")
                 sys.stdout.flush()
@@ -2920,15 +2923,12 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         return "__BROWSER_AUTH__"
 
                     # Ask the user — works in both TTY and Crucible-managed mode
-                    _br_user = auth.get("username", "").strip() or "(unknown)"
-                    _br_role_info = (
-                        f" for role '{role_label}' (user: {_br_user})"
-                        if role_label else f" (user: {_br_user})"
-                    )
+                    _br_role_suffix = f" for role '{role_label}'" if role_label else ""
                     _br_choice = vc.prompt(
-                        f"Open a browser window to complete login manually{_br_role_info}?",
+                        f"Open a browser window to complete login manually{_br_role_suffix}?",
                         prompt_type="confirm",
                         options=["Yes", "No"],
+                        role=role_label,
                     ).strip()
                     if _br_choice.lower() in ("yes", "y", "1"):
                         return "__BROWSER_AUTH__"
