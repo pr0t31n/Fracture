@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.56"
+VERSION = "2.9.57"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3310,12 +3310,21 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     return found
             return ""
 
+        # Fresh isolated profile dir for every browser-auth invocation.
+        # Prevents Chrome/Firefox session-restore from reopening the previous
+        # target's login page when a second target is scanned in the same run.
+        import tempfile as _tf_browser
+        _tmp_profile = _tf_browser.mkdtemp(prefix="fracture_browser_")
+
         def _launch_chrome_engine(bin_path: str, drv_path: str) -> "object":
             from selenium.webdriver.chrome.options import Options as _CO
             from selenium.webdriver.chrome.service import Service as _CS
             opts = _CO()
             opts.add_argument("--no-sandbox")
             opts.add_argument("--disable-dev-shm-usage")
+            opts.add_argument(f"--user-data-dir={_tmp_profile}")
+            opts.add_argument("--no-first-run")
+            opts.add_argument("--no-default-browser-check")
             opts.add_experimental_option("excludeSwitches", ["enable-automation"])
             opts.add_experimental_option("useAutomationExtension", False)
             if bin_path:
@@ -3329,6 +3338,9 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             opts = _EO()
             opts.add_argument("--no-sandbox")
             opts.add_argument("--disable-dev-shm-usage")
+            opts.add_argument(f"--user-data-dir={_tmp_profile}")
+            opts.add_argument("--no-first-run")
+            opts.add_argument("--no-default-browser-check")
             if bin_path:
                 opts.binary_location = bin_path
             svc = _ES(executable_path=drv_path) if drv_path else None
@@ -3340,6 +3352,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             import tempfile as _tf2
             opts = _FO()
             opts.add_argument("-no-remote")
+            opts.profile = _tmp_profile
             if bin_path:
                 opts.binary_location = bin_path
             _log_fd, _log_path = _tf2.mkstemp(prefix="fracture_gd_", suffix=".log")
@@ -3706,6 +3719,10 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         finally:
             try:
                 driver.quit()
+            except Exception:
+                pass
+            try:
+                _shutil.rmtree(_tmp_profile, ignore_errors=True)
             except Exception:
                 pass
 
