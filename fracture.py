@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.41"
+VERSION = "2.9.42"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -13387,29 +13387,32 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
     existing_entries = {e["path"]: e for e in existing_am.get("paths", [])}
     base_url = target["url"].rstrip("/")
     sm_path_data = sm.get("paths", {})
-    seed_unauth = "unauthenticated" in roles
-    path_entries = []
-    for p in all_paths:
-        sm_status = sm_path_data.get(p, {}).get("status")
-        if p in existing_entries:
-            entry = existing_entries[p]
-            # Backfill unauthenticated access from structure_map status if not yet probed.
-            # structure_map statuses come from pre-loop recon/gobuster (unauthenticated sess).
-            if seed_unauth and sm_status is not None and "unauthenticated" not in entry.get("access", {}):
-                entry = dict(entry)
-                entry["access"] = dict(entry.get("access", {}))
-                entry["access"]["unauthenticated"] = sm_status
-            path_entries.append(entry)
-        else:
-            access = {}
-            if seed_unauth and sm_status is not None:
-                access["unauthenticated"] = sm_status
-            path_entries.append({"path": p, "url": base_url + p, "access": access})
-    # Merge roles: preserve any roles already in file
+    # Compute merged roles first so every new path entry is null-initialized for
+    # all roles from the start — Crucible shows "—" for unprobed slots.
     merged_roles = list(existing_am.get("roles", []))
     for r in roles:
         if r not in merged_roles:
             merged_roles.append(r)
+    seed_unauth = "unauthenticated" in merged_roles
+    path_entries = []
+    for p in all_paths:
+        sm_status = sm_path_data.get(p, {}).get("status")
+        if p in existing_entries:
+            entry = dict(existing_entries[p])
+            entry["access"] = dict(entry.get("access", {}))
+            # Null-initialize any role not yet recorded for this path
+            for r in merged_roles:
+                if r not in entry["access"]:
+                    entry["access"][r] = None
+            # Backfill unauthenticated from structure_map if not yet probed
+            if seed_unauth and sm_status is not None and entry["access"].get("unauthenticated") is None:
+                entry["access"]["unauthenticated"] = sm_status
+            path_entries.append(entry)
+        else:
+            access = {r: None for r in merged_roles}
+            if seed_unauth and sm_status is not None:
+                access["unauthenticated"] = sm_status
+            path_entries.append({"path": p, "url": base_url + p, "access": access})
     data = {
         "roles": merged_roles,
         "most_privileged": existing_am.get("most_privileged"),
@@ -14125,7 +14128,11 @@ def main() -> None:
             _r1_cfg["auth"]["enabled"]  = True
             _r1_cfg["auth"]["username"] = _r1["username"]
             _r1_cfg["auth"]["password"] = _r1["password"]
-            _r1_as = _build_auth_session(_r1_cfg, "auth", _scope_hostnames, role_label=_r1["role"])
+            # Reuse the already-built auth_sess — role 1's cfg matches cfg["auth"],
+            # so calling _build_auth_session again would re-run the full login flow
+            # (including any interactive prompts) for a second time unnecessarily.
+            _r1_as = auth_sess if isinstance(auth_sess, requests.Session) else \
+                _build_auth_session(_r1_cfg, "auth", _scope_hostnames, role_label=_r1["role"])
             if _r1_as:
                 _attach_redirect_hook(_r1_as, _scope_hostnames, target, out, _in_scope_new)
             _cred_contexts.append({
