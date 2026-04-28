@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.33"
+VERSION = "2.9.34"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -12398,14 +12398,22 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
 
     vc.status(phase, "Session Analysis", "running", "Logout invalidation", 2, 4)
     # 3. Check logout invalidation
+    # IMPORTANT: Never use auth_sess itself for logout probing — hitting /logout
+    # on the live session object invalidates the server-side session and breaks all
+    # subsequent authenticated phases.  Use two disposable clones instead:
+    #   logout_probe  — hits the logout endpoint (expendable)
+    #   old_sess      — tests whether the pre-logout cookies still work
     logout_paths = ["/logout", "/signout", "/auth/logout", "/session/destroy", "/api/logout"]
     for lpath in logout_paths:
         try:
-            # Save session cookies before logout
+            # Clone auth_sess cookies into a disposable probe session
             pre_cookies = dict(auth_sess.cookies)
-            r = auth_sess.get(url + lpath, timeout=timeout)
+            logout_probe = _make_session(cfg)
+            for k, v in pre_cookies.items():
+                logout_probe.cookies.set(k, v)
+            r = logout_probe.get(url + lpath, timeout=timeout, allow_redirects=False)
             if r.status_code in (200, 302):
-                # Try to use old session
+                # Try to use old session cookies to confirm server-side invalidation
                 old_sess = _make_session(cfg)
                 for k, v in pre_cookies.items():
                     old_sess.cookies.set(k, v)
