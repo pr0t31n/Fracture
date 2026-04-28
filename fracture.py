@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.50"
+VERSION = "2.9.51"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -14194,6 +14194,40 @@ def main() -> None:
                     _ctx_cfg, "auth", _scope_hostnames, role_label=_ctx_label)
                 if _ctx_auth:
                     _attach_redirect_hook(_ctx_auth, _scope_hostnames, target, out, _in_scope_new)
+                # Browser-auth fallback: mirrors the Role 1 fallback in the pre-loop
+                # setup. If automated form login failed but --browser-auth is set,
+                # launch the interactive browser session now.
+                _lazy_auth_enabled = bool(_ctx_cfg.get("auth", {}).get("enabled"))
+                _lazy_auth_ok = _report_auth_status(
+                    _ctx_auth, _ctx_cfg.get("auth", {}), _ctx_label)
+                if _ctx_cfg.get("browser_auth") and _lazy_auth_enabled and not _lazy_auth_ok:
+                    _lazy_bl_url = (
+                        _ctx_cfg.get("auth", {}).get("login_url", "").strip()
+                        or (cfg.get("target_url", "") or "").rstrip("/")
+                        or ((cfg.get("target_urls") or [""])[0] or "").rstrip("/")
+                    )
+                    if _lazy_bl_url:
+                        vc.log(
+                            f"[auth:{_ctx_label}] Automated authentication failed — "
+                            "launching browser for interactive login",
+                            "INFO",
+                        )
+                        _lazy_b_sess = _browser_assisted_login(_lazy_bl_url)
+                        if _lazy_b_sess is not None:
+                            _ctx_auth = _lazy_b_sess
+                            _attach_redirect_hook(
+                                _ctx_auth, _scope_hostnames, target, out, _in_scope_new)
+                            vc.log(
+                                f"[auth:{_ctx_label}] Browser-assisted login successful "
+                                "— session captured", "SUCCESS")
+                        else:
+                            vc.log(
+                                f"[auth:{_ctx_label}] Browser-assisted login did not "
+                                "produce a session — proceeding unauthenticated", "WARNING")
+                    else:
+                        vc.log(
+                            f"[auth:{_ctx_label}] --browser-auth set but no login URL "
+                            "could be determined", "WARNING")
                 _ctx["auth_sess"] = _ctx_auth
 
             # Set auth context so all findings in this pass carry the account
