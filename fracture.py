@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.37"
+VERSION = "2.9.39"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2144,7 +2144,8 @@ def _make_session(cfg: dict, scope_hostnames: "set | None" = None) -> requests.S
 
 
 def _build_auth_session(cfg: dict, auth_key: str = "auth",
-                        scope_hostnames: "set | None" = None) -> "requests.Session | None":
+                        scope_hostnames: "set | None" = None,
+                        role_label: str = "") -> "requests.Session | None":
     """
     Return an authenticated requests.Session for the given cfg/auth_key, or None if disabled.
     Supports all 20 auth methods from Fracture testConnection.py.
@@ -2919,8 +2920,13 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         return "__BROWSER_AUTH__"
 
                     # Ask the user — works in both TTY and Crucible-managed mode
+                    _br_user = auth.get("username", "").strip() or "(unknown)"
+                    _br_role_info = (
+                        f" for role '{role_label}' (user: {_br_user})"
+                        if role_label else f" (user: {_br_user})"
+                    )
                     _br_choice = vc.prompt(
-                        "Open a browser window to complete login manually?",
+                        f"Open a browser window to complete login manually{_br_role_info}?",
                         prompt_type="confirm",
                         options=["Yes", "No"],
                     ).strip()
@@ -9477,6 +9483,14 @@ _SECRET_PATTERNS = [
 _INTERESTING_PATH_RE = re.compile(
     r'(?i)(/api/|/admin|/internal|/debug|/test|/backup|/old|/dev|/staging|/v\d+/)'
 )
+# Paths that should never be visited by the crawler when using an authenticated
+# session — fetching these could invalidate the server-side session for all
+# subsequent phases.
+_LOGOUT_PATH_RE = re.compile(
+    r'(?i)/(?:log[\-_]?out|sign[\-_]?out|log[\-_]?off|sign[\-_]?off|'
+    r'session/(?:destroy|end|invalidate)|auth/(?:logout|signout)|'
+    r'disconnect|deauth)(?:[/?#]|$)'
+)
 
 
 def _crawl_page(page_url: str, sess: requests.Session,
@@ -9584,7 +9598,10 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         all_links.extend(data["links"])
         if depth < max_depth:
             for link in data["links"]:
-                if link.rstrip("/") not in visited and _same_origin(url, link):
+                _lp = urllib.parse.urlparse(link).path or ""
+                if (link.rstrip("/") not in visited
+                        and _same_origin(url, link)
+                        and not _LOGOUT_PATH_RE.search(_lp)):
                     queue_urls.append((link, depth + 1))
 
     vc.log(f"[crawl] Visited {page_count} pages, {len(all_forms)} forms, {len(all_js)} JS files", "INFO")
@@ -12276,7 +12293,10 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
         auth_links.extend(data["links"])
         if depth < max_depth:
             for link in data["links"]:
-                if link.rstrip("/") not in visited and _same_origin(url, link):
+                _lp = urllib.parse.urlparse(link).path or ""
+                if (link.rstrip("/") not in visited
+                        and _same_origin(url, link)
+                        and not _LOGOUT_PATH_RE.search(_lp)):
                     queue_urls.append((link, depth + 1))
 
     vc.log(f"[auth_recon] Authenticated crawl: {page_count} pages", "INFO")
@@ -14097,7 +14117,7 @@ def main() -> None:
             _r1_cfg["auth"]["enabled"]  = True
             _r1_cfg["auth"]["username"] = _r1["username"]
             _r1_cfg["auth"]["password"] = _r1["password"]
-            _r1_as = _build_auth_session(_r1_cfg, "auth", _scope_hostnames)
+            _r1_as = _build_auth_session(_r1_cfg, "auth", _scope_hostnames, role_label=_r1["role"])
             if _r1_as:
                 _attach_redirect_hook(_r1_as, _scope_hostnames, target, out, _in_scope_new)
             _cred_contexts.append({
@@ -14110,7 +14130,7 @@ def main() -> None:
                 _rn_cfg["auth"]["enabled"]  = True
                 _rn_cfg["auth"]["username"] = _rc["username"]
                 _rn_cfg["auth"]["password"] = _rc["password"]
-                _rn_as = _build_auth_session(_rn_cfg, "auth", _scope_hostnames)
+                _rn_as = _build_auth_session(_rn_cfg, "auth", _scope_hostnames, role_label=_rc["role"])
                 if _rn_as:
                     _attach_redirect_hook(_rn_as, _scope_hostnames, target, out, _in_scope_new)
                 _cred_contexts.append({
@@ -14125,7 +14145,7 @@ def main() -> None:
                 _r_cfg["auth"]["enabled"]  = True
                 _r_cfg["auth"]["username"] = _rc.get("username", "")
                 _r_cfg["auth"]["password"] = _rc.get("password", "")
-                _r_as    = _build_auth_session(_r_cfg, "auth", _scope_hostnames)
+                _r_as    = _build_auth_session(_r_cfg, "auth", _scope_hostnames, role_label=_r_label)
                 if _r_as:
                     _attach_redirect_hook(_r_as, _scope_hostnames, target, out, _in_scope_new)
                 _cred_contexts.append({
@@ -14140,6 +14160,20 @@ def main() -> None:
             "label": "unauthenticated", "cfg": _r_unauth_cfg, "auth_sess": None,
             "reduced": _n_roles >= 1, "multi_role": False, "role_idx": -1,
         })
+
+        # Seed access_matrix.json with the full role list before scanning starts.
+        # _write_structure_map fires repeatedly during recon/gobuster and calls
+        # _write_preliminary_access_matrix(out, target, []).  Without seeding,
+        # the roles list in access_matrix.json stays empty and the Crucible
+        # frontend falls back to showing a single "Unauthenticated" column even
+        # while an authenticated role is being tested.  The seed is written once
+        # here so every subsequent preliminary write merges into (and preserves)
+        # the correct column list.
+        try:
+            _seed_roles = [_c["label"] for _c in _cred_contexts]
+            _write_preliminary_access_matrix(out, target, _seed_roles)
+        except Exception:
+            pass
 
         # Accumulators for post-context privilege phases
         _combined_auth_recon: dict = {"forms": [], "links": [], "resource_ids": []}
