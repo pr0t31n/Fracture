@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.51"
+VERSION = "2.9.53"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -4758,6 +4758,7 @@ DEFAULT_SETTINGS: dict = {
             "open_redirect": True, "deserialization": True,
             "file_upload_info": True, "mass_assignment": True,
             "access_matrix":   False,  # Phase 20: multi-credential access matrix
+            "bfla":            True,   # Phase 21: broken function level authorization
         },
         "auth": {
             "enabled":                 False,
@@ -4897,6 +4898,7 @@ PHASE_LIST = [
     ("file_upload_info","Phase 18: File upload endpoint detection (informational)"),
     ("mass_assignment", "Phase 19: Mass assignment / privilege escalation testing"),
     ("access_matrix",  "Phase 20: Multi-credential access matrix (BFLA / unauthenticated access)"),
+    ("bfla",           "Phase 21: Broken Function Level Authorization — cross-role endpoint replay"),
 ]
 
 
@@ -13498,13 +13500,17 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
 
 def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                           out: OutputManager, sess: requests.Session,
-                          crawl_data: dict) -> dict:
+                          crawl_data: dict,
+                          prebuilt_sessions: "dict | None" = None) -> dict:
     """
     Phase 20: Multi-credential access matrix: tests each discovered path with
     every role in cfg['auth_matrix'] plus unauthenticated.
     Sources paths from structure_map.json (all gobuster/crawl discovered paths).
     Generates access_matrix.json, MEDIUM findings for unauth access,
     HIGH findings for BFLA (lower-priv accessing admin paths).
+
+    prebuilt_sessions: {role_label: requests.Session} collected during the
+    context loop. When provided, skips re-authentication entirely.
     """
     import copy as _copy
 
@@ -13542,24 +13548,33 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     print(f"  Phase 20: Multi-Credential Access Matrix")
     print(f"{'─'*60}")
 
-    def _build_role_session(role_cfg: dict):
-        r_auth = _copy.deepcopy(cfg.get("auth", {}))
-        r_auth["enabled"]  = True
-        r_auth["username"] = role_cfg.get("username", r_auth.get("username", ""))
-        r_auth["password"] = role_cfg.get("password", r_auth.get("password", ""))
-        r_cfg = _copy.deepcopy(cfg)
-        r_cfg["auth"] = r_auth
-        return _build_auth_session(r_cfg, "auth")
-
     role_sessions = {}
-    for role_cfg in auth_matrix:
-        role = role_cfg.get("role") or f"role{len(role_sessions)+1}"
-        r_sess = _build_role_session(role_cfg)
-        if r_sess is None:
-            r_sess = requests.Session()
-            r_sess.verify = verify_ssl
-        role_sessions[role] = r_sess
-        print(f"  → Role '{role}' session built (user: {role_cfg.get('username','?')})")
+    if prebuilt_sessions:
+        # Reuse sessions already authenticated during the context loop — no re-auth needed.
+        for role_label, r_sess in prebuilt_sessions.items():
+            if r_sess is None:
+                r_sess = requests.Session()
+                r_sess.verify = verify_ssl
+            role_sessions[role_label] = r_sess
+            print(f"  → Role '{role_label}' session reused (no re-authentication)")
+    else:
+        def _build_role_session(role_cfg: dict):
+            r_auth = _copy.deepcopy(cfg.get("auth", {}))
+            r_auth["enabled"]  = True
+            r_auth["username"] = role_cfg.get("username", r_auth.get("username", ""))
+            r_auth["password"] = role_cfg.get("password", r_auth.get("password", ""))
+            r_cfg = _copy.deepcopy(cfg)
+            r_cfg["auth"] = r_auth
+            return _build_auth_session(r_cfg, "auth")
+
+        for role_cfg in auth_matrix:
+            role = role_cfg.get("role") or f"role{len(role_sessions)+1}"
+            r_sess = _build_role_session(role_cfg)
+            if r_sess is None:
+                r_sess = requests.Session()
+                r_sess.verify = verify_ssl
+            role_sessions[role] = r_sess
+            print(f"  → Role '{role}' session built (user: {role_cfg.get('username','?')})")
 
     unauth_sess = requests.Session()
     unauth_sess.verify = verify_ssl
@@ -13673,10 +13688,99 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     return access_matrix_data
 
 
+def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
+                out: OutputManager,
+                role1_endpoints: list,
+                ctx_sess: "requests.Session | None",
+                ctx_label: str) -> None:
+    """
+    Phase 21: Broken Function Level Authorization (BFLA).
+
+    Replays every HTTP 200 endpoint discovered during Role 1's scan using the
+    current (lower-privilege or unauthenticated) role's session. Any endpoint
+    that returns HTTP 200 for this role is a BFLA candidate: the server exposes
+    a function that should be restricted to a higher-privilege role but fails to
+    enforce that restriction.
+
+    Risk assignment:
+      CRITICAL — response body is identical to Role 1's (same data returned)
+      HIGH     — response is 200 but body differs (function reached, different view)
+    """
+    phase   = "bfla"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    probe_sess = ctx_sess if ctx_sess is not None else requests.Session()
+    total   = len(role1_endpoints)
+
+    vc.status(phase, "BFLA Testing", "running", f"Testing {total} Role 1 endpoints", 0, total)
+    vc.log(
+        f"[bfla] Testing {total} Role 1 endpoints as [{ctx_label}]", "INFO")
+
+    findings_count = 0
+    for idx, ep in enumerate(role1_endpoints):
+        ep_url = ep["url"]
+        vc.status(phase, "BFLA Testing", "running",
+                  f"Endpoint {idx+1}/{total}", idx + 1, total)
+        try:
+            r = probe_sess.get(ep_url, timeout=timeout, allow_redirects=False)
+        except Exception:
+            continue
+
+        if r.status_code != 200:
+            continue
+
+        body_hash   = hash(r.text[:4096])
+        body_match  = (body_hash == ep.get("body_hash")) and (
+            abs(len(r.text) - ep.get("body_len", 0)) < 64)
+        risk        = "CRITICAL" if body_match else "HIGH"
+        match_note  = (
+            "Response body is identical to Role 1's response — the same data "
+            "is returned regardless of privilege level."
+            if body_match else
+            "Response was HTTP 200 but body differs from Role 1's — the function "
+            "endpoint is reachable; data may be scoped differently."
+        )
+
+        out.add_finding(
+            title="Broken Function Level Authorization (BFLA)",
+            url=ep_url,
+            port=target["port"],
+            risk=risk,
+            description=(
+                f"Role '{ctx_label}' successfully accessed an endpoint that returned "
+                f"HTTP 200 for the most privileged role ('{ep['role1_label']}'). "
+                f"The server did not enforce role-level access control on this function. "
+                f"{match_note}"
+            ),
+            output=(
+                f"Role 1 ({ep['role1_label']}): HTTP {ep['status']} "
+                f"({ep.get('body_len', '?')} bytes)\n"
+                f"Role ({ctx_label}): HTTP {r.status_code} ({len(r.text)} bytes)"
+            ),
+            sources="fracture-bfla",
+            service=target["scheme"],
+            affected=ep_url,
+            owasp="A01:2025 Broken Access Control",
+            nist="AC-3",
+            remediation=(
+                "Implement server-side function-level access control checks for every "
+                "endpoint. Verify the authenticated identity's role before executing "
+                "privileged operations — do not rely solely on hiding URLs or UI elements."
+            ),
+        )
+        vc.log(f"[bfla] BFLA {risk}: {ep_url} accessible as [{ctx_label}]", "SUCCESS")
+        findings_count += 1
+
+    vc.status(phase, "BFLA Testing", "complete", "Done", total, total)
+    vc.log(
+        f"[bfla] Phase complete — {findings_count} BFLA finding(s) for [{ctx_label}]",
+        "SUCCESS")
+
+
 # Phases run for every credential context (full scan for role 1).
 # Reduced contexts (roles 2..n and unauthenticated) only run this subset.
 _REDUCED_SCAN_PHASES: frozenset = frozenset({
-    "headers", "shcheck", "auth_bypass", "account_lockout", "session", "csrf",
+    "headers", "shcheck", "auth_bypass", "account_lockout", "session", "csrf", "bfla",
 })
 
 
@@ -14174,6 +14278,9 @@ def main() -> None:
         wc_baseline: object = None
         _wp_discovered_paths: list = []
         _ep_base: list = []
+        # BFLA: endpoints that returned 200 for Role 1, tested against all other roles.
+        # Each entry: {"url": str, "status": int, "body_len": int, "role1_label": str}
+        _role1_accessible_endpoints: list = []
 
         # ── Per-credential context loop ─────────────────────────────────────
         for _ctx in _cred_contexts:
@@ -14378,6 +14485,41 @@ def main() -> None:
                 for _wp_u in _wp_discovered_paths:
                     if _is_valid_endpoint_url(_wp_u) and _is_in_scope_url(_wp_u, _scope_hostnames):
                         _ep_base.append(_wp_u)
+
+                # Fingerprint Role 1's accessible endpoints for BFLA testing.
+                # Probe each discovered URL with Role 1's session and record those
+                # that return HTTP 200 — these are the function-level resources that
+                # lesser-privilege roles will be tested against in Phase 21.
+                _bfla_probe_urls: list = list(dict.fromkeys(
+                    u for u in _ep_base + list(dict.fromkeys(
+                        (target["url"].rstrip("/") + p)
+                        for p in (
+                            list(json.loads(
+                                (out.root / "structure_map.json").read_text()
+                            ).get("paths", {}).keys())
+                            if (out.root / "structure_map.json").exists() else []
+                        )
+                    ))
+                    if _is_in_scope_url(u, _scope_hostnames)
+                ))
+                _bfla_timeout = cfg.get("timeout", 10)
+                for _burl in _bfla_probe_urls[:200]:
+                    try:
+                        _br = effective_auth.get(
+                            _burl, timeout=_bfla_timeout, allow_redirects=False)
+                        if _br.status_code == 200:
+                            _role1_accessible_endpoints.append({
+                                "url":        _burl,
+                                "status":     _br.status_code,
+                                "body_len":   len(_br.text),
+                                "body_hash":  hash(_br.text[:4096]),
+                                "role1_label": _ctx_label,
+                            })
+                    except Exception:
+                        pass
+                vc.log(
+                    f"[bfla] Role 1 fingerprint: {len(_role1_accessible_endpoints)} "
+                    "accessible endpoints recorded for cross-role testing", "INFO")
 
             # ── Phase 2: headers ──
             if not _skip("headers"):
@@ -14823,6 +14965,25 @@ def main() -> None:
                     vc.error(f"Phase mass_assignment [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"mass_assignment#{_ctx_label}", "error", detail=str(e))
 
+            # ── Phase 21: bfla ──
+            if not _skip("bfla"):
+                if not _role1_accessible_endpoints:
+                    vc.log(f"[bfla] No Role 1 endpoints fingerprinted — skipping [{_ctx_label}]",
+                           "INFO")
+                    pm.set_phase_status(f"bfla#{_ctx_label}", "skipped", "bfla")
+                elif not _is_reduced_ctx:
+                    # Role 1 itself — nothing to compare against yet; skip silently.
+                    pm.set_phase_status(f"bfla#{_ctx_label}", "skipped", "bfla")
+                else:
+                    pm.set_phase_status(f"bfla#{_ctx_label}", "running", "BFLA Testing")
+                    try:
+                        _phase_bfla(target, _ctx_cfg, pm, out,
+                                    _role1_accessible_endpoints, _ctx_auth, _ctx_label)
+                        pm.set_phase_status(f"bfla#{_ctx_label}", "complete", "BFLA Testing")
+                    except Exception as e:
+                        vc.error(f"Phase bfla [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"bfla#{_ctx_label}", "error", detail=str(e))
+
             # Ensure every discovered path has an HTTP code for this role before
             # moving on — a role is not complete until all known endpoints are probed.
             try:
@@ -14938,7 +15099,15 @@ def main() -> None:
                         {"role": r["role"], "username": r["username"], "password": r["password"]}
                         for r in _collected_roles
                     ]
-                _phase_access_matrix(target, cfg, pm, out, sess, {"links": _dedup_links})
+                # Pass sessions already established in the context loop to avoid
+                # re-authenticating every role a second time.
+                _am_prebuilt = {
+                    _c["label"]: _c["auth_sess"]
+                    for _c in _cred_contexts
+                    if _c["label"] != "unauthenticated" and _c["auth_sess"] is not None
+                }
+                _phase_access_matrix(target, cfg, pm, out, sess, {"links": _dedup_links},
+                                     prebuilt_sessions=_am_prebuilt or None)
                 pm.set_phase_status("access_matrix", "complete", "Access Matrix")
             except Exception as e:
                 vc.error(f"Phase access_matrix error: {e}")
