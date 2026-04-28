@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.48"
+VERSION = "2.9.49"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6207,7 +6207,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     except Exception as e:
         vc.log(f"[recon] Could not connect to {url}: {e}", "ERROR")
         out.log_error("recon-probe", url, str(e))
-        return
+        return wc_baseline, []
 
     vc.log(f"[recon] {url} → HTTP {status_code}", "INFO")
     # Write "/" immediately so the Structure tab shows something from the first moment
