@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.32"
+VERSION = "2.9.33"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -13513,6 +13513,85 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     return access_matrix_data
 
 
+# Phases run for every credential context (full scan for role 1).
+# Reduced contexts (roles 2..n and unauthenticated) only run this subset.
+_REDUCED_SCAN_PHASES: frozenset = frozenset({
+    "headers", "shcheck", "auth_bypass", "account_lockout", "session", "csrf",
+})
+
+
+def _prompt_multi_role_setup(auth_cfg: dict) -> int:
+    """
+    Ask how many authenticated user roles to test.
+    If n > 1 and credentials are already configured, confirm they belong to the
+    most permissive user; if not, prompt for replacement credentials.
+    Modifies auth_cfg in-place when new credentials are provided.
+    Returns the number of authenticated roles (0 = unauthenticated only).
+    """
+    import getpass as _gp
+    while True:
+        try:
+            raw = input(
+                "\n[*] How many authenticated user roles will be tested "
+                "(not including unauthenticated)? [0]: "
+            ).strip()
+            if not raw:
+                return 0
+            n = int(raw)
+            if n >= 0:
+                break
+            print("    Enter 0 or a positive integer.")
+        except ValueError:
+            print("    Enter 0 or a positive integer.")
+        except EOFError:
+            return 0
+
+    if n == 0:
+        return 0
+
+    _has_creds = bool(
+        auth_cfg.get("enabled") and (auth_cfg.get("username") or auth_cfg.get("auth_token"))
+    )
+
+    if _has_creds and n > 1:
+        _u = auth_cfg.get("username") or "(token)"
+        print(f"\n[*] Credentials are configured for '{_u}'.")
+        _ans = input("    Are these for the most permissive user? [Y/n]: ").strip().lower()
+        if _ans in ("n", "no"):
+            _has_creds = False
+
+    if not _has_creds:
+        print("\n[*] Enter credentials for the most permissive user (role 1):")
+        _uname = input("    Username: ").strip()
+        _pwd   = _gp.getpass("    Password: ")
+        _lbl   = input("    Role label (e.g. admin) [role_1]: ").strip() or "role_1"
+        auth_cfg["enabled"]      = True
+        auth_cfg["username"]     = _uname
+        auth_cfg["password"]     = _pwd
+        auth_cfg["_role_label"]  = _lbl
+    elif not auth_cfg.get("_role_label"):
+        auth_cfg["_role_label"] = auth_cfg.get("username") or "role_1"
+
+    return n
+
+
+def _prompt_next_role_creds(role_num: int, total: int) -> dict:
+    """
+    Prompt for credentials for role_num of total authenticated roles.
+    Returns {"role": label, "username": u, "password": p}.
+    """
+    import getpass as _gp
+    print(f"\n[*] Role {role_num}/{total} — enter credentials for the next role:")
+    while True:
+        _uname = input(f"    Username (role {role_num}): ").strip()
+        if _uname:
+            break
+        print("    Username cannot be empty.")
+    _pwd  = _gp.getpass(f"    Password (role {role_num}): ")
+    _lbl  = input(f"    Role label [role_{role_num}]: ").strip() or f"role_{role_num}"
+    return {"role": _lbl, "username": _uname, "password": _pwd}
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -13604,6 +13683,23 @@ def main() -> None:
 
     # Start adaptive concurrency monitor (adjusts _SCAN_SEM based on CPU/RAM)
     _start_concurrency_monitor(_SCAN_SEM)
+
+    # ── Multi-role testing setup ─────────────────────────────────────────────
+    # _n_roles: number of authenticated roles to test (0 = unauthenticated only)
+    # _collected_roles: grows as the user provides credentials during the scan;
+    #   reused across targets so the user is only prompted once per role.
+    _n_roles: int = 0
+    _collected_roles: list = []  # [{"role": label, "username": u, "password": p}, ...]
+
+    if not _VANTAGE_MANAGED:
+        _n_roles = _prompt_multi_role_setup(cfg["auth"])
+        if _n_roles >= 1:
+            _r1_lbl = cfg["auth"].pop("_role_label", None) or cfg["auth"].get("username") or "role_1"
+            _collected_roles.append({
+                "role":     _r1_lbl,
+                "username": cfg["auth"].get("username", ""),
+                "password": cfg["auth"].get("password", ""),
+            })
 
     while _pending_idx < len(_pending_urls):
         raw_url      = _pending_urls[_pending_idx]
@@ -13906,33 +14002,81 @@ def main() -> None:
                 _ep_base.append(_wp_u)
 
         # Build per-credential contexts
+        # When _n_roles >= 1 (interactive multi-role mode):
+        #   - Role 1 (most permissive): full scan, all phases.
+        #   - Roles 2..n: reduced scan — authorization/session/bypass only,
+        #     using role 1's discovered crawl data.
+        #   - Unauthenticated: same reduced scan as roles 2..n.
+        # When _n_roles == 0: existing auth_matrix behaviour (settings-file driven).
         _cred_contexts: list = []
-        for _rc in (cfg.get("auth_matrix") or []):
-            _r_label = _rc.get("role") or f"ctx{len(_cred_contexts) + 1}"
-            _r_cfg   = copy.deepcopy(cfg)
-            _r_cfg["auth"]["enabled"]  = True
-            _r_cfg["auth"]["username"] = _rc.get("username", "")
-            _r_cfg["auth"]["password"] = _rc.get("password", "")
-            _r_as    = _build_auth_session(_r_cfg, "auth", _scope_hostnames)
-            if _r_as:
-                _attach_redirect_hook(_r_as, _scope_hostnames, target, out, _in_scope_new)
-            _cred_contexts.append({"label": _r_label, "cfg": _r_cfg, "auth_sess": _r_as})
-        # Unauthenticated context always last
+        if _n_roles >= 1:
+            # Role 1 — full scan (most permissive user)
+            _r1 = _collected_roles[0]
+            _r1_cfg = copy.deepcopy(cfg)
+            _r1_cfg["auth"]["enabled"]  = True
+            _r1_cfg["auth"]["username"] = _r1["username"]
+            _r1_cfg["auth"]["password"] = _r1["password"]
+            _r1_as = _build_auth_session(_r1_cfg, "auth", _scope_hostnames)
+            if _r1_as:
+                _attach_redirect_hook(_r1_as, _scope_hostnames, target, out, _in_scope_new)
+            _cred_contexts.append({
+                "label": _r1["role"], "cfg": _r1_cfg, "auth_sess": _r1_as,
+                "reduced": False, "multi_role": True, "role_idx": 0,
+            })
+            # Any roles already collected (e.g. second target, creds collected earlier)
+            for _ri, _rc in enumerate(_collected_roles[1:], start=1):
+                _rn_cfg = copy.deepcopy(cfg)
+                _rn_cfg["auth"]["enabled"]  = True
+                _rn_cfg["auth"]["username"] = _rc["username"]
+                _rn_cfg["auth"]["password"] = _rc["password"]
+                _rn_as = _build_auth_session(_rn_cfg, "auth", _scope_hostnames)
+                if _rn_as:
+                    _attach_redirect_hook(_rn_as, _scope_hostnames, target, out, _in_scope_new)
+                _cred_contexts.append({
+                    "label": _rc["role"], "cfg": _rn_cfg, "auth_sess": _rn_as,
+                    "reduced": True, "multi_role": True, "role_idx": _ri,
+                })
+        else:
+            # Existing settings-file auth_matrix behaviour
+            for _rc in (cfg.get("auth_matrix") or []):
+                _r_label = _rc.get("role") or f"ctx{len(_cred_contexts) + 1}"
+                _r_cfg   = copy.deepcopy(cfg)
+                _r_cfg["auth"]["enabled"]  = True
+                _r_cfg["auth"]["username"] = _rc.get("username", "")
+                _r_cfg["auth"]["password"] = _rc.get("password", "")
+                _r_as    = _build_auth_session(_r_cfg, "auth", _scope_hostnames)
+                if _r_as:
+                    _attach_redirect_hook(_r_as, _scope_hostnames, target, out, _in_scope_new)
+                _cred_contexts.append({
+                    "label": _r_label, "cfg": _r_cfg, "auth_sess": _r_as,
+                    "reduced": False, "multi_role": False, "role_idx": -1,
+                })
+        # Unauthenticated context always last.
+        # Reduced if multi-role mode (role 1 already ran the full scan).
         _r_unauth_cfg = copy.deepcopy(cfg)
         _r_unauth_cfg["auth"]["enabled"] = False
-        _cred_contexts.append({"label": "unauthenticated", "cfg": _r_unauth_cfg,
-                                "auth_sess": None})
+        _cred_contexts.append({
+            "label": "unauthenticated", "cfg": _r_unauth_cfg, "auth_sess": None,
+            "reduced": _n_roles >= 1, "multi_role": False, "role_idx": -1,
+        })
 
         # Accumulators for post-context privilege phases
         _combined_auth_recon: dict = {"forms": [], "links": [], "resource_ids": []}
         _all_crawl_links:     list = []
         _discovered_creds_seen: set = set()  # avoid duplicate contexts from discovered creds
+        # Crawl data from role 1 (most permissive); passed to reduced contexts so they
+        # test accessibility to the same paths without re-crawling.
+        _role1_crawl_data: dict = {"forms": [], "params": [], "links": []}
 
         # ── Per-credential context loop ─────────────────────────────────────
         for _ctx in _cred_contexts:
             _ctx_label = _ctx["label"]
             _ctx_auth  = _ctx["auth_sess"]
             _ctx_cfg   = _ctx["cfg"]
+            # True for roles 2..n and unauthenticated in multi-role mode.
+            # Reduced contexts skip discovery/crawl/injection and most attack phases;
+            # they only test access to paths already found by role 1.
+            _is_reduced_ctx = _ctx.get("reduced", False)
 
             # Set auth context so all findings in this pass carry the account
             if _ctx_label == "unauthenticated":
@@ -13945,18 +14089,36 @@ def main() -> None:
                 vc.log(f"Auth [{_ctx_label}]: enabled", "INFO")
             else:
                 vc.log(f"Auth [{_ctx_label}]: none", "INFO")
+            if _is_reduced_ctx:
+                vc.log(
+                    f"[{_ctx_label}] Reduced context — running authorization/session/bypass "
+                    f"phases only against role 1 discovered paths", "INFO"
+                )
 
-            # Closures capture _ctx_label via default arg to avoid late-binding
-            def _skip(phase_name: str, _lbl: str = _ctx_label) -> bool:
+            # Closures capture _ctx_label and _is_reduced_ctx via default arg
+            def _skip(phase_name: str, _lbl: str = _ctx_label,
+                      _reduced: bool = _is_reduced_ctx) -> bool:
                 if not phases_enabled.get(phase_name, False):
                     vc.log(f"[{phase_name}] Phase disabled — skipping", "INFO")
                     return True
                 if pm.is_phase_complete(f"{phase_name}#{_lbl}"):
                     vc.log(f"[{phase_name}] Already complete — skipping (checkpoint)", "INFO")
                     return True
+                if _reduced and phase_name not in _REDUCED_SCAN_PHASES:
+                    vc.log(
+                        f"[{phase_name}] Skipping for reduced context [{_lbl}] — "
+                        f"full scan was performed for the most permissive user", "INFO"
+                    )
+                    pm.set_phase_status(f"{phase_name}#{_lbl}", "skipped", phase_name)
+                    return True
                 return False
 
-            crawl_data      = {"forms": [], "params": [], "links": []}
+            # For reduced contexts seed crawl_data from role 1's results so that
+            # auth_bypass / session / csrf phases test the same paths.
+            if _is_reduced_ctx:
+                crawl_data = copy.deepcopy(_role1_crawl_data)
+            else:
+                crawl_data = {"forms": [], "params": [], "links": []}
             auth_recon_data = {"forms": [], "links": [], "resource_ids": []}
             effective_auth  = _ctx_auth or sess
 
@@ -13994,6 +14156,9 @@ def main() -> None:
                 try:
                     crawl_data = _phase_crawl(target, _ctx_cfg, pm, out, effective_auth)
                     pm.set_phase_status(f"crawl#{_ctx_label}", "complete", "Crawl")
+                    # Persist role 1 crawl data for reduced contexts
+                    if not _is_reduced_ctx:
+                        _role1_crawl_data = crawl_data
                 except Exception as e:
                     vc.error(f"Phase crawl [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"crawl#{_ctx_label}", "error", detail=str(e))
@@ -14407,6 +14572,38 @@ def main() -> None:
                 _write_preliminary_access_matrix(out, target, [_ctx_label])
             except Exception:
                 pass
+
+            # ── Multi-role: prompt for the next role's credentials ───────────
+            # Only triggered after a multi_role authenticated context whose
+            # successor has not yet been collected (first target only; subsequent
+            # targets reuse _collected_roles populated here).
+            if (
+                _ctx.get("multi_role")
+                and _ctx_label != "unauthenticated"
+                and not _VANTAGE_MANAGED
+            ):
+                _next_idx = _ctx.get("role_idx", 0) + 1
+                if _next_idx < _n_roles and _next_idx >= len(_collected_roles):
+                    # Collect credentials for the next role now
+                    _nr_creds = _prompt_next_role_creds(_next_idx + 1, _n_roles)
+                    _collected_roles.append(_nr_creds)
+                    _nr_cfg = copy.deepcopy(cfg)
+                    _nr_cfg["auth"]["enabled"]  = True
+                    _nr_cfg["auth"]["username"] = _nr_creds["username"]
+                    _nr_cfg["auth"]["password"] = _nr_creds["password"]
+                    _nr_as = _build_auth_session(_nr_cfg, "auth", _scope_hostnames)
+                    if _nr_as:
+                        _attach_redirect_hook(_nr_as, _scope_hostnames, target,
+                                              out, _in_scope_new)
+                    # Insert before the unauthenticated context (always last)
+                    _cred_contexts.insert(-1, {
+                        "label":      _nr_creds["role"],
+                        "cfg":        _nr_cfg,
+                        "auth_sess":  _nr_as,
+                        "reduced":    True,
+                        "multi_role": True,
+                        "role_idx":   _next_idx,
+                    })
 
         # ── Post-context: privilege-escalation / cross-credential phases ───
         if auth_sess and cfg.get("auth", {}).get("enabled"):

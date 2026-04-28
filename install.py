@@ -202,6 +202,7 @@ PIP_PACKAGES = [
     "beautifulsoup4>=4.12.0",
     "sqlmap",
     "termcolor>=2.0.0",
+    "dnspython>=2.4.0",
 ]
 
 OFFLINE_BUNDLE_URLS = {
@@ -685,6 +686,16 @@ def install_git():
             symlink_force(ss_bin, "/usr/local/bin/searchsploit")
             info("searchsploit symlinked to /usr/local/bin/searchsploit")
 
+    # shcheck
+    if not shutil.which("shcheck") and not shutil.which("shcheck.py") \
+            and not os.path.isfile("/opt/shcheck/shcheck.py"):
+        git_clone_or_update("https://github.com/santoru/shcheck.git", "/opt/shcheck")
+    shcheck_bin = "/opt/shcheck/shcheck.py"
+    if os.path.isfile(shcheck_bin):
+        os.chmod(shcheck_bin, 0o755)
+        symlink_force(shcheck_bin, "/usr/local/bin/shcheck")
+        info("shcheck symlinked to /usr/local/bin/shcheck")
+
     # nuclei-templates
     git_clone_or_update(
         "https://github.com/projectdiscovery/nuclei-templates.git",
@@ -794,9 +805,9 @@ def install_symlinks():
 VERIFY_TOOLS = [
     "gobuster", "nikto", "sqlmap", "nuclei", "dalfox",
     "sslscan", "testssl.sh", "tplmap",
-    "whatweb", "ffuf", "feroxbuster", "searchsploit", "jwt_tool",
+    "whatweb", "ffuf", "feroxbuster", "searchsploit", "jwt_tool", "shcheck",
 ]
-VERIFY_PYTHON = ["requests", "colorama", "bs4", "selenium", "termcolor"]
+VERIFY_PYTHON = ["requests", "colorama", "bs4", "selenium", "termcolor", "dns"]
 
 
 def run_check():
@@ -824,6 +835,7 @@ def run_check():
         ("/opt/jwt_tool",          "jwt_tool"),
         ("/opt/nuclei-templates",  "nuclei-templates"),
         ("/opt/whatweb",           "whatweb (macOS git install)"),
+        ("/opt/shcheck",           "shcheck"),
     ]:
         if os.path.isdir(path):
             info(f"{label:30s} {G}PRESENT{W} ({path})")
@@ -866,6 +878,7 @@ def print_summary(skips):
     warn("tplmap installed from git (/opt/tplmap) — available as /usr/local/bin/tplmap.")
     warn("jwt_tool installed from git (/opt/jwt_tool) — available as /usr/local/bin/jwt_tool.")
     warn("searchsploit: installed via exploitdb package or git (/opt/exploitdb).")
+    warn("shcheck: installed from git (/opt/shcheck) — available as /usr/local/bin/shcheck.")
     warn("feroxbuster: apt/brew only — install manually on dnf/other systems (cargo install feroxbuster).")
     if OS == "macos":
         warn("whatweb: installed from git (/opt/whatweb) — requires bundler (gem install bundler).")
