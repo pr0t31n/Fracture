@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.46"
+VERSION = "2.9.48"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -14086,123 +14086,6 @@ def main() -> None:
                 return True
             return False
 
-        # ── Server-side phases — run once, no auth dependency ──────────────
-        # Pre-loop phases use the unauthenticated sess for discovery but must NOT
-        # populate the "unauthenticated" access-matrix column — that column is
-        # owned by the explicit unauthenticated context at the end of the context
-        # loop.  Clear the role tracker so _write_preliminary_access_matrix leaves
-        # all role slots null for newly-discovered paths during these phases.
-        # Tag pre-context findings with all configured authenticated roles so they
-        # show role pills immediately.  Unauthenticated is excluded here — its pill
-        # appears only after the explicit unauthenticated context runs.
-        _pre_accts = [{"username": r, "role": r}
-                      for r in _all_roles_ctx if r != "unauthenticated"]
-        out.set_auth_context(_pre_accts)
-        _scan_ctx["role"] = ""  # no column seeding during pre-context discovery
-
-        # Phase 0: recon
-        wc_baseline = None
-        _wp_discovered_paths: list = []
-        if not _skip("recon"):
-            pm.set_phase_status("recon", "running", "HTTP Recon")
-            try:
-                wc_baseline, _wp_discovered_paths = _phase_recon(target, cfg, pm, out, sess)
-                pm.set_phase_status("recon", "complete", "HTTP Recon")
-            except Exception as e:
-                vc.error(f"Phase recon error: {e}")
-                pm.set_phase_status("recon", "error", detail=str(e))
-
-        # Phase 0b: screenshot
-        if not _skip("screenshot"):
-            pm.set_phase_status("screenshot", "running", "Screenshot")
-            try:
-                _phase_screenshot(target, cfg, pm, out)
-                pm.set_phase_status("screenshot", "complete", "Screenshot")
-            except Exception as e:
-                vc.error(f"Phase screenshot error: {e}")
-                pm.set_phase_status("screenshot", "error", detail=str(e))
-
-        # Phase 0c: webfiles
-        if not _skip("webfiles"):
-            pm.set_phase_status("webfiles", "running", "Web Files")
-            try:
-                _phase_webfiles(target, cfg, pm, out, sess)
-                pm.set_phase_status("webfiles", "complete", "Web Files")
-            except Exception as e:
-                vc.error(f"Phase webfiles error: {e}")
-                pm.set_phase_status("webfiles", "error", detail=str(e))
-
-        # Phase 1: tls
-        if not _skip("tls"):
-            pm.set_phase_status("tls", "running", "TLS Analysis")
-            try:
-                _phase_tls(target, cfg, pm, out, sess)
-                pm.set_phase_status("tls", "complete", "TLS Analysis")
-            except Exception as e:
-                vc.error(f"Phase tls error: {e}")
-                pm.set_phase_status("tls", "error", detail=str(e))
-
-        # Phase 1b: subdomain_takeover
-        if not _skip("subdomain_takeover"):
-            pm.set_phase_status("subdomain_takeover", "running", "Subdomain Takeover")
-            try:
-                _phase_subdomain_takeover(target, cfg, pm, out, sess)
-                pm.set_phase_status("subdomain_takeover", "complete", "Subdomain Takeover")
-            except Exception as e:
-                vc.error(f"Phase subdomain_takeover error: {e}")
-                pm.set_phase_status("subdomain_takeover", "error", detail=str(e))
-
-        # Phase 2c: ffuf
-        if not _skip("ffuf"):
-            pm.set_phase_status("ffuf", "running", "ffuf Fuzzing")
-            try:
-                _phase_ffuf(target, cfg, pm, out, sess)
-                pm.set_phase_status("ffuf", "complete", "ffuf Fuzzing")
-            except Exception as e:
-                vc.error(f"Phase ffuf error: {e}")
-                pm.set_phase_status("ffuf", "error", detail=str(e))
-
-        # Phase 9: vulnscan
-        if not _skip("vulnscan"):
-            pm.set_phase_status("vulnscan", "running", "Vuln Scan")
-            try:
-                _phase_vulnscan(target, cfg, pm, out, sess, fast=args.fast)
-                pm.set_phase_status("vulnscan", "complete", "Vuln Scan")
-            except Exception as e:
-                vc.error(f"Phase vulnscan error: {e}")
-                pm.set_phase_status("vulnscan", "error", detail=str(e))
-
-        # Collect gobuster/feroxbuster endpoints once (used by endpoint_tools per context).
-        # Apply _filter_buster_wildcards here so that wildcard-false-positive paths are
-        # removed before they enter the endpoint pipeline — this prevents gobuster from
-        # ever being called on a wildcard directory, even if per-endpoint _detect_wildcard
-        # fails, and avoids wasting max_ep slots on wildcard paths.
-        _ep_base: list = []
-        _hostname    = target["hostname"]
-        _ep_timeout  = cfg.get("timeout", 10)
-        for _gob_name in [f"gobuster_{_hostname}", f"gobuster_files_{_hostname}"]:
-            _gob_path = out.output_path("recon", _gob_name)
-            if _gob_path.exists():
-                try:
-                    _raw_gob = _parse_gobuster_with_status(_gob_path, target["url"])
-                    _flt_gob = _filter_buster_wildcards(_raw_gob, sess, _ep_timeout)
-                    _ep_base.extend(u for u, _, _ in _flt_gob)
-                except Exception:
-                    pass
-        for _fer_name in [f"feroxbuster_{_hostname}", f"feroxbuster_files_{_hostname}"]:
-            _fer_path = out.output_path("recon", _fer_name)
-            if _fer_path.exists():
-                try:
-                    _raw_fer = _parse_feroxbuster_with_status(_fer_path)
-                    _flt_fer = _filter_buster_wildcards(_raw_fer, sess, _ep_timeout)
-                    _ep_base.extend(u for u, _, _ in _flt_fer)
-                except Exception:
-                    pass
-        # Add WordPress-discovered paths (only in-scope, valid URLs)
-        for _wp_u in _wp_discovered_paths:
-            if _is_valid_endpoint_url(_wp_u) and _is_in_scope_url(_wp_u, _scope_hostnames):
-                _ep_base.append(_wp_u)
-
         # Build per-credential contexts
         # When _n_roles >= 1 (interactive multi-role mode):
         #   - Role 1 (most permissive): full scan, all phases.
@@ -14287,6 +14170,10 @@ def main() -> None:
         # Crawl data from role 1 (most permissive); passed to reduced contexts so they
         # test accessibility to the same paths without re-crawling.
         _role1_crawl_data: dict = {"forms": [], "params": [], "links": []}
+        # Discovery phase outputs — populated during Role 1's context, reused by all others.
+        wc_baseline: object = None
+        _wp_discovered_paths: list = []
+        _ep_base: list = []
 
         # ── Per-credential context loop ─────────────────────────────────────
         for _ctx in _cred_contexts:
@@ -14342,6 +14229,111 @@ def main() -> None:
                 crawl_data = {"forms": [], "params": [], "links": []}
             auth_recon_data = {"forms": [], "links": [], "resource_ids": []}
             effective_auth  = _ctx_auth or sess
+
+            # ── Discovery phases — Role 1 only ──────────────────────────────
+            # All enumeration and server-analysis runs authenticated as the most
+            # privileged role to obtain the most comprehensive application surface.
+            # Reduced contexts (roles 2..n, unauthenticated) skip this block and
+            # reuse the endpoint list collected here.
+            if not _is_reduced_ctx:
+
+                # Phase 0: recon (gobuster, whatweb, nikto baseline, etc.)
+                if not _skip("recon"):
+                    pm.set_phase_status(f"recon#{_ctx_label}", "running", "HTTP Recon")
+                    try:
+                        wc_baseline, _wp_discovered_paths = _phase_recon(
+                            target, _ctx_cfg, pm, out, effective_auth)
+                        pm.set_phase_status(f"recon#{_ctx_label}", "complete", "HTTP Recon")
+                    except Exception as e:
+                        vc.error(f"Phase recon [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"recon#{_ctx_label}", "error", detail=str(e))
+
+                # Phase 0b: screenshot
+                if not _skip("screenshot"):
+                    pm.set_phase_status(f"screenshot#{_ctx_label}", "running", "Screenshot")
+                    try:
+                        _phase_screenshot(target, _ctx_cfg, pm, out)
+                        pm.set_phase_status(f"screenshot#{_ctx_label}", "complete", "Screenshot")
+                    except Exception as e:
+                        vc.error(f"Phase screenshot [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"screenshot#{_ctx_label}", "error", detail=str(e))
+
+                # Phase 0c: webfiles
+                if not _skip("webfiles"):
+                    pm.set_phase_status(f"webfiles#{_ctx_label}", "running", "Web Files")
+                    try:
+                        _phase_webfiles(target, _ctx_cfg, pm, out, effective_auth)
+                        pm.set_phase_status(f"webfiles#{_ctx_label}", "complete", "Web Files")
+                    except Exception as e:
+                        vc.error(f"Phase webfiles [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"webfiles#{_ctx_label}", "error", detail=str(e))
+
+                # Phase 1: tls
+                if not _skip("tls"):
+                    pm.set_phase_status(f"tls#{_ctx_label}", "running", "TLS Analysis")
+                    try:
+                        _phase_tls(target, _ctx_cfg, pm, out, effective_auth)
+                        pm.set_phase_status(f"tls#{_ctx_label}", "complete", "TLS Analysis")
+                    except Exception as e:
+                        vc.error(f"Phase tls [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"tls#{_ctx_label}", "error", detail=str(e))
+
+                # Phase 1b: subdomain_takeover
+                if not _skip("subdomain_takeover"):
+                    pm.set_phase_status(f"subdomain_takeover#{_ctx_label}", "running", "Subdomain Takeover")
+                    try:
+                        _phase_subdomain_takeover(target, _ctx_cfg, pm, out, effective_auth)
+                        pm.set_phase_status(f"subdomain_takeover#{_ctx_label}", "complete", "Subdomain Takeover")
+                    except Exception as e:
+                        vc.error(f"Phase subdomain_takeover [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"subdomain_takeover#{_ctx_label}", "error", detail=str(e))
+
+                # Phase 2c: ffuf
+                if not _skip("ffuf"):
+                    pm.set_phase_status(f"ffuf#{_ctx_label}", "running", "ffuf Fuzzing")
+                    try:
+                        _phase_ffuf(target, _ctx_cfg, pm, out, effective_auth)
+                        pm.set_phase_status(f"ffuf#{_ctx_label}", "complete", "ffuf Fuzzing")
+                    except Exception as e:
+                        vc.error(f"Phase ffuf [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"ffuf#{_ctx_label}", "error", detail=str(e))
+
+                # Phase 9: vulnscan
+                if not _skip("vulnscan"):
+                    pm.set_phase_status(f"vulnscan#{_ctx_label}", "running", "Vuln Scan")
+                    try:
+                        _phase_vulnscan(target, _ctx_cfg, pm, out, effective_auth, fast=args.fast)
+                        pm.set_phase_status(f"vulnscan#{_ctx_label}", "complete", "Vuln Scan")
+                    except Exception as e:
+                        vc.error(f"Phase vulnscan [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"vulnscan#{_ctx_label}", "error", detail=str(e))
+
+                # Collect gobuster/feroxbuster endpoints discovered under Role 1.
+                # Use Role 1's session for wildcard filtering so false-positive paths
+                # are detected consistently with the authenticated surface.
+                _hostname   = target["hostname"]
+                _ep_timeout = cfg.get("timeout", 10)
+                for _gob_name in [f"gobuster_{_hostname}", f"gobuster_files_{_hostname}"]:
+                    _gob_path = out.output_path("recon", _gob_name)
+                    if _gob_path.exists():
+                        try:
+                            _raw_gob = _parse_gobuster_with_status(_gob_path, target["url"])
+                            _flt_gob = _filter_buster_wildcards(_raw_gob, effective_auth, _ep_timeout)
+                            _ep_base.extend(u for u, _, _ in _flt_gob)
+                        except Exception:
+                            pass
+                for _fer_name in [f"feroxbuster_{_hostname}", f"feroxbuster_files_{_hostname}"]:
+                    _fer_path = out.output_path("recon", _fer_name)
+                    if _fer_path.exists():
+                        try:
+                            _raw_fer = _parse_feroxbuster_with_status(_fer_path)
+                            _flt_fer = _filter_buster_wildcards(_raw_fer, effective_auth, _ep_timeout)
+                            _ep_base.extend(u for u, _, _ in _flt_fer)
+                        except Exception:
+                            pass
+                for _wp_u in _wp_discovered_paths:
+                    if _is_valid_endpoint_url(_wp_u) and _is_in_scope_url(_wp_u, _scope_hostnames):
+                        _ep_base.append(_wp_u)
 
             # ── Phase 2: headers ──
             if not _skip("headers"):
