@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.57"
+VERSION = "2.9.58"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -961,6 +961,44 @@ def _filter_dominant_code(
             "INFO",
         )
     return kept
+
+
+def _buster_auth_flags(sess: "requests.Session") -> list:
+    """Return repeated -H flag pairs for gobuster/feroxbuster.
+
+    Extracts cookies, Authorization, and common auth headers from the
+    authenticated session so that discovery tools run with the same
+    access level as the requests session — preventing thousands of
+    false-positive 403 results caused by unauthenticated discovery
+    against a site that requires login.
+    """
+    flags: list = []
+
+    # Session cookies → Cookie header
+    cookie_str = "; ".join(f"{c.name}={c.value}" for c in sess.cookies)
+    if cookie_str:
+        flags += ["-H", f"Cookie: {cookie_str}"]
+
+    # Auth-relevant headers already set on the session
+    _RELAY = frozenset({
+        "authorization", "x-auth-token", "x-api-key", "x-access-token",
+        "x-session-token", "token",
+    })
+    for hname, hval in sess.headers.items():
+        if hname.lower() in _RELAY:
+            flags += ["-H", f"{hname}: {hval}"]
+
+    # HTTP Basic auth tuple — only when Authorization not already added above
+    if (isinstance(getattr(sess, "auth", None), tuple)
+            and len(sess.auth) == 2
+            and not any(h.lower() == "authorization" for h in sess.headers)):
+        import base64 as _b64
+        _creds = _b64.b64encode(
+            f"{sess.auth[0]}:{sess.auth[1]}".encode()
+        ).decode()
+        flags += ["-H", f"Authorization: Basic {_creds}"]
+
+    return flags
 
 
 # ─────────────────────────────────────────────
@@ -6853,6 +6891,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     elif gobuster and Path(wordlist).exists():
         cmd = [gobuster, "dir", "-u", url, "-w", wordlist, "-t", "30",
                "-q", "-k", "-o", str(out_f)]
+        cmd += _buster_auth_flags(sess)
         vc.log("[recon] Running gobuster ...", "INFO")
         _gobuster_run(cmd, out_f, "recon", out)
     else:
@@ -6901,6 +6940,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             "--output", str(fer_out), "--insecure",
             "--auto-tune", "--time-limit", "4m",
         ]
+        cmd += _buster_auth_flags(sess)
         vc.log("[recon] Running feroxbuster ...", "INFO")
         _fer_proc = None
         try:
@@ -6954,6 +6994,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             gob_files_out = out.output_path(phase, "gobuster_files_" + target["hostname"])
             cmd = [gobuster, "dir", "-u", url, "-w", wordlist_files, "-t", "30",
                    "-q", "-k", "-o", str(gob_files_out)]
+            cmd += _buster_auth_flags(sess)
             vc.log("[recon] Running gobuster (files) ...", "INFO")
             _gobuster_run(cmd, gob_files_out, "recon", out)
             # Write gobuster files to structure map
@@ -6983,6 +7024,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 "--output", str(fer_files_out), "--insecure",
                 "--auto-tune", "--time-limit", "4m",
             ]
+            cmd += _buster_auth_flags(sess)
             vc.log("[recon] Running feroxbuster (files) ...", "INFO")
             _fer_files_proc = None
             try:
@@ -7597,6 +7639,7 @@ def _phase_endpoint_tools(
             ep_gob = out.output_path("recon", f"gobuster_ep_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_dir,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob)]
+            cmd += _buster_auth_flags(sess)
             vc.log(f"[endpoint_tools] gobuster on {ep_url}", "INFO")
             _gobuster_run(cmd, ep_gob, "endpoint_tools", out, timeout=180)
             if ep_gob.exists():
@@ -7620,6 +7663,7 @@ def _phase_endpoint_tools(
             ep_gob_f = out.output_path("recon", f"gobuster_ep_files_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_file,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob_f)]
+            cmd += _buster_auth_flags(sess)
             _gobuster_run(cmd, ep_gob_f, "endpoint_tools", out, timeout=180)
             if ep_gob_f.exists():
                 try:
@@ -7646,6 +7690,7 @@ def _phase_endpoint_tools(
                    "--status-codes", "200,204,301,302,307,401,403",
                    "--output", str(ep_fer), "--insecure", "--auto-tune",
                    "--time-limit", "2m"]
+            cmd += _buster_auth_flags(sess)
             vc.log(f"[endpoint_tools] feroxbuster on {ep_url}", "INFO")
             _ep_fer_proc = None
             try:
