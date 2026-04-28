@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.58"
+VERSION = "2.9.59"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -716,6 +716,7 @@ def _filter_buster_wildcards(
     )
     if _uniform_status:
         _wc_global = None
+        _root_url  = ""
         try:
             _sp = urllib.parse.urlparse(results[0][0])
             _root_url = f"{_sp.scheme}://{_sp.netloc}"
@@ -734,6 +735,34 @@ def _filter_buster_wildcards(
                 "WARN",
             )
             return []
+
+        # Status-only fallback: _detect_wildcard requires body similarity and can
+        # miss wildcards when the server embeds session IDs / timestamps in its
+        # error pages (e.g. Java servlet containers returning 403 for all unknown
+        # paths).  If ≥2 of 3 HEAD probes on random paths return the same uniform
+        # status, the server is a catch-all regardless of body variance.
+        if _root_url:
+            _so_hits = 0
+            _so_needed = _global_statuses[0]
+            for _ in range(3):
+                try:
+                    _so_r = sess.head(
+                        _root_url + "/" + secrets.token_hex(12) + "-notfound",
+                        timeout=max(timeout // 2, 3),
+                        allow_redirects=False,
+                    )
+                    if _so_r.status_code == _so_needed:
+                        _so_hits += 1
+                except Exception:
+                    pass
+            if _so_hits >= 2:
+                vc.log(
+                    f"[buster-filter] All {len(results)} result(s) share HTTP {_so_needed} "
+                    f"and status-only probes confirm catch-all (body detection was inconclusive)"
+                    f" — suppressing all",
+                    "WARN",
+                )
+                return []
 
     from collections import defaultdict
 
@@ -13835,8 +13864,16 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     print(f"  Testing {len(crawled_paths)} paths × {len(all_roles)} roles")
     vc.status(phase, "Access Matrix", "running", f"Testing {len(crawled_paths)} paths", 0, len(crawled_paths))
 
+    # Use a growable list so redirect destinations discovered during probing
+    # are appended and probed in the same pass (one level of expansion only;
+    # destinations that themselves redirect are recorded but not followed further).
+    _am_paths = list(crawled_paths)
+    _am_seen  = set(crawled_paths)    # dedup set — paths already in the list
     path_access = []
-    for idx, path in enumerate(crawled_paths):
+    idx = 0
+    while idx < len(_am_paths):
+        path = _am_paths[idx]
+        idx += 1
         # Paths from structure_map are always relative (e.g. "/admin"); normalize
         if path.startswith("http"):
             url = path
@@ -13850,6 +13887,20 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 r = r_sess.get(url, timeout=timeout, allow_redirects=False,
                                headers={"Accept": "text/html,application/json"})
                 access[role] = r.status_code
+                # Collect redirect destination so the resolved URL is also probed.
+                # Only expand paths that are on the same host (in-scope).
+                if r.status_code in (301, 302, 303, 307, 308):
+                    _loc = r.headers.get("Location", "").strip()
+                    if _loc:
+                        _dest = urllib.parse.urljoin(url, _loc)
+                        _dest_parsed = urllib.parse.urlparse(_dest)
+                        _dest_netloc = _dest_parsed.netloc
+                        _base_netloc = urllib.parse.urlparse(base_url).netloc
+                        if _dest_netloc == _base_netloc:
+                            _dest_path = _dest_parsed.path or "/"
+                            if _dest_path not in _am_seen:
+                                _am_seen.add(_dest_path)
+                                _am_paths.append(_dest_path)
             except Exception:
                 try:
                     r = r_sess.head(url, timeout=max(timeout // 2, 3),
@@ -13858,7 +13909,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     access[role] = 0
         path_access.append({"path": rel, "url": url, "access": access})
-        vc.status(phase, "Access Matrix", "running", f"Path {idx+1}/{len(crawled_paths)}", idx+1, len(crawled_paths))
+        vc.status(phase, "Access Matrix", "running", f"Path {idx}/{len(_am_paths)}", idx, len(_am_paths))
 
     def _ok(status):
         return isinstance(status, int) and status in (200, 201, 202, 204)
