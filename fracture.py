@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.36"
+VERSION = "2.9.37"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -9284,16 +9284,33 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
     # ── 1. Virtual host discovery ─────────────────────────────────────────────
     vc.status(phase, "ffuf", "running", "vhost discovery", 0, 2)
     if Path(vhost_wl).exists():
-        # Baseline: request with an obviously bogus vhost to get the default response size
-        _baseline_len = 0
-        _baseline_code = 200
-        try:
-            _bl_r = sess.get(url, timeout=timeout,
-                             headers={"Host": f"_fracture_baseline_nxdomain_.{host}"})
-            _baseline_len  = len(_bl_r.content)
-            _baseline_code = _bl_r.status_code
-        except Exception:
-            pass
+        # Take 3 baseline samples with obviously bogus hostnames to detect
+        # wildcard-DNS environments where every subdomain gets a valid response.
+        # Collect all unique sizes, word counts, and line counts so that ffuf's
+        # -fs/-fw/-fl filters catch every variant of the wildcard response.
+        _VHOST_MAX_FINDINGS = 20     # sanity cap: more than this almost certainly = wildcard
+        _VHOST_BURST_THRESHOLD = 50  # if ffuf returns ≥ this many hits, treat as wildcard FP
+        _bl_sizes:   list = []
+        _bl_words:   list = []
+        _bl_lines:   list = []
+        _bl_bogons = [
+            f"_fracture_nxdomain_a_.{host}",
+            f"_fracture_nxdomain_b_.{host}",
+            f"_fracture_nxdomain_c_.{host}",
+        ]
+        for _bghost in _bl_bogons:
+            try:
+                _bl_r = sess.get(url, timeout=timeout, headers={"Host": _bghost})
+                _bl_body = _bl_r.content
+                _bl_sizes.append(len(_bl_body))
+                _bl_words.append(len(_bl_body.split()))
+                _bl_lines.append(_bl_body.count(b"\n"))
+            except Exception:
+                pass
+
+        _fs_arg = ",".join(str(s) for s in sorted(set(_bl_sizes))) if _bl_sizes else "0"
+        _fw_arg = ",".join(str(w) for w in sorted(set(_bl_words))) if _bl_words else ""
+        _fl_arg = ",".join(str(l) for l in sorted(set(_bl_lines))) if _bl_lines else ""
 
         vhost_out = ffuf_dir / f"vhost_{host}_{port}.json"
         cmd = [
@@ -9301,13 +9318,22 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
             "-u", url,
             "-H", f"Host: FUZZ.{host}",
             "-mc", "200,201,204,301,302,307,401,403",
-            "-fs", str(_baseline_len),
+            "-fs", _fs_arg,
             "-s",
             "-json", "-o", str(vhost_out),
             "-t", "40",
             "-timeout", str(timeout),
         ]
-        vc.log(f"[ffuf] vhost discovery on {host} (baseline_len={_baseline_len})", "INFO")
+        if _fw_arg:
+            cmd += ["-fw", _fw_arg]
+        if _fl_arg:
+            cmd += ["-fl", _fl_arg]
+
+        vc.log(
+            f"[ffuf] vhost discovery on {host} "
+            f"(baseline sizes={_fs_arg} words={_fw_arg or 'n/a'} lines={_fl_arg or 'n/a'})",
+            "INFO",
+        )
         try:
             proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
             _register_proc(proc)
@@ -9317,7 +9343,26 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
             if vhost_out.exists():
                 try:
                     ffuf_data = json.loads(vhost_out.read_text(encoding="utf-8"))
-                    for result in ffuf_data.get("results", []):
+                    results = ffuf_data.get("results", [])
+
+                    # Sanity check: large hit counts indicate wildcard DNS — discard all
+                    if len(results) >= _VHOST_BURST_THRESHOLD:
+                        vc.log(
+                            f"[ffuf] {len(results)} vhost hits suppressed — likely wildcard DNS "
+                            f"(≥{_VHOST_BURST_THRESHOLD} results; all filtered as false positives)",
+                            "WARNING",
+                        )
+                        results = []
+
+                    _vhost_count = 0
+                    for result in results:
+                        if _vhost_count >= _VHOST_MAX_FINDINGS:
+                            vc.log(
+                                f"[ffuf] vhost findings capped at {_VHOST_MAX_FINDINGS} "
+                                f"— remaining hits suppressed",
+                                "WARNING",
+                            )
+                            break
                         vhost_word = result.get("input", {}).get("FUZZ", "").strip()
                         status     = result.get("status", 0)
                         resp_len   = result.get("length", 0)
@@ -9342,6 +9387,7 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
                             ),
                         )
                         vc.log(f"[ffuf] vhost: {full_vhost} → {status}", "SUCCESS")
+                        _vhost_count += 1
                 except Exception:
                     pass
         except Exception as e:
@@ -10310,8 +10356,12 @@ def _write_structure_map(out: "OutputManager", target: dict,
 
     # Keep access_matrix.json in sync with every structure_map update so
     # Crucible can show a growing path list from the very first HTTP probe.
+    # Pass no roles — the preliminary write only populates path entries; actual
+    # per-role HTTP statuses are filled in by _phase_access_matrix after probing.
+    # Seeding statuses here with "unauthenticated" was incorrect because
+    # structure_map is updated during authenticated context passes too.
     try:
-        _write_preliminary_access_matrix(out, target, ["unauthenticated"])
+        _write_preliminary_access_matrix(out, target, [])
     except Exception:
         pass
 
@@ -13577,7 +13627,7 @@ def _prompt_multi_role_setup(auth_cfg: dict) -> int:
     if not _has_creds:
         _uname = vc.prompt("Username (most permissive user — role 1)", prompt_type="text").strip()
         _pwd   = vc.prompt("Password (most permissive user — role 1)", prompt_type="password")
-        _lbl   = vc.prompt("Role label (e.g. admin)", prompt_type="text").strip() or "role_1"
+        _lbl   = vc.prompt("Role label (e.g. admin)", prompt_type="text").strip() or "elevated"
         auth_cfg["enabled"]      = True
         auth_cfg["username"]     = _uname
         auth_cfg["password"]     = _pwd
@@ -13595,9 +13645,9 @@ def _prompt_next_role_creds(role_num: int, total: int) -> dict:
     """
     _uname = vc.prompt(
         f"Username (role {role_num}/{total})", prompt_type="text"
-    ).strip() or f"role_{role_num}"
+    ).strip() or f"user{role_num}"
     _pwd  = vc.prompt(f"Password (role {role_num}/{total})", prompt_type="password")
-    _lbl  = vc.prompt(f"Role label", prompt_type="text").strip() or f"role_{role_num}"
+    _lbl  = vc.prompt(f"Role label", prompt_type="text").strip() or f"user{role_num}"
     return {"role": _lbl, "username": _uname, "password": _pwd}
 
 
@@ -13707,7 +13757,7 @@ def main() -> None:
         _n_roles = len(_am)
         _collected_roles = [
             {
-                "role":     r.get("role") or f"role_{i + 1}",
+                "role":     r.get("role") or ("elevated" if i == 0 else f"user{i}"),
                 "username": r.get("username", ""),
                 "password": r.get("password", ""),
             }
@@ -13725,7 +13775,7 @@ def main() -> None:
     else:
         _n_roles = _prompt_multi_role_setup(cfg["auth"])
         if _n_roles >= 1:
-            _r1_lbl = cfg["auth"].pop("_role_label", None) or cfg["auth"].get("username") or "role_1"
+            _r1_lbl = cfg["auth"].pop("_role_label", None) or cfg["auth"].get("username") or "elevated"
             _collected_roles.append({
                 "role":     _r1_lbl,
                 "username": cfg["auth"].get("username", ""),
@@ -14695,6 +14745,13 @@ def main() -> None:
         if not _skip("access_matrix"):
             pm.set_phase_status("access_matrix", "running", "Access Matrix")
             try:
+                # In multi-role mode _collected_roles is the authoritative role list;
+                # overwrite auth_matrix in cfg so _phase_access_matrix uses correct labels.
+                if _n_roles >= 1 and _collected_roles:
+                    cfg["auth_matrix"] = [
+                        {"role": r["role"], "username": r["username"], "password": r["password"]}
+                        for r in _collected_roles
+                    ]
                 _phase_access_matrix(target, cfg, pm, out, sess, {"links": _dedup_links})
                 pm.set_phase_status("access_matrix", "complete", "Access Matrix")
             except Exception as e:
