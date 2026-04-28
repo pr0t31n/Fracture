@@ -14086,9 +14086,13 @@ def main() -> None:
             return False
 
         # ── Server-side phases — run once, no auth dependency ──────────────
-        # Pre-loop phases use the unauthenticated sess — always tag as UNAUTH
+        # Pre-loop phases use the unauthenticated sess for discovery but must NOT
+        # populate the "unauthenticated" access-matrix column — that column is
+        # owned by the explicit unauthenticated context at the end of the context
+        # loop.  Clear the role tracker so _write_preliminary_access_matrix leaves
+        # all role slots null for newly-discovered paths during these phases.
         out.set_auth_context([{"username": "UNAUTH", "role": "unauthenticated"}])
-        _scan_ctx["role"] = "unauthenticated"  # recon uses unauthenticated session
+        _scan_ctx["role"] = ""  # no column seeding during pre-context discovery
 
         # Phase 0: recon
         wc_baseline = None
