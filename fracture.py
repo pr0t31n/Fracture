@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.49"
+VERSION = "2.9.50"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -14113,16 +14113,16 @@ def main() -> None:
                 "reduced": False, "multi_role": True, "role_idx": 0,
             })
             # Any roles already collected (e.g. second target, creds collected earlier)
+            # auth_sess is intentionally left None here; it is built lazily at the
+            # start of each context iteration so that browser-auth prompts for roles
+            # 2..n appear AFTER role 1 finishes, not before any phases have run.
             for _ri, _rc in enumerate(_collected_roles[1:], start=1):
                 _rn_cfg = copy.deepcopy(cfg)
                 _rn_cfg["auth"]["enabled"]  = True
                 _rn_cfg["auth"]["username"] = _rc["username"]
                 _rn_cfg["auth"]["password"] = _rc["password"]
-                _rn_as = _build_auth_session(_rn_cfg, "auth", _scope_hostnames, role_label=_rc["role"])
-                if _rn_as:
-                    _attach_redirect_hook(_rn_as, _scope_hostnames, target, out, _in_scope_new)
                 _cred_contexts.append({
-                    "label": _rc["role"], "cfg": _rn_cfg, "auth_sess": _rn_as,
+                    "label": _rc["role"], "cfg": _rn_cfg, "auth_sess": None,
                     "reduced": True, "multi_role": True, "role_idx": _ri,
                 })
         else:
@@ -14185,6 +14185,16 @@ def main() -> None:
             # Reduced contexts skip discovery/crawl/injection and most attack phases;
             # they only test access to paths already found by role 1.
             _is_reduced_ctx = _ctx.get("reduced", False)
+
+            # Lazy auth build for Roles 2..n in VANTAGE_MANAGED multi-role mode.
+            # Sessions are not pre-built so browser-auth prompts appear after the
+            # previous role's phases complete, not before any phases run.
+            if _ctx_auth is None and _ctx_label != "unauthenticated" and _ctx.get("multi_role"):
+                _ctx_auth = _build_auth_session(
+                    _ctx_cfg, "auth", _scope_hostnames, role_label=_ctx_label)
+                if _ctx_auth:
+                    _attach_redirect_hook(_ctx_auth, _scope_hostnames, target, out, _in_scope_new)
+                _ctx["auth_sess"] = _ctx_auth
 
             # Set auth context so all findings in this pass carry the account
             if _ctx_label == "unauthenticated":
