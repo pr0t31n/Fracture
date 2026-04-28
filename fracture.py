@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.35"
+VERSION = "2.9.36"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -13700,14 +13700,37 @@ def main() -> None:
     _n_roles: int = 0
     _collected_roles: list = []  # [{"role": label, "username": u, "password": p}, ...]
 
-    _n_roles = _prompt_multi_role_setup(cfg["auth"])
-    if _n_roles >= 1:
-        _r1_lbl = cfg["auth"].pop("_role_label", None) or cfg["auth"].get("username") or "role_1"
-        _collected_roles.append({
-            "role":     _r1_lbl,
-            "username": cfg["auth"].get("username", ""),
-            "password": cfg["auth"].get("password", ""),
-        })
+    _am = cfg.get("auth_matrix") or []
+    if _VANTAGE_MANAGED and _am:
+        # Roles were pre-defined in the Crucible project — load them directly,
+        # no prompt needed.
+        _n_roles = len(_am)
+        _collected_roles = [
+            {
+                "role":     r.get("role") or f"role_{i + 1}",
+                "username": r.get("username", ""),
+                "password": r.get("password", ""),
+            }
+            for i, r in enumerate(_am)
+        ]
+        # Ensure cfg["auth"] reflects role 1 so _build_auth_session works
+        if _collected_roles:
+            cfg["auth"]["enabled"]  = True
+            cfg["auth"]["username"] = _collected_roles[0]["username"]
+            cfg["auth"]["password"] = _collected_roles[0]["password"]
+        vc.log(
+            f"[multi-role] {_n_roles} role(s) loaded from project settings — skipping prompt",
+            "INFO",
+        )
+    else:
+        _n_roles = _prompt_multi_role_setup(cfg["auth"])
+        if _n_roles >= 1:
+            _r1_lbl = cfg["auth"].pop("_role_label", None) or cfg["auth"].get("username") or "role_1"
+            _collected_roles.append({
+                "role":     _r1_lbl,
+                "username": cfg["auth"].get("username", ""),
+                "password": cfg["auth"].get("password", ""),
+            })
 
     while _pending_idx < len(_pending_urls):
         raw_url      = _pending_urls[_pending_idx]
