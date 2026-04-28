@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.53"
+VERSION = "2.9.54"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -4244,6 +4244,42 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 _handle_post_login_page(_post_resp)
         else:
             vc.log("[auth] Skipping credential submission — no login URL available", "WARNING")
+
+        # ── Browser-auth fallback (within _build_auth_session scope) ─────────────
+        # _browser_assisted_login is a closure defined in this function; it must be
+        # called from here — it is NOT accessible after _build_auth_session returns.
+        #
+        # Case A: no login URL was located — credentials were never submitted.
+        # Case B: credentials were submitted but the session carries no auth markers
+        #         (wrong credentials path, JS-based session, etc.).
+        #
+        # In both cases, if --browser-auth is set, open an interactive browser window
+        # at the target so the user can authenticate manually.
+        _ba_url = auth.get("login_url", "").strip() or _base_target_url
+        if cfg.get("browser_auth") and _ba_url:
+            if not _login_post_called:
+                vc.log(
+                    "[auth] No login form located — falling back to browser-assisted login",
+                    "INFO",
+                )
+                return _browser_assisted_login(_ba_url)
+            # Case B: POST was called — check for auth markers before deciding
+            _ba_hdr_names = frozenset({
+                "authorization", "x-auth-token", "x-api-key", "x-csrf-token",
+                "x-access-token", "x-session-token", "token",
+            })
+            _ba_has_signal = (
+                bool(sess.cookies)
+                or any(k.lower() in _ba_hdr_names for k in sess.headers)
+                or sess.auth is not None
+            )
+            if not _ba_has_signal:
+                vc.log(
+                    "[auth] Credential submission produced no authenticated session — "
+                    "falling back to browser-assisted login",
+                    "INFO",
+                )
+                return _browser_assisted_login(_ba_url)
 
         # ── False-positive guard ───────────────────────────────────────────────
         # If credentials were never submitted, any cookies on sess were set by
@@ -14117,29 +14153,10 @@ def main() -> None:
         _report_auth_status(auth2_sess, cfg.get("auth2", {}), "secondary",
                             primary_enabled=_primary_auth_enabled)
 
-        # ── Browser-assisted login fallback ───────────────────────────────────
-        # Triggered when: --browser-auth is set, primary auth was configured,
-        # and automated auth did not produce a valid session.
-        if cfg.get("browser_auth") and _primary_auth_enabled and not _primary_ok:
-            _bl_url = (
-                cfg.get("auth", {}).get("login_url", "").strip()
-                or (cfg.get("target_url", "") or "").rstrip("/")
-                or ((cfg.get("target_urls") or [""])[0] or "").rstrip("/")
-            )
-            if _bl_url:
-                vc.log(
-                    "[auth] Automated authentication failed — launching browser for "
-                    "interactive login",
-                    "INFO",
-                )
-                _b_sess = _browser_assisted_login(_bl_url)
-                if _b_sess is not None:
-                    auth_sess = _b_sess
-                    vc.log("[auth:primary] Browser-assisted login successful — session captured", "SUCCESS")
-                else:
-                    vc.log("[auth] Browser-assisted login did not produce a session — proceeding unauthenticated", "WARNING")
-            else:
-                vc.log("[auth] --browser-auth set but no login URL could be determined", "WARNING")
+        # Browser-auth fallback is handled inside _build_auth_session (form_login path)
+        # where _browser_assisted_login is in scope as a closure. If browser auth
+        # succeeded there, auth_sess is already a valid session. If it returned None,
+        # we proceed unauthenticated — no further action needed here.
 
         # Pre-scan connectivity check — retry up to 5 times before proceeding
         _alive_delays = [0, 5, 10, 15, 20]
@@ -14296,45 +14313,14 @@ def main() -> None:
             # Lazy auth build for Roles 2..n in VANTAGE_MANAGED multi-role mode.
             # Sessions are not pre-built so browser-auth prompts appear after the
             # previous role's phases complete, not before any phases run.
+            # Browser-auth fallback is handled inside _build_auth_session (form_login
+            # path) where _browser_assisted_login is in closure scope — it cannot be
+            # called from here.
             if _ctx_auth is None and _ctx_label != "unauthenticated" and _ctx.get("multi_role"):
                 _ctx_auth = _build_auth_session(
                     _ctx_cfg, "auth", _scope_hostnames, role_label=_ctx_label)
                 if _ctx_auth:
                     _attach_redirect_hook(_ctx_auth, _scope_hostnames, target, out, _in_scope_new)
-                # Browser-auth fallback: mirrors the Role 1 fallback in the pre-loop
-                # setup. If automated form login failed but --browser-auth is set,
-                # launch the interactive browser session now.
-                _lazy_auth_enabled = bool(_ctx_cfg.get("auth", {}).get("enabled"))
-                _lazy_auth_ok = _report_auth_status(
-                    _ctx_auth, _ctx_cfg.get("auth", {}), _ctx_label)
-                if _ctx_cfg.get("browser_auth") and _lazy_auth_enabled and not _lazy_auth_ok:
-                    _lazy_bl_url = (
-                        _ctx_cfg.get("auth", {}).get("login_url", "").strip()
-                        or (cfg.get("target_url", "") or "").rstrip("/")
-                        or ((cfg.get("target_urls") or [""])[0] or "").rstrip("/")
-                    )
-                    if _lazy_bl_url:
-                        vc.log(
-                            f"[auth:{_ctx_label}] Automated authentication failed — "
-                            "launching browser for interactive login",
-                            "INFO",
-                        )
-                        _lazy_b_sess = _browser_assisted_login(_lazy_bl_url)
-                        if _lazy_b_sess is not None:
-                            _ctx_auth = _lazy_b_sess
-                            _attach_redirect_hook(
-                                _ctx_auth, _scope_hostnames, target, out, _in_scope_new)
-                            vc.log(
-                                f"[auth:{_ctx_label}] Browser-assisted login successful "
-                                "— session captured", "SUCCESS")
-                        else:
-                            vc.log(
-                                f"[auth:{_ctx_label}] Browser-assisted login did not "
-                                "produce a session — proceeding unauthenticated", "WARNING")
-                    else:
-                        vc.log(
-                            f"[auth:{_ctx_label}] --browser-auth set but no login URL "
-                            "could be determined", "WARNING")
                 _ctx["auth_sess"] = _ctx_auth
 
             # Set auth context so all findings in this pass carry the account
