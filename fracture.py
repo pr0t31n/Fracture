@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.54"
+VERSION = "2.9.55"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2581,6 +2581,77 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 "fields": {},
             })
 
+        # ── JS-rendered login page detection ─────────────────────────────────
+        # When no static login form was found, inspect whether the page is a
+        # known SPA/framework login shell that renders credentials fields via JS.
+        # Signals: URL query-param intent + script/body content fingerprints.
+        # Sets result["js_rendered_login"] = True when confident; callers must
+        # then use browser-auth rather than static form submission.
+        result["js_rendered_login"] = False
+        if not result["login_form"]:
+            _jrl_url_lower = page_url.lower()
+            _jrl_html_lower = html.lower()
+
+            # 1. URL-level intent signals — query params or path segments that
+            #    indicate the page's purpose is authentication.
+            _URL_LOGIN_PARAMS = (
+                "legacylogin", "login", "signin", "logon", "signon",
+                "returnurl", "returnto", "redirect_uri", "next",
+                "auth", "authenticate", "sso", "saml", "oidc",
+            )
+            _parsed_qs = urllib.parse.parse_qs(
+                urllib.parse.urlparse(page_url).query, keep_blank_values=True)
+            _qs_keys_lower = {k.lower() for k in _parsed_qs}
+            _url_param_hit = any(p in _qs_keys_lower for p in _URL_LOGIN_PARAMS)
+            _url_path_hit  = any(
+                p in _jrl_url_lower
+                for p in ("/login", "/signin", "/logon", "/auth", "/sso",
+                          "login=", "logon=", "signin=", "auth=")
+            )
+
+            # 2. Content fingerprints for known JS login frameworks / products.
+            _JS_LOGIN_SIGNATURES = (
+                # IBM Cognos
+                "ibmcognos", "cognos", "bi/?legacylogin", "cam_passport",
+                "cognos.config", "ibm.cognos",
+                # Generic SPA/Angular/React/Vue login shells
+                "ng-app", "ng-controller", "data-ng-", "v-app", "v-model",
+                "react-root", "__react", "_reactroot",
+                # Common JS auth framework markers
+                "okta-sign-in", "okta-signin", "okta-widget",
+                "auth0-lock", "auth0.webauth",
+                "keycloak", "keycloak-js",
+                "adal.js", "msal.js", "msal-browser",
+                "pingfederate", "pingidentity",
+                "forgerock", "am.login",
+                "siteminder", "smloginpage",
+                # Generic: page says "login" / "sign in" prominently in text
+                # combined with a script-heavy page (low static form count)
+            )
+            _content_hit = any(sig in _jrl_html_lower for sig in _JS_LOGIN_SIGNATURES)
+
+            # 3. Script-density heuristic: many <script> tags + page text contains
+            #    login intent words but no static form → likely JS-rendered login.
+            _script_count  = len(_re3.findall(r'<script\b', html, _re3.IGNORECASE))
+            _text_only     = _re3.sub(r'<[^>]+>', ' ', html)
+            _text_lower    = _text_only.lower()
+            _login_words   = sum(1 for w in (
+                "username", "password", "sign in", "log in", "login",
+                "credentials", "email", "user id", "user name",
+            ) if w in _text_lower)
+            _form_count    = len(_re3.findall(r'<form\b', html, _re3.IGNORECASE))
+            _density_hit   = (_script_count >= 3 and _login_words >= 2
+                              and _form_count == 0)
+
+            if (_url_param_hit or _url_path_hit) and (_content_hit or _density_hit):
+                result["js_rendered_login"] = True
+                vc.log(
+                    f"[auth] JS-rendered login page detected at {page_url} "
+                    f"(url_param={_url_param_hit}, url_path={_url_path_hit}, "
+                    f"content={_content_hit}, density={_density_hit})",
+                    "INFO",
+                )
+
         return result
 
     # ── JS onclick automation — try everything before requiring a browser ─────
@@ -2785,6 +2856,15 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             _visited_bases.add(_udf3(current_url)[0])
 
             page = _analyse_form_page(resp.text, current_url)
+
+            # ── Priority 0: JS-rendered login page (no static form) ───────────
+            if page.get("js_rendered_login"):
+                vc.log(
+                    f"[auth] Step {_step + 1}: JS-rendered login page at {current_url} "
+                    "— automated form submission not possible; switching to browser-auth",
+                    "INFO",
+                )
+                return "__BROWSER_AUTH__"
 
             # ── Priority 1: real login form ───────────────────────────────────
             if page["login_form"]:
@@ -3705,6 +3785,11 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 if page["login_form"] or (page["has_username"] and page["has_checkbox"]):
                     vc.log(f"[auth] Login form found at common path: {r.url}", "SUCCESS")
                     return r.url
+                if page.get("js_rendered_login"):
+                    vc.log(
+                        f"[auth] JS-rendered login page at common path: {r.url} "
+                        "(browser-auth required)", "INFO")
+                    return r.url
             except Exception:
                 continue
 
@@ -3772,6 +3857,11 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             page = _analyse_form_page(r.text, r.url)
             if page["login_form"] or (page["has_username"] and page["has_checkbox"]):
                 vc.log(f"[auth] Login form found via spider at: {r.url}", "SUCCESS")
+                return r.url
+            if page.get("js_rendered_login"):
+                vc.log(
+                    f"[auth] JS-rendered login page found via spider at: {r.url} "
+                    "(browser-auth required)", "INFO")
                 return r.url
 
             if depth < 3:
@@ -4222,7 +4312,25 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     )
                 else:
                     _guard_p = _analyse_form_page(_guard_r.text, _guard_r.url)
-                    if not _guard_p["login_form"]:
+                    if _guard_p.get("js_rendered_login"):
+                        # Page is a JS-rendered login shell — automated submission
+                        # is not possible; hand off to browser-auth immediately.
+                        _ba_url_for_guard = (
+                            auth.get("login_url", "").strip() or _base_target_url)
+                        if cfg.get("browser_auth") and _ba_url_for_guard:
+                            vc.log(
+                                f"[auth] JS-rendered login detected at guard — "
+                                "falling back to browser-assisted login",
+                                "INFO",
+                            )
+                            return _browser_assisted_login(_ba_url_for_guard)
+                        vc.log(
+                            f"[auth] JS-rendered login detected at {_login_url} "
+                            "— set --browser-auth to authenticate interactively",
+                            "WARNING",
+                        )
+                        _login_url = ""
+                    elif not _guard_p["login_form"]:
                         vc.log(
                             f"[auth] Resolved URL has no username/password form — "
                             f"cannot submit credentials ({_login_url})",
