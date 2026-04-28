@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.34"
+VERSION = "2.9.35"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2918,28 +2918,18 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         )
                         return "__BROWSER_AUTH__"
 
-                    # Interactive TTY → ask the user
-                    if _sys_jo.stdin.isatty():
-                        vc.log(
-                            "[auth] Open a browser window to complete login manually? [Y/n]: ",
-                            "INFO",
-                        )
-                        try:
-                            _br_choice = input("  > ").strip().lower()
-                        except EOFError:
-                            _br_choice = "n"
-                        if _br_choice != "n":
-                            return "__BROWSER_AUTH__"
-                        vc.log(
-                            "[auth] Browser login declined — continuing without authentication",
-                            "WARNING",
-                        )
-                    else:
-                        vc.log(
-                            "[auth] Non-interactive session — re-run with "
-                            "--browser-auth to handle this login flow.",
-                            "WARNING",
-                        )
+                    # Ask the user — works in both TTY and Crucible-managed mode
+                    _br_choice = vc.prompt(
+                        "Open a browser window to complete login manually?",
+                        prompt_type="confirm",
+                        options=["Yes", "No"],
+                    ).strip()
+                    if _br_choice.lower() in ("yes", "y", "1"):
+                        return "__BROWSER_AUTH__"
+                    vc.log(
+                        "[auth] Browser login declined — continuing without authentication",
+                        "WARNING",
+                    )
                     return ""
 
                 _nav_base, _ = _udf3(nav["url"])
@@ -3490,18 +3480,24 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     except Exception:
                         pass
                 vc.log(f"  [{_si}]  {_sd}{_so}", "INFO")
-            try:
-                _choice = input(
-                    f"[auth] Select session [1-{len(_all_sessions)}]"
-                    " or press Enter to try all: "
-                ).strip()
-                if _choice.isdigit():
-                    _ci = int(_choice) - 1
-                    if 0 <= _ci < len(_all_sessions):
-                        _all_sessions = [_all_sessions[_ci]]
+            _sess_labels = [s["_display"] for s in _all_sessions]
+            _choice = vc.prompt(
+                f"Select display session [1-{len(_all_sessions)}] or leave empty to try all",
+                prompt_type="text",
+                options=_sess_labels,
+                skippable=True,
+            ).strip()
+            if _choice.isdigit():
+                _ci = int(_choice) - 1
+                if 0 <= _ci < len(_all_sessions):
+                    _all_sessions = [_all_sessions[_ci]]
+                    vc.log(f"[auth] Using session: {_all_sessions[0]['_display']}", "INFO")
+            elif _choice:
+                for _si2, _lbl2 in enumerate(_sess_labels):
+                    if _lbl2.strip().lower() == _choice.strip().lower() or _choice in _lbl2:
+                        _all_sessions = [_all_sessions[_si2]]
                         vc.log(f"[auth] Using session: {_all_sessions[0]['_display']}", "INFO")
-            except Exception:
-                pass
+                        break
 
         # Helper: apply one session's env vars before a browser launch attempt.
         # XAUTHORITY must be root-owned for Firefox; if no root-owned file was
@@ -3599,14 +3595,15 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             vc.log(f"[auth] {_used_name} opened — navigate to {login_url} and log in", "INFO")
             driver.get(login_url)
             vc.log(
-                "[auth] Complete login in the browser window, then press Enter here "
+                "[auth] Complete login in the browser window, then click OK (or press Enter) "
                 "to capture the session and continue …",
                 "INFO",
             )
-            try:
-                input()
-            except (EOFError, KeyboardInterrupt):
-                pass
+            vc.prompt(
+                "Complete login in the browser, then click OK to capture the session",
+                prompt_type="text",
+                skippable=True,
+            )
 
             captured_url    = driver.current_url
             browser_cookies = driver.get_cookies()
@@ -4070,52 +4067,62 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         continue
                     _radio_done.add(_fn)
                     _opts = [f for f in _form["fields"] if f["name"] == _fn and f["type"] == "radio"]
-                    vc.log(f"[auth]   {_flbl}:", "INFO")
-                    for _i, _opt in enumerate(_opts, 1):
-                        vc.log(f"[auth]     {_i}. {_opt['label'] or _opt['value']}", "INFO")
+                    _opt_labels = [o["label"] or o["value"] for o in _opts]
+                    _ans = vc.prompt(
+                        f"{_flbl} — select one",
+                        prompt_type="text",
+                        options=_opt_labels,
+                    ).strip()
                     try:
-                        _ans = input(f"    Enter number [1-{len(_opts)}]: ").strip()
                         _idx = int(_ans) - 1
                         _filled[_fn] = _opts[_idx]["value"] if 0 <= _idx < len(_opts) else _opts[0]["value"]
-                    except (ValueError, EOFError, IndexError):
-                        _filled[_fn] = _opts[0]["value"]
+                    except (ValueError, IndexError):
+                        _found_r = False
+                        for _ro in _opts:
+                            if (_ro["label"] or _ro["value"]).lower() == _ans.lower():
+                                _filled[_fn] = _ro["value"]
+                                _found_r = True
+                                break
+                        if not _found_r:
+                            _filled[_fn] = _opts[0]["value"] if _opts else ""
 
                 elif _ft == "checkbox":
                     _state = "checked" if _field["checked"] else "unchecked"
-                    vc.log(f"[auth]   {_flbl}  [{_state}]", "INFO")
-                    try:
-                        _ans = input("    Check this box? [Y/n]: ").strip().lower()
-                        if _ans != "n":
-                            _filled[_fn] = _field["value"] or "on"
-                        # unchecked → omit from POST (standard HTML behaviour)
-                    except EOFError:
+                    _ans = vc.prompt(
+                        f"{_flbl} [{_state}] — check this box?",
+                        prompt_type="confirm",
+                        options=["Yes", "No"],
+                    ).strip().lower()
+                    if _ans not in ("no", "n", "2"):
                         _filled[_fn] = _field["value"] or "on"
+                    # unchecked → omit from POST (standard HTML behaviour)
 
                 elif _ft == "select":
                     _opts = _field.get("options", [])
-                    vc.log(f"[auth]   {_flbl}:", "INFO")
-                    for _i, (_oval, _otxt) in enumerate(_opts, 1):
-                        vc.log(f"[auth]     {_i}. {_otxt}", "INFO")
+                    _opt_labels = [_otxt for _, _otxt in _opts]
+                    _ans = vc.prompt(
+                        f"{_flbl} — select one",
+                        prompt_type="text",
+                        options=_opt_labels,
+                    ).strip()
                     try:
-                        _ans = input(f"    Enter number [1-{len(_opts)}]: ").strip()
                         _idx = int(_ans) - 1
                         _filled[_fn] = _opts[_idx][0] if 0 <= _idx < len(_opts) else (_opts[0][0] if _opts else "")
-                    except (ValueError, EOFError, IndexError):
-                        _filled[_fn] = _opts[0][0] if _opts else ""
+                    except (ValueError, IndexError):
+                        _found_s = False
+                        for _oval, _otxt in _opts:
+                            if _otxt.lower() == _ans.lower():
+                                _filled[_fn] = _oval
+                                _found_s = True
+                                break
+                        if not _found_s:
+                            _filled[_fn] = _opts[0][0] if _opts else ""
 
                 elif _ft == "password":
-                    try:
-                        import getpass as _gp7
-                        _filled[_fn] = _gp7.getpass(f"    {_flbl}: ")
-                    except EOFError:
-                        _filled[_fn] = ""
+                    _filled[_fn] = vc.prompt(f"{_flbl}", prompt_type="password")
 
                 else:  # text, email, tel, number, search, otp, textarea
-                    vc.log(f"[auth]   {_flbl}:", "INFO")
-                    try:
-                        _filled[_fn] = input("    > ").strip()
-                    except EOFError:
-                        _filled[_fn] = ""
+                    _filled[_fn] = vc.prompt(f"{_flbl}", prompt_type="text").strip()
 
             # ── 6. Submit completed form ───────────────────────────────────────
             vc.log(f"[auth] Submitting post-login form → {_form['action']}", "INFO")
@@ -13536,23 +13543,19 @@ def _prompt_multi_role_setup(auth_cfg: dict) -> int:
     Modifies auth_cfg in-place when new credentials are provided.
     Returns the number of authenticated roles (0 = unauthenticated only).
     """
-    import getpass as _gp
-    while True:
-        try:
-            raw = input(
-                "\n[*] How many authenticated user roles will be tested "
-                "(not including unauthenticated)? [0]: "
-            ).strip()
-            if not raw:
-                return 0
-            n = int(raw)
-            if n >= 0:
-                break
-            print("    Enter 0 or a positive integer.")
-        except ValueError:
-            print("    Enter 0 or a positive integer.")
-        except EOFError:
-            return 0
+    raw = vc.prompt(
+        "How many authenticated user roles will be tested (not including unauthenticated)?",
+        prompt_type="text",
+        skippable=True,
+    ).strip()
+    if not raw:
+        return 0
+    try:
+        n = int(raw)
+        if n < 0:
+            n = 0
+    except ValueError:
+        n = 0
 
     if n == 0:
         return 0
@@ -13563,16 +13566,18 @@ def _prompt_multi_role_setup(auth_cfg: dict) -> int:
 
     if _has_creds and n > 1:
         _u = auth_cfg.get("username") or "(token)"
-        print(f"\n[*] Credentials are configured for '{_u}'.")
-        _ans = input("    Are these for the most permissive user? [Y/n]: ").strip().lower()
-        if _ans in ("n", "no"):
+        _ans = vc.prompt(
+            f"Credentials are configured for '{_u}'. Are these for the most permissive user?",
+            prompt_type="confirm",
+            options=["Yes", "No"],
+        ).strip().lower()
+        if _ans in ("no", "n", "2"):
             _has_creds = False
 
     if not _has_creds:
-        print("\n[*] Enter credentials for the most permissive user (role 1):")
-        _uname = input("    Username: ").strip()
-        _pwd   = _gp.getpass("    Password: ")
-        _lbl   = input("    Role label (e.g. admin) [role_1]: ").strip() or "role_1"
+        _uname = vc.prompt("Username (most permissive user — role 1)", prompt_type="text").strip()
+        _pwd   = vc.prompt("Password (most permissive user — role 1)", prompt_type="password")
+        _lbl   = vc.prompt("Role label (e.g. admin)", prompt_type="text").strip() or "role_1"
         auth_cfg["enabled"]      = True
         auth_cfg["username"]     = _uname
         auth_cfg["password"]     = _pwd
@@ -13588,15 +13593,11 @@ def _prompt_next_role_creds(role_num: int, total: int) -> dict:
     Prompt for credentials for role_num of total authenticated roles.
     Returns {"role": label, "username": u, "password": p}.
     """
-    import getpass as _gp
-    print(f"\n[*] Role {role_num}/{total} — enter credentials for the next role:")
-    while True:
-        _uname = input(f"    Username (role {role_num}): ").strip()
-        if _uname:
-            break
-        print("    Username cannot be empty.")
-    _pwd  = _gp.getpass(f"    Password (role {role_num}): ")
-    _lbl  = input(f"    Role label [role_{role_num}]: ").strip() or f"role_{role_num}"
+    _uname = vc.prompt(
+        f"Username (role {role_num}/{total})", prompt_type="text"
+    ).strip() or f"role_{role_num}"
+    _pwd  = vc.prompt(f"Password (role {role_num}/{total})", prompt_type="password")
+    _lbl  = vc.prompt(f"Role label", prompt_type="text").strip() or f"role_{role_num}"
     return {"role": _lbl, "username": _uname, "password": _pwd}
 
 
@@ -13699,15 +13700,14 @@ def main() -> None:
     _n_roles: int = 0
     _collected_roles: list = []  # [{"role": label, "username": u, "password": p}, ...]
 
-    if not _VANTAGE_MANAGED:
-        _n_roles = _prompt_multi_role_setup(cfg["auth"])
-        if _n_roles >= 1:
-            _r1_lbl = cfg["auth"].pop("_role_label", None) or cfg["auth"].get("username") or "role_1"
-            _collected_roles.append({
-                "role":     _r1_lbl,
-                "username": cfg["auth"].get("username", ""),
-                "password": cfg["auth"].get("password", ""),
-            })
+    _n_roles = _prompt_multi_role_setup(cfg["auth"])
+    if _n_roles >= 1:
+        _r1_lbl = cfg["auth"].pop("_role_label", None) or cfg["auth"].get("username") or "role_1"
+        _collected_roles.append({
+            "role":     _r1_lbl,
+            "username": cfg["auth"].get("username", ""),
+            "password": cfg["auth"].get("password", ""),
+        })
 
     while _pending_idx < len(_pending_urls):
         raw_url      = _pending_urls[_pending_idx]
@@ -14588,7 +14588,6 @@ def main() -> None:
             if (
                 _ctx.get("multi_role")
                 and _ctx_label != "unauthenticated"
-                and not _VANTAGE_MANAGED
             ):
                 _next_idx = _ctx.get("role_idx", 0) + 1
                 if _next_idx < _n_roles and _next_idx >= len(_collected_roles):
