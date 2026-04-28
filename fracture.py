@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.42"
+VERSION = "2.9.43"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -138,6 +138,11 @@ def _start_concurrency_monitor(sem, interval=10):
 _hw_cpu, _hw_ram    = _hw_detect()
 _SCAN_CONCURRENCY   = _calc_initial_concurrency(_hw_cpu, _hw_ram)
 _SCAN_SEM           = _AdaptiveSemaphore(_SCAN_CONCURRENCY)
+# Tracks which credential role is currently being tested so that
+# _write_preliminary_access_matrix stores HTTP statuses in the right column.
+# Set to "unauthenticated" during pre-context recon, to the role label at the
+# start of each context, and cleared ("") between targets.
+_scan_ctx: dict = {"role": ""}
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────
@@ -13393,7 +13398,11 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
     for r in roles:
         if r not in merged_roles:
             merged_roles.append(r)
-    seed_unauth = "unauthenticated" in merged_roles
+    # Which role is currently being tested?  The global tracker is set by the
+    # scan orchestrator before each phase group.  Status codes from structure_map
+    # go into that role's column — not unconditionally into "unauthenticated".
+    _active_role = _scan_ctx["role"]
+    _seed_active = bool(_active_role) and _active_role in merged_roles
     path_entries = []
     for p in all_paths:
         sm_status = sm_path_data.get(p, {}).get("status")
@@ -13404,14 +13413,14 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
             for r in merged_roles:
                 if r not in entry["access"]:
                     entry["access"][r] = None
-            # Backfill unauthenticated from structure_map if not yet probed
-            if seed_unauth and sm_status is not None and entry["access"].get("unauthenticated") is None:
-                entry["access"]["unauthenticated"] = sm_status
+            # Backfill active role's status from structure_map if not yet probed
+            if _seed_active and sm_status is not None and entry["access"].get(_active_role) is None:
+                entry["access"][_active_role] = sm_status
             path_entries.append(entry)
         else:
             access = {r: None for r in merged_roles}
-            if seed_unauth and sm_status is not None:
-                access["unauthenticated"] = sm_status
+            if _seed_active and sm_status is not None:
+                access[_active_role] = sm_status
             path_entries.append({"path": p, "url": base_url + p, "access": access})
     data = {
         "roles": merged_roles,
@@ -14009,6 +14018,7 @@ def main() -> None:
         # ── Server-side phases — run once, no auth dependency ──────────────
         # Pre-loop phases use the unauthenticated sess — always tag as UNAUTH
         out.set_auth_context([{"username": "UNAUTH", "role": "unauthenticated"}])
+        _scan_ctx["role"] = "unauthenticated"  # recon uses unauthenticated session
 
         # Phase 0: recon
         wc_baseline = None
@@ -14201,6 +14211,7 @@ def main() -> None:
         # ── Per-credential context loop ─────────────────────────────────────
         for _ctx in _cred_contexts:
             _ctx_label = _ctx["label"]
+            _scan_ctx["role"] = _ctx_label  # route structure_map statuses to this role's column
             _ctx_auth  = _ctx["auth_sess"]
             _ctx_cfg   = _ctx["cfg"]
             # True for roles 2..n and unauthenticated in multi-role mode.
@@ -14735,6 +14746,7 @@ def main() -> None:
                     })
 
         # ── Post-context: privilege-escalation / cross-credential phases ───
+        _scan_ctx["role"] = ""  # context loop complete; clear role tracker
         if auth_sess and cfg.get("auth", {}).get("enabled"):
             _post_user = cfg.get("auth", {}).get("username", "").strip() or "authenticated"
             out.set_auth_context([{"username": _post_user, "role": "authenticated"}])
