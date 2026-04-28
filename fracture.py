@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.55"
+VERSION = "2.9.56"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -4679,6 +4679,50 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         except ImportError:
             vc.err("[auth] Kerberos delegation requires: pip install requests-kerberos")
 
+    elif method == "auto":
+        # ── Auto / Unknown — try username+password methods in priority order ─────
+        # Attempts each method that accepts a username and password, stops at the
+        # first one that produces a session carrying authentication signals.
+        # Priority order (web app / form-centric):
+        #   1. form_login  — HTML form POST → session cookie (most common for web apps)
+        #   2. token_login — POST credentials → JSON token response (modern web APIs)
+        #   3. basic       — HTTP Basic Auth (RFC 7617)
+        #   4. digest      — HTTP Digest Auth (RFC 7616)
+        #   5. ntlm        — NTLM / Windows Integrated Auth (Active Directory)
+        _auto_methods = ["form_login", "token_login", "basic", "digest", "ntlm"]
+        _auto_hdr_names = frozenset({
+            "authorization", "x-auth-token", "x-api-key", "x-csrf-token",
+            "x-access-token", "x-session-token", "token",
+        })
+
+        def _auto_has_auth(s: "requests.Session") -> bool:
+            return (bool(s.cookies)
+                    or any(k.lower() in _auto_hdr_names for k in s.headers)
+                    or s.auth is not None)
+
+        _auto_succeeded = False
+        for _auto_m in _auto_methods:
+            vc.log(f"[auth:auto] Trying method: {_auto_m}", "INFO")
+            _auto_cfg = copy.deepcopy(cfg)
+            _auto_cfg["auth"] = copy.deepcopy(auth)
+            _auto_cfg["auth"]["method"] = _auto_m
+            _auto_cfg["browser_auth"] = cfg.get("browser_auth", False)
+            try:
+                _auto_sess = _build_auth_session(
+                    _auto_cfg, auth_key, scope_hostnames, role_label=role_label)
+                if _auto_sess is not None and _auto_has_auth(_auto_sess):
+                    vc.log(
+                        f"[auth:auto] Success with method '{_auto_m}' — "
+                        "using this session", "SUCCESS")
+                    return _auto_sess
+                vc.log(f"[auth:auto] Method '{_auto_m}' produced no auth signal — skipping",
+                       "INFO")
+            except Exception as _auto_e:
+                vc.log(f"[auth:auto] Method '{_auto_m}' error: {_auto_e} — skipping", "INFO")
+        vc.log("[auth:auto] All username/password methods exhausted — no session established",
+               "WARNING")
+        return None
+
     # Transfer auth state (cookies + key headers) to a scoped session for scanning.
     # This lets login_url be on a different host while scan requests remain scope-enforced.
     if scope_hostnames is not None:
@@ -4906,7 +4950,7 @@ DEFAULT_SETTINGS: dict = {
         },
         "auth": {
             "enabled":                 False,
-            "method":                  "form_login",   # form_login|basic|digest|ntlm|ntlm_v2|bearer|session_cookie|token_login|oauth2_client_creds|oauth1a|saml_assertion|oidc_token|mtls|totp_mfa|webauthn_probe|apikey_header|apikey_cookie|header_creds|kerberos|kerberos_delegation
+            "method":                  "form_login",   # auto|form_login|basic|digest|ntlm|ntlm_v2|bearer|session_cookie|token_login|oauth2_client_creds|oauth1a|saml_assertion|oidc_token|mtls|totp_mfa|webauthn_probe|apikey_header|apikey_cookie|header_creds|kerberos|kerberos_delegation
             "auth_type":               "",             # legacy alias for method
             "username":                "",
             "password":                "",
