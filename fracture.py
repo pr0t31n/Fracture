@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.45"
+VERSION = "2.9.46"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1975,15 +1975,14 @@ class OutputManager:
                         new_desc = description.strip()
                         if new_desc and new_desc not in ex_desc:
                             ex["description"] = f"{ex_desc}\n\n{new_desc}".strip() if ex_desc else new_desc
-                    # merge accounts
+                    # merge accounts — dedup by role so the same role is never added twice
                     if self._current_accounts:
                         _ex_accts = ex.get("accounts") or []
-                        _acct_keys = {(a.get("username", ""), a.get("role", "")) for a in _ex_accts}
+                        _ex_roles = {a.get("role", "") for a in _ex_accts}
                         for _a in self._current_accounts:
-                            _k = (_a.get("username", ""), _a.get("role", ""))
-                            if _k not in _acct_keys:
+                            if _a.get("role", "") not in _ex_roles:
                                 _ex_accts.append(_a)
-                                _acct_keys.add(_k)
+                                _ex_roles.add(_a.get("role", ""))
                         ex["accounts"] = _ex_accts
                     # escalate risk
                     _risk_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
@@ -14093,7 +14092,12 @@ def main() -> None:
         # owned by the explicit unauthenticated context at the end of the context
         # loop.  Clear the role tracker so _write_preliminary_access_matrix leaves
         # all role slots null for newly-discovered paths during these phases.
-        out.set_auth_context([])   # no role tag during pre-context discovery phases
+        # Tag pre-context findings with all configured authenticated roles so they
+        # show role pills immediately.  Unauthenticated is excluded here — its pill
+        # appears only after the explicit unauthenticated context runs.
+        _pre_accts = [{"username": r, "role": r}
+                      for r in _all_roles_ctx if r != "unauthenticated"]
+        out.set_auth_context(_pre_accts)
         _scan_ctx["role"] = ""  # no column seeding during pre-context discovery
 
         # Phase 0: recon
