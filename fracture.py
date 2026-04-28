@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.43"
+VERSION = "2.9.44"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -143,6 +143,11 @@ _SCAN_SEM           = _AdaptiveSemaphore(_SCAN_CONCURRENCY)
 # Set to "unauthenticated" during pre-context recon, to the role label at the
 # start of each context, and cleared ("") between targets.
 _scan_ctx: dict = {"role": ""}
+# All role labels (authenticated + "unauthenticated") for this scan run.
+# Populated as soon as _collected_roles is known so that
+# _write_preliminary_access_matrix always emits the correct column list even
+# before the context loop builds _cred_contexts.  Mutated in-place.
+_all_roles_ctx: list = []
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────
@@ -13392,15 +13397,17 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
     existing_entries = {e["path"]: e for e in existing_am.get("paths", [])}
     base_url = target["url"].rstrip("/")
     sm_path_data = sm.get("paths", {})
-    # Compute merged roles first so every new path entry is null-initialized for
-    # all roles from the start — Crucible shows "—" for unprobed slots.
+    # Compute merged roles: start from existing file, add module-level role list
+    # (_all_roles_ctx is populated as soon as _collected_roles is known, so even
+    # the very first write during recon carries the correct column names), then
+    # any caller-supplied roles.
     merged_roles = list(existing_am.get("roles", []))
-    for r in roles:
+    for r in _all_roles_ctx + list(roles):
         if r not in merged_roles:
             merged_roles.append(r)
-    # Which role is currently being tested?  The global tracker is set by the
-    # scan orchestrator before each phase group.  Status codes from structure_map
-    # go into that role's column — not unconditionally into "unauthenticated".
+    # Which role is currently being tested?  Used only for NEW paths (never to
+    # backfill structure_map status into existing entries — that would mix data
+    # from earlier probes into the wrong role's column).
     _active_role = _scan_ctx["role"]
     _seed_active = bool(_active_role) and _active_role in merged_roles
     path_entries = []
@@ -13409,15 +13416,17 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
         if p in existing_entries:
             entry = dict(existing_entries[p])
             entry["access"] = dict(entry.get("access", {}))
-            # Null-initialize any role not yet recorded for this path
+            # Null-initialize any role not yet recorded for this path.
+            # Never overwrite existing values from structure_map here — the
+            # status in structure_map may have been set by a different role's
+            # probe and must not bleed into the current role's column.
             for r in merged_roles:
                 if r not in entry["access"]:
                     entry["access"][r] = None
-            # Backfill active role's status from structure_map if not yet probed
-            if _seed_active and sm_status is not None and entry["access"].get(_active_role) is None:
-                entry["access"][_active_role] = sm_status
             path_entries.append(entry)
         else:
+            # New path just discovered in the current role's context — seed its
+            # status code from the probe that found it (accurate for this role).
             access = {r: None for r in merged_roles}
             if _seed_active and sm_status is not None:
                 access[_active_role] = sm_status
@@ -13432,6 +13441,58 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
         am_path.write_text(json.dumps(data, indent=2))
     except Exception:
         pass
+
+
+def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
+                      role_label: str, role_sess: "requests.Session | None") -> None:
+    """Probe all structure_map paths that have no HTTP code for role_label yet.
+
+    Called at the end of each credential context to guarantee role completion:
+    every discovered endpoint has a real status code for the current role before
+    the scan moves on.  Writes results directly into access_matrix.json.
+    """
+    sm_path = out.root / "structure_map.json"
+    am_path = out.root / "access_matrix.json"
+    try:
+        sm = json.loads(sm_path.read_text()) if sm_path.exists() else {}
+        am = json.loads(am_path.read_text()) if am_path.exists() else {}
+    except Exception:
+        return
+    am_by_path = {e["path"]: e for e in am.get("paths", [])}
+    all_sm_paths = sorted(sm.get("paths", {}).keys())
+    if not all_sm_paths:
+        return
+    base_url   = target["url"].rstrip("/")
+    timeout    = cfg.get("timeout", 10)
+    verify_ssl = cfg.get("verify_ssl", False)
+    probe_sess = role_sess if role_sess is not None else requests.Session()
+    if role_sess is None:
+        probe_sess.verify = verify_ssl
+    changed = False
+    for path in all_sm_paths:
+        entry = am_by_path.get(path)
+        if entry is None:
+            continue  # Not yet in access_matrix; will be added by _write_preliminary_access_matrix
+        access = entry.setdefault("access", {})
+        if access.get(role_label) is not None:
+            continue  # Already probed
+        url = base_url + path
+        try:
+            r = probe_sess.get(url, timeout=timeout, allow_redirects=False,
+                               headers={"Accept": "text/html,application/json"})
+            access[role_label] = r.status_code
+        except Exception:
+            try:
+                r = probe_sess.head(url, timeout=max(timeout // 2, 3), allow_redirects=False)
+                access[role_label] = r.status_code
+            except Exception:
+                access[role_label] = 0
+        changed = True
+    if changed:
+        try:
+            am_path.write_text(json.dumps(am, indent=2))
+        except Exception:
+            pass
 
 
 def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
@@ -13811,6 +13872,11 @@ def main() -> None:
             f"[multi-role] {_n_roles} role(s) loaded from project settings — skipping prompt",
             "INFO",
         )
+        # Seed the global role list immediately so preliminary access_matrix
+        # writes during recon/gobuster already carry the correct column names.
+        _all_roles_ctx[:] = [r["role"] for r in _collected_roles]
+        if "unauthenticated" not in _all_roles_ctx:
+            _all_roles_ctx.append("unauthenticated")
     else:
         _n_roles = _prompt_multi_role_setup(cfg["auth"])
         if _n_roles >= 1:
@@ -13820,6 +13886,10 @@ def main() -> None:
                 "username": cfg["auth"].get("username", ""),
                 "password": cfg["auth"].get("password", ""),
             })
+            # Seed with at least role 1 + unauthenticated; extended as more roles are added
+            _all_roles_ctx[:] = [r["role"] for r in _collected_roles]
+            if "unauthenticated" not in _all_roles_ctx:
+                _all_roles_ctx.append("unauthenticated")
 
     while _pending_idx < len(_pending_urls):
         raw_url      = _pending_urls[_pending_idx]
@@ -14707,6 +14777,13 @@ def main() -> None:
                     vc.error(f"Phase mass_assignment [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"mass_assignment#{_ctx_label}", "error", detail=str(e))
 
+            # Ensure every discovered path has an HTTP code for this role before
+            # moving on — a role is not complete until all known endpoints are probed.
+            try:
+                _probe_role_paths(out, target, _ctx_cfg, _ctx_label, _ctx_auth)
+            except Exception:
+                pass
+
             # Write preliminary access_matrix.json after each context completes so
             # Crucible can display the growing path list without waiting for Phase 20.
             try:
@@ -14727,6 +14804,8 @@ def main() -> None:
                     # Collect credentials for the next role now
                     _nr_creds = _prompt_next_role_creds(_next_idx + 1, _n_roles)
                     _collected_roles.append(_nr_creds)
+                    if _nr_creds["role"] not in _all_roles_ctx:
+                        _all_roles_ctx.insert(-1, _nr_creds["role"])  # before "unauthenticated"
                     _nr_cfg = copy.deepcopy(cfg)
                     _nr_cfg["auth"]["enabled"]  = True
                     _nr_cfg["auth"]["username"] = _nr_creds["username"]
