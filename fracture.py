@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.44"
+VERSION = "2.9.45"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -13405,9 +13405,9 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
     for r in _all_roles_ctx + list(roles):
         if r not in merged_roles:
             merged_roles.append(r)
-    # Which role is currently being tested?  Used only for NEW paths (never to
-    # backfill structure_map status into existing entries — that would mix data
-    # from earlier probes into the wrong role's column).
+    # Which role is currently being tested?
+    # Safe because pre-context phases use _scan_ctx["role"]="" (_seed_active=False),
+    # so only the explicitly running role's column is ever updated here.
     _active_role = _scan_ctx["role"]
     _seed_active = bool(_active_role) and _active_role in merged_roles
     path_entries = []
@@ -13417,12 +13417,14 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
             entry = dict(existing_entries[p])
             entry["access"] = dict(entry.get("access", {}))
             # Null-initialize any role not yet recorded for this path.
-            # Never overwrite existing values from structure_map here — the
-            # status in structure_map may have been set by a different role's
-            # probe and must not bleed into the current role's column.
             for r in merged_roles:
                 if r not in entry["access"]:
                     entry["access"][r] = None
+            # Seed active role's status from structure_map for real-time column
+            # feedback. _probe_role_paths at context end overwrites with accurate
+            # authenticated-session values.
+            if _seed_active and sm_status is not None and entry["access"].get(_active_role) is None:
+                entry["access"][_active_role] = sm_status
             path_entries.append(entry)
         else:
             # New path just discovered in the current role's context — seed its
@@ -14091,7 +14093,7 @@ def main() -> None:
         # owned by the explicit unauthenticated context at the end of the context
         # loop.  Clear the role tracker so _write_preliminary_access_matrix leaves
         # all role slots null for newly-discovered paths during these phases.
-        out.set_auth_context([{"username": "UNAUTH", "role": "unauthenticated"}])
+        out.set_auth_context([])   # no role tag during pre-context discovery phases
         _scan_ctx["role"] = ""  # no column seeding during pre-context discovery
 
         # Phase 0: recon
