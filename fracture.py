@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.73"
+VERSION = "2.10.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6722,6 +6722,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 }
                 # Track which security headers whatweb observed as present
                 ww_found_sec_hdrs: set = set()
+                # HTTP status from the last-parsed whatweb record (used for
+                # Missing Security Header findings emitted after the loop).
+                _ww_http_status: "int | None" = None
 
                 for line in ww_out.read_text(encoding="utf-8", errors="replace").splitlines():
                     line = line.strip()
@@ -6732,6 +6735,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                         if not isinstance(records, list):
                             records = [records]
                         for rec in records:
+                            _ww_http_status = rec.get("http_status") or _ww_http_status
                             plugins = rec.get("plugins", {})
                             for pname, pdata in plugins.items():
                                 if pname in _SKIP_WW:
@@ -6775,7 +6779,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                                     + (f" Value: {hdr_value}" if hdr_value else "")
                                                 ),
                                                 output=f"Header: {hdr_name}"
-                                                       + (f"\nValue: {hdr_value}" if hdr_value else ""),
+                                                       + (f"\nValue: {hdr_value}" if hdr_value else "")
+                                                       + (f"\nHTTP Status: {_ww_http_status}" if _ww_http_status else ""),
                                                 sources="whatweb", service=target["scheme"],
                                                 output_file=str(ww_out),
                                                 owasp="A05:2025 Security Misconfiguration",
@@ -6801,7 +6806,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                             + (f" Value: {version}" if version else "")
                                         ),
                                         output=(f"Header: {pname}"
-                                                + (f"\nValue: {version}" if version else "")),
+                                                + (f"\nValue: {version}" if version else "")
+                                                + (f"\nHTTP Status: {_ww_http_status}" if _ww_http_status else "")),
                                         sources="whatweb", service=target["scheme"],
                                         output_file=str(ww_out),
                                         owasp="A05:2025 Security Misconfiguration",
@@ -6824,7 +6830,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                         f"{' ' + version if version else ''} at {url}."
                                     ),
                                     output=(f"Plugin: {pname}"
-                                            + (f"\nVersion: {version}" if version else "")),
+                                            + (f"\nVersion: {version}" if version else "")
+                                            + (f"\nHTTP Status: {_ww_http_status}" if _ww_http_status else "")),
                                     sources="whatweb", service=target["scheme"],
                                     output_file=str(ww_out),
                                     owasp="A06:2025 Vulnerable and Outdated Components",
@@ -6847,7 +6854,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             title=f"Missing Security Header: {_hdr_name}",
                             url=url, port=target["port"], risk=_hdr_risk,
                             description=_hdr_desc,
-                            output=f"Missing: {_hdr_name}",
+                            output=f"Missing: {_hdr_name}"
+                                   + (f"\nHTTP Status: {_ww_http_status}" if _ww_http_status else ""),
                             affected=_url_rel_path(url, target["url"]),
                             sources="whatweb", service=target["scheme"],
                             output_file=str(ww_out),
@@ -10062,6 +10070,307 @@ def _crawl_output_path(root: Path, url: str) -> Path:
     return dest
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SPA detection and headless crawl
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SPA_MOUNT_IDS = frozenset({"root", "app", "__nuxt", "__next", "vue-app", "ng-app"})
+
+_SPA_SCRIPT_RE = re.compile(
+    r'react(?:\.development|\.production\.min)?\.js'
+    r'|vue(?:\.common|\.esm-bundler|\.runtime\.dom|\.min)?\.js'
+    r'|@angular/'
+    r'|angular(?:\.min)?\.js'
+    r'|_next/static'
+    r'|nuxt(?:\.min)?\.js'
+    r'|svelte(?:\.dev|\.min)?\.js'
+    r'|ember(?:\.debug|\.min)?\.js'
+    r'|backbone(?:\.min)?\.js',
+    re.IGNORECASE,
+)
+
+_SPA_BUNDLE_RE = re.compile(
+    r'(?:chunk|vendor|main|app|runtime|bundle)\.[a-f0-9]{6,20}(?:\.min)?\.js',
+    re.IGNORECASE,
+)
+
+_SPA_INLINE_MARKERS = [
+    ("__NEXT_DATA__",    "Next.js"),
+    ("__NUXT__",         "Nuxt.js"),
+    ("data-reactroot",   "React"),
+    ("ng-version",       "Angular"),
+    ("__VUE__",          "Vue"),
+    ("window.Ember",     "Ember"),
+    ("__svelte",         "Svelte"),
+]
+
+
+def _detect_spa(html: str, url: str, static_link_count: int) -> "tuple[bool, list[str]]":
+    """Heuristically determine whether the target is a Single Page Application.
+
+    Returns (is_spa, evidence_list).  Called after the static crawl so that
+    static_link_count reflects how many links were actually discovered without
+    JS execution — a low count alongside heavy JS is a strong SPA signal.
+    """
+    if not html or not _BS4_AVAILABLE:
+        return False, []
+
+    evidence: list = []
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return False, []
+
+    # Mount-point IDs used by every major SPA framework
+    for tag_id in _SPA_MOUNT_IDS:
+        if soup.find(id=tag_id):
+            evidence.append(f"SPA mount point: id='{tag_id}'")
+
+    # Angular custom elements / ng-app directive
+    if soup.find("app-root") or soup.find(attrs={"ng-app": True}):
+        evidence.append("Angular app-root / ng-app directive")
+
+    # Known SPA framework script sources
+    script_srcs = [s.get("src", "") for s in soup.find_all("script") if s.get("src")]
+    for src in script_srcs:
+        if _SPA_SCRIPT_RE.search(src):
+            evidence.append(f"SPA framework script: {src.split('?')[0][-60:]}")
+            break
+
+    # Webpack / Vite hashed bundle pattern
+    if any(_SPA_BUNDLE_RE.search(s) for s in script_srcs):
+        evidence.append("Bundled JS chunks (webpack / vite)")
+
+    # Inline markers embedded in the page HTML
+    for marker, name in _SPA_INLINE_MARKERS:
+        if marker in html:
+            evidence.append(f"{name} inline indicator ({marker})")
+            break
+
+    # Near-empty body with multiple script tags (typical SPA shell)
+    body = soup.find("body")
+    if body:
+        body_text = body.get_text(separator=" ", strip=True)
+        child_els = sum(1 for c in body.children if hasattr(c, "name") and c.name)
+        if len(body_text) < 100 and len(script_srcs) >= 2:
+            evidence.append(
+                f"Near-empty body ({len(body_text)} chars) with {len(script_srcs)} scripts"
+            )
+        elif child_els <= 3 and len(script_srcs) >= 3:
+            evidence.append(
+                f"Sparse body ({child_els} elements) with {len(script_srcs)} scripts"
+            )
+
+    # Very few static links despite heavy JS presence
+    if static_link_count < 5 and len(script_srcs) >= 3:
+        evidence.append(
+            f"Only {static_link_count} static links with {len(script_srcs)} script tags"
+        )
+
+    return bool(evidence), evidence
+
+
+def _spa_transfer_cookies(sess: "requests.Session", driver: object,
+                          base_url: str) -> None:
+    """Copy all cookies from a requests.Session into a Selenium WebDriver.
+
+    The driver must already be on the target origin before this is called —
+    Selenium's same-origin cookie policy rejects additions to a foreign domain.
+    """
+    try:
+        domain_hint = urllib.parse.urlparse(base_url).netloc.split(":")[0]
+        for ck in sess.cookies:
+            try:
+                driver.add_cookie({   # type: ignore[attr-defined]
+                    "name":   ck.name,
+                    "value":  ck.value,
+                    "domain": ck.domain or domain_hint,
+                    "path":   ck.path   or "/",
+                    "secure": bool(ck.secure),
+                })
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
+                     out: "OutputManager", sess: "requests.Session",
+                     already_visited: int) -> dict:
+    """Headless-browser crawl for Single Page Applications.
+
+    Uses Fracture's existing Selenium / Chrome infrastructure, running Chrome
+    in headless mode to execute JavaScript and crawl routes that are invisible
+    to the static BeautifulSoup pass.  Session cookies are transferred so the
+    crawl runs as the current credential context.
+
+    Returns a partial crawl_data dict (same schema as _phase_crawl output)
+    containing only the incremental results — the caller merges them.
+    """
+    phase      = "crawl"
+    url        = target["url"]
+    timeout    = cfg.get("timeout", 10)
+    verify_ssl = cfg.get("verify_ssl", False)
+    max_pages  = max(10, min(cfg.get("crawl_max_pages", 500) - already_visited, 200))
+
+    spa_forms: list = []
+    spa_links: list = []
+    spa_js:    list = []
+    visited:   set  = set()
+    driver             = None
+
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.support.ui import WebDriverWait
+    except ImportError:
+        vc.log("[crawl/spa] selenium not importable — skipping headless crawl", "WARNING")
+        return {}
+
+    try:
+        opts = Options()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--disable-notifications")
+        opts.add_argument("--disable-popup-blocking")
+        opts.add_argument("--log-level=3")
+        opts.add_argument("--silent")
+        if not verify_ssl:
+            opts.add_argument("--ignore-certificate-errors")
+            opts.add_argument("--allow-insecure-localhost")
+        chrome_bin = _find_chrome_binary()
+        if chrome_bin:
+            opts.binary_location = chrome_bin
+
+        service = _build_chrome_service()
+        driver  = webdriver.Chrome(service=service, options=opts)
+        driver.set_page_load_timeout(max(timeout * 2, 30))
+        driver.implicitly_wait(2)
+
+        # Navigate to origin first (required before cookie injection)
+        try:
+            driver.get(url)
+        except Exception:
+            pass
+        driver.delete_all_cookies()
+        _spa_transfer_cookies(sess, driver, url)
+
+        queue = [url]
+        page_count = 0
+        vc.status(phase, "Crawl", "running", "SPA headless crawl", 0, max_pages)
+
+        while queue and page_count < max_pages:
+            current = queue.pop(0)
+            norm_c  = current.rstrip("/")
+            if norm_c in visited:
+                continue
+            visited.add(norm_c)
+            page_count += 1
+            vc.status(phase, "Crawl", "running",
+                      f"SPA page {page_count}", page_count, max_pages)
+
+            try:
+                driver.get(current)
+                WebDriverWait(driver, min(timeout, 15)).until(
+                    lambda d: d.execute_script(  # type: ignore[union-attr]
+                        "return document.readyState") == "complete"
+                )
+                time.sleep(0.8)  # allow XHR / fetch to settle
+            except Exception:
+                continue
+
+            # Extract links from the rendered DOM (includes SPA router anchors
+            # and framework data-* navigation attributes)
+            try:
+                raw_links = driver.execute_script("""
+                    var sel = 'a[href],[data-href],[data-url],[data-link],[data-action]';
+                    return Array.from(document.querySelectorAll(sel)).map(function(el){
+                        return el.getAttribute('href')
+                            || el.getAttribute('data-href')
+                            || el.getAttribute('data-url')
+                            || el.getAttribute('data-link')
+                            || el.getAttribute('data-action') || '';
+                    }).filter(Boolean);
+                """) or []
+                for raw in raw_links:
+                    nl = _normalize_url(current, raw)
+                    if (nl and _same_origin(url, nl)
+                            and not _LOGOUT_PATH_RE.search(
+                                urllib.parse.urlparse(nl).path or "")):
+                        spa_links.append(nl)
+                        if nl.rstrip("/") not in visited:
+                            queue.append(nl)
+            except Exception:
+                pass
+
+            # Extract forms from the rendered DOM
+            try:
+                raw_forms = driver.execute_script("""
+                    return Array.from(document.forms).map(function(f){
+                        return {
+                            action: f.action || '',
+                            method: (f.method || 'GET').toUpperCase(),
+                            inputs: Array.from(f.elements)
+                                .filter(function(e){ return e.name; })
+                                .map(function(e){
+                                    return {name: e.name, type: e.type || 'text'};
+                                })
+                        };
+                    });
+                """) or []
+                for frm in raw_forms:
+                    raw_action = frm.get("action", "") or current
+                    norm_action = _normalize_url(current, raw_action) or current
+                    if _same_origin(url, norm_action):
+                        spa_forms.append({
+                            "action": norm_action,
+                            "method": frm.get("method", "GET"),
+                            "inputs": frm.get("inputs", []),
+                        })
+                        if norm_action.rstrip("/") not in visited:
+                            queue.append(norm_action)
+            except Exception:
+                pass
+
+            # Collect script src URLs for JS secret scan
+            try:
+                js_srcs = driver.execute_script("""
+                    return Array.from(document.scripts)
+                        .map(function(s){ return s.src; })
+                        .filter(Boolean);
+                """) or []
+                for js_src in js_srcs:
+                    nj = _normalize_url(current, js_src)
+                    if nj and _same_origin(url, nj):
+                        spa_js.append(nj)
+            except Exception:
+                pass
+
+        vc.log(
+            f"[crawl/spa] Headless crawl complete: {page_count} pages, "
+            f"{len(set(spa_links))} links, {len(spa_forms)} forms",
+            "INFO",
+        )
+
+    except Exception as exc:
+        vc.log(f"[crawl/spa] Headless crawl error: {exc}", "WARNING")
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    return {
+        "forms":    spa_forms,
+        "links":    list(set(spa_links)),
+        "js_files": list(set(spa_js)),
+    }
+
+
 def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                  out: OutputManager, sess: requests.Session) -> dict:
     phase     = "crawl"
@@ -10078,6 +10387,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     all_links:            list = []
     _crawl_path_statuses: dict = {}
     page_count                 = 0
+    _root_html:           str  = ""  # captured for SPA detection after BFS
 
     while queue_urls and page_count < max_pages:
         current_url, depth = queue_urls.pop(0)
@@ -10093,6 +10403,11 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         _cr = data.get("response")
         if _cr is not None:
             _crawl_path_statuses[current_url] = _cr.status_code
+            if page_count == 1:
+                try:
+                    _root_html = _cr.text
+                except Exception:
+                    pass
         all_forms.extend(data["forms"])
         all_js.extend(data["js_files"])
         all_links.extend(data["links"])
@@ -10111,6 +10426,59 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                     queue_urls.append((js_url, depth + 1))
 
     vc.log(f"[crawl] Visited {page_count} pages, {len(all_forms)} forms, {len(all_js)} JS files", "INFO")
+
+    # ── SPA detection and headless augmentation ──────────────────────────────
+    # After the static BFS, check whether the target is a Single Page
+    # Application.  If so (and Selenium is available), run a headless Chrome
+    # crawl to pick up routes and forms that only appear after JS execution.
+    if _root_html:
+        _is_spa, _spa_evidence = _detect_spa(_root_html, url, len(visited))
+        if _is_spa:
+            vc.log(
+                "[crawl] SPA detected — "
+                + "; ".join(_spa_evidence[:4])
+                + (f" (+{len(_spa_evidence) - 4} more)" if len(_spa_evidence) > 4 else ""),
+                "INFO",
+            )
+            out.add_finding(
+                title="Single Page Application Detected",
+                url=url, port=target["port"], risk="INFO",
+                description=(
+                    f"The target appears to be a Single Page Application. "
+                    f"Evidence: {'; '.join(_spa_evidence)}."
+                ),
+                output="\n".join(_spa_evidence),
+                sources="fracture-crawl", service=target["scheme"],
+                owasp="A04:2025 Insecure Design", nist="CM-7",
+                remediation=(
+                    "Ensure SPA routes are protected server-side; "
+                    "client-side routing is not a security boundary."
+                ),
+            )
+            if _check_selenium():
+                vc.status(phase, "Crawl", "running", "SPA headless crawl", 0, max_pages)
+                try:
+                    _spa = _phase_spa_crawl(target, cfg, pm, out, sess, len(visited))
+                    if _spa:
+                        all_forms.extend(_spa.get("forms",    []))
+                        all_links.extend(_spa.get("links",    []))
+                        all_js.extend(   _spa.get("js_files", []))
+                        vc.log(
+                            f"[crawl] SPA headless merged: "
+                            f"+{len(_spa.get('links', []))} links, "
+                            f"+{len(_spa.get('forms', []))} forms",
+                            "INFO",
+                        )
+                except Exception as _spa_err:
+                    vc.log(f"[crawl] SPA headless crawl exception: {_spa_err}", "WARNING")
+            else:
+                vc.log(
+                    "[crawl] Selenium not available — install selenium + chromedriver "
+                    "to enable headless SPA crawl (run install.py)",
+                    "WARNING",
+                )
+        else:
+            vc.log("[crawl] No SPA indicators detected — static crawl sufficient", "INFO")
 
     # Persist the HTTP status code of every page the crawl actually fetched.
     # This ensures crawl-visited pages show a status code in the structure map

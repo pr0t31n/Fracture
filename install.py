@@ -162,6 +162,8 @@ APT_PACKAGES = [
     "git", "golang-go",
     "ruby", "ruby-dev", "ruby-bundler",
     "libssl-dev", "libcurl4-openssl-dev",
+    # Headless browser for SPA crawl (chromium-driver provides chromedriver)
+    "chromium", "chromium-driver",
 ]
 DNF_PACKAGES = [
     "nikto", "sqlmap", "sslscan", "whatweb", "ffuf",
@@ -169,10 +171,14 @@ DNF_PACKAGES = [
     "git", "golang",
     "ruby", "ruby-devel",
     "openssl-devel", "libcurl-devel",
+    # Headless browser for SPA crawl
+    "chromium", "chromedriver",
 ]
 BREW_PACKAGES = [
     "gobuster", "nikto", "sslscan", "git",
     "ffuf", "feroxbuster", "exploitdb",
+    # Headless browser for SPA crawl (chromedriver auto-managed via webdriver-manager)
+    "chromium",
 ]
 
 
