@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.59"
+VERSION = "2.9.60"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3416,10 +3416,22 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         def _launch_firefox_engine(bin_path: str, drv_path: str) -> "object":
             from selenium.webdriver.firefox.options import Options as _FO
             from selenium.webdriver.firefox.service import Service as _FS
+            from selenium.webdriver.firefox.firefox_profile import FirefoxProfile as _FFP
             import tempfile as _tf2
+            # Build an isolated FirefoxProfile object from the temp dir.
+            # Passing an object (not a string path) is compatible with both
+            # Selenium 3.x and 4.x — on Selenium 3.x the string-path setter is
+            # silently ignored, leaving Firefox on the default profile and causing
+            # session restore to reopen the previous target's login page.
+            _ff_profile = _FFP(_tmp_profile)
+            _ff_profile.set_preference("browser.sessionstore.resume_from_crash", False)
+            _ff_profile.set_preference("browser.sessionstore.enabled", False)
+            _ff_profile.set_preference("toolkit.startup.max_resumed_crashes", -1)
+            _ff_profile.set_preference("browser.startup.page", 0)
+            _ff_profile.set_preference("browser.startup.homepage", "about:blank")
             opts = _FO()
             opts.add_argument("-no-remote")
-            opts.profile = _tmp_profile
+            opts.profile = _ff_profile
             if bin_path:
                 opts.binary_location = bin_path
             _log_fd, _log_path = _tf2.mkstemp(prefix="fracture_gd_", suffix=".log")
