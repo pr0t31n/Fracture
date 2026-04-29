@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.71"
+VERSION = "2.9.72"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -9905,15 +9905,47 @@ _LOGOUT_PATH_RE = re.compile(
 )
 
 
+_JS_INTERNAL_URL_RE = re.compile(
+    r'''(?:["'`])((?:/[a-zA-Z0-9_\-./]+(?:\?[^"'`\s]*)?)|(?:https?://[^"'`\s]+))(?:["'`])''',
+)
+
+
+def _extract_js_links(js_text: str, base_url: str) -> list:
+    """Extract in-scope URL references from JavaScript source.
+
+    Finds string literals that look like absolute or root-relative paths,
+    filters to same-origin, deduplicates, and returns normalised URL strings.
+    Only paths with a recognisable structure (/word or /word/…) are kept to
+    avoid picking up regex patterns, CSS values, and other non-URL strings.
+    """
+    found: list = []
+    for m in _JS_INTERNAL_URL_RE.finditer(js_text):
+        candidate = m.group(1)
+        norm = _normalize_url(base_url, candidate)
+        if norm and _same_origin(base_url, norm):
+            # Reject trivially short root paths that are likely not endpoints
+            p = urllib.parse.urlparse(norm).path or "/"
+            if len(p) > 1:
+                found.append(norm)
+    return found
+
+
 def _crawl_page(page_url: str, sess: requests.Session,
                 timeout: int, base_url: str) -> dict:
     result = {"links": [], "forms": [], "js_files": [], "error": None, "response": None}
     try:
         resp = sess.get(page_url, timeout=timeout, allow_redirects=True)
-        result["response"] = resp  # exposed for header/cookie checks by callers
+        result["response"] = resp
         ctype = resp.headers.get("Content-Type", "")
+
+        # Handle JavaScript files: extract internal URL references and return.
+        if "javascript" in ctype or page_url.split("?")[0].lower().endswith(".js"):
+            result["links"] = _extract_js_links(resp.text, base_url)
+            return result
+
         if "text/html" not in ctype:
             return result
+
         if not _BS4_AVAILABLE:
             result["links"] = [
                 _normalize_url(page_url, h)
@@ -9921,13 +9953,46 @@ def _crawl_page(page_url: str, sess: requests.Session,
                 if _normalize_url(page_url, h)
             ]
             return result
+
         soup = BeautifulSoup(resp.text, "html.parser")
+
+        # --- Hyperlinks and asset references ---------------------------------
+        # <a href>, <link href>
         for tag in soup.find_all(["a", "link"]):
             href = tag.get("href", "")
             if href:
                 norm = _normalize_url(page_url, href)
                 if norm:
                     result["links"].append(norm)
+
+        # <img src>, <iframe src>, <frame src>, <embed src>, <source src>
+        for tag in soup.find_all(["img", "iframe", "frame", "embed", "source"]):
+            for attr in ("src", "data-src"):
+                val = tag.get(attr, "")
+                if val:
+                    norm = _normalize_url(page_url, val)
+                    if norm and _same_origin(base_url, norm):
+                        result["links"].append(norm)
+
+        # <img srcset> — comma-separated list of "url [descriptor]" entries
+        for tag in soup.find_all(attrs={"srcset": True}):
+            for part in tag["srcset"].split(","):
+                url_part = part.strip().split()[0] if part.strip() else ""
+                if url_part:
+                    norm = _normalize_url(page_url, url_part)
+                    if norm and _same_origin(base_url, norm):
+                        result["links"].append(norm)
+
+        # data-href, data-url, data-action — common framework attributes
+        for tag in soup.find_all(attrs=True):
+            for attr in ("data-href", "data-url", "data-action", "data-link"):
+                val = tag.get(attr, "")
+                if val:
+                    norm = _normalize_url(page_url, val)
+                    if norm and _same_origin(base_url, norm):
+                        result["links"].append(norm)
+
+        # --- Forms -----------------------------------------------------------
         for form in soup.find_all("form"):
             action = form.get("action", "")
             method = form.get("method", "GET").upper()
@@ -9936,16 +10001,39 @@ def _crawl_page(page_url: str, sess: requests.Session,
                 for i in form.find_all(["input", "textarea", "select"])
                 if i.get("name")
             ]
+            action_url = _normalize_url(page_url, action) if action else page_url
             result["forms"].append({
-                "action": _normalize_url(page_url, action) if action else page_url,
+                "action": action_url,
                 "method": method,
                 "inputs": inputs,
             })
+            # The form action endpoint itself is also a link worth visiting
+            if action_url:
+                result["links"].append(action_url)
+
+        # --- Inline CSS url() references -------------------------------------
+        for style_tag in soup.find_all("style"):
+            for m in re.finditer(r'url\(["\']?([^)"\']+)["\']?\)', style_tag.get_text()):
+                norm = _normalize_url(page_url, m.group(1))
+                if norm and _same_origin(base_url, norm):
+                    result["links"].append(norm)
+
+        # --- Script tags -----------------------------------------------------
+        # External scripts: collect for JS parsing
         for script in soup.find_all("script", src=True):
             src  = script.get("src", "")
             norm = _normalize_url(page_url, src) if src else None
             if norm and _same_origin(base_url, norm):
                 result["js_files"].append(norm)
+
+        # Inline scripts: extract internal URL references directly
+        for script in soup.find_all("script"):
+            if not script.get("src"):
+                inline_text = script.get_text() or ""
+                if inline_text:
+                    for lnk in _extract_js_links(inline_text, base_url):
+                        result["links"].append(lnk)
+
     except Exception as e:
         result["error"] = str(e)
     return result
@@ -10015,6 +10103,12 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                         and _same_origin(url, link)
                         and not _LOGOUT_PATH_RE.search(_lp)):
                     queue_urls.append((link, depth + 1))
+            # Enqueue JS files as crawlable pages — _crawl_page's JS branch
+            # extracts internal URL references from their source so those paths
+            # are followed and added to the structure map.
+            for js_url in data["js_files"]:
+                if js_url.rstrip("/") not in visited:
+                    queue_urls.append((js_url, depth + 1))
 
     vc.log(f"[crawl] Visited {page_count} pages, {len(all_forms)} forms, {len(all_js)} JS files", "INFO")
 
@@ -13850,11 +13944,8 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
     # Which role is currently being tested?
     # Safe because pre-context phases use _scan_ctx["role"]="" (_seed_active=False),
     # so only the explicitly running role's column is ever updated here.
-    _active_role = _scan_ctx["role"]
-    _seed_active = bool(_active_role) and _active_role in merged_roles
     path_entries = []
     for p in all_paths:
-        sm_status = sm_path_data.get(p, {}).get("status")
         if p in existing_entries:
             entry = dict(existing_entries[p])
             entry["access"] = dict(entry.get("access", {}))
@@ -13862,18 +13953,15 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
             for r in merged_roles:
                 if r not in entry["access"]:
                     entry["access"][r] = None
-            # Seed active role's status from structure_map for real-time column
-            # feedback. _probe_role_paths at context end overwrites with accurate
-            # authenticated-session values.
-            if _seed_active and sm_status is not None and entry["access"].get(_active_role) is None:
-                entry["access"][_active_role] = sm_status
             path_entries.append(entry)
         else:
-            # New path just discovered in the current role's context — seed its
-            # status code from the probe that found it (accurate for this role).
+            # New path — all role columns start as None.
+            # Per-role HTTP codes are filled exclusively by _probe_role_paths,
+            # which uses each role's actual session. Never seed from the
+            # structure_map write-once status (that is Role 1's code and would
+            # propagate it to every other role, causing all roles to appear
+            # identical in the Access Matrix).
             access = {r: None for r in merged_roles}
-            if _seed_active and sm_status is not None:
-                access[_active_role] = sm_status
             path_entries.append({"path": p, "url": base_url + p, "access": access})
     data = {
         "roles": merged_roles,
@@ -13912,14 +14000,25 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
     probe_sess = role_sess if role_sess is not None else requests.Session()
     if role_sess is None:
         probe_sess.verify = verify_ssl
+    all_roles_in_am: list = am.get("roles", [])
     changed = False
     for path in all_sm_paths:
         entry = am_by_path.get(path)
         if entry is None:
-            continue  # Not yet in access_matrix; will be added by _write_preliminary_access_matrix
+            # Path exists in structure_map but not yet in access_matrix.
+            # Create the entry now so it is probed in this pass rather than
+            # waiting for the next _write_preliminary_access_matrix call.
+            entry = {"path": path, "url": base_url + path,
+                     "access": {r: None for r in all_roles_in_am}}
+            am_by_path[path] = entry
+            am.setdefault("paths", []).append(entry)
         access = entry.setdefault("access", {})
-        if access.get(role_label) is not None:
-            continue  # Already probed
+        # Ensure this role's key exists (may be absent if role was added after
+        # the entry was first written).
+        if role_label not in access:
+            access[role_label] = None
+        if access[role_label] is not None:
+            continue  # Already probed with a real response for this role
         url = base_url + path
         try:
             r = probe_sess.get(url, timeout=timeout, allow_redirects=False,
@@ -15854,17 +15953,21 @@ def main() -> None:
                         vc.error(f"Phase bfla [{_ctx_label}] error: {e}")
                         pm.set_phase_status(f"bfla#{_ctx_label}", "error", detail=str(e))
 
-            # Ensure every discovered path has an HTTP code for this role before
-            # moving on — a role is not complete until all known endpoints are probed.
+            # Sync access_matrix.json with the full structure_map path list before
+            # probing so that _probe_role_paths finds an entry for every path
+            # (including paths added late in this context after the last incremental
+            # write).  _probe_role_paths skips paths with no access matrix entry, so
+            # this write must come first.
             try:
-                _probe_role_paths(out, target, _ctx_cfg, _ctx_label, _ctx_auth)
+                _write_preliminary_access_matrix(out, target, [_ctx_label])
             except Exception:
                 pass
 
-            # Write preliminary access_matrix.json after each context completes so
-            # Crucible can display the growing path list without waiting for Phase 20.
+            # Probe every structure_map path with this role's session.
+            # _write_preliminary_access_matrix above guarantees all paths have an
+            # entry; _probe_role_paths fills only the None slots for this role.
             try:
-                _write_preliminary_access_matrix(out, target, [_ctx_label])
+                _probe_role_paths(out, target, _ctx_cfg, _ctx_label, _ctx_auth)
             except Exception:
                 pass
 
