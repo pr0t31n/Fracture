@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.68"
+VERSION = "2.9.70"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1801,6 +1801,10 @@ class OutputManager:
         self._current_accounts: list = []
         # Set by the scan loop after instantiation; used to relativize affected URLs
         self.base_url: str = ""
+        # When set to a role label (e.g. "Admin", "unauthenticated"), output_path() and
+        # _save_http_evidence() route tool outputs into a per-role subdirectory so that
+        # files from different roles do not overwrite each other.
+        self._output_role: str = ""
         self._setup_dirs()
 
     def _setup_dirs(self) -> None:
@@ -1854,6 +1858,11 @@ class OutputManager:
 
     def output_path(self, phase: str, *parts) -> Path:
         fname = self._safe_filename(list(parts), "txt")
+        if self._output_role:
+            role_safe = _RE_UNSAFE_FNAME.sub("_", self._output_role)
+            p = self.root / phase / role_safe / fname
+            p.parent.mkdir(exist_ok=True)
+            return p
         return self.root / phase / fname
 
     def log_command(self, tool: str, command: "list | str", output_file: "Path | None",
@@ -10517,7 +10526,11 @@ def _save_http_evidence(out: "OutputManager", phase: str, label: str,
     safe = re.sub(r'[^\w]', '_', label)[:60]
     if endpoint_url:
         _m = method or (r.request.method if r.request else "GET")
-        ep_dir = out.root / phase / _endpoint_dir_name(_m, endpoint_url)
+        if out._output_role:
+            role_safe = _RE_UNSAFE_FNAME.sub("_", out._output_role)
+            ep_dir = out.root / phase / role_safe / _endpoint_dir_name(_m, endpoint_url)
+        else:
+            ep_dir = out.root / phase / _endpoint_dir_name(_m, endpoint_url)
         ep_dir.mkdir(parents=True, exist_ok=True)
         req_path  = ep_dir / f"{safe}_request.txt"
         resp_path = ep_dir / f"{safe}_response.txt"
@@ -11658,23 +11671,33 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
         method = form.get("method", "GET").upper()
         inputs = form.get("inputs", [])
         data   = {i["name"]: i.get("value", "test") for i in inputs if i.get("name")}
-        results: list = []
+        results: list = []  # list of requests.Response objects
 
         def _race_req(_idx, _action=action, _method=method, _data=data):
             try:
                 r = (sess.post(_action, data=_data, timeout=timeout)
                      if _method == "POST"
                      else sess.get(_action, params=_data, timeout=timeout))
-                if r:
-                    results.append(r.status_code)
+                if r is not None:
+                    results.append(r)
             except Exception:
                 pass
 
         with ThreadPoolExecutor(max_workers=threads) as pool:
             list(pool.map(_race_req, range(threads)))
 
-        successes = [s for s in results if s in (200, 201)]
+        successes = [r for r in results if r.status_code in (200, 201)]
         if len(successes) > 1:
+            # Capture all concurrent request/response pairs as evidence
+            evidence_files: list = []
+            for _ri, _resp in enumerate(results):
+                try:
+                    _rq, _rp = _save_http_evidence(
+                        out, phase, f"race_cond_{_ri + 1:02d}",
+                        _resp, endpoint_url=action, method=method)
+                    evidence_files.extend([_rq, _rp])
+                except Exception:
+                    pass
             out.add_finding(
                 title="Business Logic — Potential Race Condition (Duplicate Submission)",
                 url=action, port=target["port"], risk="HIGH",
@@ -11686,8 +11709,13 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                 ),
                 output=(
                     f"URL: {action}\nConcurrent requests: {len(results)}\n"
-                    f"Successful responses: {len(successes)}"
+                    f"Successful responses: {len(successes)}\n"
+                    + "\n".join(
+                        f"  [{i+1}] HTTP {r.status_code} ({len(r.content)} bytes)"
+                        for i, r in enumerate(results)
+                    )
                 ),
+                output_file=",".join(evidence_files),
                 sources="fracture-business-logic", service=target["scheme"],
                 affected=action,
                 owasp="A04:2025 Insecure Design", nist="SC-5",
@@ -13345,36 +13373,53 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
         )
 
         status_codes: list = []
+        probe_responses: list = []  # requests.Response objects for evidence
+        _last_r = None
         for attempt in range(10):
             data = {user_field: "fracture_test_user", pass_field: f"wrong_pass_{attempt}"}
             try:
-                r = (sess.post(action, data=data, timeout=timeout, allow_redirects=True)
-                     if method == "POST"
-                     else sess.get(action, params=data, timeout=timeout))
-                status_codes.append(r.status_code)
+                _last_r = (sess.post(action, data=data, timeout=timeout, allow_redirects=True)
+                           if method == "POST"
+                           else sess.get(action, params=data, timeout=timeout))
+                status_codes.append(_last_r.status_code)
+                probe_responses.append(_last_r)
                 # Check for lockout/captcha indicators
                 if re.search(r'locked|captcha|too many|rate.limit|try.again.later|'
-                             r'account.*disabled|temporarily.*unavail', r.text, re.I):
+                             r'account.*disabled|temporarily.*unavail', _last_r.text, re.I):
                     vc.log(f"[account_lockout] Lockout triggered after {attempt+1} attempts", "INFO")
                     break
             except Exception:
                 pass
 
         if len(status_codes) >= 10:
-            # All 10 requests succeeded without lockout
+            # All 10 requests succeeded without lockout — capture evidence
+            evidence_files: list = []
+            for _ai, _ar in enumerate(probe_responses):
+                try:
+                    _rq, _rp = _save_http_evidence(
+                        out, phase, f"brute_probe_{_ai + 1:02d}",
+                        _ar, endpoint_url=action, method=method)
+                    evidence_files.extend([_rq, _rp])
+                except Exception:
+                    pass
             out.add_finding(
                 title="Missing Rate Limiting / Brute-Force Protection",
                 url=action, port=target["port"], risk="HIGH",
                 description="Authentication and sensitive API endpoints do not enforce request rate limits, account lockout, or CAPTCHA, allowing unlimited brute-force or credential-stuffing attempts.",
                 output=(
-                    f"Form: {action}\nAttempts: 10\n"
-                    f"Status codes: {status_codes[:10]}"
+                    f"Form: {action}\nAttempts: {len(status_codes)}\n"
+                    f"Status codes: {status_codes}\n"
+                    + "\n".join(
+                        f"  [{i+1}] HTTP {r.status_code} ({len(r.content)} bytes)"
+                        for i, r in enumerate(probe_responses)
+                    )
                 ),
+                output_file=",".join(evidence_files),
                 sources="fracture-account-lockout", service=target["scheme"],
                 affected=action,
                 owasp="A07:2025 Identification and Authentication Failures", nist="AC-7",
                 remediation="Implement per-IP and per-account rate limiting with progressive delays or lockout on all authentication endpoints; add CAPTCHA for interactive login flows; alert on anomalous request volumes.",
-                http_code=r.status_code,
+                http_code=_last_r.status_code if _last_r else None,
             )
             vc.log(f"[account_lockout] No lockout: {action} ({len(status_codes)} attempts)", "SUCCESS")
 
@@ -14396,6 +14441,10 @@ def main() -> None:
     #   reused across targets so the user is only prompted once per role.
     _n_roles: int = 0
     _collected_roles: list = []  # [{"role": label, "username": u, "password": p}, ...]
+    # Persists built auth sessions across while-loop iterations so that redirect-discovered
+    # secondary targets reuse the same sessions rather than re-authenticating.
+    # Keys: 0..n for role_idx, "auth2" for the secondary auth config.
+    _role_sessions: dict = {}
 
     _am = cfg.get("auth_matrix") or []
     if _VANTAGE_MANAGED and _am:
@@ -14471,10 +14520,29 @@ def main() -> None:
         vc.log(f"Output directory: {project_dir}", "INFO")
 
         # Build sessions — all sessions are scope-enforcing
+        # Build sessions — all sessions are scope-enforcing.
+        # For redirect-discovered secondary targets, reuse the auth session that was built
+        # for the primary target scan so that the secondary URL is scanned with the same
+        # authenticated context rather than triggering a fresh login flow.  Sessions are
+        # stored in _role_sessions (keyed by role_idx / "auth2") outside the while loop.
         _r1_label  = _collected_roles[0]["role"] if _collected_roles else ""
         sess       = _make_session(cfg, _scope_hostnames)
-        auth_sess  = _build_auth_session(cfg, "auth", _scope_hostnames, role_label=_r1_label)
-        auth2_sess = _build_auth_session(cfg, "auth2", _scope_hostnames)
+        if _is_redirect_target and 0 in _role_sessions:
+            auth_sess = _role_sessions[0]
+            vc.log(f"[auth] Reusing role-1 session for redirect target {raw_url}", "INFO")
+        else:
+            auth_sess = _build_auth_session(cfg, "auth", _scope_hostnames,
+                                            role_label=_r1_label,
+                                            no_interactive=_is_redirect_target)
+            if auth_sess:
+                _role_sessions[0] = auth_sess
+        if _is_redirect_target and "auth2" in _role_sessions:
+            auth2_sess = _role_sessions["auth2"]
+        else:
+            auth2_sess = _build_auth_session(cfg, "auth2", _scope_hostnames,
+                                             no_interactive=_is_redirect_target)
+            if auth2_sess:
+                _role_sessions["auth2"] = auth2_sess
 
         _AUTH_HDR_NAMES = frozenset({
             "authorization", "x-auth-token", "x-api-key", "x-csrf-token",
@@ -14716,15 +14784,33 @@ def main() -> None:
             # they only test access to paths already found by role 1.
             _is_reduced_ctx = _ctx.get("reduced", False)
 
+            # Route tool output files into per-role subdirectories when multi-role
+            # scanning is active so that results from different roles do not overwrite
+            # each other (e.g. recon/Admin/gobuster_... vs recon/User/gobuster_...).
+            out._output_role = _ctx_label if _n_roles >= 1 else ""
+
             # Lazy auth build for Roles 2..n in VANTAGE_MANAGED multi-role mode.
             # Sessions are not pre-built so browser-auth prompts appear after the
             # previous role's phases complete, not before any phases run.
             # Browser-auth fallback is handled inside _build_auth_session (form_login
             # path) where _browser_assisted_login is in closure scope — it cannot be
             # called from here.
+            # For redirect-discovered secondary targets, reuse the session that was
+            # established on the primary target rather than re-running the login flow.
             if _ctx_auth is None and _ctx_label != "unauthenticated" and _ctx.get("multi_role"):
-                _ctx_auth = _build_auth_session(
-                    _ctx_cfg, "auth", _scope_hostnames, role_label=_ctx_label)
+                _role_idx = _ctx.get("role_idx", -1)
+                if _is_redirect_target and _role_idx in _role_sessions:
+                    _ctx_auth = _role_sessions[_role_idx]
+                    vc.log(
+                        f"[auth] Reusing '{_ctx_label}' session for redirect target {raw_url}",
+                        "INFO",
+                    )
+                else:
+                    _ctx_auth = _build_auth_session(
+                        _ctx_cfg, "auth", _scope_hostnames, role_label=_ctx_label,
+                        no_interactive=_is_redirect_target)
+                    if _ctx_auth and _role_idx >= 0:
+                        _role_sessions[_role_idx] = _ctx_auth
                 if _ctx_auth:
                     _attach_redirect_hook(_ctx_auth, _scope_hostnames, target, out, _in_scope_new)
                 _ctx["auth_sess"] = _ctx_auth
@@ -15520,6 +15606,7 @@ def main() -> None:
 
         # ── Post-context: privilege-escalation / cross-credential phases ───
         _scan_ctx["role"] = ""  # context loop complete; clear role tracker
+        out._output_role  = ""  # post-context phases write to unroled paths
         if auth_sess and cfg.get("auth", {}).get("enabled"):
             _post_user = cfg.get("auth", {}).get("username", "").strip() or "authenticated"
             out.set_auth_context([{"username": _post_user, "role": "authenticated"}])
