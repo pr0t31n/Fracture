@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.70"
+VERSION = "2.9.71"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -13939,6 +13939,278 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
             pass
 
 
+def _score_role_access(out: "OutputManager", target: dict, role_label: str) -> dict:
+    am_path = out.root / "access_matrix.json"
+    sm_path = out.root / "structure_map.json"
+    try:
+        am = json.loads(am_path.read_text()) if am_path.exists() else {}
+        sm = json.loads(sm_path.read_text()) if sm_path.exists() else {}
+    except Exception:
+        return {"n200": 0, "n200_priv": 0, "body_weight": 0, "score": 0}
+
+    sm_paths = sm.get("paths", {})
+    n200 = 0
+    n200_priv = 0
+    body_weight = 0
+    for entry in am.get("paths", []):
+        status = entry.get("access", {}).get(role_label)
+        if status != 200:
+            continue
+        n200 += 1
+        path = entry.get("path", "")
+        if _PRIV_PATH_RE.search(path):
+            n200_priv += 1
+        sm_entry = sm_paths.get(path, {})
+        body_weight += sm_entry.get("body_len", 0) if isinstance(sm_entry, dict) else 0
+
+    score = n200 + (n200_priv * 5) + (body_weight // 1024)
+    return {"n200": n200, "n200_priv": n200_priv, "body_weight": body_weight, "score": score}
+
+
+def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
+                     sess: "requests.Session",
+                     wc_baseline=None,
+                     role_label: str = "") -> list:
+    url     = target["url"]
+    phase   = "recon"
+    timeout = cfg.get("timeout", 10)
+    sfx     = ("_" + re.sub(r'[^\w]', '_', role_label)[:30]) if role_label else ""
+
+    gobuster    = _find_tool("gobuster")
+    feroxbuster = _find_tool("feroxbuster")
+    wordlist_dir  = _find_wordlist(
+        "Discovery/Web-Content/raft-large-directories.txt",
+        cfg.get("gobuster_wordlist", ""),
+    )
+    wordlist_file = _find_wordlist("raft-large-files.txt")
+
+    discovered: list = []
+
+    # ── Dirs: gobuster ─────────────────────────────────────────────────────────
+    if wc_baseline is None and gobuster and Path(wordlist_dir).exists():
+        out_f = out.output_path(phase, f"gobuster_{target['hostname']}{sfx}")
+        cmd = [gobuster, "dir", "-u", url, "-w", wordlist_dir, "-t", "30",
+               "-q", "-k", "-o", str(out_f)]
+        cmd += _buster_auth_flags(sess)
+        vc.log(f"[recon] Running gobuster (dirs){' for ' + role_label if role_label else ''} ...", "INFO")
+        _gobuster_run(cmd, out_f, "recon", out)
+        if out_f.exists():
+            try:
+                _sm_ps, _sm_rd = {}, {}
+                _gob_res = _filter_buster_wildcards(
+                    _parse_gobuster_with_status(out_f, url), sess, timeout)
+                for _gu, _gs, _gr in _gob_res:
+                    discovered.append(_gu)
+                    _sp = urllib.parse.urlparse(_gu).path or "/"
+                    _sm_ps[_sp] = _gs
+                    if _gr:
+                        _sm_rd[_sp] = _gr
+                if _sm_ps:
+                    _write_structure_map(out, target, path_statuses=_sm_ps,
+                                         path_redirects=_sm_rd or None,
+                                         evidence_files=[str(out_f)])
+            except Exception:
+                pass
+
+    # ── Dirs: feroxbuster ──────────────────────────────────────────────────────
+    if feroxbuster and Path(wordlist_dir).exists():
+        fer_out = out.output_path(phase, f"feroxbuster_{target['hostname']}{sfx}")
+        cmd = [
+            feroxbuster, "--url", url, "--wordlist", wordlist_dir,
+            "--depth", "2", "--threads", str(_SCAN_SEM.limit), "--quiet",
+            "--status-codes", "200,204,301,302,307,401,403",
+            "--output", str(fer_out), "--insecure",
+            "--auto-tune", "--time-limit", "4m",
+        ]
+        cmd += _buster_auth_flags(sess)
+        vc.log(f"[recon] Running feroxbuster (dirs){' for ' + role_label if role_label else ''} ...", "INFO")
+        _fer_proc = None
+        try:
+            _fer_proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            _register_proc(_fer_proc)
+            _fer_proc.communicate(timeout=300)
+            _deregister_proc(_fer_proc)
+            out.log_command("feroxbuster", cmd, fer_out)
+        except subprocess.TimeoutExpired:
+            _fer_proc.kill(); _fer_proc.communicate(); _deregister_proc(_fer_proc)
+            vc.log("[recon] feroxbuster (dirs) timed out after 300s — killed", "WARNING")
+        except Exception as e:
+            if _fer_proc:
+                try: _fer_proc.kill(); _fer_proc.communicate()
+                except Exception: pass
+                _deregister_proc(_fer_proc)
+            out.log_error("feroxbuster", cmd, str(e))
+        if fer_out.exists():
+            try:
+                _sm_ps, _sm_rd = {}, {}
+                _fer_res = _filter_buster_wildcards(
+                    _parse_feroxbuster_with_status(fer_out), sess, timeout)
+                for _fu, _fs, _fr in _fer_res:
+                    discovered.append(_fu)
+                    _sp = urllib.parse.urlparse(_fu).path or "/"
+                    _sm_ps[_sp] = _fs
+                    if _fr:
+                        _sm_rd[_sp] = _fr
+                if _sm_ps:
+                    _write_structure_map(out, target, path_statuses=_sm_ps,
+                                         path_redirects=_sm_rd or None,
+                                         evidence_files=[str(fer_out)])
+            except Exception:
+                pass
+
+    # ── Files: gobuster ────────────────────────────────────────────────────────
+    if wc_baseline is None and gobuster and Path(wordlist_file).exists():
+        gob_files_out = out.output_path(phase, f"gobuster_files_{target['hostname']}{sfx}")
+        cmd = [gobuster, "dir", "-u", url, "-w", wordlist_file, "-t", "30",
+               "-q", "-k", "-o", str(gob_files_out)]
+        cmd += _buster_auth_flags(sess)
+        vc.log(f"[recon] Running gobuster (files){' for ' + role_label if role_label else ''} ...", "INFO")
+        _gobuster_run(cmd, gob_files_out, "recon", out)
+        if gob_files_out.exists():
+            try:
+                _sm_ps, _sm_rd = {}, {}
+                _gobf_res = _filter_buster_wildcards(
+                    _parse_gobuster_with_status(gob_files_out, url), sess, timeout)
+                for _gu, _gs, _gr in _gobf_res:
+                    discovered.append(_gu)
+                    _sp = urllib.parse.urlparse(_gu).path or "/"
+                    _sm_ps[_sp] = _gs
+                    if _gr:
+                        _sm_rd[_sp] = _gr
+                if _sm_ps:
+                    _write_structure_map(out, target, path_statuses=_sm_ps,
+                                         path_redirects=_sm_rd or None,
+                                         evidence_files=[str(gob_files_out)])
+            except Exception:
+                pass
+
+    # ── Files: feroxbuster ─────────────────────────────────────────────────────
+    if feroxbuster and Path(wordlist_file).exists():
+        fer_files_out = out.output_path(phase, f"feroxbuster_files_{target['hostname']}{sfx}")
+        cmd = [
+            feroxbuster, "--url", url, "--wordlist", wordlist_file,
+            "--depth", "2", "--threads", str(_SCAN_SEM.limit), "--quiet",
+            "--status-codes", "200,204,301,302,307,401,403",
+            "--output", str(fer_files_out), "--insecure",
+            "--auto-tune", "--time-limit", "4m",
+        ]
+        cmd += _buster_auth_flags(sess)
+        vc.log(f"[recon] Running feroxbuster (files){' for ' + role_label if role_label else ''} ...", "INFO")
+        _fer_files_proc = None
+        try:
+            _fer_files_proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            _register_proc(_fer_files_proc)
+            _fer_files_proc.communicate(timeout=300)
+            _deregister_proc(_fer_files_proc)
+            out.log_command("feroxbuster", cmd, fer_files_out)
+        except subprocess.TimeoutExpired:
+            _fer_files_proc.kill(); _fer_files_proc.communicate(); _deregister_proc(_fer_files_proc)
+            vc.log("[recon] feroxbuster (files) timed out after 300s — killed", "WARNING")
+        except Exception as e:
+            if _fer_files_proc:
+                try: _fer_files_proc.kill(); _fer_files_proc.communicate()
+                except Exception: pass
+                _deregister_proc(_fer_files_proc)
+            out.log_error("feroxbuster", cmd, str(e))
+        if fer_files_out.exists():
+            try:
+                _sm_ps, _sm_rd = {}, {}
+                _ferf_res = _filter_buster_wildcards(
+                    _parse_feroxbuster_with_status(fer_files_out), sess, timeout)
+                for _fu, _fs, _fr in _ferf_res:
+                    discovered.append(_fu)
+                    _sp = urllib.parse.urlparse(_fu).path or "/"
+                    _sm_ps[_sp] = _fs
+                    if _fr:
+                        _sm_rd[_sp] = _fr
+                if _sm_ps:
+                    _write_structure_map(out, target, path_statuses=_sm_ps,
+                                         path_redirects=_sm_rd or None,
+                                         evidence_files=[str(fer_files_out)])
+            except Exception:
+                pass
+
+    # Deduplicate and return
+    seen_urls: set = set()
+    result: list = []
+    for u in discovered:
+        u = u.rstrip("/")
+        if u and u not in seen_urls:
+            seen_urls.add(u)
+            result.append(u)
+    return sorted(result)
+
+
+def _retroactive_probe(out: "OutputManager", target: dict, cfg: dict,
+                       new_urls: list,
+                       completed_roles: "dict[str, requests.Session | None]") -> None:
+    if not new_urls or not completed_roles:
+        return
+    am_path = out.root / "access_matrix.json"
+    sm_path = out.root / "structure_map.json"
+    try:
+        am = json.loads(am_path.read_text()) if am_path.exists() else {}
+        sm = json.loads(sm_path.read_text()) if sm_path.exists() else {}
+    except Exception:
+        return
+    base_url = target["url"].rstrip("/")
+    timeout  = cfg.get("timeout", 10)
+    verify   = cfg.get("verify_ssl", False)
+    am_by_path = {e["path"]: e for e in am.get("paths", [])}
+
+    def _get_probe_sess(rsess):
+        if rsess is not None:
+            return rsess
+        s = requests.Session()
+        s.verify = verify
+        return s
+
+    for url_str in new_urls:
+        path = urllib.parse.urlparse(url_str).path or "/"
+        if path not in am_by_path:
+            access = {r: None for r in am.get("roles", [])}
+            am_by_path[path] = {"path": path, "url": base_url + path, "access": access}
+            am.setdefault("paths", []).append(am_by_path[path])
+
+        entry  = am_by_path[path]
+        access = entry.setdefault("access", {})
+        for r in am.get("roles", []):
+            if r not in access:
+                access[r] = None
+
+        full_url = base_url + path
+        for role_label, rsess in completed_roles.items():
+            if access.get(role_label) is not None:
+                continue
+            probe_sess = _get_probe_sess(rsess)
+            try:
+                r = probe_sess.get(full_url, timeout=timeout, allow_redirects=False,
+                                   headers={"Accept": "text/html,application/json"})
+                access[role_label] = r.status_code
+            except Exception:
+                try:
+                    r = probe_sess.head(full_url, timeout=max(timeout // 2, 3),
+                                        allow_redirects=False)
+                    access[role_label] = r.status_code
+                except Exception:
+                    access[role_label] = 0
+
+    am["paths"] = list(am_by_path.values())
+    try:
+        am_path.write_text(json.dumps(am, indent=2))
+    except Exception:
+        pass
+    try:
+        sm_paths = sm.setdefault("paths", {})
+        for url_str in new_urls:
+            path = urllib.parse.urlparse(url_str).path or "/"
+            if path not in sm_paths:
+                sm_paths[path] = {"status": None}
+        sm_path.write_text(json.dumps(sm, indent=2))
+    except Exception:
+        pass
+
+
 def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                           out: OutputManager, sess: requests.Session,
                           crawl_data: dict,
@@ -14264,6 +14536,17 @@ def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
         "SUCCESS")
 
 
+# Privileged-path keywords used when scoring role access depth.
+_PRIV_PATH_RE = re.compile(
+    r'admin|config|manage|settings|dashboard|users|accounts|reports|'
+    r'billing|finance|audit|internal|deploy|security|api/admin|api/v\d+/admin|'
+    r'superuser|staff|operator|moderator|panel|control',
+    re.I,
+)
+# Score threshold: a new role must beat the current discovery leader by this
+# factor before its busting results are considered more authoritative.
+_DISCOVERY_RESCORE_THRESHOLD = 1.15
+
 # Phases run for every credential context (full scan for role 1).
 # Reduced contexts (roles 2..n and unauthenticated) only run this subset.
 _REDUCED_SCAN_PHASES: frozenset = frozenset({
@@ -14445,6 +14728,13 @@ def main() -> None:
     # secondary targets reuse the same sessions rather than re-authenticating.
     # Keys: 0..n for role_idx, "auth2" for the secondary auth config.
     _role_sessions: dict = {}
+    # Discovery leader tracking — the role whose busting results are considered most
+    # authoritative. Initialised to empty; set to the first role that runs busting.
+    _discovery_leader: str = ""
+    _discovery_leader_score: dict = {"score": 0, "n200": 0, "n200_priv": 0}
+    # Sessions of all roles that have completed their context, keyed by role label.
+    # Used by _retroactive_probe to populate access matrix entries for newly found URLs.
+    _completed_role_sessions: dict = {}
 
     _am = cfg.get("auth_matrix") or []
     if _VANTAGE_MANAGED and _am:
@@ -14494,6 +14784,13 @@ def main() -> None:
             continue
         _processed_urls.add(raw_url)
         _is_redirect_target = raw_url in _redirect_discovered
+        # Reset per-target discovery state for non-redirect (genuine new primary targets).
+        # Redirect-discovered secondaries inherit the leader from their parent scan so
+        # session reuse works; genuine new targets start fresh.
+        if not _is_redirect_target:
+            _discovery_leader = ""
+            _discovery_leader_score = {"score": 0, "n200": 0, "n200_priv": 0}
+            _completed_role_sessions = {}
 
         target = _parse_target(raw_url)
         project_dir = Path(cfg["project"]).resolve()
@@ -15303,7 +15600,7 @@ def main() -> None:
                 except Exception:
                     pass
 
-            if _ep_discovered:
+            if _ep_discovered and not _is_reduced_ctx:
                 _et_key = f"endpoint_tools#{_ctx_label}"
                 if pm.is_phase_complete(_et_key):
                     vc.log(f"[endpoint_tools] Already complete — skipping (checkpoint)", "INFO")
@@ -15570,6 +15867,107 @@ def main() -> None:
                 _write_preliminary_access_matrix(out, target, [_ctx_label])
             except Exception:
                 pass
+
+            # Store this role's session for retroactive probing by later re-discovery runs.
+            if _ctx_label != "unauthenticated":
+                _completed_role_sessions[_ctx_label] = _ctx_auth
+
+            # ── Discovery-leader check ────────────────────────────────────────
+            # After each authenticated non-reduced context, compare this role's
+            # access score against the current discovery leader. If the new role
+            # beats the leader by _DISCOVERY_RESCORE_THRESHOLD or has more
+            # privileged-path 200s, it becomes the new discovery leader and
+            # gobuster/feroxbuster re-run for it. All prior roles are then probed
+            # against any newly discovered endpoints.
+            # The unauthenticated context never becomes discovery leader.
+            if (
+                _ctx_label != "unauthenticated"
+                and _n_roles >= 1
+            ):
+                try:
+                    _new_score = _score_role_access(out, target, _ctx_label)
+                    _is_first_leader = not _discovery_leader
+                    _beats_leader = (
+                        _discovery_leader_score["score"] > 0
+                        and _new_score["score"] > _discovery_leader_score["score"] * _DISCOVERY_RESCORE_THRESHOLD
+                    ) or (
+                        _new_score["n200_priv"] > _discovery_leader_score["n200_priv"]
+                        and _new_score["n200_priv"] > 0
+                    )
+
+                    if _is_first_leader:
+                        # First authenticated role always becomes the leader; busting
+                        # already ran during its full recon, no re-run needed.
+                        _discovery_leader = _ctx_label
+                        _discovery_leader_score = _new_score
+                        vc.log(
+                            f"[discovery-leader] '{_ctx_label}' is initial discovery leader "
+                            f"(score={_new_score['score']}, n200={_new_score['n200']}, "
+                            f"n200_priv={_new_score['n200_priv']})",
+                            "INFO",
+                        )
+                    elif _beats_leader:
+                        vc.log(
+                            f"[discovery-leader] '{_ctx_label}' outscores '{_discovery_leader}' "
+                            f"(new score={_new_score['score']} vs leader={_discovery_leader_score['score']}, "
+                            f"n200_priv {_new_score['n200_priv']} vs {_discovery_leader_score['n200_priv']}). "
+                            "Re-running gobuster/feroxbuster for new leader.",
+                            "INFO",
+                        )
+                        # Re-run busting as the new leader's session
+                        _prev_ep_base = set(_ep_base)
+                        try:
+                            _new_buster_urls = _run_buster_only(
+                                target, _ctx_cfg, out, effective_auth,
+                                wc_baseline=wc_baseline,
+                                role_label=_ctx_label,
+                            )
+                        except Exception as _be:
+                            vc.error(f"[discovery-leader] _run_buster_only error: {_be}")
+                            _new_buster_urls = []
+
+                        # Identify newly discovered URLs not seen by prior busting
+                        _newly_found = [
+                            u for u in _new_buster_urls
+                            if u.rstrip("/") not in _prev_ep_base
+                            and u.rstrip("/") != target["url"].rstrip("/")
+                        ]
+                        if _newly_found:
+                            vc.log(
+                                f"[discovery-leader] {len(_newly_found)} new URL(s) found by "
+                                f"'{_ctx_label}' busting — retroactively probing all prior roles.",
+                                "INFO",
+                            )
+                            # Merge new URLs into _ep_base for subsequent phases
+                            for _nu in _newly_found:
+                                _nup = _nu.rstrip("/")
+                                if _nup not in _prev_ep_base:
+                                    _ep_base.append(_nup)
+                            # Retroactively probe all completed prior roles
+                            try:
+                                _retroactive_probe(
+                                    out, target, _ctx_cfg,
+                                    _newly_found,
+                                    _completed_role_sessions,
+                                )
+                            except Exception as _rpe:
+                                vc.error(f"[discovery-leader] _retroactive_probe error: {_rpe}")
+                            # Probe the new leader itself for the new URLs
+                            try:
+                                _probe_role_paths(out, target, _ctx_cfg, _ctx_label, _ctx_auth)
+                            except Exception:
+                                pass
+                        else:
+                            vc.log(
+                                f"[discovery-leader] No new URLs found by '{_ctx_label}' "
+                                "busting beyond prior discovery.",
+                                "INFO",
+                            )
+
+                        _discovery_leader = _ctx_label
+                        _discovery_leader_score = _new_score
+                except Exception as _dse:
+                    vc.error(f"[discovery-leader] Scoring error: {_dse}")
 
             # ── Multi-role: prompt for the next role's credentials ───────────
             # Only triggered after a multi_role authenticated context whose
