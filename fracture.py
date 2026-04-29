@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.60"
+VERSION = "2.9.61"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2710,7 +2710,15 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             _density_hit   = (_script_count >= 3 and _login_words >= 2
                               and _form_count == 0)
 
-            if (_url_param_hit or _url_path_hit) and (_content_hit or _density_hit):
+            # URL signal required only when content/density signals are ambiguous.
+            # Strong dual-signal (known framework fingerprint + script-heavy login
+            # page with no static form) is sufficient on its own — covers IBM Cognos
+            # and other apps whose login URLs carry no recognisable path/param intent.
+            _js_login_detected = (
+                ((_url_param_hit or _url_path_hit) and (_content_hit or _density_hit))
+                or (_content_hit and _density_hit)
+            )
+            if _js_login_detected:
                 result["js_rendered_login"] = True
                 vc.log(
                     f"[auth] JS-rendered login page detected at {page_url} "
@@ -3824,6 +3832,8 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
 
     # ── Login URL discovery ───────────────────────────────────────────────────
     _LOGIN_CANDIDATE_PATHS = [
+        # IBM Cognos — checked first because its login path is not generic
+        "/ibmcognos", "/ibmcognos/", "/ibmcognos/bi/", "/ibmcognos/bi/v1/disp",
         # Generic
         "/login", "/signin", "/sign-in", "/log-in", "/logon", "/signon",
         "/auth", "/auth/login", "/auth/signin", "/authenticate",
@@ -4410,19 +4420,34 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     _guard_p = _analyse_form_page(_guard_r.text, _guard_r.url)
                     if _guard_p.get("js_rendered_login"):
                         # Page is a JS-rendered login shell — automated submission
-                        # is not possible; hand off to browser-auth immediately.
+                        # is not possible; hand off to browser-auth.
                         _ba_url_for_guard = (
                             auth.get("login_url", "").strip() or _base_target_url)
-                        if cfg.get("browser_auth") and _ba_url_for_guard:
+                        if cfg.get("browser_auth"):
                             vc.log(
                                 f"[auth] JS-rendered login detected at guard — "
                                 "falling back to browser-assisted login",
                                 "INFO",
                             )
                             return _browser_assisted_login(_ba_url_for_guard)
+                        # No --browser-auth flag — prompt interactively, consistent
+                        # with how JS login is handled in _step_to_login_form.
                         vc.log(
-                            f"[auth] JS-rendered login detected at {_login_url} "
-                            "— set --browser-auth to authenticate interactively",
+                            f"[auth] JS-rendered login page detected at {_login_url} "
+                            "— automated form submission is not possible",
+                            "WARNING",
+                        )
+                        _br_role_suffix_g = f" for role '{role_label}'" if role_label else ""
+                        _br_choice_g = vc.prompt(
+                            f"Open a browser window to complete login manually{_br_role_suffix_g}?",
+                            prompt_type="confirm",
+                            options=["Yes", "No"],
+                            role=role_label,
+                        ).strip()
+                        if _br_choice_g.lower() in ("yes", "y", "1"):
+                            return _browser_assisted_login(_ba_url_for_guard)
+                        vc.log(
+                            "[auth] Browser login declined — continuing without authentication",
                             "WARNING",
                         )
                         _login_url = ""
