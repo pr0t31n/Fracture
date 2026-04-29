@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.61"
+VERSION = "2.9.63"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2676,26 +2676,40 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                           "login=", "logon=", "signin=", "auth=")
             )
 
-            # 2. Content fingerprints for known JS login frameworks / products.
-            _JS_LOGIN_SIGNATURES = (
+            # 2. Content fingerprints split into two tiers:
+            #    Strong — authentication-product-specific strings that cannot appear
+            #      on ordinary pages.  Scripts + no static form is sufficient proof
+            #      even when the static HTML carries no login-intent words (the form
+            #      fields are JS-rendered, so they're absent from the raw HTML).
+            #    Weak — generic SPA/framework markers that can appear on any Angular,
+            #      React, or Vue page.  These require the density heuristic as well.
+            _STRONG_SIGNATURES = (
                 # IBM Cognos
-                "ibmcognos", "cognos", "bi/?legacylogin", "cam_passport",
+                "ibmcognos", "bi/?legacylogin", "cam_passport",
                 "cognos.config", "ibm.cognos",
-                # Generic SPA/Angular/React/Vue login shells
+                # Okta
+                "okta-sign-in", "okta-signin", "okta-widget",
+                # Auth0
+                "auth0-lock", "auth0.webauth",
+                # Keycloak
+                "keycloak", "keycloak-js",
+                # Microsoft ADAL / MSAL
+                "adal.js", "msal.js", "msal-browser",
+                # Ping / ForgeRock
+                "pingfederate", "pingidentity", "forgerock", "am.login",
+                # CA SiteMinder
+                "siteminder", "smloginpage",
+            )
+            # "cognos" alone is a weak signal (common word); keep it here so it
+            # still contributes when combined with density or a URL hint.
+            _WEAK_SIGNATURES = (
+                "cognos",
                 "ng-app", "ng-controller", "data-ng-", "v-app", "v-model",
                 "react-root", "__react", "_reactroot",
-                # Common JS auth framework markers
-                "okta-sign-in", "okta-signin", "okta-widget",
-                "auth0-lock", "auth0.webauth",
-                "keycloak", "keycloak-js",
-                "adal.js", "msal.js", "msal-browser",
-                "pingfederate", "pingidentity",
-                "forgerock", "am.login",
-                "siteminder", "smloginpage",
-                # Generic: page says "login" / "sign in" prominently in text
-                # combined with a script-heavy page (low static form count)
             )
-            _content_hit = any(sig in _jrl_html_lower for sig in _JS_LOGIN_SIGNATURES)
+            _strong_content_hit = any(sig in _jrl_html_lower for sig in _STRONG_SIGNATURES)
+            _weak_content_hit   = any(sig in _jrl_html_lower for sig in _WEAK_SIGNATURES)
+            _content_hit        = _strong_content_hit or _weak_content_hit
 
             # 3. Script-density heuristic: many <script> tags + page text contains
             #    login intent words but no static form → likely JS-rendered login.
@@ -2710,13 +2724,19 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             _density_hit   = (_script_count >= 3 and _login_words >= 2
                               and _form_count == 0)
 
-            # URL signal required only when content/density signals are ambiguous.
-            # Strong dual-signal (known framework fingerprint + script-heavy login
-            # page with no static form) is sufficient on its own — covers IBM Cognos
-            # and other apps whose login URLs carry no recognisable path/param intent.
+            # Strong product fingerprint + script-heavy + no static form is
+            # sufficient on its own.  The JS login page for IBM Cognos (and most
+            # other enterprise SSO products) renders all credential fields via JS;
+            # the raw HTML carries zero login-intent words, so _density_hit would
+            # always be False for these pages.
+            _product_login_hit = (_strong_content_hit
+                                  and _script_count >= 3
+                                  and _form_count == 0)
+
             _js_login_detected = (
-                ((_url_param_hit or _url_path_hit) and (_content_hit or _density_hit))
-                or (_content_hit and _density_hit)
+                _product_login_hit
+                or ((_url_param_hit or _url_path_hit) and (_content_hit or _density_hit))
+                or (_weak_content_hit and _density_hit)
             )
             if _js_login_detected:
                 result["js_rendered_login"] = True
@@ -4482,17 +4502,11 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         # Case B: credentials were submitted but the session carries no auth markers
         #         (wrong credentials path, JS-based session, etc.).
         #
-        # In both cases, if --browser-auth is set, open an interactive browser window
-        # at the target so the user can authenticate manually.
+        # If --browser-auth is set: open browser immediately.
+        # If not set: prompt the user interactively (consistent with the JS-nav
+        # escalation in _step_to_login_form).
         _ba_url = auth.get("login_url", "").strip() or _base_target_url
-        if cfg.get("browser_auth") and _ba_url:
-            if not _login_post_called:
-                vc.log(
-                    "[auth] No login form located — falling back to browser-assisted login",
-                    "INFO",
-                )
-                return _browser_assisted_login(_ba_url)
-            # Case B: POST was called — check for auth markers before deciding
+        if _ba_url:
             _ba_hdr_names = frozenset({
                 "authorization", "x-auth-token", "x-api-key", "x-csrf-token",
                 "x-access-token", "x-session-token", "token",
@@ -4502,13 +4516,36 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 or any(k.lower() in _ba_hdr_names for k in sess.headers)
                 or sess.auth is not None
             )
-            if not _ba_has_signal:
+            _ba_needed = (not _login_post_called) or (not _ba_has_signal)
+            if _ba_needed:
+                if not _login_post_called:
+                    vc.log(
+                        "[auth] No login form located — browser-assisted login required",
+                        "INFO",
+                    )
+                else:
+                    vc.log(
+                        "[auth] Credential submission produced no authenticated session — "
+                        "browser-assisted login required",
+                        "INFO",
+                    )
+                if cfg.get("browser_auth"):
+                    return _browser_assisted_login(_ba_url)
+                # No --browser-auth flag — prompt interactively, consistent with
+                # the JS-nav escalation path in _step_to_login_form.
+                _ba_role_sfx = f" for role '{role_label}'" if role_label else ""
+                _ba_choice = vc.prompt(
+                    f"Open a browser window to complete login manually{_ba_role_sfx}?",
+                    prompt_type="confirm",
+                    options=["Yes", "No"],
+                    role=role_label,
+                ).strip()
+                if _ba_choice.lower() in ("yes", "y", "1"):
+                    return _browser_assisted_login(_ba_url)
                 vc.log(
-                    "[auth] Credential submission produced no authenticated session — "
-                    "falling back to browser-assisted login",
-                    "INFO",
+                    "[auth] Browser login declined — continuing without authentication",
+                    "WARNING",
                 )
-                return _browser_assisted_login(_ba_url)
 
         # ── False-positive guard ───────────────────────────────────────────────
         # If credentials were never submitted, any cookies on sess were set by
@@ -14625,8 +14662,11 @@ def main() -> None:
                     _attach_redirect_hook(_ctx_auth, _scope_hostnames, target, out, _in_scope_new)
                 _ctx["auth_sess"] = _ctx_auth
 
-            # Set auth context so all findings in this pass carry the account
-            if _ctx_label == "unauthenticated":
+            # Set auth context so all findings in this pass carry the account.
+            # Use UNAUTH when auth is absent — either this is the unauthenticated
+            # context OR authentication was attempted but failed (_ctx_auth is None).
+            # Never tag findings with a role label that was never actually established.
+            if _ctx_label == "unauthenticated" or _ctx_auth is None:
                 out.set_auth_context([{"username": "UNAUTH", "role": "unauthenticated"}])
             else:
                 _ctx_user = (_ctx_cfg.get("auth", {}).get("username") or "").strip() or _ctx_label
