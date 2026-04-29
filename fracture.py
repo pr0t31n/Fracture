@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.1"
+VERSION = "2.10.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1308,6 +1308,79 @@ def _build_chrome_service():
         raise RuntimeError(f"No chromedriver found: {exc}") from exc
 
 
+def _find_geckodriver() -> "str | None":
+    """Return path to geckodriver (Firefox WebDriver), checking PATH then known locations."""
+    found = shutil.which("geckodriver")
+    if found:
+        return found
+    for p in [
+        "/opt/homebrew/bin/geckodriver",
+        "/usr/local/bin/geckodriver",
+        "/usr/bin/geckodriver",
+        "/usr/lib/geckodriver",
+        "/snap/bin/geckodriver",
+    ]:
+        if Path(p).exists():
+            return p
+    if platform.system() == "Darwin":
+        try:
+            result = subprocess.run(
+                ["brew", "--prefix"], capture_output=True, text=True, timeout=5,
+            )
+            prefix = result.stdout.strip()
+            if prefix:
+                candidate = Path(prefix) / "bin" / "geckodriver"
+                if candidate.exists():
+                    return str(candidate)
+        except Exception:
+            pass
+    return None
+
+
+def _find_firefox_binary() -> "str | None":
+    """Return path to Firefox browser binary, or None."""
+    if platform.system() == "Darwin":
+        sudo_user = os.environ.get("SUDO_USER", "")
+        app_roots = [Path("/Applications")]
+        if sudo_user:
+            try:
+                import pwd as _pwd
+                app_roots.append(Path(_pwd.getpwnam(sudo_user).pw_dir) / "Applications")
+            except Exception:
+                app_roots.append(Path(f"/Users/{sudo_user}") / "Applications")
+        else:
+            app_roots.append(Path.home() / "Applications")
+        for root in app_roots:
+            candidate = root / "Firefox.app" / "Contents" / "MacOS" / "firefox"
+            if candidate.exists():
+                return str(candidate)
+    for p in [
+        "/usr/bin/firefox", "/usr/bin/firefox-esr",
+        "/usr/lib/firefox/firefox", "/usr/lib/firefox-esr/firefox-esr",
+        "/snap/bin/firefox",
+    ]:
+        if Path(p).exists():
+            return p
+    for name in ("firefox", "firefox-esr"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _build_firefox_service():
+    """Return a selenium Service object pointing at a usable geckodriver."""
+    from selenium.webdriver.firefox.service import Service
+    driver = _find_geckodriver()
+    if driver:
+        return Service(driver)
+    try:
+        from webdriver_manager.firefox import GeckoDriverManager
+        return Service(GeckoDriverManager().install())
+    except Exception as exc:
+        raise RuntimeError(f"No geckodriver found: {exc}") from exc
+
+
 def _check_selenium() -> bool:
     """Return True if selenium is importable and Chrome is available.  Result is cached."""
     global _SELENIUM_AVAILABLE
@@ -1347,6 +1420,63 @@ def _check_selenium() -> bool:
         pass
     _SELENIUM_AVAILABLE = False
     return False
+
+
+def _get_spa_browser() -> "str | None":
+    """Return the best available headless browser for SPA crawling.
+
+    Returns 'chrome', 'firefox', or None.  Chrome is preferred; Firefox is the
+    fallback when Chrome/chromedriver is absent.  Result is cached after the
+    first call.
+    """
+    global _SPA_BROWSER_CACHE, _SPA_BROWSER_CHECKED
+    if _SPA_BROWSER_CHECKED:
+        return _SPA_BROWSER_CACHE
+
+    # selenium must be importable at all (reuses _check_selenium's sys.path fixup)
+    if not _check_selenium():
+        _SPA_BROWSER_CHECKED = True
+        _SPA_BROWSER_CACHE   = None
+        return None
+
+    # Chrome: prefer if chromedriver or chrome binary is locatable
+    try:
+        from selenium.webdriver.chrome.options import Options as _CO  # noqa: F401
+        if _find_chromedriver() or _find_chrome_binary():
+            _SPA_BROWSER_CHECKED = True
+            _SPA_BROWSER_CACHE   = "chrome"
+            return "chrome"
+        # webdriver_manager can fetch chromedriver on demand
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager as _CDM  # noqa: F401
+            _SPA_BROWSER_CHECKED = True
+            _SPA_BROWSER_CACHE   = "chrome"
+            return "chrome"
+        except ImportError:
+            pass
+    except ImportError:
+        pass
+
+    # Firefox fallback: geckodriver or firefox binary locatable
+    try:
+        from selenium.webdriver.firefox.options import Options as _FO  # noqa: F401
+        if _find_geckodriver() or _find_firefox_binary():
+            _SPA_BROWSER_CHECKED = True
+            _SPA_BROWSER_CACHE   = "firefox"
+            return "firefox"
+        try:
+            from webdriver_manager.firefox import GeckoDriverManager as _GDM  # noqa: F401
+            _SPA_BROWSER_CHECKED = True
+            _SPA_BROWSER_CACHE   = "firefox"
+            return "firefox"
+        except ImportError:
+            pass
+    except ImportError:
+        pass
+
+    _SPA_BROWSER_CHECKED = True
+    _SPA_BROWSER_CACHE   = None
+    return None
 
 
 # ─────────────────────────────────────────────
@@ -1482,6 +1612,10 @@ except ImportError:
 
 # ── Selenium availability cache (checked once, lazily) ────────────────────────
 _SELENIUM_AVAILABLE: "bool | None" = None
+
+# ── SPA headless-browser selection cache ─────────────────────────────────────
+_SPA_BROWSER_CACHE:   "str | None" = None   # "chrome", "firefox", or None
+_SPA_BROWSER_CHECKED: bool         = False
 
 # ── Web file download constants ───────────────────────────────────────────────
 _WEB_EXTS = frozenset({
@@ -10228,10 +10362,9 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
                      already_visited: int) -> dict:
     """Headless-browser crawl for Single Page Applications.
 
-    Uses Fracture's existing Selenium / Chrome infrastructure, running Chrome
-    in headless mode to execute JavaScript and crawl routes that are invisible
-    to the static BeautifulSoup pass.  Session cookies are transferred so the
-    crawl runs as the current credential context.
+    Tries Chrome first; falls back to Firefox (GeckoDriver) when Chrome or
+    chromedriver is unavailable.  Session cookies are transferred so the crawl
+    runs as the current credential context.
 
     Returns a partial crawl_data dict (same schema as _phase_crawl output)
     containing only the incremental results — the caller merges them.
@@ -10248,34 +10381,53 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
     visited:   set  = set()
     driver             = None
 
+    browser = _get_spa_browser()
+    if browser is None:
+        vc.log("[crawl/spa] no headless browser available — skipping", "WARNING")
+        return {}
+
     try:
         from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
         from selenium.webdriver.support.ui import WebDriverWait
     except ImportError:
         vc.log("[crawl/spa] selenium not importable — skipping headless crawl", "WARNING")
         return {}
 
     try:
-        opts = Options()
-        opts.add_argument("--headless=new")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu")
-        opts.add_argument("--disable-extensions")
-        opts.add_argument("--disable-notifications")
-        opts.add_argument("--disable-popup-blocking")
-        opts.add_argument("--log-level=3")
-        opts.add_argument("--silent")
-        if not verify_ssl:
-            opts.add_argument("--ignore-certificate-errors")
-            opts.add_argument("--allow-insecure-localhost")
-        chrome_bin = _find_chrome_binary()
-        if chrome_bin:
-            opts.binary_location = chrome_bin
+        if browser == "firefox":
+            from selenium.webdriver.firefox.options import Options
+            opts = Options()
+            opts.add_argument("-headless")
+            if not verify_ssl:
+                opts.accept_insecure_certs = True
+            ff_bin = _find_firefox_binary()
+            if ff_bin:
+                opts.binary = ff_bin
+            service = _build_firefox_service()
+            driver  = webdriver.Firefox(service=service, options=opts)
+            vc.log("[crawl/spa] Using Firefox (GeckoDriver) for headless crawl", "INFO")
+        else:
+            from selenium.webdriver.chrome.options import Options
+            opts = Options()
+            opts.add_argument("--headless=new")
+            opts.add_argument("--no-sandbox")
+            opts.add_argument("--disable-dev-shm-usage")
+            opts.add_argument("--disable-gpu")
+            opts.add_argument("--disable-extensions")
+            opts.add_argument("--disable-notifications")
+            opts.add_argument("--disable-popup-blocking")
+            opts.add_argument("--log-level=3")
+            opts.add_argument("--silent")
+            if not verify_ssl:
+                opts.add_argument("--ignore-certificate-errors")
+                opts.add_argument("--allow-insecure-localhost")
+            chrome_bin = _find_chrome_binary()
+            if chrome_bin:
+                opts.binary_location = chrome_bin
+            service = _build_chrome_service()
+            driver  = webdriver.Chrome(service=service, options=opts)
+            vc.log("[crawl/spa] Using Chrome for headless crawl", "INFO")
 
-        service = _build_chrome_service()
-        driver  = webdriver.Chrome(service=service, options=opts)
         driver.set_page_load_timeout(max(timeout * 2, 30))
         driver.implicitly_wait(2)
 
@@ -10484,7 +10636,8 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                     "client-side routing is not a security boundary."
                 ),
             )
-            if _check_selenium():
+            _spa_browser = _get_spa_browser()
+            if _spa_browser:
                 vc.status(phase, "Crawl", "running", "SPA headless crawl", 0, max_pages)
                 try:
                     _spa = _phase_spa_crawl(target, cfg, pm, out, sess, len(visited))
@@ -10502,8 +10655,9 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                     vc.log(f"[crawl] SPA headless crawl exception: {_spa_err}", "WARNING")
             else:
                 vc.log(
-                    "[crawl] Selenium not available — install selenium + chromedriver "
-                    "to enable headless SPA crawl (run install.py)",
+                    "[crawl] No headless browser available — install selenium + "
+                    "chromedriver (Chrome) or geckodriver (Firefox) to enable "
+                    "headless SPA crawl (run install.py)",
                     "WARNING",
                 )
         else:

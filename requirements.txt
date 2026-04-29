@@ -4,8 +4,8 @@ beautifulsoup4>=4.12.0
 dnspython>=2.4.0
 
 # Optional — installed by install.py (selenium phase):
-#   selenium>=4.0.0          — headless Chrome crawl for SPA targets
-#   webdriver-manager>=4.0.0 — auto-manages chromedriver binary
+#   selenium>=4.0.0          — headless Chrome/Firefox crawl for SPA targets
+#   webdriver-manager>=4.0.0 — auto-manages chromedriver / geckodriver binary
 
 # System tools (install separately — see install.py):
 #   gobuster      — directory brute-forcing

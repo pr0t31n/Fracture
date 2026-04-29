@@ -164,6 +164,8 @@ APT_PACKAGES = [
     "libssl-dev", "libcurl4-openssl-dev",
     # Headless browser for SPA crawl (chromium-driver provides chromedriver)
     "chromium", "chromium-driver",
+    # Firefox fallback for SPA crawl
+    "firefox", "firefox-geckodriver",
 ]
 DNF_PACKAGES = [
     "nikto", "sqlmap", "sslscan", "whatweb", "ffuf",
@@ -173,12 +175,16 @@ DNF_PACKAGES = [
     "openssl-devel", "libcurl-devel",
     # Headless browser for SPA crawl
     "chromium", "chromedriver",
+    # Firefox fallback for SPA crawl
+    "firefox", "geckodriver",
 ]
 BREW_PACKAGES = [
     "gobuster", "nikto", "sslscan", "git",
     "ffuf", "feroxbuster", "exploitdb",
     # Headless browser for SPA crawl (chromedriver auto-managed via webdriver-manager)
     "chromium",
+    # Firefox fallback for SPA crawl
+    "geckodriver",
 ]
 
 
