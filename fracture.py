@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.67"
+VERSION = "2.9.68"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -10680,7 +10680,12 @@ def _write_structure_map(out: "OutputManager", target: dict,
             except Exception:
                 return
             entry = paths.setdefault(path, {})
-            if status is not None:
+            # HTTP status is write-once: the first writer (Role 1 / most
+            # permissive context) sets it and later roles cannot overwrite it.
+            # This keeps the Structure tab representative of the application's
+            # surface as seen by the highest-privilege session.  Access Matrix
+            # per-role statuses are tracked separately and are unaffected.
+            if status is not None and "status" not in entry:
                 entry["status"] = status
         except Exception:
             pass
