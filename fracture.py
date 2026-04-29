@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.66"
+VERSION = "2.9.67"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2237,10 +2237,15 @@ def _make_session(cfg: dict, scope_hostnames: "set | None" = None) -> requests.S
 
 def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         scope_hostnames: "set | None" = None,
-                        role_label: str = "") -> "requests.Session | None":
+                        role_label: str = "",
+                        no_interactive: bool = False) -> "requests.Session | None":
     """
     Return an authenticated requests.Session for the given cfg/auth_key, or None if disabled.
     Supports all 20 auth methods from Fracture testConnection.py.
+
+    no_interactive: when True, suppress all vc.prompt() calls (browser-auth prompts).
+    Use for automated/internal call sites (auth_bypass credential testing, access_matrix
+    re-auth fallback) where user interaction is not appropriate.
     """
     auth = cfg.get(auth_key, {})
     if not auth.get("enabled"):
@@ -3112,12 +3117,20 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     )
 
                     # --browser-auth already set → switch immediately
-                    if cfg.get("browser_auth"):
+                    if cfg.get("browser_auth") and not no_interactive:
                         vc.log(
                             "[auth] --browser-auth set — switching to browser-assisted login",
                             "INFO",
                         )
                         return "__BROWSER_AUTH__"
+
+                    if no_interactive:
+                        vc.log(
+                            "[auth] JS login requires browser interaction — "
+                            "skipping (automated call site)",
+                            "INFO",
+                        )
+                        return ""
 
                     # Ask the user — works in both TTY and Crucible-managed mode
                     _br_role_suffix = f" for role '{role_label}'" if role_label else ""
@@ -4456,34 +4469,41 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         # is not possible; hand off to browser-auth.
                         _ba_url_for_guard = (
                             auth.get("login_url", "").strip() or _base_target_url)
-                        if cfg.get("browser_auth"):
+                        if cfg.get("browser_auth") and not no_interactive:
                             vc.log(
                                 f"[auth] JS-rendered login detected at guard — "
                                 "falling back to browser-assisted login",
                                 "INFO",
                             )
                             return _browser_assisted_login(_ba_url_for_guard)
-                        # No --browser-auth flag — prompt interactively, consistent
-                        # with how JS login is handled in _step_to_login_form.
-                        vc.log(
-                            f"[auth] JS-rendered login page detected at {_login_url} "
-                            "— automated form submission is not possible",
-                            "WARNING",
-                        )
-                        _br_role_suffix_g = f" for role '{role_label}'" if role_label else ""
-                        _br_choice_g = vc.prompt(
-                            f"Open a browser window to complete login manually{_br_role_suffix_g}?",
-                            prompt_type="confirm",
-                            options=["Yes", "No"],
-                            role=role_label,
-                        ).strip()
-                        if _br_choice_g.lower() in ("yes", "y", "1"):
-                            return _browser_assisted_login(_ba_url_for_guard)
-                        vc.log(
-                            "[auth] Browser login declined — continuing without authentication",
-                            "WARNING",
-                        )
-                        _login_url = ""
+                        if no_interactive:
+                            vc.log(
+                                f"[auth] JS-rendered login at guard — "
+                                "skipping (automated call site)",
+                                "INFO",
+                            )
+                            _login_url = ""
+                        else:
+                            # No --browser-auth flag — prompt interactively.
+                            vc.log(
+                                f"[auth] JS-rendered login page detected at {_login_url} "
+                                "— automated form submission is not possible",
+                                "WARNING",
+                            )
+                            _br_role_suffix_g = f" for role '{role_label}'" if role_label else ""
+                            _br_choice_g = vc.prompt(
+                                f"Open a browser window to complete login manually{_br_role_suffix_g}?",
+                                prompt_type="confirm",
+                                options=["Yes", "No"],
+                                role=role_label,
+                            ).strip()
+                            if _br_choice_g.lower() in ("yes", "y", "1"):
+                                return _browser_assisted_login(_ba_url_for_guard)
+                            vc.log(
+                                "[auth] Browser login declined — continuing without authentication",
+                                "WARNING",
+                            )
+                            _login_url = ""
                     elif not _guard_p["login_form"]:
                         vc.log(
                             f"[auth] Resolved URL has no username/password form — "
@@ -4542,23 +4562,28 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         "browser-assisted login required",
                         "INFO",
                     )
-                if cfg.get("browser_auth"):
+                if cfg.get("browser_auth") and not no_interactive:
                     return _browser_assisted_login(_ba_url)
-                # No --browser-auth flag — prompt interactively, consistent with
-                # the JS-nav escalation path in _step_to_login_form.
-                _ba_role_sfx = f" for role '{role_label}'" if role_label else ""
-                _ba_choice = vc.prompt(
-                    f"Open a browser window to complete login manually{_ba_role_sfx}?",
-                    prompt_type="confirm",
-                    options=["Yes", "No"],
-                    role=role_label,
-                ).strip()
-                if _ba_choice.lower() in ("yes", "y", "1"):
-                    return _browser_assisted_login(_ba_url)
-                vc.log(
-                    "[auth] Browser login declined — continuing without authentication",
-                    "WARNING",
-                )
+                if no_interactive:
+                    vc.log(
+                        "[auth] Login failed — skipping browser-auth (automated call site)",
+                        "INFO",
+                    )
+                else:
+                    # No --browser-auth flag — prompt interactively.
+                    _ba_role_sfx = f" for role '{role_label}'" if role_label else ""
+                    _ba_choice = vc.prompt(
+                        f"Open a browser window to complete login manually{_ba_role_sfx}?",
+                        prompt_type="confirm",
+                        options=["Yes", "No"],
+                        role=role_label,
+                    ).strip()
+                    if _ba_choice.lower() in ("yes", "y", "1"):
+                        return _browser_assisted_login(_ba_url)
+                    vc.log(
+                        "[auth] Browser login declined — continuing without authentication",
+                        "WARNING",
+                    )
 
         # ── False-positive guard ───────────────────────────────────────────────
         # If credentials were never submitted, any cookies on sess were set by
@@ -13931,7 +13956,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             r_auth["password"] = role_cfg.get("password", r_auth.get("password", ""))
             r_cfg = _copy.deepcopy(cfg)
             r_cfg["auth"] = r_auth
-            return _build_auth_session(r_cfg, "auth")
+            return _build_auth_session(r_cfg, "auth", no_interactive=True)
 
         for role_cfg in auth_matrix:
             role = role_cfg.get("role") or f"role{len(role_sessions)+1}"
@@ -15277,7 +15302,8 @@ def main() -> None:
                             _dc_cfg["auth"]["enabled"]  = True
                             _dc_cfg["auth"]["username"] = _dc["username"]
                             _dc_cfg["auth"]["password"] = _dc["password"]
-                            _dc_as  = _build_auth_session(_dc_cfg, "auth")
+                            _dc_as  = _build_auth_session(_dc_cfg, "auth",
+                                                             no_interactive=True)
                             _cred_contexts.append({"label": _dc_lbl, "cfg": _dc_cfg,
                                                    "auth_sess": _dc_as})
                             vc.log(
