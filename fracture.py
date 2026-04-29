@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.65"
+VERSION = "2.9.66"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -14744,7 +14744,25 @@ def main() -> None:
             else:
                 crawl_data = {"forms": [], "params": [], "links": []}
             auth_recon_data = {"forms": [], "links": [], "resource_ids": []}
-            effective_auth  = _ctx_auth or sess
+
+            # effective_auth: the session used for all requests in this context.
+            # For unauthenticated context: ALWAYS a fresh session — never fall back
+            # to `sess` (the shared probe session) which accumulates cookies from
+            # recon, spider, and redirect GETs made during all prior contexts.
+            # Using sess here would carry Role 1's tracking/session cookies into
+            # what is supposed to be a clean unauthenticated probe.
+            if _ctx_auth is not None:
+                effective_auth = _ctx_auth
+            elif _ctx_label == "unauthenticated":
+                effective_auth = _make_session(_ctx_cfg, _scope_hostnames)
+                _attach_redirect_hook(effective_auth, _scope_hostnames, target,
+                                      out, _in_scope_new)
+            else:
+                # Auth was attempted but failed — use a clean session so we don't
+                # send stale probe cookies while scanning as this role.
+                effective_auth = _make_session(_ctx_cfg, _scope_hostnames)
+                _attach_redirect_hook(effective_auth, _scope_hostnames, target,
+                                      out, _in_scope_new)
 
             # ── Discovery phases — Role 1 only ──────────────────────────────
             # All enumeration and server-analysis runs authenticated as the most
