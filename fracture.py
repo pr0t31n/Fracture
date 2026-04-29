@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.0"
+VERSION = "2.10.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6722,127 +6722,152 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 }
                 # Track which security headers whatweb observed as present
                 ww_found_sec_hdrs: set = set()
-                # HTTP status from the last-parsed whatweb record (used for
-                # Missing Security Header findings emitted after the loop).
+
+                # Parse the WhatWeb JSON log as a complete JSON document.
+                # WhatWeb --log-json writes a valid JSON array; fall back to
+                # line-by-line only for non-standard output formats.
+                _ww_records: list = []
+                _ww_raw = ww_out.read_text(encoding="utf-8", errors="replace")
+                try:
+                    _parsed = json.loads(_ww_raw)
+                    _ww_records = _parsed if isinstance(_parsed, list) else [_parsed]
+                except json.JSONDecodeError:
+                    for _ww_line in _ww_raw.splitlines():
+                        _ww_line = _ww_line.strip()
+                        if not _ww_line:
+                            continue
+                        try:
+                            _r = json.loads(_ww_line)
+                            if isinstance(_r, list):
+                                _ww_records.extend(_r)
+                            elif isinstance(_r, dict):
+                                _ww_records.append(_r)
+                        except Exception:
+                            pass
+
+                # Extract HTTP status from the first record that carries one.
                 _ww_http_status: "int | None" = None
+                for _wr in _ww_records:
+                    if isinstance(_wr, dict) and _wr.get("http_status"):
+                        _ww_http_status = int(_wr["http_status"])
+                        break
+                # Human-readable suffix included in every finding description.
+                _hs = f" [HTTP {_ww_http_status}]" if _ww_http_status else ""
 
-                for line in ww_out.read_text(encoding="utf-8", errors="replace").splitlines():
-                    line = line.strip()
-                    if not line:
+                for rec in _ww_records:
+                    if not isinstance(rec, dict):
                         continue
-                    try:
-                        records = json.loads(line)
-                        if not isinstance(records, list):
-                            records = [records]
-                        for rec in records:
-                            _ww_http_status = rec.get("http_status") or _ww_http_status
-                            plugins = rec.get("plugins", {})
-                            for pname, pdata in plugins.items():
-                                if pname in _SKIP_WW:
-                                    continue
+                    plugins = rec.get("plugins", {})
+                    for pname, pdata in plugins.items():
+                        try:
+                            if pname in _SKIP_WW:
+                                continue
 
-                                # Known security header present — track and skip Tech finding
-                                if pname in _SEC_HDR_NAMES:
-                                    ww_found_sec_hdrs.add(pname)
-                                    continue
+                            # Known security header present — track and skip Tech finding
+                            if pname in _SEC_HDR_NAMES:
+                                ww_found_sec_hdrs.add(pname)
+                                continue
 
-                                # Uncommon-Headers plugin — WhatWeb packs all uncommon
-                                # header names as a comma-separated list inside a single
-                                # string entry.  Split on commas first, then on ':' for
-                                # any items that carry a value, and emit one finding each.
-                                if pname in ("UncommonHeaders", "Uncommon-Headers"):
-                                    for hdr_val in pdata.get("string", []):
-                                        for _raw_item in hdr_val.split(","):
-                                            _raw_item = _raw_item.strip()
-                                            if not _raw_item:
-                                                continue
-                                            _hv_parts = _raw_item.split(":", 1)
-                                            hdr_name  = _hv_parts[0].strip()
-                                            hdr_value = _hv_parts[1].strip() if len(_hv_parts) > 1 else ""
-                                            if not hdr_name:
-                                                continue
-                                            # If this is a known security header, track it as
-                                            # present and suppress the "Unknown Header" finding —
-                                            # the Missing Security Header loop handles it instead.
-                                            if hdr_name.lower() in _SEC_HDR_LOWER:
-                                                ww_found_sec_hdrs.add(
-                                                    next(h for h in _SEC_HDR_NAMES
-                                                         if h.lower() == hdr_name.lower())
-                                                )
-                                                continue
-                                            out.add_finding(
-                                                title=f"Unknown Header Identified: {hdr_name}",
-                                                url=url, port=target["port"], risk="INFO",
-                                                description=(
-                                                    f"An uncommon or non-standard HTTP header "
-                                                    f"'{hdr_name}' was observed in the response."
-                                                    + (f" Value: {hdr_value}" if hdr_value else "")
-                                                ),
-                                                output=f"Header: {hdr_name}"
-                                                       + (f"\nValue: {hdr_value}" if hdr_value else "")
-                                                       + (f"\nHTTP Status: {_ww_http_status}" if _ww_http_status else ""),
-                                                sources="whatweb", service=target["scheme"],
-                                                output_file=str(ww_out),
-                                                owasp="A05:2025 Security Misconfiguration",
-                                                nist="CM-7",
-                                                remediation=(
-                                                    "Review the header for necessity; "
-                                                    "remove non-standard headers if not required."
-                                                ),
+                            # Uncommon-Headers plugin — WhatWeb packs all uncommon
+                            # header names as a comma-separated list inside a single
+                            # string entry.  Split on commas first, then on ':' for
+                            # any items that carry a value, and emit one finding each.
+                            if pname in ("UncommonHeaders", "Uncommon-Headers"):
+                                for hdr_val in pdata.get("string", []):
+                                    for _raw_item in hdr_val.split(","):
+                                        _raw_item = _raw_item.strip()
+                                        if not _raw_item:
+                                            continue
+                                        _hv_parts = _raw_item.split(":", 1)
+                                        hdr_name  = _hv_parts[0].strip()
+                                        hdr_value = _hv_parts[1].strip() if len(_hv_parts) > 1 else ""
+                                        if not hdr_name:
+                                            continue
+                                        # If this is a known security header, track it as
+                                        # present and suppress the "Unknown Header" finding —
+                                        # the Missing Security Header loop handles it instead.
+                                        if hdr_name.lower() in _SEC_HDR_LOWER:
+                                            ww_found_sec_hdrs.add(
+                                                next(h for h in _SEC_HDR_NAMES
+                                                     if h.lower() == hdr_name.lower())
                                             )
-                                    continue
+                                            continue
+                                        out.add_finding(
+                                            title=f"Unknown Header Identified: {hdr_name}",
+                                            url=url, port=target["port"], risk="INFO",
+                                            description=(
+                                                f"An uncommon or non-standard HTTP header "
+                                                f"'{hdr_name}' was observed in the response{_hs}."
+                                                + (f" Value: {hdr_value}" if hdr_value else "")
+                                            ),
+                                            output=(f"HTTP Status: {_ww_http_status}\n"
+                                                    if _ww_http_status else "")
+                                                   + f"Header: {hdr_name}"
+                                                   + (f"\nValue: {hdr_value}" if hdr_value else ""),
+                                            sources="whatweb", service=target["scheme"],
+                                            output_file=str(ww_out),
+                                            owasp="A05:2025 Security Misconfiguration",
+                                            nist="CM-7",
+                                            remediation=(
+                                                "Review the header for necessity; "
+                                                "remove non-standard headers if not required."
+                                            ),
+                                        )
+                                continue
 
-                                versions = pdata.get("version", [])
-                                version  = versions[0] if versions else ""
+                            versions = pdata.get("version", [])
+                            version  = versions[0] if versions else ""
 
-                                # Header-like plugin name (not a known security header)
-                                if _HDR_NAME_RE.match(pname):
-                                    out.add_finding(
-                                        title=f"Unknown Header Identified: {pname}",
-                                        url=url, port=target["port"], risk="INFO",
-                                        description=(
-                                            f"An unrecognised HTTP header '{pname}' "
-                                            f"was observed in the response."
-                                            + (f" Value: {version}" if version else "")
-                                        ),
-                                        output=(f"Header: {pname}"
-                                                + (f"\nValue: {version}" if version else "")
-                                                + (f"\nHTTP Status: {_ww_http_status}" if _ww_http_status else "")),
-                                        sources="whatweb", service=target["scheme"],
-                                        output_file=str(ww_out),
-                                        owasp="A05:2025 Security Misconfiguration",
-                                        nist="CM-7",
-                                        remediation=(
-                                            "Review the header for necessity; "
-                                            "remove non-standard headers if not required."
-                                        ),
-                                    )
-                                    continue
-
-                                # Standard technology finding
-                                _ww_versions.append((pname, version))
+                            # Header-like plugin name (not a known security header)
+                            if _HDR_NAME_RE.match(pname):
                                 out.add_finding(
-                                    title=(f"Technology Identified: {pname} {version}".strip()
-                                           if version else f"Technology Identified: {pname}"),
+                                    title=f"Unknown Header Identified: {pname}",
                                     url=url, port=target["port"], risk="INFO",
                                     description=(
-                                        f"whatweb identified {pname}"
-                                        f"{' ' + version if version else ''} at {url}."
+                                        f"An unrecognised HTTP header '{pname}' "
+                                        f"was observed in the response{_hs}."
+                                        + (f" Value: {version}" if version else "")
                                     ),
-                                    output=(f"Plugin: {pname}"
-                                            + (f"\nVersion: {version}" if version else "")
-                                            + (f"\nHTTP Status: {_ww_http_status}" if _ww_http_status else "")),
+                                    output=((f"HTTP Status: {_ww_http_status}\n"
+                                             if _ww_http_status else "")
+                                            + f"Header: {pname}"
+                                            + (f"\nValue: {version}" if version else "")),
                                     sources="whatweb", service=target["scheme"],
                                     output_file=str(ww_out),
-                                    owasp="A06:2025 Vulnerable and Outdated Components",
+                                    owasp="A05:2025 Security Misconfiguration",
                                     nist="CM-7",
                                     remediation=(
-                                        "Ensure all identified technologies are up to date "
-                                        "and properly configured."
+                                        "Review the header for necessity; "
+                                        "remove non-standard headers if not required."
                                     ),
                                 )
-                    except Exception:
-                        pass
+                                continue
+
+                            # Standard technology finding
+                            _ww_versions.append((pname, version))
+                            out.add_finding(
+                                title=(f"Technology Identified: {pname} {version}".strip()
+                                       if version else f"Technology Identified: {pname}"),
+                                url=url, port=target["port"], risk="INFO",
+                                description=(
+                                    f"whatweb identified {pname}"
+                                    f"{' ' + version if version else ''} at {url}{_hs}."
+                                ),
+                                output=((f"HTTP Status: {_ww_http_status}\n"
+                                         if _ww_http_status else "")
+                                        + f"Plugin: {pname}"
+                                        + (f"\nVersion: {version}" if version else "")),
+                                sources="whatweb", service=target["scheme"],
+                                output_file=str(ww_out),
+                                owasp="A06:2025 Vulnerable and Outdated Components",
+                                nist="CM-7",
+                                remediation=(
+                                    "Ensure all identified technologies are up to date "
+                                    "and properly configured."
+                                ),
+                            )
+                        except Exception:
+                            pass
 
                 # Emit Missing Security Header findings for headers absent from whatweb output
                 for _hdr_name, _hdr_risk, _unused, _hdr_desc, _hdr_nist, _hdr_remed \
@@ -6853,9 +6878,13 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                         out.add_finding(
                             title=f"Missing Security Header: {_hdr_name}",
                             url=url, port=target["port"], risk=_hdr_risk,
-                            description=_hdr_desc,
-                            output=f"Missing: {_hdr_name}"
-                                   + (f"\nHTTP Status: {_ww_http_status}" if _ww_http_status else ""),
+                            description=(
+                                _hdr_desc
+                                + (_hs if _hs else "")
+                            ),
+                            output=((f"HTTP Status: {_ww_http_status}\n"
+                                     if _ww_http_status else "")
+                                    + f"Missing: {_hdr_name}"),
                             affected=_url_rel_path(url, target["url"]),
                             sources="whatweb", service=target["scheme"],
                             output_file=str(ww_out),
