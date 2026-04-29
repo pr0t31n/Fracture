@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.72"
+VERSION = "2.9.73"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -14020,16 +14020,29 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
         if access[role_label] is not None:
             continue  # Already probed with a real response for this role
         url = base_url + path
+        _body_denied = False
+        _body_len    = 0
+        _final_code  = 0
         try:
             r = probe_sess.get(url, timeout=timeout, allow_redirects=False,
                                headers={"Accept": "text/html,application/json"})
-            access[role_label] = r.status_code
+            _final_code = r.status_code
+            if _final_code == 200:
+                try:
+                    _body_len   = len(r.content)
+                    _body_denied = bool(_DENIAL_RE.search(r.text[:8192]))
+                except Exception:
+                    pass
         except Exception:
             try:
                 r = probe_sess.head(url, timeout=max(timeout // 2, 3), allow_redirects=False)
-                access[role_label] = r.status_code
+                _final_code = r.status_code
             except Exception:
-                access[role_label] = 0
+                pass
+        access[role_label] = _final_code
+        if _final_code == 200:
+            _meta = entry.setdefault("access_meta", {})
+            _meta[role_label] = {"body_len": _body_len, "body_denied": _body_denied}
         changed = True
     if changed:
         try:
@@ -14641,6 +14654,17 @@ _PRIV_PATH_RE = re.compile(
     r'billing|finance|audit|internal|deploy|security|api/admin|api/v\d+/admin|'
     r'superuser|staff|operator|moderator|panel|control',
     re.I,
+)
+# Patterns that indicate access denial in a 200 response body.
+# Checked in the page <title> first (lower false-positive rate) then body text.
+_DENIAL_RE = re.compile(
+    r'<title[^>]*>[^<]*(?:access\s+denied|403|forbidden|unauthorized|not\s+authorized)[^<]*</title'
+    r'|'
+    r'\b(access\s+denied|403\s+forbidden|401\s+unauthorized|permission\s+denied|'
+    r'not\s+authorized|unauthorized\s+access|login\s+required|'
+    r'sign[\s\-]?in\s+required|'
+    r'you\s+(?:don\'?t|do\s+not)\s+have\s+(?:permission|access))\b',
+    re.IGNORECASE,
 )
 # Score threshold: a new role must beat the current discovery leader by this
 # factor before its busting results are considered more authoritative.
