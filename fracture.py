@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.9.63"
+VERSION = "2.9.65"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1086,6 +1086,18 @@ def _is_placeholder_secret(value: str, key_name: str = "") -> bool:
         # camelCase with 3+ words and no digits run → likely an identifier, not a secret
         if not re.search(r'\d{4,}', v):
             return True
+    # Code expression — value is a variable dereference, not a literal.
+    # Covers: array subscript (a[4], params[idx]), function calls (getPass()),
+    # and property chains (config.password, this.pwd).
+    # Real credential literals do not contain [ or ( and are not dotted identifiers.
+    if '[' in v or '(' in v:
+        return True
+    if re.match(r'^[A-Za-z_$][\w$]*(?:\.\w+)+$', v):
+        return True
+    # JavaScript/Python falsy / null literals that are never real secrets.
+    if v.lower() in ("null", "undefined", "true", "false", "none", "nil",
+                     "nan", "infinity", "unknown", "n/a"):
+        return True
     return False
 
 
@@ -1974,6 +1986,7 @@ class OutputManager:
                 "login page detected",
                 "missing secure cookie attribute:",
                 "misconfigured secure cookie attribute:",
+                "broken function level authorization (bfla)",
             )
             _is_global = any(_title_lower.startswith(_p) for _p in _GLOBAL_MERGE_PREFIXES)
             _norm_key  = (_title_lower, "" if _is_global else url.strip(),
@@ -14091,7 +14104,12 @@ def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
     vc.log(
         f"[bfla] Testing {total} Role 1 endpoints as [{ctx_label}]", "INFO")
 
-    findings_count = 0
+    # Collect all accessible endpoints first, then emit one merged finding per
+    # risk tier so that all affected relative URLs are consolidated into a single
+    # finding rather than producing one finding per endpoint.
+    _bfla_critical: list = []   # body-identical to Role 1
+    _bfla_high:     list = []   # HTTP 200 but body differs
+
     for idx, ep in enumerate(role1_endpoints):
         ep_url = ep["url"]
         vc.status(phase, "BFLA Testing", "running",
@@ -14104,37 +14122,45 @@ def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
         if r.status_code != 200:
             continue
 
-        body_hash   = hash(r.text[:4096])
-        body_match  = (body_hash == ep.get("body_hash")) and (
+        body_hash  = hash(r.text[:4096])
+        body_match = (body_hash == ep.get("body_hash")) and (
             abs(len(r.text) - ep.get("body_len", 0)) < 64)
-        risk        = "CRITICAL" if body_match else "HIGH"
-        match_note  = (
-            "Response body is identical to Role 1's response — the same data "
-            "is returned regardless of privilege level."
-            if body_match else
-            "Response was HTTP 200 but body differs from Role 1's — the function "
-            "endpoint is reachable; data may be scoped differently."
-        )
+        bucket = _bfla_critical if body_match else _bfla_high
+        bucket.append({
+            "ep":    ep,
+            "url":   ep_url,
+            "r_len": len(r.text),
+            "r_status": r.status_code,
+        })
+        tier = "CRITICAL" if body_match else "HIGH"
+        vc.log(f"[bfla] BFLA {tier}: {ep_url} accessible as [{ctx_label}]", "SUCCESS")
 
+    def _emit_bfla_tier(hits: list, risk: str, match_note: str) -> None:
+        if not hits:
+            return
+        role1_label = hits[0]["ep"]["role1_label"]
+        affected_urls = "\n".join(h["url"] for h in hits)
+        output_lines  = [
+            f"  {h['url']}  |  Role 1 ({role1_label}): HTTP {h['ep']['status']} "
+            f"({h['ep'].get('body_len', '?')} bytes)  |  "
+            f"Role ({ctx_label}): HTTP {h['r_status']} ({h['r_len']} bytes)"
+            for h in hits
+        ]
         out.add_finding(
             title="Broken Function Level Authorization (BFLA)",
-            url=ep_url,
+            url=target["url"],
             port=target["port"],
             risk=risk,
             description=(
-                f"Role '{ctx_label}' successfully accessed an endpoint that returned "
-                f"HTTP 200 for the most privileged role ('{ep['role1_label']}'). "
-                f"The server did not enforce role-level access control on this function. "
-                f"{match_note}"
+                f"Role '{ctx_label}' successfully accessed {len(hits)} endpoint(s) "
+                f"that returned HTTP 200 for the most privileged role "
+                f"('{role1_label}'). The server did not enforce role-level access "
+                f"control on these functions. {match_note}"
             ),
-            output=(
-                f"Role 1 ({ep['role1_label']}): HTTP {ep['status']} "
-                f"({ep.get('body_len', '?')} bytes)\n"
-                f"Role ({ctx_label}): HTTP {r.status_code} ({len(r.text)} bytes)"
-            ),
+            output="\n".join(output_lines),
             sources="fracture-bfla",
             service=target["scheme"],
-            affected=ep_url,
+            affected=affected_urls,
             owasp="A01:2025 Broken Access Control",
             nist="AC-3",
             remediation=(
@@ -14143,12 +14169,23 @@ def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
                 "privileged operations — do not rely solely on hiding URLs or UI elements."
             ),
         )
-        vc.log(f"[bfla] BFLA {risk}: {ep_url} accessible as [{ctx_label}]", "SUCCESS")
-        findings_count += 1
 
+    _emit_bfla_tier(
+        _bfla_critical, "CRITICAL",
+        "Response body is identical to Role 1's response — the same data "
+        "is returned regardless of privilege level.",
+    )
+    _emit_bfla_tier(
+        _bfla_high, "HIGH",
+        "Response was HTTP 200 but body differs from Role 1's — the function "
+        "endpoint is reachable; data may be scoped differently.",
+    )
+
+    findings_count = len(_bfla_critical) + len(_bfla_high)
     vc.status(phase, "BFLA Testing", "complete", "Done", total, total)
     vc.log(
-        f"[bfla] Phase complete — {findings_count} BFLA finding(s) for [{ctx_label}]",
+        f"[bfla] Phase complete — {findings_count} accessible endpoint(s) "
+        f"({len(_bfla_critical)} CRITICAL, {len(_bfla_high)} HIGH) for [{ctx_label}]",
         "SUCCESS")
 
 
@@ -14815,9 +14852,10 @@ def main() -> None:
                         _ep_base.append(_wp_u)
 
                 # Fingerprint Role 1's accessible endpoints for BFLA testing.
-                # Probe each discovered URL with Role 1's session and record those
-                # that return HTTP 200 — these are the function-level resources that
-                # lesser-privilege roles will be tested against in Phase 21.
+                # Only "pages of interest" — paths that are likely to require the
+                # highest privilege level — are recorded.  Testing everything Role 1
+                # can reach produces noise; restricting to privileged-path candidates
+                # keeps BFLA results actionable.
                 _bfla_probe_urls: list = list(dict.fromkeys(
                     u for u in _ep_base + list(dict.fromkeys(
                         (target["url"].rstrip("/") + p)
@@ -14830,8 +14868,80 @@ def main() -> None:
                     ))
                     if _is_in_scope_url(u, _scope_hostnames)
                 ))
+
+                # ── Pages-of-interest filter ────────────────────────────────────
+                # Paths whose segments strongly suggest they require elevated
+                # privilege are flagged as BFLA candidates.  Generic pages
+                # (home, login, static assets, etc.) are excluded.
+                _BFLA_INTEREST_RE = re.compile(
+                    r'(?i)/('
+                    # Administration / management
+                    r'admin|administration|manage|management|manager|dashboard|'
+                    r'control[\-_]?panel|cp|panel|console|backstage|backoffice|'
+                    r'back[\-_]?end|operator|supervisor|moderator|'
+                    # User / account management
+                    r'users?|accounts?|members?|staff|employees?|personnel|'
+                    r'roles?|permissions?|privileges?|grants?|entitlements?|'
+                    # Configuration / settings
+                    r'config|configuration|settings?|setup|preferences?|options?|'
+                    r'properties|env|environment|'
+                    # Reporting / analytics
+                    r'reports?|reporting|analytics?|audit|audit[\-_]?log|logs?|'
+                    r'statistics?|stats?|metrics?|monitoring|'
+                    # Billing / finance
+                    r'billing|invoices?|payments?|subscriptions?|finance|'
+                    r'pricing|orders?|transactions?|'
+                    # API write / privileged endpoints
+                    r'api/admin|api/internal|api/private|api/manage|api/v\d+/admin|'
+                    r'internal|private|restricted|protected|secure|'
+                    # Data management
+                    r'export|import|backup|restore|migrate|migration|'
+                    r'database|db|schema|'
+                    # Security / credentials
+                    r'security|auth/manage|credentials?|keys?|tokens?|secrets?|'
+                    r'certificates?|'
+                    # DevOps / deployment
+                    r'deploy|deployment|release|ci|cd|pipeline|'
+                    r'infrastructure|servers?|nodes?|clusters?|'
+                    # Integrations / webhooks
+                    r'integrations?|webhooks?|connectors?|'
+                    # IBM Cognos / enterprise BI specific
+                    r'cognos|bi/v\d|dispatcher|gateway|servlet|ibmcognos'
+                    r')'
+                    r'(?:[/\-_?#]|$)',
+                    re.IGNORECASE,
+                )
+                # Paths to always exclude regardless of keywords (they're public
+                # or static and generate false positives for every role).
+                _BFLA_EXCLUDE_RE = re.compile(
+                    r'(?i)/('
+                    r'login|logout|signin|signout|logon|logoff|'
+                    r'static|assets?|css|js|fonts?|images?|img|icons?|'
+                    r'favicon|robots\.txt|sitemap|\.well-known|'
+                    r'health|healthcheck|ping|status|version|'
+                    r'register|signup|password[\-_]?reset|forgot[\-_]?password'
+                    r')'
+                    r'(?:[/\-_?#]|$)',
+                    re.IGNORECASE,
+                )
+
+                def _bfla_is_of_interest(url_str: str) -> bool:
+                    try:
+                        _p = urllib.parse.urlparse(url_str).path or "/"
+                    except Exception:
+                        _p = url_str
+                    if _BFLA_EXCLUDE_RE.search(_p):
+                        return False
+                    return bool(_BFLA_INTEREST_RE.search(_p))
+
+                _bfla_candidates = [u for u in _bfla_probe_urls
+                                    if _bfla_is_of_interest(u)]
+                vc.log(
+                    f"[bfla] Pages-of-interest filter: {len(_bfla_candidates)}/{len(_bfla_probe_urls)} "
+                    "URL(s) selected for BFLA fingerprinting", "INFO")
+
                 _bfla_timeout = cfg.get("timeout", 10)
-                for _burl in _bfla_probe_urls[:200]:
+                for _burl in _bfla_candidates[:200]:
                     try:
                         _br = effective_auth.get(
                             _burl, timeout=_bfla_timeout, allow_redirects=False)
@@ -14847,7 +14957,7 @@ def main() -> None:
                         pass
                 vc.log(
                     f"[bfla] Role 1 fingerprint: {len(_role1_accessible_endpoints)} "
-                    "accessible endpoints recorded for cross-role testing", "INFO")
+                    "accessible privileged endpoints recorded for cross-role testing", "INFO")
 
             # ── Phase 2: headers ──
             if not _skip("headers"):
