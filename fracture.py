@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.21"
+VERSION = "2.10.22"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -18419,9 +18419,14 @@ def main() -> None:
             # privileged-path 200s, it becomes the new discovery leader and
             # gobuster/feroxbuster re-run for it. All prior roles are then probed
             # against any newly discovered endpoints.
-            # The unauthenticated context never becomes discovery leader.
+            # Excluded: unauthenticated, reduced contexts, and the current leader
+            # itself (a role cannot outscore itself — the stored leader score is a
+            # snapshot from when the role was first elected; later phases inflate
+            # the live score, causing a spurious self-outscore comparison).
             if (
                 _ctx_label != "unauthenticated"
+                and not _is_reduced_ctx
+                and _ctx_label != _discovery_leader
                 and _n_roles >= 1
             ):
                 try:
