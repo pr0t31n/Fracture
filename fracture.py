@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.15"
+VERSION = "2.10.16"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5665,6 +5665,13 @@ _BI_UNAUTH_PROBES = {
     "Redash":          [("/api/dashboards",  "dashboards API")],
     "Splunk":          [("/services/server/info?output_mode=json", "server info API")],
     "Zabbix":          [("/api_jsonrpc.php", "JSON-RPC API")],
+    # IBM Cognos — paths are relative to the Cognos base URL (e.g. /ibmcognos/)
+    # bi/admin/ requires Cognos admin role; api/v1/namespaces requires auth in v11+;
+    # cgi-bin/cognos.cgi is the legacy SOAP dispatcher (present on v10/v11 installs).
+    "IBM Cognos":      [("/bi/admin/",                          "administration console"),
+                        ("/api/v1/namespaces",                  "REST API namespace list (v11+)"),
+                        ("/cgi-bin/cognos.cgi",                 "legacy SOAP dispatcher"),
+                        ("/bi/v1/disp?b_action=xts.run&m=portal/main.xts", "portal (unauthenticated access)")],
 }
 _SERVER_PATTERNS = {
     "Apache": re.compile(r'Apache', re.I),
@@ -16995,6 +17002,8 @@ def main() -> None:
                         "Nagios":          [r"/nagios(?:/|$)", r"/nagiosxi/"],
                         "Splunk":          [r"/en-US/app/", r"/splunk/"],
                         "Looker":          [r"/looker(?:/|$)"],
+                        "IBM Cognos":      [r"/ibmcognos(?:/|$)", r"/bi/v1/", r"/bi/admin/",
+                                            r"xts\.run", r"/cgi-bin/cognos\.cgi"],
                     }
                     _disc_cms = [
                         n for n, pats in _cms_path_sigs.items()
