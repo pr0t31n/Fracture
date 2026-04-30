@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.23"
+VERSION = "2.10.24"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -11635,8 +11635,39 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
             driver  = webdriver.Chrome(service=service, options=opts)
             vc.log("[crawl/spa] Using Chrome for headless crawl", "INFO")
 
-        driver.set_page_load_timeout(max(timeout * 2, 30))
+        driver.set_page_load_timeout(max(timeout * 2, 60))
         driver.implicitly_wait(2)
+
+        # Read target profile to detect JS-heavy platforms and tune timing
+        _spa_settle_time = 2.5
+        _spa_bi_tools: set = set()
+        try:
+            _spa_tp = json.loads((out.root / "target_profile.json").read_text())
+            _spa_bi_tools = set(_spa_tp.get("bi_tools", [])) | set(_spa_tp.get("technologies", []))
+        except Exception:
+            pass
+        _SLOW_HEADLESS_PLATFORMS = frozenset({
+            "IBM Cognos", "Oracle ADF", "Oracle JET", "SAP Fiori", "Google Web Toolkit",
+        })
+        if _spa_bi_tools & _SLOW_HEADLESS_PLATFORMS:
+            _spa_settle_time = 8.0
+            vc.log(
+                f"[crawl/spa] JS-heavy platform detected "
+                f"({', '.join(_spa_bi_tools & _SLOW_HEADLESS_PLATFORMS)}) — "
+                f"using {_spa_settle_time}s settle time",
+                "INFO",
+            )
+
+        # Chrome: inject XHR/fetch/pushState interceptor as a pre-navigation script
+        # so it captures requests fired during initial page load (before post-load injection)
+        if browser == "chrome":
+            try:
+                driver.execute_cdp_cmd(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    {"source": _SPA_INTERCEPT_JS},
+                )
+            except Exception:
+                pass
 
         # Navigate to origin first (required before cookie injection)
         try:
@@ -11646,10 +11677,52 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
         driver.delete_all_cookies()
         _spa_transfer_cookies(sess, driver, url)
 
+        # Detect if initial navigation landed on a login page.
+        # This happens when the target immediately redirects to a login URL before
+        # any cookies are set — the browser follows the redirect, ends up on the
+        # login page, and cookie injection happens while on that page.
+        # The loop's first driver.get(url) should recover because the auth cookies
+        # are now set, but we log a warning so the outcome is visible.
+        try:
+            _setup_url = driver.current_url or ""
+            if _WAF_LOGIN_URL_RE.search(_setup_url):
+                vc.log(
+                    f"[crawl/spa] Setup navigation redirected to login page ({_setup_url}). "
+                    "Auth cookies injected — first loop navigation will attempt recovery.",
+                    "WARNING",
+                )
+        except Exception:
+            pass
+
         queue = [url]
         if extra_seeds:
             queue.extend(s for s in extra_seeds if s != url)
+
+        # Add known application entry points for detected BI platforms
+        if "IBM Cognos" in _spa_bi_tools:
+            _cog_parsed = urllib.parse.urlparse(url)
+            _cog_origin = f"{_cog_parsed.scheme}://{_cog_parsed.netloc}"
+            _cog_base   = ""
+            for _cp in ("/ibmcognos", "/cognos"):
+                if _cp in url.lower():
+                    _cog_base = _cp
+                    break
+            if _cog_base:
+                _cog_seeds = [
+                    f"{_cog_origin}{_cog_base}/bi/?perspective=portal",
+                    f"{_cog_origin}{_cog_base}/bi/?perspective=administration",
+                    f"{_cog_origin}{_cog_base}/bi/admin/",
+                ]
+                for _cs in _cog_seeds:
+                    if _cs.rstrip("/") not in {q.rstrip("/") for q in queue}:
+                        queue.append(_cs)
+                vc.log(
+                    f"[crawl/spa] IBM Cognos — added {len(_cog_seeds)} perspective seeds",
+                    "INFO",
+                )
+
         page_count = 0
+        _spa_login_warned = False  # suppress repeated login-redirect warnings
         vc.status(phase, "Crawl", "running", "SPA headless crawl", 0, max_pages)
 
         while queue and page_count < max_pages:
@@ -11662,20 +11735,69 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
             vc.status(phase, "Crawl", "running",
                       f"SPA page {page_count}", page_count, max_pages)
 
+            # Navigate — do NOT bail on page-load timeout; Dojo/AMD apps may never
+            # reach readyState 'complete' because AMD modules load asynchronously
+            # after the initial document is parsed. A timeout leaves the browser on
+            # a partially-rendered page that is still worth extracting links from.
             try:
                 driver.get(current)
+            except Exception:
+                pass  # page-load timeout — partial content may still be extractable
+
+            # Wait for readyState without blocking extraction on timeout
+            try:
                 WebDriverWait(driver, min(timeout, 15)).until(
                     lambda d: d.execute_script(  # type: ignore[union-attr]
                         "return document.readyState") == "complete"
                 )
-                time.sleep(2.5)  # allow XHR / fetch / async init to settle
-                # Inject interceptor for click-triggered XHR and pushState routes
-                try:
-                    driver.execute_script(_SPA_INTERCEPT_JS)
-                except Exception:
-                    pass
             except Exception:
-                continue
+                pass  # AMD-loading pages may never settle — proceed with what rendered
+
+            time.sleep(_spa_settle_time)
+
+            # Post-load interceptor injection — catches XHR/fetch/pushState calls
+            # fired during click interactions and lazy-loaded route transitions
+            try:
+                driver.execute_script(_SPA_INTERCEPT_JS)
+            except Exception:
+                pass
+
+            # Detect login redirect: if the target bounced us to a login page
+            # after we navigated with auth cookies, the session may be invalid in
+            # the headless browser. Re-inject cookies and retry once per scan.
+            try:
+                _cur_after = driver.current_url or ""
+                if (_WAF_LOGIN_URL_RE.search(_cur_after)
+                        and _cur_after.rstrip("/") != current.rstrip("/")):
+                    if not _spa_login_warned:
+                        _spa_login_warned = True
+                        vc.log(
+                            f"[crawl/spa] Redirected to login ({_cur_after}) after "
+                            "navigating with auth cookies — session may be incompatible "
+                            "with headless browser (User-Agent mismatch or cookie binding). "
+                            "Re-injecting cookies and retrying.",
+                            "WARNING",
+                        )
+                        driver.delete_all_cookies()
+                        _spa_transfer_cookies(sess, driver, url)
+                        try:
+                            driver.get(current)
+                        except Exception:
+                            pass
+                        try:
+                            WebDriverWait(driver, min(timeout, 15)).until(
+                                lambda d: d.execute_script(
+                                    "return document.readyState") == "complete"
+                            )
+                        except Exception:
+                            pass
+                        time.sleep(_spa_settle_time)
+                        try:
+                            driver.execute_script(_SPA_INTERCEPT_JS)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
             # Extract links from the rendered DOM (includes SPA router anchors
             # and framework data-* navigation attributes)
