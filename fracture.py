@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.3"
+VERSION = "2.10.4"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1002,6 +1002,46 @@ def _filter_dominant_code(
         f"source-validating dominant-code entries for dead endpoints",
         "INFO",
     )
+
+    # ── Categorical-block fast path ──────────────────────────────────────────
+    # Probe 3 random non-existent UUID paths against the target root using the
+    # same session.  If ≥2 of those paths also return the dominant code then the
+    # scanner IP has been categorically blocked (e.g. by Akamai, Cloudflare,
+    # or any WAF that doesn't advertise itself in headers/body), or the server
+    # uses the dominant code as its wildcard "not found" response.  Either way,
+    # the dominant-code results carry no signal — suppress them all at once
+    # rather than relying on body fingerprinting which fails for custom block pages.
+    _dom_urls = [u for u, s, _ in results if s == dominant_code]
+    if _dom_urls:
+        try:
+            import uuid as _uuid_mod
+            from urllib.parse import urlparse as _urlparse
+            _pr = _urlparse(_dom_urls[0])
+            _root = f"{_pr.scheme}://{_pr.netloc}"
+            _cat_hits = 0
+            for _ in range(3):
+                try:
+                    _pv = sess.get(
+                        f"{_root}/{_uuid_mod.uuid4().hex}",
+                        timeout=max(timeout // 2, 3),
+                        allow_redirects=False,
+                        headers={"Accept": "text/html"},
+                    )
+                    if _pv.status_code == dominant_code:
+                        _cat_hits += 1
+                except Exception:
+                    pass
+            if _cat_hits >= 2:
+                _cat_total = sum(1 for _, s, _ in results if s == dominant_code)
+                vc.log(
+                    f"[buster-filter] {_cat_hits}/3 random non-existent paths returned "
+                    f"HTTP {dominant_code} — categorical WAF/CDN block or wildcard "
+                    f"detected; suppressing all {_cat_total} HTTP {dominant_code} result(s)",
+                    "INFO",
+                )
+                return [e for e in results if e[1] != dominant_code]
+        except Exception:
+            pass  # if anything goes wrong fall through to per-entry logic
 
     kept       = []
     _suppressed = 0
