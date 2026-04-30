@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.16"
+VERSION = "2.10.17"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5637,6 +5637,58 @@ _CDN_HDR_PATTERNS = [
     ("x-cdn",               "StackPath"),
     ("fastly-io-info",      "Fastly"),
 ]
+# Edge security platform detection — response headers that indicate a WAF,
+# bot-protection service, or cloud-native security layer is in front of the target.
+# Each entry: (header_name_lowercase, platform_name).  Prefix matches (e.g. "x-px-")
+# are handled by the _detect_edge_security function.
+_EDGE_SECURITY_HDR_PATTERNS = [
+    # Sucuri WAF
+    ("x-sucuri-id",                   "Sucuri WAF"),
+    ("x-sucuri-cache",                "Sucuri WAF"),
+    # Imperva / Incapsula
+    ("x-iinfo",                       "Imperva"),
+    ("x-cdn-request-id",              "Imperva"),
+    ("x-imperva-sid",                 "Imperva"),
+    # Fastly Next-Gen WAF (formerly Signal Sciences)
+    ("x-fw-hash",                     "Fastly WAF"),
+    ("x-fw-protection-mode",          "Fastly WAF"),
+    ("x-fw-type",                     "Fastly WAF"),
+    # F5 / Shape Security
+    ("x-f5-cs-sensor-data",           "F5 Shape Security"),
+    ("x-f5-riak-bucket",              "F5 BIG-IP"),
+    # Barracuda WAF
+    ("barra-counter-session",         "Barracuda WAF"),
+    # Fortinet FortiWeb
+    ("x-waf-event-info",              "Fortinet FortiWeb"),
+    # AWS WAF / Shield
+    ("x-amzn-waf-action",             "AWS WAF"),
+    # Azure Front Door WAF
+    ("x-azure-fdid",                  "Azure Front Door"),
+    # Radware (formerly Distil Networks)
+    ("x-distil-cs",                   "Radware Bot Manager"),
+    # Reblaze
+    ("rbzid",                         "Reblaze"),
+    # ModSecurity (generic)
+    ("x-modsecurity-id",              "ModSecurity"),
+]
+# Prefix-based edge security header patterns (header name starts with prefix)
+_EDGE_SECURITY_HDR_PREFIXES = [
+    ("x-px-",         "PerimeterX / HUMAN Security"),
+    ("x-perimeterx-", "PerimeterX / HUMAN Security"),
+    ("x-datadome-",   "DataDome"),
+    ("x-kasada-",     "Kasada"),
+    ("x-arkose-",     "Arkose Labs"),
+]
+# Body signatures for edge security platforms (challenge / block pages)
+_EDGE_SECURITY_BODY_PATTERNS = [
+    (re.compile(r'_pxParam|__pxChallenge|pxCaptcha|PerimeterX', re.I), "PerimeterX / HUMAN Security"),
+    (re.compile(r'datadome\.co/captcha|dd-device-check', re.I),         "DataDome"),
+    (re.compile(r'kasada\.io|kasada-client', re.I),                      "Kasada"),
+    (re.compile(r'Sucuri WebSite Firewall|sucuri\.net', re.I),           "Sucuri WAF"),
+    (re.compile(r'incapsula|CloudGuard', re.I),                          "Imperva"),
+    (re.compile(r'arkose\.com|arkoselabs\.com', re.I),                   "Arkose Labs"),
+    (re.compile(r'reblaze\.com', re.I),                                  "Reblaze"),
+]
 _BI_PATTERNS = {
     "Grafana":         [re.compile(r'grafana|/grafana/|GrafanaApp', re.I)],
     "Kibana":          [re.compile(r'kbn-name.*kibana|kbn-version|/app/kibana', re.I)],
@@ -6922,6 +6974,24 @@ def _detect_cdn(headers: "dict", body: str) -> str:
     return ""
 
 
+def _detect_edge_security(headers: "dict", body: str) -> "list[str]":
+    """Identify edge security platforms (WAF, bot-protection, cloud security) from
+    response headers and body.  Returns a deduplicated list of platform names."""
+    _found: list = []
+    _h_lower = {k.lower(): v for k, v in headers.items()}
+    for _hdr, _platform in _EDGE_SECURITY_HDR_PATTERNS:
+        if _hdr in _h_lower and _platform not in _found:
+            _found.append(_platform)
+    for _prefix, _platform in _EDGE_SECURITY_HDR_PREFIXES:
+        if any(k.startswith(_prefix) for k in _h_lower) and _platform not in _found:
+            _found.append(_platform)
+    _body_sample = (body or "")[:4096]
+    for _pat, _platform in _EDGE_SECURITY_BODY_PATTERNS:
+        if _pat.search(_body_sample) and _platform not in _found:
+            _found.append(_platform)
+    return _found
+
+
 def _detect_bi_tools(text: str, headers: "dict") -> "list[str]":
     """Detect Business Intelligence / monitoring platforms from page content and headers."""
     _h_str = " ".join(f"{k}: {v}" for k, v in headers.items())
@@ -7137,8 +7207,11 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         bi_tools=_detected_bi or None,
         cms=detected_cms or None,
     )
+    _recon_edge_security = _detect_edge_security(headers, body)
     if _recon_cdn:
         vc.log(f"[recon] CDN detected: {_recon_cdn}", "INFO")
+    if _recon_edge_security:
+        vc.log(f"[recon] Edge security detected: {', '.join(_recon_edge_security)}", "INFO")
     if _recon_web_structure not in ("Unknown", ""):
         vc.log(f"[recon] Web structure: {_recon_web_structure}", "INFO")
     if _detected_bi:
@@ -7449,6 +7522,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             cdn=_recon_cdn,
             web_structure=_recon_web_structure,
             bi_tools=_detected_bi,
+            edge_security=_recon_edge_security,
         )
     except Exception:
         pass
@@ -11553,6 +11627,242 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
 
 
 # ─────────────────────────────────────────────
+# Phase 3a-supplement: Manual crawl via mitmproxy
+# ─────────────────────────────────────────────
+
+def _phase_manual_crawl(out: "OutputManager", target: dict, cfg: dict,
+                        effective_auth: "requests.Session",
+                        scope_hostnames: "set") -> "list[str]":
+    """Prompt the user to browse the target manually while Fracture listens via
+    mitmproxy.  Session cookies are automatically injected by the proxy addon so
+    the user's browser session is authenticated without requiring a manual login.
+
+    Returns a list of unique URLs discovered during the manual browse session.
+    These are merged into _ep_base before the shcheck / crawl / injection phases
+    run so all subsequently discovered paths are tested like any other endpoint.
+    """
+    mitmdump = shutil.which("mitmdump")
+    if not mitmdump:
+        vc.log("[manual-crawl] mitmdump not found — skipping (install mitmproxy to enable)", "WARNING")
+        return []
+
+    _pid = os.getpid()
+    _mitm_log  = f"/tmp/fracture_mitm_{_pid}.jsonl"
+    _mitm_addon = f"/tmp/fracture_mitm_{_pid}.py"
+    _ff_profile = f"/tmp/fracture_ff_{_pid}"
+
+    # Find a free port for the proxy
+    _proxy_port: "int | None" = None
+    for _port_cand in range(8080, 9001):
+        try:
+            _ps = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _ps.bind(("127.0.0.1", _port_cand))
+            _ps.close()
+            _proxy_port = _port_cand
+            break
+        except OSError:
+            continue
+    if _proxy_port is None:
+        vc.log("[manual-crawl] No free port found for proxy — skipping", "WARNING")
+        return []
+
+    # Extract cookies from the authenticated session for proxy-side injection
+    _cookie_dict: dict = {}
+    try:
+        for _ck in effective_auth.cookies:
+            _cookie_dict[str(_ck.name)] = str(_ck.value)
+    except Exception:
+        pass
+
+    _target_host = target["hostname"]
+
+    # Write the mitmproxy addon script.  The addon:
+    # 1. Injects stored session cookies into every in-scope request so the
+    #    browser is authenticated without a manual login.
+    # 2. Logs every in-scope response URL (method + status) as JSONL.
+    _addon_src = (
+        "import json\n"
+        f"_LOGFILE = {repr(_mitm_log)}\n"
+        f"_COOKIES = {repr(_cookie_dict)}\n"
+        f"_TARGET_HOST = {repr(_target_host)}\n"
+        "_fh = open(_LOGFILE, 'a')\n\n"
+        "class _FractureAddon:\n"
+        "    def request(self, flow):\n"
+        "        try:\n"
+        "            if _TARGET_HOST not in (flow.request.pretty_host or ''):\n"
+        "                return\n"
+        "            for _n, _v in _COOKIES.items():\n"
+        "                if _n not in flow.request.cookies:\n"
+        "                    flow.request.cookies[_n] = _v\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    def response(self, flow):\n"
+        "        try:\n"
+        "            if _TARGET_HOST not in (flow.request.pretty_host or ''):\n"
+        "                return\n"
+        "            _fh.write(json.dumps({\n"
+        "                'url': flow.request.pretty_url,\n"
+        "                'method': flow.request.method,\n"
+        "                'status': flow.response.status_code,\n"
+        "            }) + '\\n')\n"
+        "            _fh.flush()\n"
+        "        except Exception:\n"
+        "            pass\n\n"
+        "addons = [_FractureAddon()]\n"
+    )
+    try:
+        Path(_mitm_addon).write_text(_addon_src, encoding="utf-8")
+    except Exception as e:
+        vc.log(f"[manual-crawl] Could not write proxy addon: {e}", "WARNING")
+        return []
+
+    # Start mitmdump
+    _proxy_proc: "subprocess.Popen | None" = None
+    try:
+        _proxy_proc = _popen(
+            [mitmdump, "-p", str(_proxy_port),
+             "--addon-file", _mitm_addon,
+             "--ssl-insecure", "--quiet"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _register_proc(_proxy_proc)
+    except Exception as e:
+        vc.log(f"[manual-crawl] Failed to start mitmdump: {e}", "WARNING")
+        try:
+            Path(_mitm_addon).unlink(missing_ok=True)
+        except Exception:
+            pass
+        return []
+
+    # Brief pause to let the proxy bind its port
+    time.sleep(2)
+
+    # Launch Firefox with the proxy pre-configured via a temp profile user.js.
+    # The proxy injects auth cookies so the user doesn't need to log in manually.
+    _browser_proc: "subprocess.Popen | None" = None
+    _ff_bin = _find_firefox_binary()
+    if _ff_bin:
+        try:
+            Path(_ff_profile).mkdir(parents=True, exist_ok=True)
+            _user_js_lines = [
+                'user_pref("network.proxy.type", 1);',
+                f'user_pref("network.proxy.http", "127.0.0.1");',
+                f'user_pref("network.proxy.http_port", {_proxy_port});',
+                f'user_pref("network.proxy.ssl", "127.0.0.1");',
+                f'user_pref("network.proxy.ssl_port", {_proxy_port});',
+                'user_pref("network.proxy.no_proxies_on", "");',
+                f'user_pref("browser.startup.homepage", {repr(target["url"])});',
+                'user_pref("security.cert_pinning.enforcement_level", 0);',
+                'user_pref("network.stricttransportsecurity.preloadlist", false);',
+            ]
+            (Path(_ff_profile) / "user.js").write_text(
+                "\n".join(_user_js_lines) + "\n", encoding="utf-8"
+            )
+            _browser_proc = _popen(
+                [_ff_bin, "--profile", _ff_profile, "--no-remote", target["url"]],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            _register_proc(_browser_proc)
+            vc.log("[manual-crawl] Firefox launched — proxy and session cookies configured", "INFO")
+        except Exception as e:
+            vc.log(f"[manual-crawl] Firefox launch failed ({e}) — configure browser manually", "WARNING")
+            _browser_proc = None
+    else:
+        vc.log(
+            f"[manual-crawl] Firefox not found — manually set your browser proxy to "
+            f"127.0.0.1:{_proxy_port} (trust all certificates) and browse the target",
+            "WARNING",
+        )
+
+    _cookie_note = (
+        "Session cookies injected automatically via proxy."
+        if _cookie_dict
+        else "No session detected — log in manually in the browser."
+    )
+    vc.log(
+        f"[manual-crawl] Proxy listening on 127.0.0.1:{_proxy_port}. "
+        f"{_cookie_note} Browse the target then signal completion.",
+        "INFO",
+    )
+    vc.status("manual_crawl", "Manual Crawl", "running",
+              f"Proxy: 127.0.0.1:{_proxy_port} — browse the target then confirm done")
+
+    try:
+        vc.prompt(
+            f"Manual crawl is active (proxy: 127.0.0.1:{_proxy_port}). "
+            f"{_cookie_note} "
+            "Navigate through the target application. "
+            "Type 'done' and press Enter when finished to continue testing.",
+            prompt_type="text",
+            skippable=True,
+        )
+    except Exception:
+        pass
+
+    vc.status("manual_crawl", "Manual Crawl", "complete", "Parsing captured requests")
+
+    # Teardown
+    for _p in (_browser_proc, _proxy_proc):
+        if _p is not None:
+            try:
+                _p.terminate()
+                _deregister_proc(_p)
+            except Exception:
+                pass
+
+    # Parse the JSONL capture log
+    _discovered_urls: list = []
+    try:
+        _log_path = Path(_mitm_log)
+        if _log_path.exists():
+            _seen_paths: set = set()
+            for _line in _log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                try:
+                    _entry = json.loads(_line.strip())
+                    _raw_url = _entry.get("url", "")
+                    if not _raw_url:
+                        continue
+                    _parsed_u = urllib.parse.urlparse(_raw_url)
+                    _u_host = _parsed_u.hostname or ""
+                    if _target_host not in _u_host:
+                        continue
+                    # Normalise: strip query string and fragment; keep path only
+                    _norm_url = urllib.parse.urlunparse((
+                        _parsed_u.scheme, _parsed_u.netloc,
+                        _parsed_u.path, "", "", "",
+                    ))
+                    _u_path = _parsed_u.path or "/"
+                    if _u_path not in _seen_paths:
+                        _seen_paths.add(_u_path)
+                        _discovered_urls.append(_norm_url)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    # Clean up temp files
+    for _tmp_f in (_mitm_addon, _mitm_log):
+        try:
+            Path(_tmp_f).unlink(missing_ok=True)
+        except Exception:
+            pass
+    try:
+        import shutil as _shutil_mc
+        _shutil_mc.rmtree(_ff_profile, ignore_errors=True)
+    except Exception:
+        pass
+
+    _n = len(_discovered_urls)
+    vc.log(
+        f"[manual-crawl] {_n} unique path(s) captured from manual browse session",
+        "SUCCESS" if _n else "INFO",
+    )
+    return list(dict.fromkeys(_discovered_urls))
+
+
+# ─────────────────────────────────────────────
 # Phase 3b: JWT security testing
 # ─────────────────────────────────────────────
 
@@ -12113,6 +12423,12 @@ def _write_target_profile(out: "OutputManager", **updates) -> None:
                 if _b and _b not in _bi:
                     _bi.append(_b)
             existing["bi_tools"] = _bi
+        elif key == "edge_security":
+            _es = existing.get("edge_security", [])
+            for _e in (val if isinstance(val, list) else [val]):
+                if _e and _e not in _es:
+                    _es.append(_e)
+            existing["edge_security"] = _es
         else:
             if existing.get(key) and not val:
                 continue
@@ -16967,6 +17283,42 @@ def main() -> None:
                 _write_structure_map(out, target, extra_urls=list(dict.fromkeys(_ep_base)))
             except Exception:
                 pass
+
+            # ── Manual crawl (sparse discovery) ──────────────────────────────
+            # If automated discovery produced fewer than 3 non-root paths the
+            # target is likely parameter-routed (BI platform, SPA, etc.) and
+            # directory brute-forcing has found little of value.  Prompt the user
+            # to browse manually; Fracture captures all requests/responses via
+            # mitmproxy and adds discovered paths to _ep_base before testing runs.
+            if not _is_reduced_ctx:
+                try:
+                    _sm_path = out.root / "structure_map.json"
+                    if _sm_path.exists():
+                        _sm_data = json.loads(_sm_path.read_text(encoding="utf-8"))
+                        _sm_real_paths = [
+                            p for p in _sm_data.get("paths", {}).keys()
+                            if p and p != "/"
+                        ]
+                        if len(_sm_real_paths) < 3:
+                            vc.log(
+                                f"[manual-crawl] Only {len(_sm_real_paths)} non-root path(s) "
+                                "found by automated discovery — triggering manual crawl",
+                                "INFO",
+                            )
+                            _crawled = _phase_manual_crawl(
+                                out, target, cfg, effective_auth, _scope_hostnames
+                            )
+                            if _crawled:
+                                _ep_base = list(dict.fromkeys(_ep_base + _crawled))
+                                try:
+                                    _write_structure_map(
+                                        out, target,
+                                        extra_urls=list(dict.fromkeys(_ep_base)),
+                                    )
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
 
             # ── Post-discovery CMS / BI re-analysis ──────────────────────────
             # Check every path in _ep_base against CMS and BI path signatures.
