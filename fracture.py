@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.14"
+VERSION = "2.10.15"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5650,6 +5650,7 @@ _BI_PATTERNS = {
     "Prometheus":      [re.compile(r'# HELP \w+_\w+ |/api/v1/targets', re.I)],
     "Power BI":        [re.compile(r'powerbi-client|PowerBI\.embed', re.I)],
     "Looker":          [re.compile(r'\blooker\b|LookerBrowser|/looker/', re.I)],
+    "IBM Cognos":      [re.compile(r'ibmcognos|cam_passport|/bi/v1/|xts\.run|IBM\s+Cognos|cognos\.js', re.I)],
 }
 # Paths that require authentication on each BI platform — HTTP 200 without
 # credentials indicates unauthenticated access.  Paths known to be public
@@ -6950,9 +6951,14 @@ def _classify_web_structure(body: str, headers: "dict", spa_evidence: "list",
     for lang, pat in _LANG_PATTERNS.items():
         if pat.search(_all):
             return f"Server-Rendered ({lang})"
-    # Static HTML: no JavaScript at all — not merely few scripts
-    if body and "<html" in body.lower() and body.lower().count("<script") == 0:
-        return "Static HTML"
+    # Static HTML: no scripting and no meta/JS redirects that indicate a dynamic entry page
+    if body and "<html" in body.lower():
+        _bl = body.lower()
+        _has_script    = _bl.count("<script") > 0
+        _has_metaredir = 'http-equiv="refresh"' in _bl or "http-equiv='refresh'" in _bl
+        _has_jsredir   = "window.location" in _bl or "document.location" in _bl
+        if not _has_script and not _has_metaredir and not _has_jsredir:
+            return "Static HTML"
     return "Unknown"
 
 
@@ -7100,6 +7106,25 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     # Detect BI tools before classifying web structure so the classifier can
     # use them to avoid misidentifying BI platform entry pages as "Static HTML".
     _detected_bi = _detect_bi_tools(all_text, headers)
+    # URL-path-based BI detection: catches platforms whose entry page carries
+    # no body fingerprint (e.g. Cognos meta-refresh redirect with zero scripts).
+    _url_path_lower = urllib.parse.urlparse(url).path.lower()
+    _URL_PATH_BI = {
+        "IBM Cognos":    "/ibmcognos",
+        "Grafana":       "/grafana",
+        "Kibana":        "/kibana",
+        "Tableau":       "/vizportal",
+        "Splunk":        "/en-us/app/",
+        "Zabbix":        "/zabbix",
+        "Nagios":        "/nagios",
+        "Prometheus":    "/prometheus",
+        "Apache Superset": "/superset",
+        "Redash":        "/redash",
+        "Looker":        "/looker",
+    }
+    for _bi_name, _bi_path_sig in _URL_PATH_BI.items():
+        if _bi_path_sig in _url_path_lower and _bi_name not in _detected_bi:
+            _detected_bi.append(_bi_name)
     _recon_web_structure = _classify_web_structure(
         body, headers, _recon_spa_ev,
         bi_tools=_detected_bi or None,
