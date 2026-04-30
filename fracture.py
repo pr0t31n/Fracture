@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.13"
+VERSION = "2.10.14"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6921,11 +6921,13 @@ def _detect_bi_tools(text: str, headers: "dict") -> "list[str]":
     return [name for name, pats in _BI_PATTERNS.items() if any(p.search(_all) for p in pats)]
 
 
-def _classify_web_structure(body: str, headers: "dict", spa_evidence: "list") -> str:
+def _classify_web_structure(body: str, headers: "dict", spa_evidence: "list",
+                            bi_tools: "list | None" = None,
+                            cms: "list | None" = None) -> str:
     """Classify the web application structure type from initial response data.
 
     Returns one of: SPA, SSR Hybrid (Next.js/Nuxt/Vue), Server-Rendered (<lang>),
-    Static HTML, API-first, or Unknown.
+    BI Platform (<name>), CMS (<name>), Static HTML, API-first, or Unknown.
     """
     ct = headers.get("Content-Type", "")
     if ("application/json" in ct or "application/xml" in ct) and "<html" not in (body or "").lower():
@@ -6939,11 +6941,17 @@ def _classify_web_structure(body: str, headers: "dict", spa_evidence: "list") ->
             return "SSR Hybrid (Vue)"
     if spa_evidence:
         return "SPA"
+    # BI platform / CMS detected — always dynamic, never static
+    if bi_tools:
+        return f"BI Platform ({bi_tools[0]})"
+    if cms:
+        return f"CMS ({cms[0]})"
     _all = (body or "") + " ".join(f"{k}: {v}" for k, v in headers.items())
     for lang, pat in _LANG_PATTERNS.items():
         if pat.search(_all):
             return f"Server-Rendered ({lang})"
-    if body and "<html" in body.lower() and body.lower().count("<script") <= 2:
+    # Static HTML: no JavaScript at all — not merely few scripts
+    if body and "<html" in body.lower() and body.lower().count("<script") == 0:
         return "Static HTML"
     return "Unknown"
 
@@ -7089,8 +7097,14 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         _recon_is_spa, _recon_spa_ev = _detect_spa(body, url, 0)
     except Exception:
         pass
-    _recon_web_structure = _classify_web_structure(body, headers, _recon_spa_ev)
+    # Detect BI tools before classifying web structure so the classifier can
+    # use them to avoid misidentifying BI platform entry pages as "Static HTML".
     _detected_bi = _detect_bi_tools(all_text, headers)
+    _recon_web_structure = _classify_web_structure(
+        body, headers, _recon_spa_ev,
+        bi_tools=_detected_bi or None,
+        cms=detected_cms or None,
+    )
     if _recon_cdn:
         vc.log(f"[recon] CDN detected: {_recon_cdn}", "INFO")
     if _recon_web_structure not in ("Unknown", ""):
@@ -7197,6 +7211,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     "Script", "HTML", "Title", "Meta-Refresh", "IP", "Country",
                     "Email", "Cookies", "Open-Graph-Protocol", "HTML5",
                     "Bootstrap", "jQuery", "X-Powered-By", "Server", "HTTPServer",
+                    # Cookie attributes — not technologies
+                    "HttpOnly", "Secure", "PasswordField", "RedirectLocation",
                 }
                 # Track which security headers whatweb observed as present
                 ww_found_sec_hdrs: set = set()
