@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.17"
+VERSION = "2.10.18"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5632,6 +5632,8 @@ _CDN_HDR_PATTERNS = [
     ("x-amz-cf-pop",        "Amazon CloudFront"),
     ("CDN-PullZone",        "BunnyCDN"),
     ("x-akamai-request-id", "Akamai"),
+    ("x-akamai-session-info", "Akamai"),
+    ("akamai-global-host",  "Akamai"),
     ("x-check-cacheable",   "Akamai"),
     ("x-azure-ref",         "Azure CDN"),
     ("x-cdn",               "StackPath"),
