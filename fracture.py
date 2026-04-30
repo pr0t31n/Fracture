@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.10"
+VERSION = "2.10.11"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3720,6 +3720,23 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             from selenium.webdriver.firefox.service import Service as _FS
             from selenium.webdriver.firefox.firefox_profile import FirefoxProfile as _FFP
             import tempfile as _tf2
+            # Write prefs directly into _tmp_profile/user.js so they are present
+            # in the profile zip regardless of set_preference() timing.
+            try:
+                _user_js_path = _os.path.join(_tmp_profile, "user.js")
+                _user_js_lines = [
+                    'user_pref("browser.sessionstore.resume_from_crash", false);',
+                    'user_pref("toolkit.startup.max_resumed_crashes", -1);',
+                    'user_pref("browser.startup.page", 0);',
+                    'user_pref("browser.startup.homepage", "about:blank");',
+                    'user_pref("browser.sessionstore.resume_session_once", false);',
+                    'user_pref("browser.sessionstore.max_tabs_undo", 0);',
+                    'user_pref("browser.sessionstore.max_windows_undo", 0);',
+                ]
+                with open(_user_js_path, "w", encoding="utf-8") as _ujf:
+                    _ujf.write("\n".join(_user_js_lines) + "\n")
+            except Exception:
+                pass
             # Build an isolated FirefoxProfile object from the temp dir.
             # Passing an object (not a string path) is compatible with both
             # Selenium 3.x and 4.x — on Selenium 3.x the string-path setter is
@@ -3727,13 +3744,27 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             # session restore to reopen the previous target's login page.
             _ff_profile = _FFP(_tmp_profile)
             _ff_profile.set_preference("browser.sessionstore.resume_from_crash", False)
-            _ff_profile.set_preference("browser.sessionstore.enabled", False)
             _ff_profile.set_preference("toolkit.startup.max_resumed_crashes", -1)
             _ff_profile.set_preference("browser.startup.page", 0)
             _ff_profile.set_preference("browser.startup.homepage", "about:blank")
+            _ff_profile.set_preference("browser.sessionstore.resume_session_once", False)
+            _ff_profile.set_preference("browser.sessionstore.max_tabs_undo", 0)
+            _ff_profile.set_preference("browser.sessionstore.max_windows_undo", 0)
             opts = _FO()
             opts.add_argument("-no-remote")
             opts.profile = _ff_profile
+            # Belt-and-suspenders: also set prefs via moz:firefoxOptions["prefs"]
+            # (geckodriver capability path).  This fires even when FirefoxProfile
+            # serialisation silently fails and Firefox falls back to the default
+            # profile — which was the root cause of session-restore reopening the
+            # previous target's login page.
+            opts.set_preference("browser.sessionstore.resume_from_crash", False)
+            opts.set_preference("toolkit.startup.max_resumed_crashes", -1)
+            opts.set_preference("browser.startup.page", 0)
+            opts.set_preference("browser.startup.homepage", "about:blank")
+            opts.set_preference("browser.sessionstore.resume_session_once", False)
+            opts.set_preference("browser.sessionstore.max_tabs_undo", 0)
+            opts.set_preference("browser.sessionstore.max_windows_undo", 0)
             if bin_path:
                 opts.binary_location = bin_path
             _log_fd, _log_path = _tf2.mkstemp(prefix="fracture_gd_", suffix=".log")
