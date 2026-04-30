@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.2"
+VERSION = "2.10.3"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -864,6 +864,32 @@ def _filter_buster_wildcards(
 _WC_DOMINANT_RATIO   = 0.80   # trigger threshold (>80 % share same code)
 _WC_DEAD_MIN_TEXT    = 100    # visible text shorter than this → dead endpoint
 
+# WAF/CDN block-page detection — used to suppress false-positive 403 results when
+# a security scanner is rate-limited or IP-blocked by a WAF/CDN mid-scan (e.g.
+# Akamai blocking gobuster after detecting scan traffic, then blocking the whole
+# scanner IP so subsequent session re-fetches also return 403).
+_WAF_SERVER_RE = re.compile(
+    r"\b(akamaighost|akamai|cloudflare|awswaf|imperva|incapsula|"
+    r"barracuda|sucuri|modsecurity|bigip|citrix-adc|f5)\b",
+    re.I,
+)
+_WAF_BODY_RE = re.compile(
+    # Akamai — Reference # error ID and explicit branding
+    r"reference\s*#\s*[\d.]+|"
+    r"\bakamai(?:ghost|error)?\b|"
+    # Cloudflare
+    r"\bcf-ray\b|__cf_bm\b|cloudflare\b.*(?:blocked|denied)|"
+    # Generic WAF/CDN block language
+    r"this request has been blocked|"
+    r"your (?:IP )?(?:address )?has been blocked|"
+    r"you have been blocked|"
+    r"access to this (?:site|page|resource) has been (?:blocked|denied)|"
+    r"security service.*(?:block|protect)|"
+    r"automated (?:tool|scan|request|access|bot)\b|"
+    r"suspicious (?:activity|request|traffic)",
+    re.I,
+)
+
 _DEAD_TITLE_RE = re.compile(
     r"<title[^>]*>[^<]*"
     r"(404|not\s+found|page\s+not\s+found|file\s+not\s+found|"
@@ -926,6 +952,22 @@ def _is_dead_endpoint_body(text: str) -> bool:
     return False
 
 
+def _is_waf_block(r: "requests.Response") -> bool:
+    """Return True if *r* looks like a WAF/CDN IP-block page rather than real content.
+
+    Used to suppress false-positive 403 results from gobuster/feroxbuster when a
+    WAF (Akamai, Cloudflare, etc.) blocks the scanner IP mid-scan and returns the
+    same block page for every subsequent request — even through the requests session.
+    """
+    server = r.headers.get("Server", "") or r.headers.get("Via", "") or ""
+    body   = r.text[:4096] if r.text else ""
+    if _WAF_SERVER_RE.search(server) and r.status_code in (403, 406, 429, 503):
+        return True
+    if _WAF_BODY_RE.search(body):
+        return True
+    return False
+
+
 def _filter_dominant_code(
     results: "list[tuple[str, int | None, str | None]]",
     sess: "requests.Session",
@@ -936,8 +978,9 @@ def _filter_dominant_code(
     When >80 % of the remaining results share one HTTP status code, re-fetch
     every entry with that code and inspect its response body for dead-endpoint
     indicators (404-equivalent page titles, not-found phrases, minimal visible
-    text).  Confirmed dead entries are suppressed; entries with genuine content
-    — and all entries with non-dominant codes — are returned unchanged.
+    text) or WAF/CDN block pages.  Confirmed dead or WAF-blocked entries are
+    suppressed; entries with genuine content — and all entries with non-dominant
+    codes — are returned unchanged.
     """
     if not results:
         return results
@@ -967,7 +1010,7 @@ def _filter_dominant_code(
         if status != dominant_code:
             kept.append(entry)
             continue
-        # Re-fetch and inspect source code for 404-indicating content
+        # Re-fetch and inspect source code for 404-indicating content or WAF block
         try:
             _rv = sess.get(
                 url,
@@ -975,7 +1018,7 @@ def _filter_dominant_code(
                 allow_redirects=True,
                 headers={"Accept": "text/html,application/json"},
             )
-            if _is_dead_endpoint_body(_rv.text):
+            if _is_dead_endpoint_body(_rv.text) or _is_waf_block(_rv):
                 _suppressed += 1
                 continue
         except Exception:
@@ -984,9 +1027,9 @@ def _filter_dominant_code(
 
     if _suppressed:
         vc.log(
-            f"[buster-filter] Suppressed {_suppressed} dead-endpoint "
+            f"[buster-filter] Suppressed {_suppressed} dead-endpoint or WAF-blocked "
             f"HTTP {dominant_code} result(s) — "
-            f"source code confirms no real content (404-equivalent page)",
+            f"source code confirms no real content (404-equivalent or WAF block page)",
             "INFO",
         )
     return kept
@@ -2192,12 +2235,19 @@ class OutputManager:
                             ex_files = set(f.strip() for f in _ex_of.split(",") if f.strip())
                             ex_files.add(_in_of)
                             ex["output_file"] = ",".join(sorted(ex_files))
-                    # merge description
+                    # merge description — findings with HTTP-status context
+                    # replace stale entries rather than appending, so the most
+                    # recent scan's response code appears prominently in Crucible.
                     if description:
                         ex_desc  = (ex.get("description") or "").strip()
                         new_desc = description.strip()
-                        if new_desc and new_desc not in ex_desc:
-                            ex["description"] = f"{ex_desc}\n\n{new_desc}".strip() if ex_desc else new_desc
+                        if new_desc:
+                            if "[HTTP " in new_desc and "[HTTP " not in ex_desc:
+                                ex["description"] = new_desc
+                                if output:
+                                    ex["output"] = output
+                            elif new_desc not in ex_desc:
+                                ex["description"] = f"{ex_desc}\n\n{new_desc}".strip() if ex_desc else new_desc
                     # merge accounts — dedup by role so the same role is never added twice
                     if self._current_accounts:
                         _ex_accts = ex.get("accounts") or []
@@ -2211,8 +2261,8 @@ class OutputManager:
                     _risk_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
                     if _risk_rank.get((risk or "").upper(), 0) > _risk_rank.get((ex.get("risk") or "").upper(), 0):
                         ex["risk"] = risk
-                    # keep first non-zero http_code
-                    if http_code and not ex.get("http_code"):
+                    # update http_code — always prefer the latest non-zero value
+                    if http_code:
                         ex["http_code"] = int(http_code)
                     merged = True
                     break
@@ -6946,6 +6996,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                                 "Review the header for necessity; "
                                                 "remove non-standard headers if not required."
                                             ),
+                                            http_code=_ww_http_status or 0,
                                         )
                                 continue
 
@@ -6974,6 +7025,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                         "Review the header for necessity; "
                                         "remove non-standard headers if not required."
                                     ),
+                                    http_code=_ww_http_status or 0,
                                 )
                                 continue
 
@@ -6999,6 +7051,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                     "Ensure all identified technologies are up to date "
                                     "and properly configured."
                                 ),
+                                http_code=_ww_http_status or 0,
                             )
                         except Exception:
                             pass
@@ -7025,6 +7078,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             owasp="A05:2025 Security Misconfiguration",
                             nist=_hdr_nist,
                             remediation=_hdr_remed,
+                            http_code=_ww_http_status or 0,
                         )
         except Exception as e:
             out.log_error("whatweb", cmd, str(e))
@@ -14573,17 +14627,20 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
         url = base_url + path
         _body_denied = False
         _body_len    = 0
+        _waf_blocked = False
         _final_code  = 0
         try:
             r = probe_sess.get(url, timeout=timeout, allow_redirects=False,
                                headers={"Accept": "text/html,application/json"})
             _final_code = r.status_code
-            if _final_code == 200:
-                try:
-                    _body_len   = len(r.content)
+            try:
+                if _is_waf_block(r):
+                    _waf_blocked = True
+                elif _final_code == 200:
+                    _body_len    = len(r.content)
                     _body_denied = bool(_DENIAL_RE.search(r.text[:8192]))
-                except Exception:
-                    pass
+            except Exception:
+                pass
         except Exception:
             try:
                 r = probe_sess.head(url, timeout=max(timeout // 2, 3), allow_redirects=False)
@@ -14591,9 +14648,13 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
             except Exception:
                 pass
         access[role_label] = _final_code
-        if _final_code == 200:
+        if _final_code in (200, 403) or _waf_blocked:
             _meta = entry.setdefault("access_meta", {})
-            _meta[role_label] = {"body_len": _body_len, "body_denied": _body_denied}
+            _meta[role_label] = {
+                "body_len":    _body_len,
+                "body_denied": _body_denied,
+                "waf_blocked": _waf_blocked,
+            }
         changed = True
     if changed:
         try:
