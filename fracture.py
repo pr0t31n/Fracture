@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.6"
+VERSION = "2.10.7"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -13386,20 +13386,38 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
             login_u = url + lpath
             times_invalid = []
             times_valid_fmt = []
+            _timing_resp_invalid = None
+            _timing_resp_valid   = None
             # Probe with clearly invalid usernames vs. valid-format usernames
             for _ in range(5):
                 t0 = _time_ab.monotonic()
-                sess.post(login_u, json={"username": "zzznouserzzzz", "password": "wrong"}, timeout=timeout)
+                _timing_resp_invalid = sess.post(login_u, json={"username": "zzznouserzzzz", "password": "wrong"}, timeout=timeout)
                 times_invalid.append(_time_ab.monotonic() - t0)
             for _ in range(5):
                 t0 = _time_ab.monotonic()
-                sess.post(login_u, json={"username": "admin", "password": "wrong_password_xyz"}, timeout=timeout)
+                _timing_resp_valid = sess.post(login_u, json={"username": "admin", "password": "wrong_password_xyz"}, timeout=timeout)
                 times_valid_fmt.append(_time_ab.monotonic() - t0)
             if times_invalid and times_valid_fmt:
                 avg_invalid = sum(times_invalid) / len(times_invalid)
                 avg_valid   = sum(times_valid_fmt) / len(times_valid_fmt)
                 # If valid-format username is consistently >150ms slower, timing oracle likely
                 if avg_valid - avg_invalid > 0.15:
+                    _timing_evidence: list = []
+                    _timing_http_code = 0
+                    try:
+                        if _timing_resp_invalid is not None:
+                            _rq, _rp = _save_http_evidence(
+                                out, phase, "timing_invalid_user",
+                                _timing_resp_invalid, endpoint_url=login_u, method="POST")
+                            _timing_evidence.extend([_rq, _rp])
+                        if _timing_resp_valid is not None:
+                            _rq, _rp = _save_http_evidence(
+                                out, phase, "timing_valid_fmt_user",
+                                _timing_resp_valid, endpoint_url=login_u, method="POST")
+                            _timing_evidence.extend([_rq, _rp])
+                            _timing_http_code = _timing_resp_valid.status_code
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Timing Attack — Non-Constant-Time Authentication",
                         url=login_u, port=target["port"], risk="MEDIUM",
@@ -13409,11 +13427,14 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                                      f"An attacker can use this timing oracle for username enumeration."),
                         output=(f"Avg time (invalid user): {avg_invalid*1000:.0f}ms\n"
                                 f"Avg time (valid-format user): {avg_valid*1000:.0f}ms\n"
-                                f"Delta: {(avg_valid-avg_invalid)*1000:.0f}ms"),
+                                f"Delta: {(avg_valid-avg_invalid)*1000:.0f}ms\n"
+                                f"HTTP status (valid-format probe): {_timing_http_code}"),
+                        output_file=",".join(_timing_evidence) if _timing_evidence else None,
                         sources="fracture-auth-bypass", service=target["scheme"],
                         affected=login_u,
                         owasp="A07:2025 Identification and Authentication Failures",
                         nist="IA-5",
+                        http_code=_timing_http_code,
                         remediation=(
                             "Use constant-time comparison functions for all credential checks. "
                             "Hash credentials before comparison and add artificial jitter to login response times."
@@ -13515,6 +13536,10 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
                     owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                     remediation=f"Remove or restrict access to {fpath}.",
                 )
+                try:
+                    _write_structure_map(out, target, path_statuses={fpath: r.status_code})
+                except Exception:
+                    pass
                 vc.log(f"[files] Found: {fpath} (risk={risk})", "SUCCESS")
         except Exception:
             pass
@@ -14456,7 +14481,7 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                 affected=action,
                 owasp="A07:2025 Identification and Authentication Failures", nist="AC-7",
                 remediation="Implement per-IP and per-account rate limiting with progressive delays or lockout on all authentication endpoints; add CAPTCHA for interactive login flows; alert on anomalous request volumes.",
-                http_code=_last_r.status_code if _last_r else None,
+                http_code=_last_r.status_code if _last_r is not None else 0,
             )
             vc.log(f"[account_lockout] No lockout: {action} ({len(status_codes)} attempts)", "SUCCESS")
 
@@ -16463,6 +16488,13 @@ def main() -> None:
                     f"[bfla] Role 1 fingerprint: {len(_role1_accessible_endpoints)} "
                     "accessible privileged endpoints recorded for cross-role testing", "INFO")
 
+            # Sync structure map with all ep_base paths before header/shcheck phases run.
+            # Ensures discovered endpoints are registered before phases that test them.
+            try:
+                _write_structure_map(out, target, extra_urls=list(dict.fromkeys(_ep_base)))
+            except Exception:
+                pass
+
             # ── Phase 2: headers ──
             if not _skip("headers"):
                 pm.set_phase_status(f"headers#{_ctx_label}", "running", "Security Headers")
@@ -16926,6 +16958,24 @@ def main() -> None:
                     except Exception as e:
                         vc.error(f"Phase bfla [{_ctx_label}] error: {e}")
                         pm.set_phase_status(f"bfla#{_ctx_label}", "error", detail=str(e))
+
+            # Consolidate all finding URLs into structure_map before access matrix sync.
+            # Findings from every phase (headers, shcheck, files, etc.) may reference
+            # paths that were never written to structure_map incrementally.  Scanning
+            # findings_json here ensures every discovered path is tracked.
+            try:
+                _findings_urls: list = []
+                _fj = out.findings_json
+                if _fj.exists():
+                    for _fentry in json.loads(_fj.read_text()):
+                        for _fkey in ("url", "affected"):
+                            _fval = _fentry.get(_fkey, "")
+                            if _fval and isinstance(_fval, str):
+                                _findings_urls.append(_fval)
+                if _findings_urls:
+                    _write_structure_map(out, target, extra_urls=_findings_urls)
+            except Exception:
+                pass
 
             # Sync access_matrix.json with the full structure_map path list before
             # probing so that _probe_role_paths finds an entry for every path
