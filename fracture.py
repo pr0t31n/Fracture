@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.5"
+VERSION = "2.10.6"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -10346,9 +10346,25 @@ def _crawl_output_path(root: Path, url: str) -> Path:
 # SPA detection and headless crawl
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SPA_MOUNT_IDS = frozenset({"root", "app", "__nuxt", "__next", "vue-app", "ng-app"})
+_SPA_MOUNT_IDS = frozenset({
+    # Standard SPA framework mount points
+    "root", "app", "__nuxt", "__next", "vue-app", "ng-app",
+    # Enterprise / portal shells
+    "shell", "portal", "workspace", "application", "spa-root",
+    "app-container", "app-wrapper", "app-root", "ui-root",
+    "main-app", "view-container", "page-container", "content-container",
+    # IBM / Cognos
+    "cognos", "cognos-viewer", "content-pane", "bi-shell",
+    # Ember
+    "ember-application",
+    # Blazor
+    "blazor-app", "app-host",
+    # Oracle / SAP
+    "oracle-adf-container", "sapui5-content",
+})
 
 _SPA_SCRIPT_RE = re.compile(
+    # Major open-source SPA frameworks
     r'react(?:\.development|\.production\.min)?\.js'
     r'|vue(?:\.common|\.esm-bundler|\.runtime\.dom|\.min)?\.js'
     r'|@angular/'
@@ -10357,7 +10373,27 @@ _SPA_SCRIPT_RE = re.compile(
     r'|nuxt(?:\.min)?\.js'
     r'|svelte(?:\.dev|\.min)?\.js'
     r'|ember(?:\.debug|\.min)?\.js'
-    r'|backbone(?:\.min)?\.js',
+    r'|backbone(?:\.min)?\.js'
+    # Enterprise / proprietary frameworks
+    r'|_framework/blazor'                              # Blazor WebAssembly
+    r'|sap-ui-core'                                    # SAP Fiori / OpenUI5
+    r'|openui5'                                        # OpenUI5 CDN
+    r'|dojo(?:\.js|\.min\.js)'                        # Dojo toolkit (IBM, older enterprise)
+    r'|ext(?:-all|-modern|-classic|-legacy)?(?:\.min)?\.js'  # Ext JS / Sencha
+    r'|VAADIN/'                                        # Vaadin (Java enterprise)
+    r'|knockout(?:\.min)?\.js'                         # Knockout.js (MVVM)
+    r'|alpine(?:\.esm|\.min)?\.js'                    # Alpine.js
+    r'|polymer(?:\.min)?\.js'                          # Polymer
+    r'|lit(?:-element)?(?:\.min)?\.js'                # Lit
+    r'|require(?:\.min)?\.js'                          # RequireJS (AMD loader — Cognos, Dojo apps)
+    r'|ojs/'                                           # Oracle JET
+    r'|\.nocache\.js'                                  # Google Web Toolkit (GWT)
+    r'|mootools(?:\.min)?\.js'                         # MooTools (legacy enterprise)
+    r'|yui(?:-min)?\.js|yui/'                         # YUI (legacy IBM/Yahoo)
+    r'|dwr/'                                           # Direct Web Remoting (Java enterprise)
+    r'|stimulus(?:\.min)?\.js'                         # Stimulus / Hotwire
+    r'|htmx(?:\.min)?\.js'                            # HTMX
+    r'|angular-ui-router',                             # AngularJS ui-router
     re.IGNORECASE,
 )
 
@@ -10367,14 +10403,60 @@ _SPA_BUNDLE_RE = re.compile(
 )
 
 _SPA_INLINE_MARKERS = [
-    ("__NEXT_DATA__",    "Next.js"),
-    ("__NUXT__",         "Nuxt.js"),
-    ("data-reactroot",   "React"),
-    ("ng-version",       "Angular"),
-    ("__VUE__",          "Vue"),
-    ("window.Ember",     "Ember"),
-    ("__svelte",         "Svelte"),
+    # Standard frameworks
+    ("__NEXT_DATA__",         "Next.js"),
+    ("__NUXT__",              "Nuxt.js"),
+    ("data-reactroot",        "React"),
+    ("ng-version",            "Angular"),
+    ("__VUE__",               "Vue"),
+    ("window.Ember",          "Ember"),
+    ("__svelte",              "Svelte"),
+    # SSR hydration markers (page looks static but is client-hydrated)
+    ("data-server-rendered",  "Vue SSR"),
+    ("__vue_ssr_context__",   "Vue SSR"),
+    ("data-n-head",           "Nuxt SSR"),
+    ("__NUXT_FULL__",         "Nuxt SSR"),
+    # History API — framework-agnostic SPA routing signal
+    ("history.pushState",     "History API routing"),
+    ("history.replaceState",  "History API routing"),
+    ("window.onpopstate",     "History API routing"),
+    # Enterprise frameworks
+    ("sap-ui-config",         "SAP Fiori/OpenUI5"),
+    ("sap.ui.getCore",        "SAP Fiori/OpenUI5"),
+    ("sap.ui.define",         "SAP Fiori/OpenUI5"),
+    ("Ext.application",       "Ext JS"),
+    ("Ext.define",            "Ext JS"),
+    ("ko.applyBindings",      "Knockout.js"),
+    ("ko.observable",         "Knockout.js"),
+    ("dojo.require",          "Dojo"),
+    ("dojo.config",           "Dojo"),
+    ("require.config",        "RequireJS"),
+    ("VAADIN",                "Vaadin"),
+    ("Blazor.start",          "Blazor"),
+    ("DotNet.invokeMethod",   "Blazor"),
+    # IBM
+    ("CognosViewer",          "IBM Cognos"),
+    ("cognos.Report",         "IBM Cognos"),
+    ("cognosLaunchInWindow",  "IBM Cognos"),
+    ("ibm.common",            "IBM JS framework"),
+    # Oracle
+    ("oracle.adf",            "Oracle ADF"),
+    ("oracle.jet",            "Oracle JET"),
+    # GWT
+    ("GWT.create",            "Google Web Toolkit"),
+    # Alpine.js
+    ("Alpine.data",           "Alpine.js"),
+    ("x-data=",               "Alpine.js"),
 ]
+
+# onclick attribute pattern for DHTML / jQuery-era apps whose navigation
+# is driven by JS handlers rather than <a href> links
+_SPA_ONCLICK_NAV_RE = re.compile(
+    r'(?:location\.href\s*[=+]|window\.location\s*[=+]|\.load\s*\(|'
+    r'navigate\s*\(|showPage\s*\(|loadContent\s*\(|loadPage\s*\(|'
+    r'changePage\s*\(|goTo\s*\(|renderView\s*\(|displayContent\s*\()',
+    re.I,
+)
 
 
 def _detect_spa(html: str, url: str, static_link_count: int) -> "tuple[bool, list[str]]":
@@ -10401,6 +10483,10 @@ def _detect_spa(html: str, url: str, static_link_count: int) -> "tuple[bool, lis
     # Angular custom elements / ng-app directive
     if soup.find("app-root") or soup.find(attrs={"ng-app": True}):
         evidence.append("Angular app-root / ng-app directive")
+
+    # Blazor: uses <app> as mount element (not an id — it's the tag name itself)
+    if soup.find("app"):
+        evidence.append("Blazor-style <app> mount element")
 
     # Known SPA framework script sources
     script_srcs = [s.get("src", "") for s in soup.find_all("script") if s.get("src")]
@@ -10439,7 +10525,97 @@ def _detect_spa(html: str, url: str, static_link_count: int) -> "tuple[bool, lis
             f"Only {static_link_count} static links with {len(script_srcs)} script tags"
         )
 
+    # ES module <script type="module"> — used by Vite, SvelteKit, modern SSR setups
+    module_scripts = [s for s in soup.find_all("script") if s.get("type") == "module"]
+    if len(module_scripts) >= 2:
+        evidence.append(f"{len(module_scripts)} ES module <script type=module> tags (Vite/modern SSR)")
+
+    # History API in inline scripts — framework-agnostic SPA routing signal
+    # (catches hand-rolled SPAs and custom portals that don't use a named framework)
+    _inline_text = " ".join(s.get_text() for s in soup.find_all("script") if not s.get("src"))
+    if "history.pushState" in _inline_text or "history.replaceState" in _inline_text:
+        if not any("History API" in e for e in evidence):  # not already caught by inline marker
+            evidence.append("History API (pushState/replaceState) in inline scripts")
+
+    # DHTML / onclick-driven navigation — jQuery-era and enterprise portal apps
+    # where navigation fires JS handlers rather than following <a href> links
+    _onclick_nav_count = sum(
+        1 for _el in soup.find_all(onclick=True)
+        if _SPA_ONCLICK_NAV_RE.search(_el.get("onclick", ""))
+    )
+    if _onclick_nav_count >= 3:
+        evidence.append(f"DHTML onclick navigation: {_onclick_nav_count} onclick-driven nav elements")
+    elif _onclick_nav_count >= 1 and not evidence:
+        evidence.append("onclick navigation handler detected")
+
+    # data-* attribute density — heavy use of data-* bindings is a framework indicator
+    # even when no known framework name appears in scripts or markers
+    _data_attr_count = sum(
+        1 for _tag in soup.find_all()
+        if any(
+            k.startswith("data-") and k not in ("data-src", "data-id", "data-type", "data-value")
+            for k in (_tag.attrs or {})
+        )
+    )
+    if _data_attr_count >= 20 and not evidence:
+        evidence.append(f"{_data_attr_count} elements with data-* binding attributes (framework pattern)")
+
     return bool(evidence), evidence
+
+
+# ── SPA headless crawl interaction constants ─────────────────────────────────
+
+_SPA_MAX_CLICKS = 30  # max click interactions per page during headless crawl
+
+# CSS selector for elements that trigger navigation via JS rather than <a href>
+_SPA_CLICK_SEL = (
+    '[role="menuitem"],[role="tab"],[role="treeitem"],[role="option"],'
+    '[role="button"]:not([disabled]),'
+    'nav button,nav li[onclick],nav [onclick],'
+    '.nav-item button,.menu-item,.nav-link[onclick],'
+    'li[onclick],td[onclick],div[onclick],'
+    '[data-href],[data-url],[data-route],[data-link],[data-page],'
+    '[data-toggle="tab"],[data-toggle="pill"],[data-toggle="collapse"],'
+    'button[data-href],button[data-url],button[data-route],'
+    'a[onclick]:not([href]):not([href="#"]),'
+    '[data-id][onclick]'
+)
+
+# Injected into each page after load — intercepts XHR, fetch, and history API
+# pushState/replaceState so click-triggered navigations are captured as routes
+_SPA_INTERCEPT_JS = """
+(function () {
+    if (!window._fracture_net_urls) { window._fracture_net_urls = []; }
+    if (window._fracture_intercepted) { return; }
+    window._fracture_intercepted = true;
+    var _op = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (m, u) {
+        try { window._fracture_net_urls.push(String(u)); } catch (e) {}
+        return _op.apply(this, arguments);
+    };
+    if (typeof window.fetch !== 'undefined') {
+        var _of = window.fetch;
+        window.fetch = function (input, init) {
+            try {
+                window._fracture_net_urls.push(
+                    input instanceof Request ? input.url : String(input)
+                );
+            } catch (e) {}
+            return _of.apply(this, arguments);
+        };
+    }
+    var _ops = history.pushState;
+    history.pushState = function (s, t, u) {
+        try { if (u) window._fracture_net_urls.push(String(u)); } catch (e) {}
+        return _ops.apply(this, arguments);
+    };
+    var _ors = history.replaceState;
+    history.replaceState = function (s, t, u) {
+        try { if (u) window._fracture_net_urls.push(String(u)); } catch (e) {}
+        return _ors.apply(this, arguments);
+    };
+})();
+"""
 
 
 def _spa_transfer_cookies(sess: "requests.Session", driver: object,
@@ -10468,7 +10644,8 @@ def _spa_transfer_cookies(sess: "requests.Session", driver: object,
 
 def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
                      out: "OutputManager", sess: "requests.Session",
-                     already_visited: int) -> dict:
+                     already_visited: int,
+                     extra_seeds: "list[str] | None" = None) -> dict:
     """Headless-browser crawl for Single Page Applications.
 
     Tries Chrome first; falls back to Firefox (GeckoDriver) when Chrome or
@@ -10549,6 +10726,8 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
         _spa_transfer_cookies(sess, driver, url)
 
         queue = [url]
+        if extra_seeds:
+            queue.extend(s for s in extra_seeds if s != url)
         page_count = 0
         vc.status(phase, "Crawl", "running", "SPA headless crawl", 0, max_pages)
 
@@ -10568,7 +10747,12 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
                     lambda d: d.execute_script(  # type: ignore[union-attr]
                         "return document.readyState") == "complete"
                 )
-                time.sleep(0.8)  # allow XHR / fetch to settle
+                time.sleep(2.5)  # allow XHR / fetch / async init to settle
+                # Inject interceptor for click-triggered XHR and pushState routes
+                try:
+                    driver.execute_script(_SPA_INTERCEPT_JS)
+                except Exception:
+                    pass
             except Exception:
                 continue
 
@@ -10639,6 +10823,79 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
             except Exception:
                 pass
 
+            # Collect URLs captured by the XHR / fetch / history-API interceptor
+            # (routes pushed via pushState during page init or after link clicks)
+            try:
+                _net_urls = driver.execute_script(
+                    "return (window._fracture_net_urls || []).splice(0);"
+                ) or []
+                for _raw_nu in _net_urls:
+                    _nl = _normalize_url(current, _raw_nu)
+                    if (_nl and _same_origin(url, _nl)
+                            and not _LOGOUT_PATH_RE.search(
+                                urllib.parse.urlparse(_nl).path or "")
+                            and _nl.rstrip("/") not in visited):
+                        spa_links.append(_nl)
+                        queue.append(_nl)
+            except Exception:
+                pass
+
+            # Click-based route discovery — interact with nav elements that don't
+            # use <a href>: tree nodes, tabs, DHTML onclick handlers, role=menuitem
+            try:
+                _clickable = driver.find_elements("css selector", _SPA_CLICK_SEL)
+                _pre_click_url = driver.current_url
+                for _cel in _clickable[:_SPA_MAX_CLICKS]:
+                    try:
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({block:'center',behavior:'instant'});",
+                            _cel,
+                        )
+                        _cel.click()
+                        time.sleep(0.6)
+                        _post_click_url = driver.current_url
+                        if _post_click_url != _pre_click_url:
+                            _nl = _normalize_url(url, _post_click_url)
+                            if (_nl and _same_origin(url, _nl)
+                                    and not _LOGOUT_PATH_RE.search(
+                                        urllib.parse.urlparse(_nl).path or "")
+                                    and _nl.rstrip("/") not in visited):
+                                spa_links.append(_nl)
+                                queue.append(_nl)
+                            # Navigate back to recover state for next click
+                            try:
+                                driver.back()
+                                time.sleep(0.5)
+                                driver.execute_script(_SPA_INTERCEPT_JS)
+                            except Exception:
+                                try:
+                                    driver.get(current)
+                                    time.sleep(1.0)
+                                    driver.execute_script(_SPA_INTERCEPT_JS)
+                                except Exception:
+                                    pass
+                            _pre_click_url = driver.current_url
+                        # Collect XHR / pushState URLs fired by this click
+                        _cu = driver.execute_script(
+                            "return (window._fracture_net_urls || []).splice(0);"
+                        ) or []
+                        for _raw_cu in _cu:
+                            _nl = _normalize_url(current, _raw_cu)
+                            if (_nl and _same_origin(url, _nl)
+                                    and not _LOGOUT_PATH_RE.search(
+                                        urllib.parse.urlparse(_nl).path or "")
+                                    and _nl.rstrip("/") not in visited):
+                                spa_links.append(_nl)
+                                queue.append(_nl)
+                    except Exception:
+                        # Click may have caused unexpected navigation — re-inject
+                        try:
+                            driver.execute_script(_SPA_INTERCEPT_JS)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
         vc.log(
             f"[crawl/spa] Headless crawl complete: {page_count} pages, "
             f"{len(set(spa_links))} links, {len(spa_forms)} forms",
@@ -10670,14 +10927,16 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     max_pages = cfg.get("crawl_max_pages", 500)
     vc.status(phase, "Crawl", "running", "Crawling", 0, max_pages)
 
-    visited:              set  = set()
-    queue_urls:           list = [(url, 0)]
-    all_forms:            list = []
-    all_js:               list = []
-    all_links:            list = []
-    _crawl_path_statuses: dict = {}
-    page_count                 = 0
-    _root_html:           str  = ""  # captured for SPA detection after BFS
+    visited:               set  = set()
+    queue_urls:            list = [(url, 0)]
+    all_forms:             list = []
+    all_js:                list = []
+    all_links:             list = []
+    _crawl_path_statuses:  dict = {}
+    page_count                  = 0
+    _root_html:            str  = ""  # captured for SPA detection after BFS
+    _spa_roots:            set  = set()  # sub-paths with SPA signals (micro-frontends)
+    _checked_spa_prefixes: set  = set()  # path prefixes already tested to avoid redundant checks
 
     while queue_urls and page_count < max_pages:
         current_url, depth = queue_urls.pop(0)
@@ -10693,11 +10952,25 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         _cr = data.get("response")
         if _cr is not None:
             _crawl_path_statuses[current_url] = _cr.status_code
+            try:
+                _pg_html = _cr.text
+            except Exception:
+                _pg_html = ""
             if page_count == 1:
-                try:
-                    _root_html = _cr.text
-                except Exception:
-                    pass
+                _root_html = _pg_html
+            elif _pg_html and _BS4_AVAILABLE:
+                # Per-page SPA detection for micro-frontend discovery:
+                # run once per unique two-segment path prefix so we don't
+                # parse every single page but still catch sub-path SPAs
+                _pg_path   = urllib.parse.urlparse(current_url).path.rstrip("/")
+                _pg_prefix = "/".join(_pg_path.split("/")[:3])
+                if _pg_prefix not in _checked_spa_prefixes:
+                    _checked_spa_prefixes.add(_pg_prefix)
+                    _pg_is_spa, _ = _detect_spa(
+                        _pg_html, current_url, len(data.get("links", []))
+                    )
+                    if _pg_is_spa:
+                        _spa_roots.add(current_url)
         all_forms.extend(data["forms"])
         all_js.extend(data["js_files"])
         all_links.extend(data["links"])
@@ -10718,59 +10991,69 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     vc.log(f"[crawl] Visited {page_count} pages, {len(all_forms)} forms, {len(all_js)} JS files", "INFO")
 
     # ── SPA detection and headless augmentation ──────────────────────────────
-    # After the static BFS, check whether the target is a Single Page
-    # Application.  If so (and Selenium is available), run a headless Chrome
-    # crawl to pick up routes and forms that only appear after JS execution.
+    # Check root page first; also merge any micro-frontend SPA roots found
+    # during per-page BFS detection above.
+    _is_root_spa, _spa_evidence = False, []
     if _root_html:
-        _is_spa, _spa_evidence = _detect_spa(_root_html, url, len(visited))
-        if _is_spa:
-            vc.log(
-                "[crawl] SPA detected — "
-                + "; ".join(_spa_evidence[:4])
-                + (f" (+{len(_spa_evidence) - 4} more)" if len(_spa_evidence) > 4 else ""),
-                "INFO",
-            )
-            out.add_finding(
-                title="Single Page Application Detected",
-                url=url, port=target["port"], risk="INFO",
-                description=(
-                    f"The target appears to be a Single Page Application. "
-                    f"Evidence: {'; '.join(_spa_evidence)}."
-                ),
-                output="\n".join(_spa_evidence),
-                sources="fracture-crawl", service=target["scheme"],
-                owasp="A04:2025 Insecure Design", nist="CM-7",
-                remediation=(
-                    "Ensure SPA routes are protected server-side; "
-                    "client-side routing is not a security boundary."
-                ),
-            )
-            _spa_browser = _get_spa_browser()
-            if _spa_browser:
-                vc.status(phase, "Crawl", "running", "SPA headless crawl", 0, max_pages)
-                try:
-                    _spa = _phase_spa_crawl(target, cfg, pm, out, sess, len(visited))
-                    if _spa:
-                        all_forms.extend(_spa.get("forms",    []))
-                        all_links.extend(_spa.get("links",    []))
-                        all_js.extend(   _spa.get("js_files", []))
-                        vc.log(
-                            f"[crawl] SPA headless merged: "
-                            f"+{len(_spa.get('links', []))} links, "
-                            f"+{len(_spa.get('forms', []))} forms",
-                            "INFO",
-                        )
-                except Exception as _spa_err:
-                    vc.log(f"[crawl] SPA headless crawl exception: {_spa_err}", "WARNING")
-            else:
-                vc.log(
-                    "[crawl] No headless browser available — install selenium + "
-                    "chromedriver (Chrome) or geckodriver (Firefox) to enable "
-                    "headless SPA crawl (run install.py)",
-                    "WARNING",
+        _is_root_spa, _spa_evidence = _detect_spa(_root_html, url, len(visited))
+    if _is_root_spa:
+        _spa_roots.add(url)
+    elif _spa_roots and not _spa_evidence:
+        # Root is static but sub-paths are SPAs — micro-frontend pattern
+        _spa_evidence = [f"Micro-frontend SPA detected on {len(_spa_roots)} sub-path(s)"]
+
+    if _spa_roots:
+        vc.log(
+            "[crawl] SPA detected — "
+            + "; ".join(_spa_evidence[:4])
+            + (f" (+{len(_spa_evidence) - 4} more)" if len(_spa_evidence) > 4 else ""),
+            "INFO",
+        )
+        out.add_finding(
+            title="Single Page Application Detected",
+            url=url, port=target["port"], risk="INFO",
+            description=(
+                f"The target appears to be a Single Page Application. "
+                f"Evidence: {'; '.join(_spa_evidence)}."
+            ),
+            output="\n".join(_spa_evidence),
+            sources="fracture-crawl", service=target["scheme"],
+            owasp="A04:2025 Insecure Design", nist="CM-7",
+            remediation=(
+                "Ensure SPA routes are protected server-side; "
+                "client-side routing is not a security boundary."
+            ),
+        )
+        _spa_browser = _get_spa_browser()
+        if _spa_browser:
+            vc.status(phase, "Crawl", "running", "SPA headless crawl", 0, max_pages)
+            _extra_seeds = list(_spa_roots - {url}) or None
+            try:
+                _spa = _phase_spa_crawl(
+                    target, cfg, pm, out, sess, len(visited),
+                    extra_seeds=_extra_seeds,
                 )
+                if _spa:
+                    all_forms.extend(_spa.get("forms",    []))
+                    all_links.extend(_spa.get("links",    []))
+                    all_js.extend(   _spa.get("js_files", []))
+                    vc.log(
+                        f"[crawl] SPA headless merged: "
+                        f"+{len(_spa.get('links', []))} links, "
+                        f"+{len(_spa.get('forms', []))} forms",
+                        "INFO",
+                    )
+            except Exception as _spa_err:
+                vc.log(f"[crawl] SPA headless crawl exception: {_spa_err}", "WARNING")
         else:
-            vc.log("[crawl] No SPA indicators detected — static crawl sufficient", "INFO")
+            vc.log(
+                "[crawl] No headless browser available — install selenium + "
+                "chromedriver (Chrome) or geckodriver (Firefox) to enable "
+                "headless SPA crawl (run install.py)",
+                "WARNING",
+            )
+    else:
+        vc.log("[crawl] No SPA indicators detected — static crawl sufficient", "INFO")
 
     # Persist the HTTP status code of every page the crawl actually fetched.
     # This ensures crawl-visited pages show a status code in the structure map
