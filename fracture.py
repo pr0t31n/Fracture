@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.7"
+VERSION = "2.10.8"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6846,7 +6846,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     vc.log(f"[recon] {url} → HTTP {status_code}", "INFO")
     # Write "/" immediately so the Structure tab shows something from the first moment
     try:
-        _write_structure_map(out, target, path_statuses={"/": status_code})
+        _write_structure_map(out, target, path_statuses={"/": status_code}, source="recon")
     except Exception:
         pass
     server_hdr  = headers.get("Server", "")
@@ -7140,6 +7140,29 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     else:
         vc.log("[recon] whatweb not found — skipping tech fingerprint", "WARNING")
 
+    # Write target profile — server, technology stack, CMS, WAF from initial probe
+    try:
+        _tp_waf = ""
+        if server_hdr:
+            _tp_waf_m = _WAF_SERVER_RE.search(server_hdr)
+            if _tp_waf_m:
+                _tp_waf = _tp_waf_m.group(1)
+        if not _tp_waf:
+            _tp_waf_bm = _WAF_BODY_RE.search(body[:4096]) if body else None
+            if _tp_waf_bm:
+                _tp_waf = "WAF (body signature)"
+        _write_target_profile(out,
+            url=url,
+            hostname=target["hostname"],
+            server=server_hdr,
+            powered_by=powered_by,
+            cms=list(set(detected_cms)),
+            technologies=[{"name": n, "version": v} for n, v in _ww_versions if n],
+            waf=_tp_waf,
+        )
+    except Exception:
+        pass
+
     # ── Exploit lookup (searchsploit) ─────────────────────────────────────────
     # Build search terms from detected server header, CMS, and whatweb results.
     searchsploit = _find_tool("searchsploit")
@@ -7210,7 +7233,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _rf_rq, _rf_rp = _save_http_evidence(out, phase, _rf_safe, r)
                 vc.log(f"[recon] Found {rpath} ({len(r.text)} bytes)", "SUCCESS")
                 try:
-                    _write_structure_map(out, target, path_statuses={rpath: _rpath_status})
+                    _write_structure_map(out, target, path_statuses={rpath: _rpath_status}, source="recon")
                 except Exception:
                     pass
                 if rpath == "/robots.txt":
@@ -7225,7 +7248,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             _robots_sm[_rp_path] = None
                     if _robots_sm:
                         try:
-                            _write_structure_map(out, target, path_statuses=_robots_sm)
+                            _write_structure_map(out, target, path_statuses=_robots_sm, source="robots.txt")
                         except Exception:
                             pass
                     if disallowed:
@@ -7281,7 +7304,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                         _admin_redir = r.headers.get("Location", "")
                     _write_structure_map(out, target,
                                          path_statuses={apath: r.status_code},
-                                         path_redirects={apath: _admin_redir} if _admin_redir else None)
+                                         path_redirects={apath: _admin_redir} if _admin_redir else None,
+                                         source="recon")
                 except Exception:
                     pass
         except Exception:
@@ -7355,7 +7379,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             if _sm_ps:
                 _write_structure_map(out, target, path_statuses=_sm_ps,
                                      path_redirects=_sm_rd or None,
-                                     evidence_files=[str(out_f)])
+                                     evidence_files=[str(out_f)],
+                                     source="gobuster")
         except Exception:
             pass
 
@@ -7404,7 +7429,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 if _sm_ps:
                     _write_structure_map(out, target, path_statuses=_sm_ps,
                                          path_redirects=_sm_rd or None,
-                                         evidence_files=[str(fer_out)])
+                                         evidence_files=[str(fer_out)],
+                                         source="feroxbuster")
             except Exception:
                 pass
     elif feroxbuster:
@@ -7441,7 +7467,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     if _sm_ps:
                         _write_structure_map(out, target, path_statuses=_sm_ps,
                                              path_redirects=_sm_rd or None,
-                                             evidence_files=[str(gob_files_out)])
+                                             evidence_files=[str(gob_files_out)],
+                                             source="gobuster")
                 except Exception:
                     pass
         # feroxbuster files
@@ -7488,7 +7515,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     if _sm_ps:
                         _write_structure_map(out, target, path_statuses=_sm_ps,
                                              path_redirects=_sm_rd or None,
-                                             evidence_files=[str(fer_files_out)])
+                                             evidence_files=[str(fer_files_out)],
+                                             source="feroxbuster")
                 except Exception:
                     pass
 
@@ -7524,7 +7552,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _wp_sm_rd[_wpath] = _wr
         if _wp_sm_ps:
             _write_structure_map(out, target, path_statuses=_wp_sm_ps,
-                                 path_redirects=_wp_sm_rd or None)
+                                 path_redirects=_wp_sm_rd or None,
+                                 source="wayback")
         _wp_discovered = [_wu for _wu, *_ in _wp_info.get("discovered_paths", [])]
 
     vc.status(phase, "Recon", "complete", "Done", 10, 10)
@@ -8085,7 +8114,8 @@ def _phase_endpoint_tools(
                     if _ep_ps:
                         _write_structure_map(out, target, path_statuses=_ep_ps,
                                              path_redirects=_ep_rd or None,
-                                             evidence_files=[str(ep_gob)])
+                                             evidence_files=[str(ep_gob)],
+                                             source="gobuster")
                 except Exception:
                     pass
 
@@ -8108,7 +8138,8 @@ def _phase_endpoint_tools(
                     if _ep_ps:
                         _write_structure_map(out, target, path_statuses=_ep_ps,
                                              path_redirects=_ep_rd or None,
-                                             evidence_files=[str(ep_gob_f)])
+                                             evidence_files=[str(ep_gob_f)],
+                                             source="gobuster")
                 except Exception:
                     pass
 
@@ -8153,7 +8184,8 @@ def _phase_endpoint_tools(
                     if _ep_ps:
                         _write_structure_map(out, target, path_statuses=_ep_ps,
                                              path_redirects=_ep_rd or None,
-                                             evidence_files=[str(ep_fer)])
+                                             evidence_files=[str(ep_fer)],
+                                             source="feroxbuster")
                 except Exception:
                     pass
 
@@ -8316,6 +8348,8 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
     host_port = f"{hostname}:{port}"
     vc.status(phase, "TLS Analysis", "running", "sslscan", 0, 4)
 
+    _tls_profile_info: dict = {}
+
     sslscan = _find_tool("sslscan")
     if sslscan:
         out_f = out.output_path(phase, f"sslscan_{hostname}_{port}")
@@ -8384,6 +8418,14 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         "bits":     _m.group(2),
                         "cipher":   _m.group(3),
                     })
+            _tls_profile_info.update({
+                "cert_subject": _ss_cert_subject,
+                "cert_issuer":  _ss_cert_issuer,
+                "cert_expiry":  _ss_cert_expiry,
+                "cert_valid":   _ss_cert_valid,
+                "protocols":    sorted({c.get("protocol") for c in _ss_ciphers
+                                        if c.get("protocol")}),
+            })
             # Dedicated Heartbleed check on raw output — the section-header filter
             # removes "  Heartbleed:" so the generic _TLS_VULN_PATTERNS match fails.
             _hb_sect = re.search(
@@ -8838,6 +8880,10 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
 
+    try:
+        _write_target_profile(out, tls_enabled=True, **_tls_profile_info)
+    except Exception:
+        pass
     vc.status(phase, "TLS Analysis", "complete", "Done", 4, 4)
     vc.log("[tls] Phase complete", "SUCCESS")
 
@@ -9209,6 +9255,18 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     # Persist base-domain header state for per-endpoint deviation detection
     target["_base_sec_hdrs_present"] = _base_sec_hdrs_present
     target["_base_sec_hdrs_absent"]  = _base_sec_hdrs_absent
+    try:
+        _write_target_profile(out,
+            server=server_hdr,
+            powered_by=powered_by,
+            security_headers={
+                "present": sorted(_base_sec_hdrs_present),
+                "missing": sorted(_base_sec_hdrs_absent),
+            },
+        )
+    except Exception:
+        pass
+    _hdr_cookie_names: list = []
 
     # ── Permissive (misconfigured) security header checks ────────────────────
     _csp_val = headers.get("Content-Security-Policy", "")
@@ -9378,6 +9436,8 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             continue
         sc_lower = sc.lower()
         cname    = sc.split("=")[0].strip() if "=" in sc else sc.split(";")[0].strip()
+        if cname:
+            _hdr_cookie_names.append(cname)
         _sc_out  = f"Set-Cookie: {sc[:300]}"
         _sc_src  = "fracture-headers"
         _sc_owasp = "A05:2025 Security Misconfiguration"
@@ -9547,6 +9607,10 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
 
+    try:
+        _write_target_profile(out, cookies=_hdr_cookie_names)
+    except Exception:
+        pass
     vc.status(phase, "Security Headers", "complete", "Done", 5, 5)
     vc.log("[headers] Phase complete", "SUCCESS")
 
@@ -11060,7 +11124,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     # even if they're not re-probed by the endpoint tools phase.
     if _crawl_path_statuses:
         try:
-            _write_structure_map(out, target, path_statuses=_crawl_path_statuses)
+            _write_structure_map(out, target, path_statuses=_crawl_path_statuses, source="crawl")
         except Exception:
             pass
 
@@ -11664,12 +11728,63 @@ def _sm_normalize_redirect(redirect_url: str, base_host: str) -> "str | None":
         return None
 
 
+def _write_target_profile(out: "OutputManager", **updates) -> None:
+    """Incrementally merge newly discovered information into target_profile.json.
+
+    Each call merges *updates* into the existing profile — non-empty values are
+    never overwritten by empty ones, and list/dict fields are merged rather than
+    replaced.  Uses the same atomic-rename pattern as _write_structure_map.
+    """
+    tp_path = out.root / "target_profile.json"
+    try:
+        existing = json.loads(tp_path.read_text(encoding="utf-8")) if tp_path.exists() else {}
+    except Exception:
+        existing = {}
+    for key, val in updates.items():
+        if val is None or val == "" or val == [] or val == {}:
+            continue
+        if key == "technologies":
+            _t_map = {t["name"]: t for t in existing.get("technologies", []) if t.get("name")}
+            for t in val:
+                n = t.get("name", "")
+                if n and (n not in _t_map or (t.get("version") and not _t_map[n].get("version"))):
+                    _t_map[n] = t
+            existing["technologies"] = list(_t_map.values())
+        elif key == "security_headers":
+            _eh = existing.get("security_headers", {"present": [], "missing": []})
+            for sub in ("present", "missing"):
+                _eh[sub] = list(dict.fromkeys(_eh.get(sub, []) + (val.get(sub) or [])))
+            existing["security_headers"] = _eh
+        elif key == "cookies":
+            existing["cookies"] = list(dict.fromkeys(existing.get("cookies", []) + val))
+        elif key == "cms":
+            _cms = existing.get("cms", [])
+            for c in (val if isinstance(val, list) else [val]):
+                if c and c not in _cms:
+                    _cms.append(c)
+            existing["cms"] = _cms
+        elif key == "protocols":
+            existing["protocols"] = list(dict.fromkeys(existing.get("protocols", []) + val))
+        else:
+            if existing.get(key) and not val:
+                continue
+            existing[key] = val
+    existing["last_updated"] = datetime.now().isoformat()
+    try:
+        _tp_tmp = tp_path.with_suffix(".tmp")
+        _tp_tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        _tp_tmp.replace(tp_path)
+    except Exception:
+        pass
+
+
 def _write_structure_map(out: "OutputManager", target: dict,
                          crawl_data: "dict | None" = None,
                          extra_urls: "list | None" = None,
                          path_statuses: "dict | None" = None,
                          path_redirects: "dict | None" = None,
-                         evidence_files: "list | None" = None) -> None:
+                         evidence_files: "list | None" = None,
+                         source: "str | None" = None) -> None:
     """Incrementally build and persist structure_map.json.
 
     Each call merges newly discovered paths into the existing map so information
@@ -11737,6 +11852,8 @@ def _write_structure_map(out: "OutputManager", target: dict,
             # per-role statuses are tracked separately and are unaffected.
             if status is not None and "status" not in entry:
                 entry["status"] = status
+            if source and "source" not in entry:
+                entry["source"] = source
         except Exception:
             pass
 
@@ -13537,7 +13654,7 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
                     remediation=f"Remove or restrict access to {fpath}.",
                 )
                 try:
-                    _write_structure_map(out, target, path_statuses={fpath: r.status_code})
+                    _write_structure_map(out, target, path_statuses={fpath: r.status_code}, source="files")
                 except Exception:
                     pass
                 vc.log(f"[files] Found: {fpath} (risk={risk})", "SUCCESS")
@@ -15095,7 +15212,8 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
                 if _sm_ps:
                     _write_structure_map(out, target, path_statuses=_sm_ps,
                                          path_redirects=_sm_rd or None,
-                                         evidence_files=[str(out_f)])
+                                         evidence_files=[str(out_f)],
+                                         source="gobuster")
             except Exception:
                 pass
 
@@ -15141,7 +15259,8 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
                 if _sm_ps:
                     _write_structure_map(out, target, path_statuses=_sm_ps,
                                          path_redirects=_sm_rd or None,
-                                         evidence_files=[str(fer_out)])
+                                         evidence_files=[str(fer_out)],
+                                         source="feroxbuster")
             except Exception:
                 pass
 
@@ -15167,7 +15286,8 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
                 if _sm_ps:
                     _write_structure_map(out, target, path_statuses=_sm_ps,
                                          path_redirects=_sm_rd or None,
-                                         evidence_files=[str(gob_files_out)])
+                                         evidence_files=[str(gob_files_out)],
+                                         source="gobuster")
             except Exception:
                 pass
 
@@ -15213,7 +15333,8 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
                 if _sm_ps:
                     _write_structure_map(out, target, path_statuses=_sm_ps,
                                          path_redirects=_sm_rd or None,
-                                         evidence_files=[str(fer_files_out)])
+                                         evidence_files=[str(fer_files_out)],
+                                         source="feroxbuster")
             except Exception:
                 pass
 
@@ -16495,6 +16616,20 @@ def main() -> None:
             except Exception:
                 pass
 
+            # Write auth method and login page to target profile (Role 1 context only)
+            if not _is_reduced_ctx:
+                try:
+                    _auth_cfg   = _ctx_cfg.get("auth", {})
+                    _auth_meth  = (_auth_cfg.get("auth_method")
+                                   or ("enabled" if _auth_cfg.get("enabled") else "none"))
+                    _auth_login = (_auth_cfg.get("login_url") or "")
+                    _write_target_profile(out,
+                        auth_method=_auth_meth,
+                        auth_page=_auth_login,
+                    )
+                except Exception:
+                    pass
+
             # ── Phase 2: headers ──
             if not _skip("headers"):
                 pm.set_phase_status(f"headers#{_ctx_label}", "running", "Security Headers")
@@ -16571,7 +16706,7 @@ def main() -> None:
 
             # Write structure map from crawl data (first pass — pages, forms, params)
             try:
-                _write_structure_map(out, target, crawl_data=crawl_data)
+                _write_structure_map(out, target, crawl_data=crawl_data, source="crawl")
             except Exception:
                 pass
 
