@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.19"
+VERSION = "2.10.20"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -7254,6 +7254,112 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
 
+    # ── CDN / WAF presence finding + cache poisoning probes ──────────────────
+    if _recon_cdn or _recon_edge_security:
+        _waf_cdn_name = _recon_cdn or (_recon_edge_security[0] if _recon_edge_security else "")
+        _waf_all = ([_recon_cdn] if _recon_cdn else []) + _recon_edge_security
+        _waf_str = ", ".join(_waf_all)
+        out.add_finding(
+            title=f"CDN / WAF Active: {_waf_str}",
+            url=url, port=target["port"], risk="INFO",
+            description=(
+                f"A CDN or WAF layer ({_waf_str}) was identified in front of the target. "
+                "This has the following testing implications:\n"
+                "1. TLS is terminated at the CDN edge — TLS findings reflect the CDN's "
+                "configuration, not the origin server's.\n"
+                "2. WAF rules may suppress or block injection probes (SQLi, XSS, traversal) "
+                "— absence of a finding does not confirm absence of the vulnerability.\n"
+                "3. Directory brute-forcing has been throttled to avoid IP blocks from "
+                "bot-detection. Results may be less comprehensive than against a direct target.\n"
+                "4. Web cache poisoning is in scope — the CDN caching layer may cache "
+                "attacker-controlled header values and serve them to other users."
+            ),
+            output=f"Detected: {_waf_str}",
+            sources="fracture-recon", service=target["scheme"],
+            owasp="A05:2025 Security Misconfiguration", nist="SC-5",
+            remediation=(
+                "Ensure the WAF rule set is kept up to date and covers OWASP Top 10 2025. "
+                "Restrict origin server access to CDN IP ranges only. "
+                "Review CDN cache key configuration to prevent web cache poisoning."
+            ),
+            http_code=resp.status_code,
+        )
+
+        # Web cache poisoning probes — test whether unkeyed request headers are
+        # reflected in cached responses.  Each probe sends the header once and
+        # checks for reflection in the response body, Location, or Link headers.
+        # A reflected value that the CDN could cache constitutes a web cache
+        # poisoning vector that may affect all users receiving the cached response.
+        _wcp_headers = [
+            ("X-Forwarded-Host",   "evil-cache-probe.invalid"),
+            ("X-Original-URL",     "/cache-probe-path"),
+            ("X-Rewrite-URL",      "/cache-probe-path"),
+            ("X-Host",             "evil-cache-probe.invalid"),
+            ("X-Forwarded-Server", "evil-cache-probe.invalid"),
+            ("X-Forwarded-Scheme", "http"),
+            ("X-Forwarded-Prefix", "/cache-probe-prefix"),
+        ]
+        _wcp_timeout = min(timeout, 8)
+        for _wcp_hdr, _wcp_val in _wcp_headers:
+            try:
+                # Cache-bust the probe so we hit the origin, not a stale cached copy
+                _wcp_bust = f"fracture-probe-{_wcp_hdr.lower().replace('-', '')}"
+                _wcp_probe_url = (url.rstrip("/") + "/"
+                                  + f"?{_wcp_bust}={int(time.time())}"
+                                  if "?" not in url else
+                                  url + f"&{_wcp_bust}={int(time.time())}")
+                _wcp_r = sess.get(
+                    _wcp_probe_url,
+                    timeout=_wcp_timeout,
+                    allow_redirects=False,
+                    headers={_wcp_hdr: _wcp_val},
+                )
+                _wcp_body    = (_wcp_r.text or "")[:8192]
+                _wcp_loc     = _wcp_r.headers.get("Location", "")
+                _wcp_link    = _wcp_r.headers.get("Link", "")
+                _wcp_reflect = _wcp_val in _wcp_body or _wcp_val in _wcp_loc or _wcp_val in _wcp_link
+                if _wcp_reflect:
+                    _wcp_rq, _wcp_rp = _save_http_evidence(
+                        out, phase,
+                        f"cache_poison_{_wcp_hdr.lower().replace('-', '_')}",
+                        _wcp_r)
+                    out.add_finding(
+                        title=f"Web Cache Poisoning: {_wcp_hdr} Reflected",
+                        url=url, port=target["port"], risk="HIGH",
+                        description=(
+                            f"The '{_wcp_hdr}' request header value was reflected in the "
+                            f"response (body, Location, or Link). Because {_waf_cdn_name} "
+                            "caches responses, an attacker can send a request with a "
+                            f"malicious '{_wcp_hdr}' value, causing the CDN to cache the "
+                            "poisoned response and serve it to all subsequent users — "
+                            "without those users sending the header themselves."
+                        ),
+                        output=(
+                            f"Probe header: {_wcp_hdr}: {_wcp_val}\n"
+                            f"Reflected in: "
+                            + ("body " if _wcp_val in _wcp_body else "")
+                            + ("Location " if _wcp_val in _wcp_loc else "")
+                            + ("Link" if _wcp_val in _wcp_link else "")
+                        ),
+                        affected=url,
+                        sources="fracture-recon", service=target["scheme"],
+                        output_file=f"{_wcp_rq},{_wcp_rp}",
+                        owasp="A05:2025 Security Misconfiguration", nist="SI-10",
+                        remediation=(
+                            "Configure the CDN cache key to include all headers that the "
+                            "origin reflects. Remove or normalise unkeyed headers at the CDN "
+                            "edge before forwarding to origin. Audit CDN cache rules to "
+                            "ensure user-controlled values cannot influence cached responses."
+                        ),
+                        http_code=_wcp_r.status_code,
+                    )
+                    vc.log(
+                        f"[recon] Web cache poisoning — {_wcp_hdr} reflected in response",
+                        "WARNING",
+                    )
+            except Exception:
+                pass
+
     # BI / monitoring tool unauthenticated access probes
     for _bi_name in _detected_bi:
         for _bi_path, _bi_desc in _BI_UNAUTH_PROBES.get(_bi_name, []):
@@ -7793,6 +7899,18 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             pass
 
     vc.status(phase, "Recon", "running", "Directory discovery", 5, 10)
+    # When a CDN or WAF is in front of the target, throttle directory busting.
+    # Full-speed busting against Akamai/Cloudflare/Imperva triggers Bot Manager
+    # rate-limiting or an IP block that poisons every subsequent probe in the scan
+    # session.  5 threads with a short delay stays below typical bot-detection
+    # thresholds while still completing discovery within the time budget.
+    _buster_threads = "5" if _recon_cdn else "30"
+    if _recon_cdn:
+        vc.log(
+            f"[recon] CDN/WAF detected ({_recon_cdn}) — throttling directory busting "
+            f"to {_buster_threads} threads to avoid triggering bot-detection IP blocks",
+            "INFO",
+        )
     gobuster = _find_tool("gobuster")
     wordlist = _find_wordlist(
         "Discovery/Web-Content/raft-large-directories.txt",
@@ -7802,7 +7920,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     if wc_baseline is not None:
         vc.log("[recon] Skipping directory brute-force (wildcard detected)", "INFO")
     elif gobuster and Path(wordlist).exists():
-        cmd = [gobuster, "dir", "-u", url, "-w", wordlist, "-t", "30",
+        cmd = [gobuster, "dir", "-u", url, "-w", wordlist, "-t", _buster_threads,
                "-q", "-k", "-o", str(out_f)]
         cmd += _buster_auth_flags(sess)
         vc.log("[recon] Running gobuster ...", "INFO")
@@ -7847,13 +7965,16 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     feroxbuster = _find_tool("feroxbuster")
     if feroxbuster and Path(wordlist).exists():
         fer_out = out.output_path(phase, "feroxbuster_" + target["hostname"])
+        _fer_threads = "5" if _recon_cdn else str(_SCAN_SEM.limit)
         cmd = [
             feroxbuster, "--url", url, "--wordlist", wordlist,
-            "--depth", "2", "--threads", str(_SCAN_SEM.limit), "--quiet",
+            "--depth", "2", "--threads", _fer_threads, "--quiet",
             "--status-codes", "200,204,301,302,307,401,403",
             "--output", str(fer_out), "--insecure",
             "--auto-tune", "--time-limit", "4m",
         ]
+        if _recon_cdn:
+            cmd += ["--rate-limit", "25"]
         cmd += _buster_auth_flags(sess)
         vc.log("[recon] Running feroxbuster ...", "INFO")
         _fer_proc = None
@@ -12714,10 +12835,18 @@ def _write_structure_map(out: "OutputManager", target: dict,
 
 def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                      out: OutputManager, sess: requests.Session,
-                     crawl_data: dict, fast: bool = False) -> None:
+                     crawl_data: dict, fast: bool = False,
+                     waf_cdn: str = "") -> None:
     phase   = "injection"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
+    if waf_cdn:
+        vc.log(
+            f"[injection] WAF/CDN active ({waf_cdn}) — injection probes may be blocked. "
+            "Absence of a finding does not confirm absence of the vulnerability. "
+            "sqlmap will attempt WAF identification and evasion.",
+            "WARNING",
+        )
     forms   = crawl_data.get("forms", [])
     params  = crawl_data.get("params", [])
     vc.status(phase, "Injection Testing", "running", "SQLi heuristic", 0, 7)
@@ -12784,6 +12913,8 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             cmd = [sqlmap, "-u", sample_url, "--batch", "--level=2", "--risk=2",
                    f"--timeout={sq_timeout}", f"--output-dir={sq_dir}",
                    "--random-agent", "--forms"]
+            if waf_cdn:
+                cmd += ["--identify-waf", "--tamper=space2comment,between,randomcase"]
             vc.log("[injection] Running sqlmap ...", "INFO")
             try:
                 proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -17046,6 +17177,8 @@ def main() -> None:
         # BFLA: endpoints that returned 200 for Role 1, tested against all other roles.
         # Each entry: {"url": str, "status": int, "body_len": int, "role1_label": str}
         _role1_accessible_endpoints: list = []
+        # CDN/WAF detected by _phase_recon; used to modulate injection/testing phases.
+        _scan_waf_cdn: str = ""
 
         # ── Per-credential context loop ─────────────────────────────────────
         for _ctx in _cred_contexts:
@@ -17171,6 +17304,17 @@ def main() -> None:
                     except Exception as e:
                         vc.error(f"Phase recon [{_ctx_label}] error: {e}")
                         pm.set_phase_status(f"recon#{_ctx_label}", "error", detail=str(e))
+
+                # Read CDN/WAF from target_profile — used to modulate injection phases.
+                # Written by _phase_recon; read here so all subsequent phases can
+                # access it without requiring changes to every phase signature.
+                try:
+                    _tp = json.loads((out.root / "target_profile.json").read_text())
+                    _scan_waf_cdn = _tp.get("cdn", "") or ""
+                    if not _scan_waf_cdn and _tp.get("edge_security"):
+                        _scan_waf_cdn = _tp["edge_security"][0]
+                except Exception:
+                    _scan_waf_cdn = ""
 
                 # Phase 0b: screenshot
                 if not _skip("screenshot"):
@@ -17759,7 +17903,7 @@ def main() -> None:
                 pm.set_phase_status(f"injection#{_ctx_label}", "running", "Injection Testing")
                 try:
                     _phase_injection(target, _ctx_cfg, pm, out, effective_auth, crawl_data,
-                                     fast=args.fast)
+                                     fast=args.fast, waf_cdn=_scan_waf_cdn)
                     pm.set_phase_status(f"injection#{_ctx_label}", "complete", "Injection Testing")
                 except Exception as e:
                     vc.error(f"Phase injection [{_ctx_label}] error: {e}")
