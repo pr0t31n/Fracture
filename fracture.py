@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.22"
+VERSION = "2.10.23"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -11460,6 +11460,26 @@ def _detect_spa(html: str, url: str, static_link_count: int) -> "tuple[bool, lis
     if _data_attr_count >= 20 and not evidence:
         evidence.append(f"{_data_attr_count} elements with data-* binding attributes (framework pattern)")
 
+    # Known JS-driven enterprise platform URL signals — these platforms are always
+    # JS-driven regardless of what the initial HTML contains, so the URL alone is
+    # sufficient evidence to request headless rendering.
+    _url_lower = (url or "").lower()
+    _KNOWN_JS_URL_SIGS = [
+        ("/ibmcognos/",   "IBM Cognos BI portal"),
+        ("xts.run",       "IBM Cognos xts dispatcher"),
+        ("/bi/v1/disp",   "IBM Cognos BI dispatcher"),
+        ("/cgi-bin/cognos.cgi", "IBM Cognos SOAP/CGI dispatcher"),
+        ("/oracle/adf/",  "Oracle ADF portal"),
+        ("/faces/",       "Oracle ADF JSF"),
+        ("/sap/bc/",      "SAP Fiori"),
+        ("/sap/opu/",     "SAP OData service"),
+        ("/ui5/",         "SAP UI5"),
+    ]
+    for _sig, _sig_name in _KNOWN_JS_URL_SIGS:
+        if _sig in _url_lower and not any(_sig_name.split()[0] in e for e in evidence):
+            evidence.append(f"Known JS-driven platform URL: {_sig_name}")
+            break
+
     return bool(evidence), evidence
 
 
@@ -11473,11 +11493,12 @@ _SPA_CLICK_SEL = (
     '[role="button"]:not([disabled]),'
     'nav button,nav li[onclick],nav [onclick],'
     '.nav-item button,.menu-item,.nav-link[onclick],'
-    'li[onclick],td[onclick],div[onclick],'
+    'li[onclick],td[onclick],div[onclick],span[onclick],'
     '[data-href],[data-url],[data-route],[data-link],[data-page],'
     '[data-toggle="tab"],[data-toggle="pill"],[data-toggle="collapse"],'
     'button[data-href],button[data-url],button[data-route],'
     'a[onclick]:not([href]):not([href="#"]),'
+    'a[href^="javascript:"],'
     '[data-id][onclick]'
 )
 
@@ -11901,6 +11922,36 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     elif _spa_roots and not _spa_evidence:
         # Root is static but sub-paths are SPAs — micro-frontend pattern
         _spa_evidence = [f"Micro-frontend SPA detected on {len(_spa_roots)} sub-path(s)"]
+
+    # ── Known JS-driven enterprise apps: force headless crawl ────────────────
+    # Some platforms (IBM Cognos, Oracle ADF, SAP Fiori, GWT apps) are entirely
+    # JS-driven but their initial HTML is a thin server-rendered shell with no
+    # recognisable SPA markers — navigation and content are loaded via AMD
+    # (Dojo/RequireJS) or AJAX dispatchers that _detect_spa cannot see in static
+    # HTML.  When the BI tool or framework has already been identified in the
+    # target profile, force headless mode regardless of heuristic SPA detection.
+    _FORCE_HEADLESS_BI = frozenset({
+        "IBM Cognos", "Oracle ADF", "Oracle JET", "SAP Fiori",
+        "Google Web Toolkit",
+    })
+    if not _spa_roots:
+        try:
+            _tp_crawl = json.loads((out.root / "target_profile.json").read_text())
+            _tp_bi    = set(_tp_crawl.get("bi_tools", []))
+            _tp_tech  = set(_tp_crawl.get("technologies", []))
+            _forced   = (_tp_bi | _tp_tech) & _FORCE_HEADLESS_BI
+            if _forced:
+                _forced_name = next(iter(_forced))
+                vc.log(
+                    f"[crawl] Known JS-driven platform detected ({_forced_name}) — "
+                    "forcing headless crawl regardless of static SPA indicators",
+                    "INFO",
+                )
+                _spa_roots.add(url)
+                if not _spa_evidence:
+                    _spa_evidence = [f"Known JS-driven platform: {_forced_name}"]
+        except Exception:
+            pass
 
     if _spa_roots:
         vc.log(
