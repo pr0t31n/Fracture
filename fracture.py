@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.18"
+VERSION = "2.10.19"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -7321,6 +7321,33 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     # Cookie attributes — not technologies
                     "HttpOnly", "Secure", "PasswordField", "RedirectLocation",
                 }
+                # Fast lookup: WhatWeb-reported header name → CDN / edge security platform.
+                # Used in both the UncommonHeaders handler and the header-like plugin path
+                # so that headers detected by WhatWeb (which makes its own HTTP request)
+                # are not missed when the initial probe headers didn't carry them.
+                _ww_cdn_hdr  = {h.lower(): n for h, n in _CDN_HDR_PATTERNS}
+                _ww_edge_hdr = {h.lower(): n for h, n in _EDGE_SECURITY_HDR_PATTERNS}
+                # WhatWeb plugin names that directly identify a CDN or security platform.
+                # WhatWeb ships plugins for many CDN/WAF vendors; mapping those to our
+                # canonical names lets us update _recon_cdn / _recon_edge_security from
+                # WhatWeb hits without requiring a header-level match.
+                _ww_plugin_to_cdn = {
+                    "akamai": "Akamai", "cloudflare": "Cloudflare",
+                    "fastly": "Fastly", "cloudfront": "Amazon CloudFront",
+                    "amazon-cloudfront": "Amazon CloudFront",
+                    "varnish": "Varnish", "netlify": "Netlify",
+                    "vercel": "Vercel", "bunnycdn": "BunnyCDN",
+                    "keycdn": "KeyCDN", "stackpath": "StackPath",
+                }
+                _ww_plugin_to_edge = {
+                    "sucuri": "Sucuri WAF", "imperva": "Imperva",
+                    "incapsula": "Imperva", "datadome": "DataDome",
+                    "perimeterx": "PerimeterX / HUMAN Security",
+                    "human-security": "PerimeterX / HUMAN Security",
+                    "kasada": "Kasada", "barracuda": "Barracuda WAF",
+                    "fortiweb": "Fortinet FortiWeb", "modsecurity": "ModSecurity",
+                    "reblaze": "Reblaze", "f5-shape": "F5 Shape Security",
+                }
                 # Track which security headers whatweb observed as present
                 ww_found_sec_hdrs: set = set()
 
@@ -7393,6 +7420,30 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                                      if h.lower() == hdr_name.lower())
                                             )
                                             continue
+                                        # CDN / edge security header identified by WhatWeb?
+                                        _ww_hn_l = hdr_name.lower()
+                                        _ww_known = False
+                                        if _ww_hn_l in _ww_cdn_hdr:
+                                            if not _recon_cdn:
+                                                _recon_cdn = _ww_cdn_hdr[_ww_hn_l]
+                                                vc.log(f"[recon] CDN identified via WhatWeb header: {_recon_cdn}", "INFO")
+                                            _ww_known = True
+                                        elif _ww_hn_l in _ww_edge_hdr:
+                                            _ww_es_n = _ww_edge_hdr[_ww_hn_l]
+                                            if _ww_es_n not in _recon_edge_security:
+                                                _recon_edge_security.append(_ww_es_n)
+                                                vc.log(f"[recon] Edge security identified via WhatWeb header: {_ww_es_n}", "INFO")
+                                            _ww_known = True
+                                        else:
+                                            for _ww_pfx, _ww_pfx_n in _EDGE_SECURITY_HDR_PREFIXES:
+                                                if _ww_hn_l.startswith(_ww_pfx):
+                                                    if _ww_pfx_n not in _recon_edge_security:
+                                                        _recon_edge_security.append(_ww_pfx_n)
+                                                        vc.log(f"[recon] Edge security identified via WhatWeb header: {_ww_pfx_n}", "INFO")
+                                                    _ww_known = True
+                                                    break
+                                        if _ww_known:
+                                            continue
                                         out.add_finding(
                                             title=f"Unknown Header Identified: {hdr_name}",
                                             url=url, port=target["port"], risk="INFO",
@@ -7422,6 +7473,31 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
 
                             # Header-like plugin name (not a known security header)
                             if _HDR_NAME_RE.match(pname):
+                                # Check against CDN / edge security patterns before
+                                # emitting an "Unknown Header" finding.
+                                _ww_pn_l = pname.lower()
+                                _ww_pn_known = False
+                                if _ww_pn_l in _ww_cdn_hdr:
+                                    if not _recon_cdn:
+                                        _recon_cdn = _ww_cdn_hdr[_ww_pn_l]
+                                        vc.log(f"[recon] CDN identified via WhatWeb header: {_recon_cdn}", "INFO")
+                                    _ww_pn_known = True
+                                elif _ww_pn_l in _ww_edge_hdr:
+                                    _ww_pn_es = _ww_edge_hdr[_ww_pn_l]
+                                    if _ww_pn_es not in _recon_edge_security:
+                                        _recon_edge_security.append(_ww_pn_es)
+                                        vc.log(f"[recon] Edge security identified via WhatWeb header: {_ww_pn_es}", "INFO")
+                                    _ww_pn_known = True
+                                else:
+                                    for _ww_pfx2, _ww_pfx2_n in _EDGE_SECURITY_HDR_PREFIXES:
+                                        if _ww_pn_l.startswith(_ww_pfx2):
+                                            if _ww_pfx2_n not in _recon_edge_security:
+                                                _recon_edge_security.append(_ww_pfx2_n)
+                                                vc.log(f"[recon] Edge security identified via WhatWeb header: {_ww_pfx2_n}", "INFO")
+                                            _ww_pn_known = True
+                                            break
+                                if _ww_pn_known:
+                                    continue
                                 out.add_finding(
                                     title=f"Unknown Header Identified: {pname}",
                                     url=url, port=target["port"], risk="INFO",
@@ -7446,7 +7522,19 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                 )
                                 continue
 
-                            # Standard technology finding
+                            # Standard technology finding.
+                            # If the plugin name is a CDN or edge security platform,
+                            # update the corresponding recon variables so they appear
+                            # in target_profile.json alongside the technology finding.
+                            _ww_pn_canon = pname.lower()
+                            if _ww_pn_canon in _ww_plugin_to_cdn and not _recon_cdn:
+                                _recon_cdn = _ww_plugin_to_cdn[_ww_pn_canon]
+                                vc.log(f"[recon] CDN identified via WhatWeb plugin: {_recon_cdn}", "INFO")
+                            elif _ww_pn_canon in _ww_plugin_to_edge:
+                                _ww_pt_es = _ww_plugin_to_edge[_ww_pn_canon]
+                                if _ww_pt_es not in _recon_edge_security:
+                                    _recon_edge_security.append(_ww_pt_es)
+                                    vc.log(f"[recon] Edge security identified via WhatWeb plugin: {_ww_pt_es}", "INFO")
                             _ww_versions.append((pname, version))
                             out.add_finding(
                                 title=(f"Technology Identified: {pname} {version}".strip()
