@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.20"
+VERSION = "2.10.21"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -890,6 +890,26 @@ _WAF_BODY_RE = re.compile(
     re.I,
 )
 
+# WAF session-health detection — login redirect and challenge patterns
+_WAF_LOGIN_URL_RE = re.compile(
+    r"(?:^|[/?&])(?:login|signin|sign-in|logon|log-in|authenticate?|sso|"
+    r"session[_-]?expired|account[_-]?locked|access[_-]?denied)",
+    re.I,
+)
+_WAF_LOGIN_BODY_RE = re.compile(
+    r"<input[^>]+(?:name|id)=[\"']password[\"']|"
+    r"(?:session|account).{0,40}(?:expired|timed.?out|terminated|invalid)|"
+    r"(?:you have been|your session has been).{0,30}(?:logged out|signed out|expired|terminated)|"
+    r"please (?:log in|sign in|authenticate) (?:again|to continue)",
+    re.I,
+)
+_WAF_CHALLENGE_RE = re.compile(
+    r"captcha|i am not a robot|robot check|__cf_chl|px-captcha|"
+    r"datadome\.co/captcha|kasada\.io|_pxParam|arkoselabs\.com|"
+    r"js-challenge|javascript required.*blocked|challenge.*complete",
+    re.I,
+)
+
 _DEAD_TITLE_RE = re.compile(
     r"<title[^>]*>[^<]*"
     r"(404|not\s+found|page\s+not\s+found|file\s+not\s+found|"
@@ -966,6 +986,190 @@ def _is_waf_block(r: "requests.Response") -> bool:
     if _WAF_BODY_RE.search(body):
         return True
     return False
+
+
+def _waf_session_health(
+    target_url: str,
+    sess: "requests.Session",
+    timeout: int,
+    out: "OutputManager",
+    target: dict,
+    waf_cdn: str,
+    role_label: str = "",
+) -> str:
+    """Probe the target root URL to detect WAF IP-block or session termination.
+
+    Only meaningful when *waf_cdn* is non-empty (i.e. a WAF/CDN was detected
+    during recon).  Designed to be called at phase boundaries so that Fracture
+    can report mid-scan IP blocks or session revocations before continuing with
+    phases whose results would be meaningless.
+
+    Returns one of:
+        "ok"                 — target responding normally
+        "ip_blocked"         — WAF/CDN is blocking all requests from this IP
+        "session_terminated" — authenticated session was revoked
+        "challenge"          — WAF is serving a JS challenge / CAPTCHA
+    Emits an appropriate finding for any non-ok result.
+    """
+    if not waf_cdn:
+        return "ok"
+
+    _lbl = f" [{role_label}]" if role_label else ""
+    try:
+        _probe = sess.get(target_url, timeout=min(timeout, 10),
+                          allow_redirects=False, verify=False)
+    except Exception:
+        return "ok"
+
+    _status = _probe.status_code
+    _body   = (_probe.text or "")[:4096]
+    _loc    = _probe.headers.get("Location", "") or ""
+
+    # ── IP block ──────────────────────────────────────────────────────────────
+    if _is_waf_block(_probe):
+        _msg = (
+            f"WAF/CDN ({waf_cdn}) is blocking all requests from this scanner IP. "
+            f"HTTP {_status} received on root URL probe. "
+            "Subsequent scan results from this point forward may be unreliable."
+        )
+        vc.log(
+            f"[waf-health{_lbl}] IP BLOCK — {waf_cdn} returned WAF block page "
+            f"(HTTP {_status})",
+            "CRITICAL",
+        )
+        out.add_finding(
+            title=f"WAF/CDN IP Block Detected: {waf_cdn}",
+            url=target_url, port=target.get("port", 443), risk="HIGH",
+            description=_msg,
+            output=f"HTTP {_status}\n{_body[:512]}",
+            affected=target_url, sources="fracture-waf-health",
+            service=target.get("scheme", "https"),
+            command=f"GET {target_url}",
+            owasp="A05:2021 – Security Misconfiguration", nist="SI-4",
+            remediation=(
+                "This scanner's IP has been blocked by the WAF/CDN. "
+                "Consider using a different egress IP, rotating through a proxy, "
+                "or temporarily allowlisting the scanner IP in the WAF policy for "
+                "the duration of the authorised engagement."
+            ),
+        )
+        return "ip_blocked"
+
+    # ── Challenge / CAPTCHA ───────────────────────────────────────────────────
+    if _WAF_CHALLENGE_RE.search(_body):
+        _msg = (
+            f"WAF/CDN ({waf_cdn}) is serving a challenge or CAPTCHA page instead of "
+            f"real content (HTTP {_status}). "
+            "Automated probe results may be incomplete or inaccurate while the "
+            "challenge is active."
+        )
+        vc.log(
+            f"[waf-health{_lbl}] CHALLENGE PAGE — {waf_cdn} serving challenge "
+            f"(HTTP {_status})",
+            "WARNING",
+        )
+        out.add_finding(
+            title=f"WAF/CDN Challenge Page Active: {waf_cdn}",
+            url=target_url, port=target.get("port", 443), risk="INFO",
+            description=_msg,
+            output=f"HTTP {_status}\n{_body[:512]}",
+            affected=target_url, sources="fracture-waf-health",
+            service=target.get("scheme", "https"),
+            command=f"GET {target_url}",
+            owasp="A05:2021 – Security Misconfiguration", nist="SI-4",
+            remediation="Informational — no remediation required for the WAF challenge itself.",
+        )
+        return "challenge"
+
+    # ── Session termination — 401/403 at root ────────────────────────────────
+    if _status == 401:
+        _msg = (
+            f"Root URL returned HTTP 401 while {waf_cdn} is active{_lbl}. "
+            "The authenticated session may have been revoked by the WAF or "
+            "application server mid-scan. Results from authenticated phases "
+            "following this point may be inaccurate."
+        )
+        vc.log(
+            f"[waf-health{_lbl}] SESSION TERMINATED — HTTP 401 on root URL",
+            "WARNING",
+        )
+        out.add_finding(
+            title=f"WAF/CDN Session Termination Detected: {waf_cdn}",
+            url=target_url, port=target.get("port", 443), risk="INFO",
+            description=_msg,
+            output=f"HTTP {_status}\n{_body[:512]}",
+            affected=target_url, sources="fracture-waf-health",
+            service=target.get("scheme", "https"),
+            command=f"GET {target_url}",
+            owasp="A07:2021 – Identification and Authentication Failures", nist="IA-3",
+            remediation=(
+                "Re-authenticate to the target and resume the scan from this phase. "
+                "Consider adding a longer delay between scan phases to reduce the "
+                "chance of session revocation by WAF bot-detection heuristics."
+            ),
+        )
+        return "session_terminated"
+
+    # ── Session termination — redirect to login ───────────────────────────────
+    if _status in (301, 302, 307, 308) and _WAF_LOGIN_URL_RE.search(_loc):
+        _msg = (
+            f"Authenticated session{_lbl} redirected to a login URL ({_loc}) — "
+            f"the WAF or application server terminated the session mid-scan "
+            f"({waf_cdn} active, HTTP {_status}). "
+            "Results from authenticated phases following this point may be inaccurate."
+        )
+        vc.log(
+            f"[waf-health{_lbl}] SESSION TERMINATED — redirected to login: {_loc} "
+            f"(HTTP {_status})",
+            "WARNING",
+        )
+        out.add_finding(
+            title=f"WAF/CDN Session Termination Detected: {waf_cdn}",
+            url=target_url, port=target.get("port", 443), risk="INFO",
+            description=_msg,
+            output=f"HTTP {_status} Location: {_loc}",
+            affected=target_url, sources="fracture-waf-health",
+            service=target.get("scheme", "https"),
+            command=f"GET {target_url}",
+            owasp="A07:2021 – Identification and Authentication Failures", nist="IA-3",
+            remediation=(
+                "Re-authenticate to the target and resume the scan from this phase. "
+                "Consider adding a longer delay between scan phases to reduce the "
+                "chance of session revocation by WAF bot-detection heuristics."
+            ),
+        )
+        return "session_terminated"
+
+    # ── Session termination — login body on 200 ───────────────────────────────
+    if _status == 200 and _WAF_LOGIN_BODY_RE.search(_body):
+        _msg = (
+            f"Root URL returned HTTP 200 but the response body contains "
+            f"login/session-expired indicators while {waf_cdn} is active{_lbl}. "
+            "The session may have been silently terminated. "
+            "Results from authenticated phases following this point may be inaccurate."
+        )
+        vc.log(
+            f"[waf-health{_lbl}] POSSIBLE SESSION TERMINATION — login body on root "
+            f"URL (HTTP 200)",
+            "WARNING",
+        )
+        out.add_finding(
+            title=f"WAF/CDN Possible Session Termination: {waf_cdn}",
+            url=target_url, port=target.get("port", 443), risk="INFO",
+            description=_msg,
+            output=f"HTTP {_status}\n{_body[:512]}",
+            affected=target_url, sources="fracture-waf-health",
+            service=target.get("scheme", "https"),
+            command=f"GET {target_url}",
+            owasp="A07:2021 – Identification and Authentication Failures", nist="IA-3",
+            remediation=(
+                "Verify that the authenticated session is still valid. "
+                "If the session was terminated, re-authenticate and resume the scan."
+            ),
+        )
+        return "session_terminated"
+
+    return "ok"
 
 
 def _filter_dominant_code(
@@ -7966,10 +8170,15 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     if feroxbuster and Path(wordlist).exists():
         fer_out = out.output_path(phase, "feroxbuster_" + target["hostname"])
         _fer_threads = "5" if _recon_cdn else str(_SCAN_SEM.limit)
+        # When a CDN/WAF is present, 403 and 401 responses come from the WAF
+        # block page for every non-existent path — not from the origin app.
+        # Including them causes feroxbuster to recurse into thousands of
+        # false-positive directories, generating massive output file noise.
+        _fer_sc = "200,204,301,302,307" if _recon_cdn else "200,204,301,302,307,401,403"
         cmd = [
             feroxbuster, "--url", url, "--wordlist", wordlist,
             "--depth", "2", "--threads", _fer_threads, "--quiet",
-            "--status-codes", "200,204,301,302,307,401,403",
+            "--status-codes", _fer_sc,
             "--output", str(fer_out), "--insecure",
             "--auto-tune", "--time-limit", "4m",
         ]
@@ -8054,13 +8263,16 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         # feroxbuster files
         if feroxbuster:
             fer_files_out = out.output_path(phase, "feroxbuster_files_" + target["hostname"])
+            _fer_files_threads = "5" if _recon_cdn else str(_SCAN_SEM.limit)
             cmd = [
                 feroxbuster, "--url", url, "--wordlist", wordlist_files,
-                "--depth", "2", "--threads", str(_SCAN_SEM.limit), "--quiet",
-                "--status-codes", "200,204,301,302,307,401,403",
+                "--depth", "2", "--threads", _fer_files_threads, "--quiet",
+                "--status-codes", _fer_sc,
                 "--output", str(fer_files_out), "--insecure",
                 "--auto-tune", "--time-limit", "4m",
             ]
+            if _recon_cdn:
+                cmd += ["--rate-limit", "25"]
             cmd += _buster_auth_flags(sess)
             vc.log("[recon] Running feroxbuster (files) ...", "INFO")
             _fer_files_proc = None
@@ -8322,6 +8534,15 @@ def _phase_endpoint_tools(
         "Discovery/Web-Content/raft-large-directories.txt",
         cfg.get("gobuster_wordlist", ""),
     )
+    # Read CDN/WAF from target_profile to restrict feroxbuster status codes
+    try:
+        _ep_tools_cdn = json.loads(
+            (out.root / "target_profile.json").read_text()
+        ).get("cdn", "") or ""
+    except Exception:
+        _ep_tools_cdn = ""
+    _ep_fer_sc = "200,204,301,302,307" if _ep_tools_cdn else "200,204,301,302,307,401,403"
+    _ep_fer_threads = "5" if _ep_tools_cdn else str(_SCAN_SEM.limit)
     wordlist_file = _find_wordlist("raft-large-files.txt")
 
     # Deduplicate, exclude base URL, cap count
@@ -8727,10 +8948,12 @@ def _phase_endpoint_tools(
         if feroxbuster and Path(wordlist_dir).exists() and not _url_is_file(ep_url):
             ep_fer = out.output_path("recon", f"feroxbuster_ep_{ep_safe}")
             cmd = [feroxbuster, "--url", ep_url, "--wordlist", wordlist_dir,
-                   "--depth", "1", "--threads", str(_SCAN_SEM.limit), "--quiet",
-                   "--status-codes", "200,204,301,302,307,401,403",
+                   "--depth", "1", "--threads", _ep_fer_threads, "--quiet",
+                   "--status-codes", _ep_fer_sc,
                    "--output", str(ep_fer), "--insecure", "--auto-tune",
                    "--time-limit", "2m"]
+            if _ep_tools_cdn:
+                cmd += ["--rate-limit", "25"]
             cmd += _buster_auth_flags(sess)
             vc.log(f"[endpoint_tools] feroxbuster on {ep_url}", "INFO")
             _ep_fer_proc = None
@@ -16077,12 +16300,22 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
     )
     wordlist_file = _find_wordlist("raft-large-files.txt")
 
+    # Read CDN from target_profile to throttle busters if WAF/CDN detected
+    try:
+        _rbo_cdn = json.loads(
+            (out.root / "target_profile.json").read_text()
+        ).get("cdn", "") or ""
+    except Exception:
+        _rbo_cdn = ""
+    _rbo_fer_sc = "200,204,301,302,307" if _rbo_cdn else "200,204,301,302,307,401,403"
+    _rbo_threads = "5" if _rbo_cdn else "30"
+
     discovered: list = []
 
     # ── Dirs: gobuster ─────────────────────────────────────────────────────────
     if wc_baseline is None and gobuster and Path(wordlist_dir).exists():
         out_f = out.output_path(phase, f"gobuster_{target['hostname']}{sfx}")
-        cmd = [gobuster, "dir", "-u", url, "-w", wordlist_dir, "-t", "30",
+        cmd = [gobuster, "dir", "-u", url, "-w", wordlist_dir, "-t", _rbo_threads,
                "-q", "-k", "-o", str(out_f)]
         cmd += _buster_auth_flags(sess)
         vc.log(f"[recon] Running gobuster (dirs){' for ' + role_label if role_label else ''} ...", "INFO")
@@ -16111,11 +16344,13 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
         fer_out = out.output_path(phase, f"feroxbuster_{target['hostname']}{sfx}")
         cmd = [
             feroxbuster, "--url", url, "--wordlist", wordlist_dir,
-            "--depth", "2", "--threads", str(_SCAN_SEM.limit), "--quiet",
-            "--status-codes", "200,204,301,302,307,401,403",
+            "--depth", "2", "--threads", _rbo_threads, "--quiet",
+            "--status-codes", _rbo_fer_sc,
             "--output", str(fer_out), "--insecure",
             "--auto-tune", "--time-limit", "4m",
         ]
+        if _rbo_cdn:
+            cmd += ["--rate-limit", "25"]
         cmd += _buster_auth_flags(sess)
         vc.log(f"[recon] Running feroxbuster (dirs){' for ' + role_label if role_label else ''} ...", "INFO")
         _fer_proc = None
@@ -16156,7 +16391,7 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
     # ── Files: gobuster ────────────────────────────────────────────────────────
     if wc_baseline is None and gobuster and Path(wordlist_file).exists():
         gob_files_out = out.output_path(phase, f"gobuster_files_{target['hostname']}{sfx}")
-        cmd = [gobuster, "dir", "-u", url, "-w", wordlist_file, "-t", "30",
+        cmd = [gobuster, "dir", "-u", url, "-w", wordlist_file, "-t", _rbo_threads,
                "-q", "-k", "-o", str(gob_files_out)]
         cmd += _buster_auth_flags(sess)
         vc.log(f"[recon] Running gobuster (files){' for ' + role_label if role_label else ''} ...", "INFO")
@@ -16185,11 +16420,13 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
         fer_files_out = out.output_path(phase, f"feroxbuster_files_{target['hostname']}{sfx}")
         cmd = [
             feroxbuster, "--url", url, "--wordlist", wordlist_file,
-            "--depth", "2", "--threads", str(_SCAN_SEM.limit), "--quiet",
-            "--status-codes", "200,204,301,302,307,401,403",
+            "--depth", "2", "--threads", _rbo_threads, "--quiet",
+            "--status-codes", _rbo_fer_sc,
             "--output", str(fer_files_out), "--insecure",
             "--auto-tune", "--time-limit", "4m",
         ]
+        if _rbo_cdn:
+            cmd += ["--rate-limit", "25"]
         cmd += _buster_auth_flags(sess)
         vc.log(f"[recon] Running feroxbuster (files){' for ' + role_label if role_label else ''} ...", "INFO")
         _fer_files_proc = None
@@ -17316,6 +17553,14 @@ def main() -> None:
                 except Exception:
                     _scan_waf_cdn = ""
 
+                # WAF health check — detect IP blocks or session termination early.
+                # Only meaningful when a WAF/CDN was identified by _phase_recon.
+                if _scan_waf_cdn and effective_auth is not None:
+                    _waf_session_health(
+                        target["url"], effective_auth, cfg.get("timeout", 10),
+                        out, target, _scan_waf_cdn, role_label=_ctx_label,
+                    )
+
                 # Phase 0b: screenshot
                 if not _skip("screenshot"):
                     pm.set_phase_status(f"screenshot#{_ctx_label}", "running", "Screenshot")
@@ -17899,6 +18144,13 @@ def main() -> None:
                     pm.set_phase_status(f"jwt#{_ctx_label}", "error", detail=str(e))
 
             # ── Phase 4: injection ──
+            # Pre-injection WAF health check: detect session termination or IP
+            # block before running injection probes that depend on a valid session.
+            if _scan_waf_cdn and effective_auth is not None:
+                _waf_session_health(
+                    target["url"], effective_auth, cfg.get("timeout", 10),
+                    out, target, _scan_waf_cdn, role_label=_ctx_label,
+                )
             if not _skip("injection"):
                 pm.set_phase_status(f"injection#{_ctx_label}", "running", "Injection Testing")
                 try:
