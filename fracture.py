@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.8"
+VERSION = "2.10.10"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5570,13 +5570,69 @@ def _parse_args() -> argparse.Namespace:
 # Phase 0: Recon
 # ─────────────────────────────────────────────
 _CMS_PATTERNS = {
-    "WordPress": [re.compile(r'wp-content|wp-includes|wordpress', re.I)],
-    "Drupal":    [re.compile(r'Drupal|drupal\.js|sites/default', re.I)],
-    "Joomla":    [re.compile(r'Joomla|/components/com_', re.I)],
-    "Django":    [re.compile(r'csrfmiddlewaretoken|django', re.I)],
-    "Laravel":   [re.compile(r'laravel_session|Laravel', re.I)],
-    "Rails":     [re.compile(r'_rails_|authenticity_token', re.I)],
-    "Express":   [re.compile(r'X-Powered-By.*Express', re.I)],
+    "WordPress":   [re.compile(r'wp-content|wp-includes|wordpress', re.I)],
+    "Drupal":      [re.compile(r'Drupal|drupal\.js|sites/default', re.I)],
+    "Joomla":      [re.compile(r'Joomla|/components/com_', re.I)],
+    "Magento":     [re.compile(r'mage/|Magento|/skin/frontend/|/pub/static/frontend/', re.I)],
+    "Shopify":     [re.compile(r'cdn\.shopify\.com|shopify\.com/s/files|Shopify\.theme', re.I)],
+    "TYPO3":       [re.compile(r'typo3|TYPO3 CMS', re.I)],
+    "Ghost":       [re.compile(r'content/themes/casper|ghost\.io|ghostcms|\/ghost\/api\/', re.I)],
+    "WooCommerce": [re.compile(r'woocommerce|/wc-api/|wc-ajax=', re.I)],
+    "PrestaShop":  [re.compile(r'prestashop|\/index\.php\?controller=', re.I)],
+    "OpenCart":    [re.compile(r'opencart|route=common/home', re.I)],
+    "DotNetNuke":  [re.compile(r'dotnetnuke|dnnVariable|DNN', re.I)],
+    "Umbraco":     [re.compile(r'umbraco|__umbracoRedirectId', re.I)],
+    "Django":      [re.compile(r'csrfmiddlewaretoken|django', re.I)],
+    "Laravel":     [re.compile(r'laravel_session|Laravel', re.I)],
+    "Rails":       [re.compile(r'_rails_|authenticity_token', re.I)],
+    "Express":     [re.compile(r'X-Powered-By.*Express', re.I)],
+}
+_CDN_SERVER_RE = re.compile(
+    r'\b(cloudflare|akamai(?:ghost)?|fastly|cloudfront|varnish|'
+    r'bunny|bunnycdn|keycdn|stackpath|maxcdn|netlify|vercel)\b',
+    re.I,
+)
+_CDN_HDR_PATTERNS = [
+    # header name (case-insensitive match)  → CDN name
+    ("CF-RAY",              "Cloudflare"),
+    ("x-vercel-id",         "Vercel"),
+    ("x-nf-request-id",     "Netlify"),
+    ("x-amz-cf-id",         "Amazon CloudFront"),
+    ("x-amz-cf-pop",        "Amazon CloudFront"),
+    ("CDN-PullZone",        "BunnyCDN"),
+    ("x-akamai-request-id", "Akamai"),
+    ("x-check-cacheable",   "Akamai"),
+    ("x-azure-ref",         "Azure CDN"),
+    ("x-cdn",               "StackPath"),
+    ("fastly-io-info",      "Fastly"),
+]
+_BI_PATTERNS = {
+    "Grafana":         [re.compile(r'grafana|/grafana/|GrafanaApp', re.I)],
+    "Kibana":          [re.compile(r'kbn-name.*kibana|kbn-version|/app/kibana', re.I)],
+    "Tableau":         [re.compile(r'tableau|vizql\.js|/vizportal/', re.I)],
+    "Metabase":        [re.compile(r'metabase|MetabaseBootstrap', re.I)],
+    "Apache Superset": [re.compile(r'apache-superset|superset-all\.js', re.I)],
+    "Redash":          [re.compile(r'redash\.min\.js|\/api\/queries\b', re.I)],
+    "Splunk":          [re.compile(r'splunk|SplunkWebUI', re.I)],
+    "Zabbix":          [re.compile(r'zabbix\.php|zabbix\.min\.js|Zabbix SIA', re.I)],
+    "Nagios":          [re.compile(r'nagios|nagiosxi', re.I)],
+    "Prometheus":      [re.compile(r'# HELP \w+_\w+ |/api/v1/targets', re.I)],
+    "Power BI":        [re.compile(r'powerbi-client|PowerBI\.embed', re.I)],
+    "Looker":          [re.compile(r'\blooker\b|LookerBrowser|/looker/', re.I)],
+}
+# Paths that require authentication on each BI platform — HTTP 200 without
+# credentials indicates unauthenticated access.  Paths known to be public
+# (e.g. /api/health) are intentionally excluded.
+_BI_UNAUTH_PROBES = {
+    "Grafana":         [("/api/org",    "organisation API"),
+                        ("/api/search", "dashboard search API")],
+    "Metabase":        [("/api/database", "database configuration API")],
+    "Apache Superset": [("/api/v1/dashboard/", "dashboard list API")],
+    "Prometheus":      [("/metrics",         "metrics endpoint"),
+                        ("/api/v1/targets",  "targets API")],
+    "Redash":          [("/api/dashboards",  "dashboards API")],
+    "Splunk":          [("/services/server/info?output_mode=json", "server info API")],
+    "Zabbix":          [("/api_jsonrpc.php", "JSON-RPC API")],
 }
 _SERVER_PATTERNS = {
     "Apache": re.compile(r'Apache', re.I),
@@ -6799,6 +6855,68 @@ def _phase_wordpress_scan(
     return wp_info
 
 
+def _detect_cdn(headers: "dict", body: str) -> str:
+    """Identify CDN provider from response headers and body. Returns CDN name or ''."""
+    _h_lower = {k.lower(): v for k, v in headers.items()}
+    for hdr, cdn_name in _CDN_HDR_PATTERNS:
+        if hdr.lower() in _h_lower:
+            return cdn_name
+    srv = headers.get("Server", "")
+    if srv:
+        m = _CDN_SERVER_RE.search(srv)
+        if m:
+            _name_map = {
+                "cloudflare": "Cloudflare", "akamaighost": "Akamai", "akamai": "Akamai",
+                "fastly": "Fastly", "cloudfront": "Amazon CloudFront", "varnish": "Varnish",
+                "bunny": "BunnyCDN", "bunnycdn": "BunnyCDN", "keycdn": "KeyCDN",
+                "stackpath": "StackPath", "maxcdn": "MaxCDN",
+                "netlify": "Netlify", "vercel": "Vercel",
+            }
+            return _name_map.get(m.group(1).lower(), m.group(1))
+    via = headers.get("Via", "").lower()
+    if "cloudfront" in via:
+        return "Amazon CloudFront"
+    if "varnish" in via:
+        return "Varnish"
+    if "fastly" in via:
+        return "Fastly"
+    return ""
+
+
+def _detect_bi_tools(text: str, headers: "dict") -> "list[str]":
+    """Detect Business Intelligence / monitoring platforms from page content and headers."""
+    _h_str = " ".join(f"{k}: {v}" for k, v in headers.items())
+    _all = text + " " + _h_str
+    return [name for name, pats in _BI_PATTERNS.items() if any(p.search(_all) for p in pats)]
+
+
+def _classify_web_structure(body: str, headers: "dict", spa_evidence: "list") -> str:
+    """Classify the web application structure type from initial response data.
+
+    Returns one of: SPA, SSR Hybrid (Next.js/Nuxt/Vue), Server-Rendered (<lang>),
+    Static HTML, API-first, or Unknown.
+    """
+    ct = headers.get("Content-Type", "")
+    if ("application/json" in ct or "application/xml" in ct) and "<html" not in (body or "").lower():
+        return "API-first"
+    if body:
+        if "__NEXT_DATA__" in body:
+            return "SSR Hybrid (Next.js)"
+        if "__NUXT_FULL__" in body or "data-n-head" in body:
+            return "SSR Hybrid (Nuxt)"
+        if "data-server-rendered" in body or "__vue_ssr_context__" in body:
+            return "SSR Hybrid (Vue)"
+    if spa_evidence:
+        return "SPA"
+    _all = (body or "") + " ".join(f"{k}: {v}" for k, v in headers.items())
+    for lang, pat in _LANG_PATTERNS.items():
+        if pat.search(_all):
+            return f"Server-Rendered ({lang})"
+    if body and "<html" in body.lower() and body.lower().count("<script") <= 2:
+        return "Static HTML"
+    return "Unknown"
+
+
 def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                  out: OutputManager, sess: requests.Session) -> None:
     url     = target["url"]
@@ -6844,9 +6962,11 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         return wc_baseline, []
 
     vc.log(f"[recon] {url} → HTTP {status_code}", "INFO")
-    # Write "/" immediately so the Structure tab shows something from the first moment
+    # Derive the actual base path so non-root targets (e.g. /ibmcognos/) are recorded correctly
+    _base_path = urllib.parse.urlparse(url).path or "/"
+    # Write base path immediately so the Structure tab shows something from the first moment
     try:
-        _write_structure_map(out, target, path_statuses={"/": status_code}, source="recon")
+        _write_structure_map(out, target, path_statuses={_base_path: status_code}, source="recon")
     except Exception:
         pass
     server_hdr  = headers.get("Server", "")
@@ -6930,6 +7050,94 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             remediation="Ensure the CMS and all plugins/themes are kept up to date.",
             http_code=resp.status_code,
         )
+
+    # ── CDN, web structure, and BI tool detection ─────────────────────────────
+    _recon_cdn = _detect_cdn(headers, body)
+    _recon_is_spa, _recon_spa_ev = False, []
+    try:
+        _recon_is_spa, _recon_spa_ev = _detect_spa(body, url, 0)
+    except Exception:
+        pass
+    _recon_web_structure = _classify_web_structure(body, headers, _recon_spa_ev)
+    _detected_bi = _detect_bi_tools(all_text, headers)
+    if _recon_cdn:
+        vc.log(f"[recon] CDN detected: {_recon_cdn}", "INFO")
+    if _recon_web_structure not in ("Unknown", ""):
+        vc.log(f"[recon] Web structure: {_recon_web_structure}", "INFO")
+    if _detected_bi:
+        vc.log(f"[recon] BI/monitoring tools detected: {', '.join(_detected_bi)}", "INFO")
+
+    # CDN origin-bypass probe: test whether IP-spoofing headers cause the CDN
+    # to strip itself from the response, exposing the origin server directly.
+    if _recon_cdn:
+        try:
+            _bp_r = sess.get(url, timeout=min(timeout, 8), allow_redirects=True,
+                             headers={"X-Forwarded-For": "127.0.0.1",
+                                      "X-Real-IP": "127.0.0.1"})
+            _bp_srv = _bp_r.headers.get("Server", "").lower()
+            _cdn_key = _recon_cdn.lower().split()[0]
+            if _cdn_key in server_hdr.lower() and _cdn_key not in _bp_srv and _bp_srv:
+                _bp_rq, _bp_rp = _save_http_evidence(out, phase, "cdn_bypass_probe", _bp_r)
+                out.add_finding(
+                    title=f"Potential CDN Origin Bypass: {_recon_cdn}",
+                    url=url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"A request with X-Forwarded-For / X-Real-IP spoofing headers "
+                        f"returned a different Server header, suggesting the origin server "
+                        f"may be reachable without passing through {_recon_cdn}. "
+                        f"Direct access to the origin bypasses CDN-level WAF and rate-limiting."
+                    ),
+                    output=(f"CDN: {_recon_cdn}\n"
+                            f"Original Server: {server_hdr}\n"
+                            f"Bypass Server: {_bp_r.headers.get('Server', '')}"),
+                    sources="fracture-recon", service=target["scheme"],
+                    output_file=f"{_bp_rq},{_bp_rp}",
+                    owasp="A05:2025 Security Misconfiguration", nist="SC-5",
+                    remediation=(
+                        "Restrict origin server to accept connections only from CDN IP ranges; "
+                        "enforce firewall rules to block direct internet access to the origin."
+                    ),
+                    http_code=_bp_r.status_code,
+                )
+        except Exception:
+            pass
+
+    # BI / monitoring tool unauthenticated access probes
+    for _bi_name in _detected_bi:
+        for _bi_path, _bi_desc in _BI_UNAUTH_PROBES.get(_bi_name, []):
+            try:
+                _bi_r = sess.get(
+                    url.rstrip("/") + _bi_path,
+                    timeout=min(timeout, 6), allow_redirects=False)
+                if _bi_r.status_code == 200:
+                    _bi_rq, _bi_rp = _save_http_evidence(
+                        out, phase,
+                        f"bi_{_bi_name.lower().replace(' ', '_').replace('/', '_')}_probe",
+                        _bi_r)
+                    out.add_finding(
+                        title=f"Unauthenticated {_bi_name} Access: {_bi_desc}",
+                        url=url.rstrip("/") + _bi_path,
+                        port=target["port"], risk="HIGH",
+                        description=(
+                            f"The {_bi_name} {_bi_desc} at "
+                            f"'{_bi_path}' returned HTTP 200 without authentication. "
+                            f"Business Intelligence and monitoring panels can expose "
+                            f"sensitive metrics, internal service topology, and credentials."
+                        ),
+                        output=f"HTTP 200\n{_bi_r.text[:400]}",
+                        affected=_bi_path,
+                        sources="fracture-recon", service=target["scheme"],
+                        output_file=f"{_bi_rq},{_bi_rp}",
+                        owasp="A01:2025 Broken Access Control", nist="AC-3",
+                        remediation=(
+                            f"Require authentication for {_bi_path}. "
+                            f"Place the {_bi_name} interface behind a VPN or "
+                            f"network-level access control if possible."
+                        ),
+                        http_code=200,
+                    )
+            except Exception:
+                pass
 
     vc.status(phase, "Recon", "running", "Tech fingerprint (whatweb)", 1, 10)
     _ww_versions: list = []   # [(name, version_str)] collected for searchsploit
@@ -7140,7 +7348,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     else:
         vc.log("[recon] whatweb not found — skipping tech fingerprint", "WARNING")
 
-    # Write target profile — server, technology stack, CMS, WAF from initial probe
+    # Write target profile — server, technology stack, CMS, WAF, CDN, structure, BI
     try:
         _tp_waf = ""
         if server_hdr:
@@ -7159,6 +7367,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             cms=list(set(detected_cms)),
             technologies=[{"name": n, "version": v} for n, v in _ww_versions if n],
             waf=_tp_waf,
+            cdn=_recon_cdn,
+            web_structure=_recon_web_structure,
+            bi_tools=_detected_bi,
         )
     except Exception:
         pass
@@ -7225,7 +7436,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Recon", "running", "robots.txt/sitemap", 2, 10)
     for rpath in ["/robots.txt", "/sitemap.xml"]:
         try:
-            r = sess.get(url + rpath, timeout=timeout)
+            r = sess.get(url.rstrip("/") + rpath, timeout=timeout)
             _rpath_status = r.status_code
             if r.status_code == 200 and len(r.text) > 10 \
                     and not _is_wildcard_match(r, wc_baseline):
@@ -7233,7 +7444,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _rf_rq, _rf_rp = _save_http_evidence(out, phase, _rf_safe, r)
                 vc.log(f"[recon] Found {rpath} ({len(r.text)} bytes)", "SUCCESS")
                 try:
-                    _write_structure_map(out, target, path_statuses={rpath: _rpath_status}, source="recon")
+                    _write_structure_map(out, target,
+                                         path_statuses={_base_path.rstrip("/") + rpath: _rpath_status},
+                                         source="recon")
                 except Exception:
                     pass
                 if rpath == "/robots.txt":
@@ -7254,7 +7467,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     if disallowed:
                         out.add_finding(
                             title="Sensitive Paths Disclosed in robots.txt",
-                            url=url + rpath, port=target["port"], risk="INFO",
+                            url=url.rstrip("/") + rpath, port=target["port"], risk="INFO",
                             description=f"robots.txt disallows {len(disallowed)} path(s).",
                             output=r.text[:2000], sources="fracture-recon",
                             service=target["scheme"], output_file=f"{_rf_rq},{_rf_rp}",
@@ -7269,7 +7482,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Recon", "running", "Admin panel detection", 3, 10)
     for apath in _ADMIN_PATHS:
         try:
-            r = sess.get(url + apath, timeout=timeout, allow_redirects=False)
+            r = sess.get(url.rstrip("/") + apath, timeout=timeout, allow_redirects=False)
             if r.status_code in (200, 301, 302):
                 # Wildcard baseline check: skip if response matches the catch-all pattern
                 if _is_wildcard_match(r, wc_baseline):
@@ -7286,13 +7499,14 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 )
                 _admin_safe = apath.lstrip("/").replace("/", "_").replace(".", "_") or "root"
                 _admin_rq, _admin_rp = _save_http_evidence(out, phase, f"admin_{_admin_safe}", r)
+                _admin_full_url = url.rstrip("/") + apath
                 out.add_finding(
                     title=f"Admin Panel Exposed: {apath}",
-                    url=url + apath, port=target["port"], risk=_admin_risk,
+                    url=_admin_full_url, port=target["port"], risk=_admin_risk,
                     description=_admin_desc,
                     output=f"GET {apath} → {r.status_code}",
                     sources="fracture-recon", service=target["scheme"],
-                    affected=url + apath, output_file=f"{_admin_rq},{_admin_rp}",
+                    affected=_admin_full_url, output_file=f"{_admin_rq},{_admin_rp}",
                     owasp="A05:2025 Security Misconfiguration", nist="AC-3",
                     remediation="Restrict admin interfaces by IP allowlist or VPN.",
                     http_code=r.status_code,
@@ -7302,9 +7516,10 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     _admin_redir = None
                     if r.status_code in (301, 302, 307, 308):
                         _admin_redir = r.headers.get("Location", "")
+                    _admin_full_path = _base_path.rstrip("/") + apath
                     _write_structure_map(out, target,
-                                         path_statuses={apath: r.status_code},
-                                         path_redirects={apath: _admin_redir} if _admin_redir else None,
+                                         path_statuses={_admin_full_path: r.status_code},
+                                         path_redirects={_admin_full_path: _admin_redir} if _admin_redir else None,
                                          source="recon")
                 except Exception:
                     pass
@@ -7314,18 +7529,19 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Recon", "running", "Common paths probe", 4, 10)
     for cpath in _COMMON_PATHS:
         try:
-            r = sess.get(url + cpath, timeout=timeout, allow_redirects=False)
+            r = sess.get(url.rstrip("/") + cpath, timeout=timeout, allow_redirects=False)
             if r.status_code == 200 and cpath in ("/.git/HEAD", "/.env") \
                     and not _is_wildcard_match(r, wc_baseline):
                 _cp_safe = cpath.lstrip("/").replace("/", "_").replace(".", "_")
                 _cp_rq, _cp_rp = _save_http_evidence(out, phase, f"sensitive_path_{_cp_safe}", r)
+                _cp_full_url = url.rstrip("/") + cpath
                 out.add_finding(
                     title=f"Sensitive Path Accessible: {cpath}",
-                    url=url + cpath, port=target["port"], risk="CRITICAL",
+                    url=_cp_full_url, port=target["port"], risk="CRITICAL",
                     description=f"The path {cpath} is publicly accessible.",
                     output=f"GET {cpath} → {r.status_code}\n{r.text[:500]}",
                     sources="fracture-recon", service=target["scheme"],
-                    affected=url + cpath, output_file=f"{_cp_rq},{_cp_rp}",
+                    affected=_cp_full_url, output_file=f"{_cp_rq},{_cp_rp}",
                     owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                     remediation=f"Block public access to {cpath}.",
                     http_code=r.status_code,
@@ -7356,7 +7572,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         found = []
         for mpath in _TOP_200_PATHS:
             try:
-                r = sess.get(url + mpath, timeout=timeout, allow_redirects=False)
+                r = sess.get(url.rstrip("/") + mpath, timeout=timeout, allow_redirects=False)
                 if r.status_code in (200, 301, 302, 403):
                     if not _is_wildcard_match(r, wc_baseline):
                         found.append(f"{mpath} [{r.status_code}]")
@@ -11119,6 +11335,20 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     else:
         vc.log("[crawl] No SPA indicators detected — static crawl sufficient", "INFO")
 
+    # Update target profile web_structure with crawl-phase result (more accurate
+    # than the recon-phase classification since it uses actual visited-page data).
+    try:
+        if _spa_roots:
+            _crawl_structure = _classify_web_structure(
+                _root_html or "", {}, _spa_evidence)
+        else:
+            _crawl_structure = _classify_web_structure(
+                _root_html or "", {}, [])
+        if _crawl_structure and _crawl_structure != "Unknown":
+            _write_target_profile(out, web_structure=_crawl_structure)
+    except Exception:
+        pass
+
     # Persist the HTTP status code of every page the crawl actually fetched.
     # This ensures crawl-visited pages show a status code in the structure map
     # even if they're not re-probed by the endpoint tools phase.
@@ -11765,6 +11995,12 @@ def _write_target_profile(out: "OutputManager", **updates) -> None:
             existing["cms"] = _cms
         elif key == "protocols":
             existing["protocols"] = list(dict.fromkeys(existing.get("protocols", []) + val))
+        elif key == "bi_tools":
+            _bi = existing.get("bi_tools", [])
+            for _b in (val if isinstance(val, list) else [val]):
+                if _b and _b not in _bi:
+                    _bi.append(_b)
+            existing["bi_tools"] = _bi
         else:
             if existing.get(key) and not val:
                 continue
@@ -13622,10 +13858,11 @@ _SENSITIVE_FILES: list = [
 
 def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
                  out: OutputManager, sess: requests.Session) -> None:
-    phase   = "files"
-    url     = target["url"]
-    timeout = cfg.get("timeout", 10)
-    total   = len(_SENSITIVE_FILES)
+    phase      = "files"
+    url        = target["url"]
+    timeout    = cfg.get("timeout", 10)
+    total      = len(_SENSITIVE_FILES)
+    _base_path = urllib.parse.urlparse(url).path or "/"
     vc.status(phase, "Sensitive Files", "running", "Probing", 0, total)
 
     # Detect wildcard/catch-all before probing; skip files that match the baseline.
@@ -13637,7 +13874,8 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
     for idx, (fpath, risk, fdesc) in enumerate(_SENSITIVE_FILES):
         vc.status(phase, "Sensitive Files", "running", fpath, idx, total)
         try:
-            r = sess.get(url + fpath, timeout=timeout, allow_redirects=False)
+            _fpath_full_url = url.rstrip("/") + fpath
+            r = sess.get(_fpath_full_url, timeout=timeout, allow_redirects=False)
             if r.status_code == 200 and len(r.text) > 5:
                 if _is_wildcard_match(r, _file_wc):
                     continue   # matches catch-all baseline — not a real file
@@ -13645,16 +13883,18 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
                 out_f.write_text(r.text[:10000], encoding="utf-8")
                 out.add_finding(
                     title=f"Sensitive File Exposed: {fpath}",
-                    url=url + fpath, port=target["port"], risk=risk,
-                    description=fdesc + f" ({url + fpath} returned HTTP 200).",
+                    url=_fpath_full_url, port=target["port"], risk=risk,
+                    description=fdesc + f" ({_fpath_full_url} returned HTTP 200).",
                     output=r.text[:500], sources="fracture-files",
                     service=target["scheme"], output_file=str(out_f),
-                    affected=url + fpath,
+                    affected=_fpath_full_url,
                     owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                     remediation=f"Remove or restrict access to {fpath}.",
                 )
                 try:
-                    _write_structure_map(out, target, path_statuses={fpath: r.status_code}, source="files")
+                    _write_structure_map(out, target,
+                                         path_statuses={_base_path.rstrip("/") + fpath: r.status_code},
+                                         source="files")
                 except Exception:
                     pass
                 vc.log(f"[files] Found: {fpath} (risk={risk})", "SUCCESS")
