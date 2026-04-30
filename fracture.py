@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.11"
+VERSION = "2.10.13"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -9868,7 +9868,8 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
 
 def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
                    out: OutputManager, sess: requests.Session,
-                   extra_urls: "list | None" = None) -> None:
+                   extra_urls: "list | None" = None,
+                   wc_baseline: "dict | None" = None) -> None:
     """Run shcheck against the target URL (and any extra URLs) to detect missing
     HTTP security response headers.
 
@@ -9876,6 +9877,10 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
       - "Missing Security Header: <name>" — MEDIUM for HSTS, LOW for all others
     Output saved to: headers/shcheck_<hostname>_<port>.txt
     SSL error retry: if shcheck bails on TLS validation, retried with -d flag.
+
+    Extra URLs are validated with a quick GET probe before shcheck is invoked.
+    Any URL that is a wildcard false positive, returns 404/410, or is unreachable
+    is discarded immediately — no subprocess is spawned and no file is written.
     """
     phase   = "shcheck"
     timeout = cfg.get("timeout", 10) + 20   # shcheck needs a little more time
@@ -9886,6 +9891,7 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
         return
 
     _HSTS = "Strict-Transport-Security"
+    _val_timeout = min(cfg.get("timeout", 10), 6)
     targets_to_scan = [target]
     if extra_urls:
         for eu in extra_urls:
@@ -9902,6 +9908,27 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
         port     = tgt["port"]
         safe_host = hostname.replace(".", "_")
         out_f    = out.output_path("headers", f"shcheck_{safe_host}_{port}")
+
+        # Extra URLs (i > 0) are validated before shcheck runs.  False positives
+        # are deleted immediately — no output file is written, no subprocess spawned.
+        if i > 0:
+            try:
+                _val_r = sess.get(tgt_url, timeout=_val_timeout, allow_redirects=True)
+                if _val_r.status_code in (404, 410):
+                    vc.log(
+                        f"[shcheck] Skipping {tgt_url} — HTTP {_val_r.status_code} (not found)",
+                        "INFO",
+                    )
+                    continue
+                if wc_baseline is not None and _is_wildcard_match(_val_r, wc_baseline):
+                    vc.log(
+                        f"[shcheck] Skipping {tgt_url} — wildcard false positive",
+                        "INFO",
+                    )
+                    continue
+            except Exception:
+                vc.log(f"[shcheck] Skipping {tgt_url} — unreachable", "INFO")
+                continue
 
         # Build command: python3 path/to/shcheck.py if it's a .py script
         _flags = ["-k", "--colors=none", "-j"]
@@ -9943,7 +9970,13 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
 
         except subprocess.TimeoutExpired:
             vc.log(f"[shcheck] Timed out on {hostname}:{port}", "WARNING")
-            out_f.write_text(f"(shcheck timed out after {timeout}s)", encoding="utf-8")
+            # Do not store a timeout placeholder — delete the file immediately
+            # so no useless artifact is left in the headers/ directory.
+            try:
+                if out_f.exists():
+                    out_f.unlink()
+            except Exception:
+                pass
             vc.status(phase, "shcheck", "running", "Scanning", i + 1, len(targets_to_scan))
             continue
         except OSError as exc:
@@ -16887,6 +16920,91 @@ def main() -> None:
             except Exception:
                 pass
 
+            # ── Post-discovery CMS / BI re-analysis ──────────────────────────
+            # Check every path in _ep_base against CMS and BI path signatures.
+            # The initial probe in _phase_recon only checks the root page body;
+            # CMSs/BI tools on sub-paths are invisible unless discovered URLs are
+            # also checked.  No additional HTTP probes are needed — all paths are
+            # already known from gobuster/feroxbuster/WordPress discovery.
+            if not _is_reduced_ctx:
+                try:
+                    _ep_path_str = " ".join(_ep_base)
+                    _cms_path_sigs = {
+                        "WordPress":  [r"/wp-admin", r"/wp-login\.php", r"/wp-content/", r"/wp-includes/"],
+                        "Drupal":     [r"/sites/default/", r"/drupal/", r"/misc/drupal\.js"],
+                        "Joomla":     [r"/components/com_", r"/administrator/index\.php"],
+                        "Magento":    [r"/skin/frontend/", r"/pub/static/frontend/", r"/Magento/"],
+                        "TYPO3":      [r"/typo3/", r"/typo3conf/", r"/fileadmin/"],
+                        "Ghost":      [r"/ghost/api/", r"/content/themes/casper"],
+                        "Umbraco":    [r"/umbraco/"],
+                        "DotNetNuke": [r"/DesktopModules/", r"/portals/"],
+                        "OpenCart":   [r"route=common/", r"/catalog/view/"],
+                        "PrestaShop": [r"/modules/ps_"],
+                        "Shopify":    [r"/cdn\.shopify\.com/", r"/s/files/"],
+                    }
+                    _bi_path_sigs = {
+                        "Grafana":         [r"/grafana(?:/|$|\?)"],
+                        "Kibana":          [r"/app/kibana", r"/kibana/"],
+                        "Tableau":         [r"/vizportal/"],
+                        "Metabase":        [r"/metabase/"],
+                        "Apache Superset": [r"/superset/"],
+                        "Redash":          [r"/redash/"],
+                        "Prometheus":      [r"/metrics(?:\?|$)", r"/api/v1/targets"],
+                        "Zabbix":          [r"/zabbix(?:/|\.php)"],
+                        "Nagios":          [r"/nagios(?:/|$)", r"/nagiosxi/"],
+                        "Splunk":          [r"/en-US/app/", r"/splunk/"],
+                        "Looker":          [r"/looker(?:/|$)"],
+                    }
+                    _disc_cms = [
+                        n for n, pats in _cms_path_sigs.items()
+                        if any(re.search(p, _ep_path_str, re.I) for p in pats)
+                    ]
+                    _disc_bi = [
+                        n for n, pats in _bi_path_sigs.items()
+                        if any(re.search(p, _ep_path_str, re.I) for p in pats)
+                    ]
+                    if _disc_cms:
+                        _write_target_profile(out, cms=_disc_cms)
+                        for _dcn in _disc_cms:
+                            vc.log(f"[discovery] CMS identified from discovered paths: {_dcn}", "SUCCESS")
+                    if _disc_bi:
+                        _write_target_profile(out, bi_tools=_disc_bi)
+                        for _dbn in _disc_bi:
+                            vc.log(f"[discovery] BI tool identified from discovered paths: {_dbn}", "SUCCESS")
+                        # Run unauthenticated probes against any newly identified BI tools
+                        for _bi_name in _disc_bi:
+                            for _bi_path, _bi_desc in _BI_UNAUTH_PROBES.get(_bi_name, []):
+                                try:
+                                    _bi_r = effective_auth.get(
+                                        target["url"].rstrip("/") + _bi_path,
+                                        timeout=min(cfg.get("timeout", 10), 6),
+                                        allow_redirects=False)
+                                    if _bi_r.status_code == 200:
+                                        out.add_finding(
+                                            title=f"Unauthenticated {_bi_name} Access: {_bi_desc}",
+                                            url=target["url"].rstrip("/") + _bi_path,
+                                            port=target["port"], risk="HIGH",
+                                            description=(
+                                                f"The {_bi_name} {_bi_desc} at '{_bi_path}' "
+                                                f"returned HTTP 200 without authentication."
+                                            ),
+                                            output=f"HTTP 200\n{_bi_r.text[:400]}",
+                                            affected=_bi_path,
+                                            sources="fracture-discovery",
+                                            service=target["scheme"],
+                                            owasp="A01:2025 Broken Access Control", nist="AC-3",
+                                            remediation=(
+                                                f"Require authentication for {_bi_path}. "
+                                                f"Place the {_bi_name} interface behind a VPN "
+                                                f"or network-level access control."
+                                            ),
+                                            http_code=200,
+                                        )
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
             # Write auth method and login page to target profile (Role 1 context only)
             if not _is_reduced_ctx:
                 try:
@@ -16923,7 +17041,8 @@ def main() -> None:
                     ]
                     _all_shcheck_extra = _extra + _ep_shcheck
                     _phase_shcheck(target, _ctx_cfg, pm, out, effective_auth,
-                                   extra_urls=_all_shcheck_extra if _all_shcheck_extra else None)
+                                   extra_urls=_all_shcheck_extra if _all_shcheck_extra else None,
+                                   wc_baseline=wc_baseline)
                     pm.set_phase_status(f"shcheck#{_ctx_label}", "complete", "shcheck Header Check")
                 except Exception as e:
                     vc.error(f"Phase shcheck [{_ctx_label}] error: {e}")
