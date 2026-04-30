@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.4"
+VERSION = "2.10.5"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1004,25 +1004,39 @@ def _filter_dominant_code(
     )
 
     # ── Categorical-block fast path ──────────────────────────────────────────
-    # Probe 3 random non-existent UUID paths against the target root using the
-    # same session.  If ≥2 of those paths also return the dominant code then the
-    # scanner IP has been categorically blocked (e.g. by Akamai, Cloudflare,
-    # or any WAF that doesn't advertise itself in headers/body), or the server
-    # uses the dominant code as its wildcard "not found" response.  Either way,
-    # the dominant-code results carry no signal — suppress them all at once
-    # rather than relying on body fingerprinting which fails for custom block pages.
+    # Probe 3 random non-existent UUID paths under the scan base directory
+    # using the same session.  If ≥2 of those paths also return the dominant
+    # code then the scanner IP has been categorically blocked (e.g. by Akamai,
+    # Cloudflare, or any WAF that doesn't advertise itself in headers/body),
+    # or the server uses the dominant code as its wildcard "not found" response.
+    # Either way the dominant-code results carry no signal — suppress them all
+    # at once rather than relying on body fingerprinting, which fails for custom
+    # block pages.
+    #
+    # The probe base is the longest common directory prefix of the dominant-code
+    # URLs so that probes land in the same path space as the scan (e.g. /cognos/
+    # rather than the server root), giving an apples-to-apples comparison.
     _dom_urls = [u for u, s, _ in results if s == dominant_code]
     if _dom_urls:
         try:
             import uuid as _uuid_mod
             from urllib.parse import urlparse as _urlparse
-            _pr = _urlparse(_dom_urls[0])
-            _root = f"{_pr.scheme}://{_pr.netloc}"
+            import os.path as _osp
+            _pr0 = _urlparse(_dom_urls[0])
+            _origin = f"{_pr0.scheme}://{_pr0.netloc}"
+            # Find common path prefix across all dominant-code URLs
+            _paths = [_urlparse(u).path for u in _dom_urls]
+            _common = _paths[0]
+            for _p in _paths[1:]:
+                while _common and not _p.startswith(_common):
+                    _common = _common.rsplit("/", 1)[0]
+            # Ensure we have at least a "/" base; strip trailing slash for clean join
+            _base_path = _common.rstrip("/") or ""
             _cat_hits = 0
             for _ in range(3):
                 try:
                     _pv = sess.get(
-                        f"{_root}/{_uuid_mod.uuid4().hex}",
+                        f"{_origin}{_base_path}/{_uuid_mod.uuid4().hex}",
                         timeout=max(timeout // 2, 3),
                         allow_redirects=False,
                         headers={"Accept": "text/html"},
@@ -1034,9 +1048,10 @@ def _filter_dominant_code(
             if _cat_hits >= 2:
                 _cat_total = sum(1 for _, s, _ in results if s == dominant_code)
                 vc.log(
-                    f"[buster-filter] {_cat_hits}/3 random non-existent paths returned "
-                    f"HTTP {dominant_code} — categorical WAF/CDN block or wildcard "
-                    f"detected; suppressing all {_cat_total} HTTP {dominant_code} result(s)",
+                    f"[buster-filter] {_cat_hits}/3 random non-existent paths under "
+                    f"'{_base_path or '/'}' returned HTTP {dominant_code} — categorical "
+                    f"WAF/CDN block or wildcard detected; suppressing all "
+                    f"{_cat_total} HTTP {dominant_code} result(s)",
                     "INFO",
                 )
                 return [e for e in results if e[1] != dominant_code]
