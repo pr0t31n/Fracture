@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.0"
+VERSION = "2.12.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2693,6 +2693,10 @@ class OutputManager:
         # _save_http_evidence() route tool outputs into a per-role subdirectory so that
         # files from different roles do not overwrite each other.
         self._output_role: str = ""
+        # "Header Data Leakage:" findings are server-level — only the first
+        # occurrence per title+hostname is recorded.  Subsequent calls for the
+        # same header on different paths are silently dropped.
+        self._hdr_disclosure_seen: set = set()
         self._setup_dirs()
 
     def _setup_dirs(self) -> None:
@@ -2825,6 +2829,21 @@ class OutputManager:
         """Record a security finding to findings.json and findings.csv. Thread-safe."""
         ts    = self._ts()
         title = _normalize_finding_title(title)
+
+        # Header Data Leakage findings are server-level; emit only once per
+        # title+hostname across the entire scan regardless of which path or
+        # phase triggers them.
+        if title.startswith("Header Data Leakage:"):
+            try:
+                _hdr_host = urllib.parse.urlparse(url).hostname or url
+            except Exception:
+                _hdr_host = url
+            _hdr_key = f"{title}\x00{_hdr_host}"
+            with self._findings_lock:
+                if _hdr_key in self._hdr_disclosure_seen:
+                    return
+                self._hdr_disclosure_seen.add(_hdr_key)
+
         ascii_title = title.encode("ascii", errors="replace").decode("ascii")
 
         # parse hostname from url
