@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.10.24"
+VERSION = "2.12.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1781,6 +1781,457 @@ def _get_spa_browser() -> "str | None":
     return None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Login-profile store  (cross-session, cross-project)
+# Profiles persist at /opt/pr0t31n/Fracture/login_profiles/ and are shared
+# across all Fracture scans and AuthProbe runs.  Each profile captures the
+# structural fingerprint of a login page plus a replay recipe so that future
+# encounters with matching pages can be authenticated without opening a browser.
+# ─────────────────────────────────────────────────────────────────────────────
+_LP_STORE_DIR       = Path("/opt/pr0t31n/Fracture/login_profiles")
+_LP_INDEX_PATH      = _LP_STORE_DIR / "index.json"
+_LP_MATCH_THRESHOLD = 0.75
+
+
+def _lp_ensure_dir() -> None:
+    """Create the login_profiles store directory if absent."""
+    try:
+        _LP_STORE_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+
+def _lp_load_index() -> list:
+    """Return index.json contents; [] on missing or corrupt file."""
+    try:
+        if _LP_INDEX_PATH.exists():
+            return json.loads(_LP_INDEX_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
+def _lp_save_index(index: list) -> None:
+    """Write the profile index atomically."""
+    _lp_ensure_dir()
+    _LP_INDEX_PATH.write_text(json.dumps(index, indent=2), encoding="utf-8")
+
+
+def _lp_fingerprint_url(url: str) -> dict:
+    """
+    Fetch *url* with a plain GET and extract a structural fingerprint from the
+    HTML that can be compared against stored profiles.  Returns a dict of
+    field values; all fields default to safe values if the fetch fails.
+    """
+    import html.parser as _hp
+    fp: dict = {
+        "input_count":        0,
+        "has_password_field": False,
+        "has_hidden_fields":  False,
+        "hidden_field_count": 0,
+        "form_action_path":   "",
+        "form_action_depth":  0,
+        "form_method":        "POST",
+        "login_path":         "",
+        "framework_hints":    [],
+    }
+    try:
+        r   = requests.get(url, timeout=8, verify=False, allow_redirects=True)
+        htm = r.text
+        fp["login_path"] = urllib.parse.urlparse(r.url).path.rstrip("/").split("/")[-1].lower()
+
+        class _P(_hp.HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.in_form = False
+                self.inputs: list = []
+                self.faction = ""
+                self.fmethod = "POST"
+
+            def handle_starttag(self, tag, attrs):
+                a = dict(attrs)
+                if tag == "form":
+                    self.in_form = True
+                    self.faction = a.get("action", "")
+                    self.fmethod = (a.get("method") or "post").upper()
+                elif tag == "input" and self.in_form:
+                    self.inputs.append(a)
+
+            def handle_endtag(self, tag):
+                if tag == "form":
+                    self.in_form = False
+
+        p = _P()
+        p.feed(htm)
+
+        fp["input_count"]        = len(p.inputs)
+        fp["has_password_field"] = any(i.get("type", "").lower() == "password" for i in p.inputs)
+        hidden                   = [i for i in p.inputs if i.get("type", "").lower() == "hidden"]
+        fp["has_hidden_fields"]  = bool(hidden)
+        fp["hidden_field_count"] = len(hidden)
+        fp["form_method"]        = p.fmethod
+        if p.faction:
+            _ap = urllib.parse.urlparse(p.faction).path
+            fp["form_action_path"]  = _ap
+            fp["form_action_depth"] = len([s for s in _ap.split("/") if s])
+
+        _fh: list = []
+        if "wp-login" in htm or "WordPress" in htm:
+            _fh.append("wordpress")
+        if "csrfmiddlewaretoken" in htm or "django" in htm.lower():
+            _fh.append("django")
+        if 'name="_token"' in htm or "laravel" in htm.lower():
+            _fh.append("laravel")
+        if "authenticity_token" in htm:
+            _fh.append("rails")
+        if "angular" in htm.lower():
+            _fh.append("angular")
+        if "react" in htm.lower():
+            _fh.append("react")
+        fp["framework_hints"] = _fh
+    except Exception:
+        pass
+    return fp
+
+
+def _lp_score(observed: dict, stored: dict) -> float:
+    """Score how well *observed* fingerprint matches *stored*.  Returns [0.0, 1.0]."""
+    pts   = 0.0
+    total = 0.0
+
+    def _w(key: str, weight: float) -> None:
+        nonlocal pts, total
+        total += weight
+        if observed.get(key) == stored.get(key):
+            pts += weight
+
+    _w("has_password_field", 3.0)
+    _w("has_hidden_fields",  2.0)
+    _w("form_method",        1.0)
+    _w("form_action_depth",  1.0)
+
+    # input_count: full credit if equal, half credit within ±1
+    total += 2.0
+    diff   = abs(observed.get("input_count", 0) - stored.get("input_count", 0))
+    pts   += 2.0 if diff == 0 else (1.0 if diff == 1 else 0.0)
+
+    # framework_hints: proportional overlap; both blank also scores well
+    o_h   = set(observed.get("framework_hints", []))
+    s_h   = set(stored.get("framework_hints",  []))
+    total += 2.0
+    if o_h and s_h:
+        pts += 2.0 * len(o_h & s_h) / max(len(o_h), len(s_h))
+    elif not o_h and not s_h:
+        pts += 2.0
+
+    # login path partial match
+    total += 1.0
+    o_p   = observed.get("login_path", "").lower()
+    s_p   = stored.get("login_path",  "").lower()
+    if o_p and s_p:
+        if o_p == s_p:
+            pts += 1.0
+        elif o_p in s_p or s_p in o_p:
+            pts += 0.5
+
+    return round(pts / total, 3) if total > 0 else 0.0
+
+
+def _lp_match(login_url: str) -> "dict | None":
+    """
+    Fingerprint *login_url* and return the best matching profile entry from the
+    index (with an added 'confidence' key as int 0-100), or None if nothing
+    scores at or above the threshold (_LP_MATCH_THRESHOLD = 0.75).
+    """
+    index = _lp_load_index()
+    if not index:
+        return None
+    observed = _lp_fingerprint_url(login_url)
+    best_s: float         = 0.0
+    best_e: "dict | None" = None
+    for entry in index:
+        s = _lp_score(observed, entry.get("fingerprint", {}))
+        if s > best_s:
+            best_s = s
+            best_e = entry
+    if best_s >= _LP_MATCH_THRESHOLD and best_e:
+        return {**best_e, "confidence": int(best_s * 100)}
+    return None
+
+
+def _lp_replay(profile_id: str, login_url: str, cfg: dict,
+               scope_hostnames: "set | None") -> "requests.Session | None":
+    """
+    Replay a stored login profile against *login_url*.  Harvests a live CSRF
+    token from the login page if the profile's recipe requires it, then POSTs
+    credentials.  Returns an authenticated requests.Session on success, or None.
+    """
+    profile_path = _LP_STORE_DIR / f"{profile_id}.json"
+    if not profile_path.exists():
+        return None
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    recipe     = profile.get("recipe", {})
+    submit_url = recipe.get("submit_url", "")
+    method     = (recipe.get("submit_method", "POST") or "POST").upper()
+    ct         = recipe.get("content_type", "application/x-www-form-urlencoded")
+    csrf_strat = recipe.get("csrf_strategy", "none")
+    csrf_field = recipe.get("csrf_field", "")
+    success_pat = (recipe.get("success_indicator") or {}).get("pattern", "")
+    if not submit_url:
+        return None
+
+    sess = _make_session(cfg, scope_hostnames or set())
+
+    # Harvest CSRF token if required by the recipe
+    csrf_token = ""
+    if csrf_strat == "hidden_field" and csrf_field:
+        try:
+            import html.parser as _hp2
+
+            r_get = sess.get(login_url, timeout=10, verify=False)
+
+            class _CT(_hp2.HTMLParser):
+                def __init__(self):
+                    super().__init__()
+                    self.token = ""
+
+                def handle_starttag(self, tag, attrs):
+                    if tag == "input":
+                        a = dict(attrs)
+                        if a.get("name") == csrf_field and a.get("type") == "hidden":
+                            self.token = a.get("value", "")
+
+            _p2 = _CT()
+            _p2.feed(r_get.text)
+            csrf_token = _p2.token
+        except Exception:
+            pass
+    elif csrf_strat == "cookie" and csrf_field:
+        try:
+            sess.get(login_url, timeout=10, verify=False)
+            csrf_token = sess.cookies.get(csrf_field, "")
+        except Exception:
+            pass
+
+    # Build credential payload from stored field selectors + scan auth config
+    auth   = cfg.get("auth", {})
+    cred   = recipe.get("credential_fields", {})
+
+    def _sel_to_name(s: str) -> str:
+        """Convert a CSS selector to a plain field name."""
+        s = s.lstrip("#")
+        s = s.replace('[name="', "").replace('"]', "")
+        return s.split("[")[0].strip()
+
+    u_field = _sel_to_name(cred.get("email") or cred.get("username") or "username")
+    p_field = _sel_to_name(cred.get("password") or "password")
+    payload: dict = {
+        u_field: auth.get("username", ""),
+        p_field: auth.get("password", ""),
+    }
+    if csrf_token and csrf_field:
+        payload[csrf_field] = csrf_token
+
+    try:
+        if "json" in ct.lower():
+            r_post = sess.post(submit_url, json=payload, timeout=15,
+                               verify=False, allow_redirects=True)
+        else:
+            r_post = sess.post(submit_url, data=payload, timeout=15,
+                               verify=False, allow_redirects=True)
+    except Exception:
+        return None
+
+    if success_pat and success_pat not in r_post.url:
+        return None
+    if not sess.cookies:
+        return None
+    return sess
+
+
+def _lp_parse_recording(recording_txt: str, login_url: str) -> "dict | None":
+    """
+    Parse a login-session recording TXT file and return a recipe dict
+    ready to be stored in the profile, or None if the recording lacks enough
+    data to build a reliable replay.
+    """
+    recipe: dict = {
+        "login_path":        "",
+        "submit_url":        "",
+        "submit_method":     "POST",
+        "content_type":      "application/x-www-form-urlencoded",
+        "credential_fields": {},
+        "csrf_strategy":     "none",
+        "csrf_field":        "",
+        "success_indicator": {},
+        "session_carriers":  [],
+    }
+    _inputs: list          = []
+    _submit: "dict | None" = None
+    _request: "dict | None" = None
+    _nav_urls: list        = []
+    _cookies: list         = []
+    _rec_ct                = ""
+
+    for line in recording_txt.splitlines():
+        ln = line.strip()
+        parts = ln.split(None, 3)
+
+        if len(parts) >= 3 and parts[0].startswith("STEP"):
+            evtype = parts[2] if len(parts) > 2 else ""
+            rest   = parts[3] if len(parts) > 3 else ""
+
+            if evtype == "INPUT":
+                sel = val = ""
+                for tok in rest.split("  "):
+                    tok = tok.strip()
+                    if tok.startswith("selector="):
+                        sel = tok[9:]
+                    elif tok.startswith("value="):
+                        val = tok[6:]
+                if sel:
+                    _inputs.append((sel, val))
+
+            elif evtype == "SUBMIT":
+                d: dict = {}
+                for tok in rest.split("  "):
+                    tok = tok.strip()
+                    if tok.startswith("action="):
+                        d["action"] = tok[7:].strip('"')
+                    elif tok.startswith("method="):
+                        d["method"] = tok[7:]
+                    elif tok.startswith("fields="):
+                        d["fields"] = tok[7:].split(",")
+                _submit = d
+
+            elif evtype == "REQUEST":
+                toks2 = rest.strip().split()
+                if len(toks2) >= 2:
+                    _request = {"method": toks2[0], "url": toks2[1]}
+
+            elif evtype == "NAVIGATE":
+                nav_url = rest.strip()
+                if nav_url:
+                    _nav_urls.append(nav_url)
+
+            elif evtype == "COOKIE":
+                cname = ""
+                for tok in rest.split("  "):
+                    tok = tok.strip()
+                    if tok.startswith("name="):
+                        cname = tok[5:]
+                if cname:
+                    _cookies.append(cname)
+
+        # Content-Type indented under a REQUEST step
+        elif ln.startswith("Content-Type:"):
+            _rec_ct = ln.split(":", 1)[1].strip()
+
+        # SESSION INDICATORS block
+        elif ln.startswith("Submit URL:"):
+            recipe["submit_url"] = ln.split(":", 1)[1].strip()
+        elif ln.startswith("Submit method:"):
+            recipe["submit_method"] = ln.split(":", 1)[1].strip()
+        elif ln.startswith("CSRF field:"):
+            recipe["csrf_field"] = ln.split(":", 1)[1].strip()
+        elif ln.startswith("Session cookies:"):
+            recipe["session_carriers"] = [
+                c.strip() for c in ln.split(":", 1)[1].split(",")
+                if c.strip() and c.strip() != "(none detected)"
+            ]
+        elif ln.startswith("Success URL pattern:"):
+            pat = ln.split(":", 1)[1].strip()
+            if pat:
+                recipe["success_indicator"] = {"type": "url_pattern", "pattern": pat}
+
+    recipe["login_path"] = urllib.parse.urlparse(login_url).path
+
+    # Fall back: derive submit_url from SUBMIT / REQUEST events
+    if not recipe["submit_url"]:
+        if _submit and _submit.get("action"):
+            recipe["submit_url"] = _submit["action"]
+        elif _request and _request.get("url"):
+            recipe["submit_url"] = _request["url"]
+
+    if not recipe["submit_url"]:
+        return None
+
+    if _rec_ct:
+        recipe["content_type"] = _rec_ct
+
+    # Credential field selectors
+    _pw_sel = _user_sel = ""
+    for sel, val in _inputs:
+        if val == "[REDACTED]":
+            _pw_sel = sel
+        elif not _user_sel and val:
+            _user_sel = sel
+    if _user_sel:
+        recipe["credential_fields"]["email"] = _user_sel
+    if _pw_sel:
+        recipe["credential_fields"]["password"] = _pw_sel
+
+    # CSRF detection from SUBMIT field list
+    _cred_names = {"email", "username", "user", "login", "password", "passwd", "pass"}
+    if _submit and _submit.get("fields") and not recipe["csrf_field"]:
+        for f in _submit["fields"]:
+            f = f.strip()
+            if f.lower() not in _cred_names and len(f) > 2:
+                recipe["csrf_field"]    = f
+                recipe["csrf_strategy"] = "hidden_field"
+                break
+
+    # Success indicator from navigation change
+    if not recipe["success_indicator"] and len(_nav_urls) >= 2:
+        _fp  = urllib.parse.urlparse(_nav_urls[-1])
+        _lp2 = urllib.parse.urlparse(login_url)
+        if _fp.path and _fp.path != _lp2.path:
+            recipe["success_indicator"] = {"type": "url_pattern", "pattern": _fp.path}
+
+    if _cookies and not recipe["session_carriers"]:
+        recipe["session_carriers"] = _cookies
+
+    return recipe
+
+
+def _lp_save_profile(profile_id: str, login_url: str, browser_used: str,
+                     recipe: dict) -> None:
+    """Persist a new profile to disk and add it to the shared index."""
+    _lp_ensure_dir()
+    fp = _lp_fingerprint_url(login_url)
+    profile = {
+        "id":           profile_id,
+        "created":      datetime.now().isoformat(timespec="seconds"),
+        "target_url":   login_url,
+        "browser_used": browser_used,
+        "recipe":       recipe,
+        "fingerprint":  fp,
+    }
+    (_LP_STORE_DIR / f"{profile_id}.json").write_text(
+        json.dumps(profile, indent=2), encoding="utf-8"
+    )
+    index = _lp_load_index()
+    index = [e for e in index if e.get("id") != profile_id]
+    index.append({
+        "id":         profile_id,
+        "file":       f"{profile_id}.json",
+        "created":    profile["created"],
+        "target_url": login_url,
+        "description": (
+            f"{recipe.get('submit_method','POST')} "
+            f"{recipe.get('content_type','').split(';')[0]} "
+            f"csrf={recipe.get('csrf_strategy','none')} "
+            f"carrier={','.join(recipe.get('session_carriers',[]))}"
+        ).strip(),
+        "fingerprint": fp,
+    })
+    _lp_save_index(index)
+
+
 # ─────────────────────────────────────────────
 # Third-party dependency bootstrap
 # ─────────────────────────────────────────────
@@ -2213,6 +2664,7 @@ class OutputManager:
         "recon", "tls", "headers", "crawl", "injection",
         "traversal", "ssrf", "auth_bypass", "files", "vulnscan",
         "graphql", "auth_recon", "authorization", "session", "csrf", "cross_user",
+        "logout",
     ]
 
     FINDINGS_CSV_FIELDS = [
@@ -3663,9 +4115,15 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         requests.Session.  Returns None if Selenium is unavailable or no
         supported browser can be launched.
 
-        Browser detection order (first working browser wins):
-          Firefox → Iceweasel → LibreWolf → Waterfox → Pale Moon
-                  → Chrome → Brave → Chromium → Edge
+        Before opening a browser, the login page is fingerprinted and compared
+        against the shared login-profile store.  If a matching profile is found
+        (confidence >= 75%) the session is replayed automatically without any
+        browser interaction.  A new recording is offered after every successful
+        manual session so the profile store grows over time.
+
+        Browser detection order (Chrome first, Firefox fallback):
+          Chrome → Brave → Chromium → Firefox → Iceweasel → LibreWolf
+                → Waterfox → Pale Moon → Edge
 
         Driver resolution for each candidate (in order):
           1. --chromedriver CLI flag / cfg["chromedriver_path"]    (Chrome only)
@@ -3675,6 +4133,33 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         """
         import shutil as _shutil, os as _os, sys as _sys
         _scope_hostnames = scope_hostnames or set()
+
+        # ── Profile-store check ───────────────────────────────────────────────
+        # If a stored profile matches this login page's structural fingerprint,
+        # replay it automatically and skip the browser entirely.
+        try:
+            _lp_candidate = _lp_match(login_url)
+            if _lp_candidate:
+                vc.log(
+                    f"[auth] Login profile matched: {_lp_candidate['id']} "
+                    f"({_lp_candidate['confidence']}% confidence) — attempting replay",
+                    "INFO",
+                )
+                _replay_sess = _lp_replay(
+                    _lp_candidate["id"], login_url, cfg, scope_hostnames
+                )
+                if _replay_sess:
+                    vc.log(
+                        "[auth] Profile replay successful — browser login skipped",
+                        "SUCCESS",
+                    )
+                    return _replay_sess
+                vc.log(
+                    "[auth] Profile replay failed — opening browser for manual login",
+                    "WARNING",
+                )
+        except Exception:
+            pass
 
         try:
             from selenium import webdriver as _wd
@@ -3697,7 +4182,75 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         # path_names:  basenames for shutil.which() lookup (all platforms)
         # abs_paths:   absolute install paths per platform (checked if which fails)
         # driver_names: WebDriver binary names for shutil.which()
+        # Chrome-engine browsers are tried first because ChromeDriver supports
+        # network-level performance logging (CDP), which gives the recording layer
+        # richer request/body capture.  Firefox and compatible browsers are the
+        # fallback — they still produce full DOM-event recordings via JS injection.
         _BROWSERS = [
+            {
+                "name":        "Chrome",
+                "engine":      "chrome",
+                "path_names":  ["google-chrome", "google-chrome-stable",
+                                 "google-chrome-beta", "chrome"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                    ],
+                    "linux":  [
+                        "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+                        "/usr/local/bin/google-chrome",
+                        "/opt/google/chrome/google-chrome",
+                    ],
+                    "win":    [
+                        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                        _os.path.expandvars(
+                            r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+                    ],
+                },
+                "driver_names": ["chromedriver"],
+            },
+            {
+                "name":        "Brave",
+                "engine":      "chrome",
+                "path_names":  ["brave-browser", "brave", "brave-browser-stable"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                    ],
+                    "linux":  [
+                        "/usr/bin/brave-browser", "/usr/bin/brave",
+                        "/usr/local/bin/brave-browser",
+                        "/opt/brave.com/brave/brave-browser",
+                    ],
+                    "win":    [
+                        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                        _os.path.expandvars(
+                            r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+                    ],
+                },
+                "driver_names": ["chromedriver"],
+            },
+            {
+                "name":        "Chromium",
+                "engine":      "chrome",
+                "path_names":  ["chromium-browser", "chromium", "chromium-freeworld"],
+                "abs_paths": {
+                    "darwin": [
+                        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                    ],
+                    "linux":  [
+                        "/usr/bin/chromium-browser", "/usr/bin/chromium",
+                        "/usr/local/bin/chromium",
+                        "/snap/bin/chromium",
+                    ],
+                    "win":    [
+                        r"C:\Program Files\Chromium\Application\chrome.exe",
+                    ],
+                },
+                "driver_names": ["chromedriver", "chromium-chromedriver",
+                                  "chromium.chromedriver"],
+            },
             {
                 "name":        "Firefox",
                 "engine":      "firefox",
@@ -3778,70 +4331,6 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 "driver_names": ["geckodriver"],
             },
             {
-                "name":        "Chrome",
-                "engine":      "chrome",
-                "path_names":  ["google-chrome", "google-chrome-stable",
-                                 "google-chrome-beta", "chrome"],
-                "abs_paths": {
-                    "darwin": [
-                        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                    ],
-                    "linux":  [
-                        "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
-                        "/usr/local/bin/google-chrome",
-                        "/opt/google/chrome/google-chrome",
-                    ],
-                    "win":    [
-                        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                        _os.path.expandvars(
-                            r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-                    ],
-                },
-                "driver_names": ["chromedriver"],
-            },
-            {
-                "name":        "Brave",
-                "engine":      "chrome",
-                "path_names":  ["brave-browser", "brave", "brave-browser-stable"],
-                "abs_paths": {
-                    "darwin": [
-                        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-                    ],
-                    "linux":  [
-                        "/usr/bin/brave-browser", "/usr/bin/brave",
-                        "/usr/local/bin/brave-browser",
-                        "/opt/brave.com/brave/brave-browser",
-                    ],
-                    "win":    [
-                        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-                        _os.path.expandvars(
-                            r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
-                    ],
-                },
-                "driver_names": ["chromedriver"],
-            },
-            {
-                "name":        "Chromium",
-                "engine":      "chrome",
-                "path_names":  ["chromium-browser", "chromium", "chromium-freeworld"],
-                "abs_paths": {
-                    "darwin": [
-                        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-                    ],
-                    "linux":  [
-                        "/usr/bin/chromium-browser", "/usr/bin/chromium",
-                        "/usr/local/bin/chromium",
-                        "/snap/bin/chromium",
-                    ],
-                    "win":    [
-                        r"C:\Program Files\Chromium\Application\chrome.exe",
-                    ],
-                },
-                "driver_names": ["chromedriver", "chromium-chromedriver",
-                                  "chromium.chromedriver"],
-            },
-            {
                 "name":        "Edge",
                 "engine":      "edge",
                 "path_names":  ["microsoft-edge", "microsoft-edge-stable",
@@ -3889,7 +4378,8 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         import tempfile as _tf_browser
         _tmp_profile = _tf_browser.mkdtemp(prefix="fracture_browser_")
 
-        def _launch_chrome_engine(bin_path: str, drv_path: str) -> "object":
+        def _launch_chrome_engine(bin_path: str, drv_path: str,
+                                  record: bool = False) -> "object":
             from selenium.webdriver.chrome.options import Options as _CO
             from selenium.webdriver.chrome.service import Service as _CS
             opts = _CO()
@@ -3900,6 +4390,11 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             opts.add_argument("--no-default-browser-check")
             opts.add_experimental_option("excludeSwitches", ["enable-automation"])
             opts.add_experimental_option("useAutomationExtension", False)
+            if record:
+                # Enable CDP-based network logging so the recording layer can
+                # capture request URLs, methods, and POST bodies without needing
+                # Selenium Wire or any additional proxy.
+                opts.set_capability("goog:loggingPrefs", {"performance": "ALL"})
             if bin_path:
                 opts.binary_location = bin_path
             svc = _CS(executable_path=drv_path) if drv_path else None
@@ -4291,7 +4786,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     try:
                         engine = _b["engine"]
                         if engine == "chrome":
-                            driver = _launch_chrome_engine(_bin, _drv)
+                            driver = _launch_chrome_engine(_bin, _drv, record=True)
                         elif engine == "edge":
                             driver = _launch_edge_engine(_bin, _drv)
                         else:
@@ -4316,9 +4811,72 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             return None
 
         # ── Interactive session capture ───────────────────────────────────────
+        _dom_events: list = []
+        _net_events: list = []
+
+        # JS recorder injected after page load — captures clicks, inputs, form
+        # submissions, and URL navigations without any browser-specific APIs.
+        _RECORDER_JS = r"""
+window._fracture_events = [];
+window._fracture_seq    = 0;
+var _fr_last_url        = location.href;
+window._fracture_nav_tmr = setInterval(function() {
+    if (location.href !== _fr_last_url) {
+        _fr_last_url = location.href;
+        window._fracture_events.push({
+            t: 'NAVIGATE', seq: ++window._fracture_seq,
+            ts: Date.now(), url: location.href
+        });
+    }
+}, 300);
+function _fr_sel(el) {
+    if (el.id)   return '#' + el.id;
+    if (el.name) return '[name="' + el.name + '"]';
+    return (el.tagName || '').toLowerCase() +
+           (el.type ? '[type="' + el.type + '"]' : '');
+}
+document.addEventListener('click', function(e) {
+    var el = e.target;
+    window._fracture_events.push({
+        t: 'CLICK', seq: ++window._fracture_seq, ts: Date.now(),
+        selector: _fr_sel(el),
+        text: (el.innerText || el.value ||
+               el.getAttribute('aria-label') || '').trim().slice(0, 80)
+    });
+}, true);
+document.addEventListener('input', function(e) {
+    var el = e.target;
+    window._fracture_events.push({
+        t: 'INPUT', seq: ++window._fracture_seq, ts: Date.now(),
+        selector: _fr_sel(el),
+        value: el.type === 'password' ? '[REDACTED]' : (el.value || '').slice(0, 500)
+    });
+}, true);
+document.addEventListener('submit', function(e) {
+    var f = e.target, fd = {};
+    for (var i = 0; i < f.elements.length; i++) {
+        var fe = f.elements[i];
+        if (fe.name) fd[fe.name] = fe.type === 'password' ? '[REDACTED]' : fe.value;
+    }
+    window._fracture_events.push({
+        t: 'SUBMIT', seq: ++window._fracture_seq, ts: Date.now(),
+        action: f.action || '', method: (f.method || 'get').toUpperCase(),
+        fields: Object.keys(fd)
+    });
+}, true);
+"""
+
         try:
             vc.log(f"[auth] {_used_name} opened — navigate to {login_url} and log in", "INFO")
             driver.get(login_url)
+
+            # Inject the event recorder into the current page
+            try:
+                driver.execute_script(_RECORDER_JS)
+                vc.log("[auth] Login session recorder active", "INFO")
+            except Exception:
+                pass
+
             vc.log(
                 "[auth] Complete login in the browser window, then click OK (or press Enter) "
                 "to capture the session and continue …",
@@ -4332,6 +4890,40 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
 
             captured_url    = driver.current_url
             browser_cookies = driver.get_cookies()
+
+            # Collect DOM events recorded by the injected JS
+            try:
+                _dom_events = driver.execute_script(
+                    "return window._fracture_events || [];"
+                ) or []
+            except Exception:
+                pass
+
+            # For Chrome-engine browsers: collect network events from the CDP
+            # performance log.  Firefox does not expose this API, so it falls
+            # back to the JS-only DOM events collected above.
+            _used_lower = (_used_name or "").lower()
+            if any(k in _used_lower for k in ("chrome", "brave", "chromium")):
+                try:
+                    for _pl in driver.get_log("performance"):
+                        try:
+                            _msg = json.loads(_pl["message"])["message"]
+                            if _msg.get("method") == "Network.requestWillBeSent":
+                                _req = _msg["params"].get("request", {})
+                                _url = _req.get("url", "")
+                                if _url.startswith("http"):
+                                    _net_events.append({
+                                        "url":    _url,
+                                        "method": _req.get("method", "GET"),
+                                        "body":   _req.get("postData", ""),
+                                        "ct":     (_req.get("headers") or {}).get(
+                                                      "content-type", ""),
+                                    })
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
         finally:
             try:
                 driver.quit()
@@ -4345,6 +4937,161 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         if not browser_cookies:
             vc.log("[auth] No cookies captured from browser — cannot build session", "WARNING")
             return None
+
+        # ── Build recording TXT ───────────────────────────────────────────────
+        _cred_names_lp = {"email", "username", "user", "login",
+                          "password", "passwd", "pass"}
+        _rec_lines: list = [
+            "FRACTURE LOGIN SESSION RECORDING",
+            f"Target: {login_url}",
+            f"Browser: {_used_name}",
+            f"Captured: {datetime.now().isoformat(timespec='seconds')}",
+            "",
+        ]
+        _step_n = 0
+        _step_n += 1
+        _rec_lines.append(f"STEP {_step_n:03d}  NAVIGATE  {login_url}")
+        for _ev in sorted(_dom_events, key=lambda e: e.get("seq", 0)):
+            _step_n += 1
+            _et = _ev.get("t", "")
+            if _et == "CLICK":
+                _rec_lines.append(
+                    f"STEP {_step_n:03d}  CLICK     "
+                    f"selector={_ev.get('selector','')}  "
+                    f"text=\"{_ev.get('text','')}\"")
+            elif _et == "INPUT":
+                _rec_lines.append(
+                    f"STEP {_step_n:03d}  INPUT     "
+                    f"selector={_ev.get('selector','')}  "
+                    f"value={_ev.get('value','')}")
+            elif _et == "SUBMIT":
+                _rec_lines.append(
+                    f"STEP {_step_n:03d}  SUBMIT    "
+                    f"action=\"{_ev.get('action','')}\"  "
+                    f"method={_ev.get('method','POST')}  "
+                    f"fields={','.join(_ev.get('fields',[]))}")
+            elif _et == "NAVIGATE":
+                _rec_lines.append(
+                    f"STEP {_step_n:03d}  NAVIGATE  {_ev.get('url','')}")
+
+        # Append network-level POST requests (Chrome only)
+        for _nreq in _net_events:
+            if _nreq.get("method") in ("POST", "PUT", "PATCH") and _nreq.get("url"):
+                _step_n += 1
+                _rec_lines.append(
+                    f"STEP {_step_n:03d}  REQUEST   "
+                    f"{_nreq['method']}  {_nreq['url']}")
+                if _nreq.get("ct"):
+                    _rec_lines.append(f"            Content-Type: {_nreq['ct']}")
+                if _nreq.get("body"):
+                    _body_disp = re.sub(
+                        r'(password|passwd|pass)=[^&\s]+', r'\1=[REDACTED]',
+                        _nreq["body"][:500], flags=re.IGNORECASE,
+                    )
+                    _rec_lines.append(f"            Body: {_body_disp}")
+
+        _step_n += 1
+        _rec_lines.append(f"STEP {_step_n:03d}  NAVIGATE  {captured_url}")
+        for _ck in browser_cookies:
+            _step_n += 1
+            _rec_lines.append(
+                f"STEP {_step_n:03d}  COOKIE    "
+                f"name={_ck.get('name','')}  "
+                f"domain={_ck.get('domain','')}  "
+                f"httpOnly={_ck.get('httpOnly',False)}  "
+                f"secure={_ck.get('secure',False)}")
+
+        # Derive session indicators
+        _si_submit_url  = ""
+        _si_method      = "POST"
+        _si_csrf        = ""
+        _si_carriers    = [c.get("name", "") for c in browser_cookies
+                           if c.get("httpOnly")]
+
+        # Primary: SUBMIT DOM event
+        for _ev in _dom_events:
+            if _ev.get("t") == "SUBMIT" and _ev.get("action"):
+                _si_submit_url = _ev["action"]
+                _si_method     = _ev.get("method", "POST")
+                for _f in _ev.get("fields", []):
+                    if _f.lower() not in _cred_names_lp and len(_f) > 2:
+                        _si_csrf = _f
+                        break
+                break
+
+        # Fallback: first POST network event (Chrome)
+        if not _si_submit_url:
+            for _nreq in _net_events:
+                if _nreq.get("method") in ("POST", "PUT"):
+                    _si_submit_url = _nreq["url"]
+                    _si_method     = _nreq["method"]
+                    break
+
+        # Success URL pattern
+        _si_success = ""
+        _lp_lp = urllib.parse.urlparse(login_url)
+        _lp_cp = urllib.parse.urlparse(captured_url)
+        if _lp_cp.path and _lp_cp.path != _lp_lp.path:
+            _si_success = _lp_cp.path
+
+        _rec_lines += [
+            "",
+            "SESSION INDICATORS",
+            f"  Login URL: {login_url}",
+            f"  Submit URL: {_si_submit_url}",
+            f"  Submit method: {_si_method}",
+            f"  Session cookies: {', '.join(_si_carriers) or '(none detected)'}",
+            f"  CSRF field: {_si_csrf or '(none detected)'}",
+            f"  Success URL pattern: {_si_success}",
+        ]
+        _rec_txt = "\n".join(_rec_lines) + "\n"
+
+        # Write recording to project output dir (or /tmp on fallback)
+        try:
+            _scan_cfg  = cfg.get("scan", {})
+            _proj_root = Path(cfg.get("_project_dir", ""))
+            _proj_sub  = _scan_cfg.get("project", "fracture_output")
+            _rec_dir   = (_proj_root / _proj_sub) if _proj_root.is_dir() else Path(_proj_sub)
+            if not _rec_dir.is_dir():
+                _rec_dir = Path(tempfile.mkdtemp(prefix="fracture_"))
+            _rec_fname = f"login_recording_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            _rec_path  = _rec_dir / _rec_fname
+            _rec_path.write_text(_rec_txt, encoding="utf-8")
+            vc.log(f"[auth] Login session recording saved: {_rec_path}", "SUCCESS")
+        except Exception as _re:
+            vc.log(f"[auth] Could not save recording: {_re}", "WARNING")
+            _rec_path = None
+
+        # Offer to save as a reusable login profile
+        try:
+            _save_ans = vc.prompt(
+                "Save this login session as a reusable profile for future "
+                "automated authentication? [y/N]",
+                prompt_type="text",
+                skippable=True,
+            ).strip().lower()
+            if _save_ans in ("y", "yes"):
+                _recipe = _lp_parse_recording(_rec_txt, login_url)
+                if _recipe:
+                    _pid = (
+                        "lp_"
+                        + datetime.now().strftime("%Y%m%d_%H%M%S")
+                        + "_"
+                        + hashlib.md5(
+                            (_recipe.get("submit_url") or login_url).encode()
+                          ).hexdigest()[:6]
+                    )
+                    _lp_save_profile(_pid, login_url, _used_name, _recipe)
+                    vc.log(f"[auth] Login profile saved: {_pid}", "SUCCESS")
+                else:
+                    vc.log(
+                        "[auth] Insufficient data to build a profile. "
+                        + (f"Review the recording at {_rec_path}."
+                           if _rec_path else "No recording was saved."),
+                        "WARNING",
+                    )
+        except Exception:
+            pass
 
         # Transfer cookies into a fresh scoped session
         new_sess = _make_session(cfg, _scope_hostnames)
@@ -5622,6 +6369,7 @@ DEFAULT_SETTINGS: dict = {
             "graphql": False, "logging_monitoring": True, "account_lockout": True,
             "auth_recon": False, "authorization": False,
             "session": False, "csrf": False, "cross_user": False,
+            "logout": False,   # Phase 22: post-context logout + session lifecycle
             "open_redirect": True, "deserialization": True,
             "file_upload_info": True, "mass_assignment": True,
             "access_matrix":   False,  # Phase 20: multi-credential access matrix
@@ -5766,6 +6514,7 @@ PHASE_LIST = [
     ("mass_assignment", "Phase 19: Mass assignment / privilege escalation testing"),
     ("access_matrix",  "Phase 20: Multi-credential access matrix (BFLA / unauthenticated access)"),
     ("bfla",           "Phase 21: Broken Function Level Authorization — cross-role endpoint replay"),
+    ("logout",         "Phase 22: Logoff detection, session timeout, server-side invalidation (requires auth)"),
 ]
 
 
@@ -7458,33 +8207,113 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
 
-    # ── CDN / WAF presence finding + cache poisoning probes ──────────────────
+    # ── CDN / WAF presence findings + cache poisoning probes ─────────────────
+    _h_lower_recon = {k.lower(): v for k, v in headers.items()}
     if _recon_cdn or _recon_edge_security:
         _waf_cdn_name = _recon_cdn or (_recon_edge_security[0] if _recon_edge_security else "")
         _waf_all = ([_recon_cdn] if _recon_cdn else []) + _recon_edge_security
         _waf_str = ", ".join(_waf_all)
+
+    if _recon_cdn:
+        # CDN identity headers that may appear in the response
+        _cdn_id_headers = [
+            "CF-RAY", "x-vercel-id", "x-nf-request-id", "x-amz-cf-id", "x-amz-cf-pop",
+            "CDN-PullZone", "x-akamai-request-id", "x-akamai-session-info",
+            "akamai-global-host", "x-azure-ref", "x-cdn", "fastly-io-info",
+            "x-check-cacheable",
+        ]
+        _cdn_cache_headers = [
+            "X-Cache", "X-Cache-Status", "X-Cache-Hits", "Age",
+            "Surrogate-Key", "Surrogate-Control", "X-Served-By", "X-Timer",
+            "X-Varnish", "Via",
+        ]
+        _cdn_out = [f"CDN Provider: {_recon_cdn}"]
+        _cdn_id_found = [(h, _h_lower_recon[h.lower()])
+                         for h in _cdn_id_headers if h.lower() in _h_lower_recon]
+        if _cdn_id_found:
+            _cdn_out.append("Identifying headers:")
+            _cdn_out.extend(f"  {h}: {v}" for h, v in _cdn_id_found)
+        _cdn_cache_found = [(h, _h_lower_recon[h.lower()])
+                            for h in _cdn_cache_headers if h.lower() in _h_lower_recon]
+        if _cdn_cache_found:
+            _cdn_out.append("Cache/edge metadata headers:")
+            _cdn_out.extend(f"  {h}: {v}" for h, v in _cdn_cache_found)
+        if server_hdr:
+            _cdn_out.append(f"Edge Server: {server_hdr}")
+        if powered_by:
+            _cdn_out.append(f"X-Powered-By: {powered_by}")
+        if _recon_edge_security:
+            _cdn_out.append(f"Co-located edge security: {', '.join(_recon_edge_security)}")
         out.add_finding(
-            title=f"CDN / WAF Active: {_waf_str}",
+            title=f"CDN Active: {_recon_cdn}",
             url=url, port=target["port"], risk="INFO",
             description=(
-                f"A CDN or WAF layer ({_waf_str}) was identified in front of the target. "
-                "This has the following testing implications:\n"
+                f"A Content Delivery Network ({_recon_cdn}) was identified in front of the target. "
+                "Testing implications:\n"
                 "1. TLS is terminated at the CDN edge — TLS findings reflect the CDN's "
                 "configuration, not the origin server's.\n"
-                "2. WAF rules may suppress or block injection probes (SQLi, XSS, traversal) "
-                "— absence of a finding does not confirm absence of the vulnerability.\n"
-                "3. Directory brute-forcing has been throttled to avoid IP blocks from "
-                "bot-detection. Results may be less comprehensive than against a direct target.\n"
+                "2. Effective response headers and security posture may differ at the origin.\n"
+                "3. Directory brute-forcing has been throttled to reduce IP-block risk.\n"
                 "4. Web cache poisoning is in scope — the CDN caching layer may cache "
                 "attacker-controlled header values and serve them to other users."
             ),
-            output=f"Detected: {_waf_str}",
+            output="\n".join(_cdn_out),
             sources="fracture-recon", service=target["scheme"],
             owasp="A05:2025 Security Misconfiguration", nist="SC-5",
             remediation=(
-                "Ensure the WAF rule set is kept up to date and covers OWASP Top 10 2025. "
-                "Restrict origin server access to CDN IP ranges only. "
-                "Review CDN cache key configuration to prevent web cache poisoning."
+                "Restrict origin server to accept connections only from CDN IP ranges. "
+                "Review CDN cache key configuration to prevent web cache poisoning. "
+                "Ensure security headers are set at the origin, not only at the CDN edge."
+            ),
+            http_code=resp.status_code,
+        )
+
+    if _recon_edge_security:
+        _waf_names = ", ".join(_recon_edge_security)
+        _waf_id_headers = [
+            "x-sucuri-id", "x-sucuri-cache", "x-iinfo", "x-cdn-request-id",
+            "x-imperva-sid", "x-fw-hash", "x-fw-protection-mode", "x-fw-type",
+            "x-f5-cs-sensor-data", "x-f5-riak-bucket", "barra-counter-session",
+            "x-waf-event-info", "x-amzn-waf-action", "x-azure-fdid",
+            "x-distil-cs", "rbzid", "x-modsecurity-id",
+        ]
+        _waf_prefix_found = []
+        for _pfx, _pname in _EDGE_SECURITY_HDR_PREFIXES:
+            if any(k.startswith(_pfx) for k in _h_lower_recon):
+                _matches = [(k, v) for k, v in _h_lower_recon.items() if k.startswith(_pfx)]
+                _waf_prefix_found.extend(f"  {k}: {v}" for k, v in _matches[:3])
+        _waf_id_found = [(h, _h_lower_recon[h.lower()])
+                         for h in _waf_id_headers if h.lower() in _h_lower_recon]
+        _waf_out = [f"Platform(s): {_waf_names}"]
+        if _waf_id_found:
+            _waf_out.append("Identifying headers:")
+            _waf_out.extend(f"  {h}: {v}" for h, v in _waf_id_found)
+        if _waf_prefix_found:
+            _waf_out.append("Prefix-matched headers:")
+            _waf_out.extend(_waf_prefix_found)
+        if _recon_cdn:
+            _waf_out.append(f"Co-located CDN: {_recon_cdn}")
+        if server_hdr:
+            _waf_out.append(f"Server: {server_hdr}")
+        out.add_finding(
+            title=f"WAF / Edge Security Platform Active: {_waf_names}",
+            url=url, port=target["port"], risk="INFO",
+            description=(
+                f"A WAF or edge security platform ({_waf_names}) was identified in front of the target. "
+                "Testing implications:\n"
+                "1. WAF rules may suppress or block injection probes (SQLi, XSS, traversal) "
+                "— absence of a finding does not confirm absence of the vulnerability.\n"
+                "2. Rate-limiting and IP-reputation enforcement may flag scanner traffic.\n"
+                "3. Bot-protection challenges (CAPTCHA, JS challenge) may interrupt automated probes.\n"
+                "4. WAF bypass techniques may reveal vulnerabilities masked by the WAF."
+            ),
+            output="\n".join(_waf_out),
+            sources="fracture-recon", service=target["scheme"],
+            owasp="A05:2025 Security Misconfiguration", nist="SC-7",
+            remediation=(
+                "Keep WAF rule sets up to date and covering OWASP Top 10 2025. "
+                "Do not rely solely on WAF protection — fix underlying vulnerabilities in the application. "
+                "Review WAF bypass techniques relevant to the identified platform."
             ),
             http_code=resp.status_code,
         )
@@ -9229,6 +10058,30 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 "protocols":    sorted({c.get("protocol") for c in _ss_ciphers
                                         if c.get("protocol")}),
             })
+            # Certificate information finding — always emitted when cert data is available
+            if _ss_cert_subject or _ss_cert_issuer or _ss_cert_expiry:
+                _ss_cert_lines = []
+                if _ss_cert_subject:
+                    _ss_cert_lines.append(f"Subject: {_ss_cert_subject}")
+                if _ss_cert_issuer:
+                    _ss_cert_lines.append(f"Issuer: {_ss_cert_issuer}")
+                if _ss_cert_expiry:
+                    _ss_cert_lines.append(f"Not Valid After: {_ss_cert_expiry}")
+                if _ss_cert_valid:
+                    _ss_cert_lines.append(f"Status: {_ss_cert_valid}")
+                out.add_finding(
+                    title="SSL/TLS Certificate Information",
+                    url=target["url"], port=port, risk="INFO",
+                    description=(
+                        f"TLS certificate details for {hostname}:{port}. "
+                        "Certificate subject, issuer, and validity metadata extracted for reference."
+                    ),
+                    output="\n".join(_ss_cert_lines),
+                    sources="sslscan", service="https",
+                    output_file=str(out_f),
+                    owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                    remediation="",
+                )
             # Dedicated Heartbleed check on raw output — the section-header filter
             # removes "  Heartbleed:" so the generic _TLS_VULN_PATTERNS match fails.
             _hb_sect = re.search(
@@ -9443,6 +10296,35 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                     remediation="",
                 )
+            # Certificate information finding — emitted whenever cert metadata is available
+            if _ts_cert_subject or _ts_cert_issuer or _ts_cert_expiry or _ts_cert_san:
+                _ts_cert_lines = []
+                if _ts_cert_subject:
+                    _ts_cert_lines.append(f"Subject: {_ts_cert_subject}")
+                if _ts_cert_issuer:
+                    _ts_cert_lines.append(f"Issuer: {_ts_cert_issuer}")
+                if _ts_cert_expiry:
+                    _ts_cert_lines.append(f"Not Valid After: {_ts_cert_expiry}")
+                if _ts_cert_san:
+                    _ts_cert_lines.append(
+                        f"Subject Alternative Names ({len(_ts_cert_san)}): "
+                        + ", ".join(_ts_cert_san[:30])
+                    )
+                if _ts_grade:
+                    _ts_cert_lines.append(f"TLS Grade: {_ts_grade}")
+                out.add_finding(
+                    title="SSL/TLS Certificate Information",
+                    url=target["url"], port=port, risk="INFO",
+                    description=(
+                        f"TLS certificate details for {hostname}:{port}. "
+                        "Certificate subject, SANs, issuer, validity, and grade extracted for reference."
+                    ),
+                    output="\n".join(_ts_cert_lines),
+                    sources="testssl.sh", service="https",
+                    output_file=str(out_f),
+                    owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                    remediation="",
+                )
             # ── JSON-based structured finding extraction ─────────────────────
             # Preferred over text-pattern matching for structured cert/vuln data.
             if _ts_json_f.exists():
@@ -9613,6 +10495,52 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                     remediation="Configure TLS 1.2/1.3 only.",
                 )
+        except Exception:
+            pass
+        # Certificate information finding — extract cert metadata via raw socket (no sslscan/testssl)
+        try:
+            ctx_raw = _ssl.create_default_context()
+            ctx_raw.check_hostname = False
+            ctx_raw.verify_mode    = _ssl.CERT_NONE
+            with ctx_raw.wrap_socket(
+                socket.create_connection((hostname, port), timeout=10),
+                server_hostname=hostname,
+            ) as _sc_raw:
+                _sock_cert = _sc_raw.getpeercert(binary_form=False)
+            if _sock_cert:
+                _sock_subj  = dict(x[0] for x in _sock_cert.get("subject", ()))
+                _sock_iss   = dict(x[0] for x in _sock_cert.get("issuer", ()))
+                _sock_cn    = _sock_subj.get("commonName", "")
+                _sock_iss_cn = _sock_iss.get("commonName", "")
+                _sock_org   = _sock_iss.get("organizationName", "")
+                _sock_expiry = _sock_cert.get("notAfter", "")
+                _sock_sans  = [v for (t, v) in _sock_cert.get("subjectAltName", []) if t == "DNS"]
+                _sock_cert_lines = []
+                if _sock_cn:
+                    _sock_cert_lines.append(f"Subject CN: {_sock_cn}")
+                _issuer_label = f"{_sock_iss_cn}" + (f" ({_sock_org})" if _sock_org else "")
+                if _issuer_label.strip():
+                    _sock_cert_lines.append(f"Issuer: {_issuer_label}")
+                if _sock_expiry:
+                    _sock_cert_lines.append(f"Not Valid After: {_sock_expiry}")
+                if _sock_sans:
+                    _sock_cert_lines.append(
+                        f"Subject Alternative Names ({len(_sock_sans)}): "
+                        + ", ".join(_sock_sans[:30])
+                    )
+                if _sock_cert_lines:
+                    out.add_finding(
+                        title="SSL/TLS Certificate Information",
+                        url=target["url"], port=port, risk="INFO",
+                        description=(
+                            f"TLS certificate details for {hostname}:{port}. "
+                            "Certificate subject, SANs, issuer, and expiry extracted for reference."
+                        ),
+                        output="\n".join(_sock_cert_lines),
+                        sources="fracture-tls-socket", service="https",
+                        owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                        remediation="",
+                    )
         except Exception:
             pass
         # Certificate trust check — detects self-signed and expired certs
@@ -15308,7 +16236,11 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
     phase   = "session"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
-    vc.status(phase, "Session Analysis", "running", "Token entropy", 0, 4)
+    vc.status(phase, "Session Analysis", "running", "Token entropy", 0, 5)
+    _SESS_LOGIN_RE = re.compile(
+        r'login|sign.?in|auth(?:enticate)?|session.?expired|timed.?out|'
+        r'please.{0,20}log.{0,10}in', re.I
+    )
 
     # 1. Analyse session token entropy
     for cookie in auth_sess.cookies:
@@ -15342,7 +16274,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                 remediation="Use cryptographically secure random session identifiers.",
             )
 
-    vc.status(phase, "Session Analysis", "running", "Session fixation", 1, 4)
+    vc.status(phase, "Session Analysis", "running", "Session fixation", 1, 5)
     # 2. Session fixation — check if server accepts user-provided session ID
     fixed_id = "fracture_fixed_session_12345678"
     try:
@@ -15373,8 +16305,190 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
     except Exception:
         pass
 
-    vc.status(phase, "Session Analysis", "running", "Logout invalidation", 2, 4)
-    # 3. Check logout invalidation
+    vc.status(phase, "Session Analysis", "running", "Session management UI", 2, 5)
+    # 3. Active session management UI detection (OWASP WSTG-SESS-06)
+    # Probe common paths where apps expose an interface to view/close active sessions.
+    _SESS_MGMT_PATHS = (
+        "/sessions", "/active-sessions", "/account/sessions", "/user/sessions",
+        "/settings/security", "/security/sessions", "/account/security",
+        "/profile/sessions", "/me/sessions", "/api/sessions",
+        "/api/active-sessions", "/api/v1/sessions",
+    )
+    _sess_mgmt_found = None
+    for _smp in _SESS_MGMT_PATHS:
+        try:
+            _r_sm = auth_sess.get(url.rstrip("/") + _smp, timeout=timeout,
+                                  allow_redirects=True)
+            if (_r_sm.status_code == 200
+                    and not _SESS_LOGIN_RE.search(_r_sm.text[:600])):
+                _sess_mgmt_found = url.rstrip("/") + _smp
+                break
+        except Exception:
+            pass
+
+    if _sess_mgmt_found:
+        out.add_finding(
+            title="Active Session Management Interface Detected",
+            url=_sess_mgmt_found, port=target["port"], risk="INFO",
+            description=(
+                f"An active session management endpoint was found at "
+                f"{_sess_mgmt_found}. This interface may allow users to view "
+                f"and revoke other sessions — verify it is properly "
+                f"access-controlled and cannot be abused to terminate other "
+                f"users' sessions."
+            ),
+            output=f"Session management URL: {_sess_mgmt_found}",
+            sources="fracture-session", service=target["scheme"],
+            owasp="A07:2025 Identification and Authentication Failures",
+            nist="AC-17",
+            remediation=(
+                "Ensure the session management interface enforces authorisation — "
+                "users must only be able to view and revoke their own sessions. "
+                "Log all session revocation events."
+            ),
+        )
+        vc.log(f"[session] Active session management UI: {_sess_mgmt_found}", "SUCCESS")
+    else:
+        vc.log("[session] No active session management interface found at common paths", "INFO")
+
+    vc.status(phase, "Session Analysis", "running", "Cookie security flags", 3, 5)
+    # 4. Cookie security flag audit
+    # Collect all cookies missing Secure, HttpOnly, or SameSite.
+    # Groups by flag type to produce one finding per issue, not per cookie,
+    # so the report is clean even on apps that set many cookies.
+    _miss_secure:   list = []
+    _miss_httponly: list = []
+    _miss_samesite: list = []
+    _bad_samesite_none: list = []
+
+    for _ck in auth_sess.cookies:
+        # Secure flag (standard http.cookiejar attribute)
+        if not _ck.secure:
+            _miss_secure.append(_ck.name)
+
+        # HttpOnly flag (non-standard, stored in _rest by requests)
+        _httponly = False
+        try:
+            _httponly = _ck.has_nonstandard_attr("HttpOnly")
+        except Exception:
+            try:
+                _httponly = "HttpOnly" in (_ck._rest or {})
+            except Exception:
+                pass
+        if not _httponly:
+            _miss_httponly.append(_ck.name)
+
+        # SameSite attribute
+        _samesite = ""
+        try:
+            _samesite = ((_ck._rest or {}).get("SameSite") or "").strip()
+        except Exception:
+            pass
+        if not _samesite:
+            _miss_samesite.append(_ck.name)
+        elif _samesite.lower() == "none" and not _ck.secure:
+            # SameSite=None requires Secure; without it modern browsers reject
+            # the attribute and fall back to SameSite=Lax — a misconfiguration.
+            _bad_samesite_none.append(_ck.name)
+
+    if _miss_secure:
+        out.add_finding(
+            title="Session Cookie Missing Secure Flag",
+            url=url, port=target["port"], risk="MEDIUM",
+            description=(
+                f"The following session cookie(s) are transmitted without the Secure "
+                f"flag: {', '.join(_miss_secure)}. "
+                f"Without Secure, the cookie is sent over unencrypted HTTP connections, "
+                f"making it vulnerable to interception by a network-level attacker."
+            ),
+            output=f"Cookies without Secure: {', '.join(_miss_secure)}",
+            sources="fracture-session", service=target["scheme"],
+            owasp="A02:2025 Cryptographic Failures",
+            nist="SC-8",
+            remediation=(
+                "Set the Secure attribute on all session and auth cookies. "
+                "Enforce HTTPS at the application and infrastructure level."
+            ),
+        )
+        vc.log(f"[session] Missing Secure flag: {', '.join(_miss_secure)}", "SUCCESS")
+
+    if _miss_httponly:
+        out.add_finding(
+            title="Session Cookie Missing HttpOnly Flag",
+            url=url, port=target["port"], risk="MEDIUM",
+            description=(
+                f"The following cookie(s) lack the HttpOnly attribute: "
+                f"{', '.join(_miss_httponly)}. "
+                f"Without HttpOnly, JavaScript running in the browser (e.g. via XSS) "
+                f"can read the cookie value with document.cookie, enabling session hijacking."
+            ),
+            output=f"Cookies without HttpOnly: {', '.join(_miss_httponly)}",
+            sources="fracture-session", service=target["scheme"],
+            owasp="A07:2025 Identification and Authentication Failures",
+            nist="SC-23",
+            remediation=(
+                "Set the HttpOnly attribute on all session and authentication cookies. "
+                "Cookies used purely by client-side JavaScript do not require HttpOnly, "
+                "but session identifiers always should."
+            ),
+        )
+        vc.log(f"[session] Missing HttpOnly flag: {', '.join(_miss_httponly)}", "SUCCESS")
+
+    if _miss_samesite:
+        out.add_finding(
+            title="Session Cookie Missing SameSite Attribute",
+            url=url, port=target["port"], risk="MEDIUM",
+            description=(
+                f"The following cookie(s) have no SameSite attribute: "
+                f"{', '.join(_miss_samesite)}. "
+                f"Without SameSite, cookies are sent with cross-site requests, "
+                f"leaving the application reliant solely on CSRF tokens for protection. "
+                f"Modern browsers default to SameSite=Lax but this cannot be relied upon "
+                f"for all clients."
+            ),
+            output=f"Cookies without SameSite: {', '.join(_miss_samesite)}",
+            sources="fracture-session", service=target["scheme"],
+            owasp="A04:2025 Insecure Design",
+            nist="SI-10",
+            remediation=(
+                "Add SameSite=Strict or SameSite=Lax to all session cookies. "
+                "Use SameSite=None only for cookies that must be sent cross-origin, "
+                "and only in combination with the Secure flag."
+            ),
+        )
+        vc.log(f"[session] Missing SameSite: {', '.join(_miss_samesite)}", "SUCCESS")
+
+    if _bad_samesite_none:
+        out.add_finding(
+            title="Session Cookie SameSite=None Without Secure Flag",
+            url=url, port=target["port"], risk="MEDIUM",
+            description=(
+                f"The following cookie(s) are set with SameSite=None but without "
+                f"the Secure flag: {', '.join(_bad_samesite_none)}. "
+                f"The SameSite=None attribute requires Secure — modern browsers will "
+                f"reject or ignore SameSite=None on non-HTTPS responses, and the cookie "
+                f"will be sent over unencrypted connections."
+            ),
+            output=f"Cookies with SameSite=None but no Secure: {', '.join(_bad_samesite_none)}",
+            sources="fracture-session", service=target["scheme"],
+            owasp="A02:2025 Cryptographic Failures",
+            nist="SC-8",
+            remediation=(
+                "Add the Secure flag to all SameSite=None cookies. "
+                "If the Secure flag cannot be added, change SameSite to Lax or Strict."
+            ),
+        )
+        vc.log(
+            f"[session] SameSite=None without Secure: {', '.join(_bad_samesite_none)}",
+            "SUCCESS"
+        )
+
+    if not any((_miss_secure, _miss_httponly, _miss_samesite, _bad_samesite_none)):
+        vc.log("[session] Cookie security flags: all checked cookies appear correctly configured",
+               "INFO")
+
+    vc.status(phase, "Session Analysis", "running", "Logout invalidation", 4, 5)
+    # 5. Check logout invalidation
     # IMPORTANT: Never use auth_sess itself for logout probing — hitting /logout
     # on the live session object invalidates the server-side session and breaks all
     # subsequent authenticated phases.  Use two disposable clones instead:
@@ -15412,8 +16526,471 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
 
-    vc.status(phase, "Session Analysis", "complete", "Done", 4, 4)
+    vc.status(phase, "Session Analysis", "complete", "Done", 5, 5)
     vc.log("[session] Phase complete", "SUCCESS")
+
+
+# ─────────────────────────────────────────────
+# Phase 22: Logout (post-context, runs once)
+# ─────────────────────────────────────────────
+def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
+                  out: OutputManager,
+                  completed_role_sessions: dict,
+                  all_crawl_links: list) -> None:
+    """Post-context: missing logoff detection, session timeout probe,
+    and server-side logout invalidation testing.
+
+    Runs once, against the first completed authenticated role.  Uses only
+    disposable clone sessions — the live sessions in completed_role_sessions
+    are never touched so that access_matrix (which runs after) still has
+    valid sessions for its probes.
+    """
+    phase   = "logout"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+
+    # Pick the first authenticated role's session
+    _logout_role_label = None
+    _logout_src_sess   = None
+    for _lbl, _s in completed_role_sessions.items():
+        if _lbl != "unauthenticated" and _s is not None:
+            _logout_role_label = _lbl
+            _logout_src_sess   = _s
+            break
+
+    if _logout_src_sess is None:
+        vc.log("[logout] No authenticated sessions available — skipping phase", "INFO")
+        return
+
+    vc.log(f"[logout] Testing session lifecycle for role: {_logout_role_label}", "INFO")
+    vc.status(phase, "Logout Testing", "running", "Logoff function detection", 0, 5)
+
+    _LOGOUT_URL_RE = re.compile(
+        r'/(?:logout|signout|sign.?out|logoff|log.?off|sign_out|log_out|'
+        r'session[/_]?destroy|auth[/_]?logout|account[/_]?logout|'
+        r'user[/_]?logout|api[/_]?(?:logout|signout)|end.?session|bye|exit)',
+        re.I
+    )
+
+    # ── 1. Missing logoff function detection ───────────────────────────────
+    _logout_url = None
+
+    # Search crawl links
+    for _link in all_crawl_links:
+        if _LOGOUT_URL_RE.search(_link):
+            _logout_url = _link
+            break
+
+    # Search structure_map.json
+    if not _logout_url:
+        _sm_path = out.root / "structure_map.json"
+        if _sm_path.exists():
+            try:
+                _sm = json.loads(_sm_path.read_text(encoding="utf-8"))
+                for _pkey in _sm.keys():
+                    if _LOGOUT_URL_RE.search(_pkey):
+                        _logout_url = url.rstrip("/") + _pkey
+                        break
+            except Exception:
+                pass
+
+    # Probe common logout paths
+    if not _logout_url:
+        for _lpath in ("/logout", "/signout", "/logoff", "/sign-out", "/log-out",
+                       "/auth/logout", "/api/logout", "/session/destroy",
+                       "/account/logout", "/user/logout"):
+            try:
+                _clone = _make_session(cfg)
+                for _cn, _cv in dict(_logout_src_sess.cookies).items():
+                    _clone.cookies.set(_cn, _cv)
+                _rp = _clone.get(url.rstrip("/") + _lpath, timeout=timeout,
+                                 allow_redirects=False)
+                if _rp.status_code in (200, 301, 302, 303):
+                    _logout_url = url.rstrip("/") + _lpath
+                    break
+            except Exception:
+                pass
+
+    if not _logout_url:
+        out.add_finding(
+            title="No Logout (Logoff) Function Detected",
+            url=url, port=target["port"], risk="MEDIUM",
+            description=(
+                "No logout or session-termination endpoint was found in the "
+                "crawl data, structure map, or at common logout paths. "
+                "Users may be unable to explicitly invalidate their sessions, "
+                "leaving stolen tokens usable indefinitely."
+            ),
+            output=(
+                "Checked: crawl links, structure_map, and common paths "
+                "(/logout /signout /logoff /sign-out /log-out "
+                "/auth/logout /api/logout /session/destroy)"
+            ),
+            sources="fracture-logout", service=target["scheme"],
+            owasp="A07:2025 Identification and Authentication Failures",
+            nist="SC-23",
+            remediation=(
+                "Implement an explicit logout endpoint. On logout, invalidate "
+                "the session server-side and instruct the client to clear session "
+                "cookies (Set-Cookie: ...; Max-Age=0)."
+            ),
+        )
+        vc.log("[logout] No logout function detected", "SUCCESS")
+    else:
+        vc.log(f"[logout] Logout endpoint identified: {_logout_url}", "INFO")
+
+    # ── 2. Session idle timeout probe (up to 600s / 10 minutes) ───────────
+    vc.status(phase, "Logout Testing", "running", "Session timeout probe", 1, 5)
+
+    # Clone source session cookies into an idle probe session that is
+    # never refreshed during the wait, giving the server a truly idle token.
+    _idle_probe = _make_session(cfg)
+    for _cn, _cv in dict(_logout_src_sess.cookies).items():
+        _idle_probe.cookies.set(_cn, _cv)
+
+    _TIMEOUT_EXPIRED_RE = re.compile(
+        r'login|sign.?in|auth(?:enticate)?|session.?expired|timed.?out|'
+        r'please.{0,20}log.{0,10}in|your session|access denied', re.I
+    )
+
+    # Check session cookie Max-Age / Expires for a pre-configured long lifetime
+    for _ck in _logout_src_sess.cookies:
+        if re.search(r'sess|token|auth|sid', _ck.name, re.I):
+            if hasattr(_ck, 'expires') and _ck.expires:
+                _remaining = _ck.expires - int(time.time())
+                if _remaining > 1800:   # > 30 minutes
+                    _timeout_mins = _remaining // 60
+                    out.add_finding(
+                        title="Excessive Session Timeout Configured",
+                        url=url, port=target["port"], risk="MEDIUM",
+                        description=(
+                            f"The session cookie '{_ck.name}' has a configured "
+                            f"absolute expiry of approximately {_timeout_mins} minutes. "
+                            f"OWASP recommends 15–30 minutes of idle timeout for "
+                            f"sensitive applications."
+                        ),
+                        output=f"Cookie: {_ck.name} | Configured expiry: ~{_timeout_mins} min",
+                        sources="fracture-logout", service=target["scheme"],
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="AC-11",
+                        remediation=(
+                            "Reduce session lifetime to 15–30 minutes for sensitive "
+                            "applications. Complement absolute expiry with server-side "
+                            "idle timeout independent of the cookie's Max-Age."
+                        ),
+                    )
+                    vc.log(
+                        f"[logout] Cookie '{_ck.name}' expires in ~{_timeout_mins} min "
+                        f"(MEDIUM — excessive)", "SUCCESS"
+                    )
+            break
+
+    _timeout_interval = 60    # seconds between idle probes
+    _timeout_max      = 600   # 10-minute ceiling
+    _timeout_elapsed  = 0
+    _timeout_detected = False
+    _timeout_at       = None
+
+    vc.log(
+        f"[logout] Starting idle timeout probe — checking every {_timeout_interval}s "
+        f"for up to {_timeout_max // 60} minutes ...", "INFO"
+    )
+
+    while _timeout_elapsed < _timeout_max:
+        time.sleep(_timeout_interval)
+        _timeout_elapsed += _timeout_interval
+        try:
+            _r_idle = _idle_probe.get(url, timeout=timeout, allow_redirects=True)
+            _expired = (
+                _r_idle.status_code in (401, 403)
+                or _TIMEOUT_EXPIRED_RE.search(_r_idle.url or "")
+                or _TIMEOUT_EXPIRED_RE.search(_r_idle.text[:2000])
+            )
+            if _expired:
+                _timeout_detected = True
+                _timeout_at       = _timeout_elapsed
+                _tm = _timeout_at // 60
+                _ts = _timeout_at % 60
+                vc.log(
+                    f"[logout] Session expired after {_tm}m {_ts}s of idle — "
+                    f"timeout active", "INFO"
+                )
+                break
+            vc.log(f"[logout] Idle probe: session still valid at {_timeout_elapsed}s", "INFO")
+        except Exception:
+            pass
+
+    if not _timeout_detected:
+        out.add_finding(
+            title="Session Timeout Absent or Excessive",
+            url=url, port=target["port"], risk="HIGH",
+            description=(
+                f"The authenticated session remained valid after {_timeout_max} seconds "
+                f"({_timeout_max // 60} minutes) of inactivity. No server-side idle "
+                f"timeout was detected. An attacker who obtains a valid session token "
+                f"can exploit it indefinitely without time pressure."
+            ),
+            output=(
+                f"Idle probe: session accepted at every {_timeout_interval}s check "
+                f"for {_timeout_max}s total. No 401/403 response; no redirect to login."
+            ),
+            sources="fracture-logout", service=target["scheme"],
+            owasp="A07:2025 Identification and Authentication Failures",
+            nist="AC-11",
+            remediation=(
+                "Implement an idle session timeout of 15–30 minutes for sensitive "
+                "applications. Expire the server-side session record on inactivity — "
+                "do not rely solely on cookie Max-Age. Display a warning to the user "
+                "before automatic expiry."
+            ),
+        )
+        vc.log("[logout] No session timeout detected after 600s idle", "SUCCESS")
+
+    # ── 3. Server-side logout invalidation ────────────────────────────────
+    _REDIR_LOGIN_RE = re.compile(
+        r'login|sign.?in|auth(?:enticate)?|session.?expired', re.I
+    )
+
+    if _logout_url:
+        vc.status(phase, "Logout Testing", "running", "Server-side invalidation check", 2, 5)
+
+        _pre_logout_cookies = dict(_logout_src_sess.cookies)
+
+        # Identify an authenticated endpoint for post-logout probing
+        _auth_probe_url = url
+        _sm_path = out.root / "structure_map.json"
+        if _sm_path.exists():
+            try:
+                _sm2 = json.loads(_sm_path.read_text(encoding="utf-8"))
+                for _p2, _inf2 in _sm2.items():
+                    if (isinstance(_inf2, dict)
+                            and _inf2.get("status") == 200
+                            and not _LOGOUT_URL_RE.search(_p2)):
+                        _auth_probe_url = url.rstrip("/") + _p2
+                        break
+            except Exception:
+                pass
+
+        # Disposable logout session — clone pre-logout cookies, hit logout endpoint
+        _logout_probe = _make_session(cfg)
+        for _cn, _cv in _pre_logout_cookies.items():
+            _logout_probe.cookies.set(_cn, _cv)
+
+        _r_logout = None
+        try:
+            _r_logout = _logout_probe.get(
+                _logout_url, timeout=timeout, allow_redirects=True
+            )
+            vc.log(f"[logout] Logout request → HTTP {_r_logout.status_code}", "INFO")
+        except Exception as _le:
+            vc.log(f"[logout] Logout request failed: {_le}", "WARNING")
+
+        if _r_logout is not None:
+            vc.status(phase, "Logout Testing", "running", "Verifying old session rejected", 3, 5)
+
+            _old_sess = _make_session(cfg)
+            for _cn, _cv in _pre_logout_cookies.items():
+                _old_sess.cookies.set(_cn, _cv)
+
+            try:
+                time.sleep(1)   # allow server to process logout before probing
+                _r_old = _old_sess.get(_auth_probe_url, timeout=timeout, allow_redirects=True)
+
+                _still_valid = (
+                    _r_old.status_code == 200
+                    and not _REDIR_LOGIN_RE.search(_r_old.url or "")
+                    and not _REDIR_LOGIN_RE.search(_r_old.text[:3000])
+                )
+
+                if _still_valid:
+                    out.add_finding(
+                        title="Session Not Invalidated Server-Side After Logout",
+                        url=_logout_url, port=target["port"], risk="HIGH",
+                        description=(
+                            f"After sending a logout request to {_logout_url}, the "
+                            f"pre-logout session cookies were still accepted by the server. "
+                            f"A request to {_auth_probe_url} returned HTTP "
+                            f"{_r_old.status_code} without redirecting to a login page, "
+                            f"indicating the session was not invalidated server-side."
+                        ),
+                        output=(
+                            f"Logout:          {_logout_url} → HTTP {_r_logout.status_code}\n"
+                            f"Old session re-use: {_auth_probe_url} → "
+                            f"HTTP {_r_old.status_code} (cookies accepted)"
+                        ),
+                        sources="fracture-logout", service=target["scheme"],
+                        affected=_logout_url,
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="SC-23",
+                        remediation=(
+                            "Invalidate the session token in the server-side session store "
+                            "(database, cache, or token blacklist) on logout. "
+                            "Relying on client-side cookie deletion alone is insufficient."
+                        ),
+                        http_code=_r_old.status_code,
+                    )
+                    vc.log(
+                        "[logout] Server-side invalidation FAILED — old session still accepted",
+                        "SUCCESS"
+                    )
+                else:
+                    vc.log(
+                        f"[logout] Server-side invalidation confirmed — old session rejected "
+                        f"(HTTP {_r_old.status_code})", "INFO"
+                    )
+            except Exception as _ve:
+                vc.log(f"[logout] Old-session validation probe failed: {_ve}", "WARNING")
+
+    # ── 4. Concurrent session limit testing ───────────────────────────────
+    # Creates two fresh login sessions with the same credentials (never touching
+    # the live scan sessions), checks whether the first is invalidated when the
+    # second authenticates, then cleans up both test sessions.
+    # Runs AFTER access_matrix so even a single-session-per-user application cannot
+    # disrupt earlier authenticated phase testing.
+    vc.status(phase, "Logout Testing", "running", "Concurrent session limit", 4, 5)
+
+    _auth_cfg    = cfg.get("auth", {})
+    _auth_method = (
+        _auth_cfg.get("method") or _auth_cfg.get("auth_method") or ""
+    ).lower()
+    # Methods where re-login with the same credentials is feasible
+    _SKIP_CONCURRENT_METHODS = frozenset({
+        "session_cookie", "webauthn_probe", "mtls",
+        "kerberos", "kerberos_delegation",
+        "oauth2_client_creds", "saml_assertion", "oidc_token",
+    })
+    _concurrent_testable = (
+        _auth_cfg.get("enabled")
+        and bool(_auth_cfg.get("username"))
+        and bool(_auth_cfg.get("password"))
+        and _auth_method not in _SKIP_CONCURRENT_METHODS
+    )
+
+    if not _concurrent_testable:
+        vc.log(
+            "[logout] Concurrent session test skipped — auth method or credentials "
+            "do not support automated re-login", "INFO"
+        )
+    else:
+        vc.log("[logout] Building test sessions for concurrent session limit check ...", "INFO")
+        _test_sess_a = None
+        _test_sess_b = None
+        try:
+            # Session A — first fresh login with primary credentials
+            _test_sess_a = _build_auth_session(cfg, "auth", no_interactive=True)
+        except Exception as _bse:
+            vc.log(f"[logout] Could not build test session A: {_bse}", "WARNING")
+
+        if _test_sess_a is not None:
+            # Verify session A is authenticated before proceeding
+            _a_ok = False
+            try:
+                _r_a = _test_sess_a.get(url, timeout=timeout, allow_redirects=True)
+                _a_ok = (
+                    _r_a.status_code == 200
+                    and not _REDIR_LOGIN_RE.search(_r_a.url or "")
+                )
+            except Exception:
+                pass
+
+            if not _a_ok:
+                vc.log("[logout] Test session A not authenticated — skipping concurrent test",
+                       "WARNING")
+            else:
+                try:
+                    # Session B — second fresh login with the same credentials
+                    _test_sess_b = _build_auth_session(cfg, "auth", no_interactive=True)
+                except Exception as _bse2:
+                    vc.log(f"[logout] Could not build test session B: {_bse2}", "WARNING")
+
+                if _test_sess_b is not None:
+                    # Brief pause to let the server associate session B before re-probing A
+                    time.sleep(2)
+
+                    _a_still_valid = False
+                    try:
+                        _r_a2 = _test_sess_a.get(url, timeout=timeout, allow_redirects=True)
+                        _a_still_valid = (
+                            _r_a2.status_code == 200
+                            and not _REDIR_LOGIN_RE.search(_r_a2.url or "")
+                        )
+                    except Exception:
+                        pass
+
+                    if not _a_still_valid:
+                        out.add_finding(
+                            title="Concurrent Session Limit Enforced",
+                            url=url, port=target["port"], risk="INFO",
+                            description=(
+                                "A new login with the same credentials invalidated the "
+                                "preceding session, indicating the application enforces "
+                                "a concurrent session limit (one active session per user). "
+                                "This reduces the window of exposure from stolen tokens "
+                                "but may also cause denial of service if sessions are "
+                                "terminated unexpectedly."
+                            ),
+                            output=(
+                                "Test session A authenticated successfully. "
+                                "After test session B logged in with the same credentials, "
+                                "test session A was rejected (login redirect or 401/403)."
+                            ),
+                            sources="fracture-logout", service=target["scheme"],
+                            owasp="A07:2025 Identification and Authentication Failures",
+                            nist="AC-10",
+                            remediation=(
+                                "If intentional, notify users when a new login terminates "
+                                "existing sessions. If unintentional, review session store "
+                                "logic to ensure concurrent sessions are supported where needed."
+                            ),
+                        )
+                        vc.log(
+                            "[logout] Concurrent session limit ENFORCED — session A invalidated "
+                            "by session B login", "SUCCESS"
+                        )
+                    else:
+                        out.add_finding(
+                            title="No Concurrent Session Limit Detected",
+                            url=url, port=target["port"], risk="LOW",
+                            description=(
+                                "Two simultaneous authenticated sessions using the same "
+                                "credentials were active without either being invalidated. "
+                                "The application does not appear to enforce a concurrent "
+                                "session limit. A stolen session token remains valid even "
+                                "after the legitimate user logs in again from another device."
+                            ),
+                            output=(
+                                "Test session A and test session B were both authenticated "
+                                "simultaneously with the same credentials. Session A "
+                                "remained valid after session B authenticated."
+                            ),
+                            sources="fracture-logout", service=target["scheme"],
+                            owasp="A07:2025 Identification and Authentication Failures",
+                            nist="AC-10",
+                            remediation=(
+                                "Consider enforcing a maximum of one or a small number of "
+                                "concurrent sessions per user. Provide a session management "
+                                "UI so users can view and revoke active sessions."
+                            ),
+                        )
+                        vc.log(
+                            "[logout] No concurrent session limit — both test sessions valid "
+                            "simultaneously", "SUCCESS"
+                        )
+
+                    # Clean up: attempt logout on both test sessions
+                    for _ts in (_test_sess_a, _test_sess_b):
+                        if _ts is None:
+                            continue
+                        for _tlpath in ("/logout", "/signout", "/auth/logout"):
+                            try:
+                                _ts.get(url.rstrip("/") + _tlpath, timeout=timeout,
+                                        allow_redirects=False)
+                                break
+                            except Exception:
+                                pass
+
+    vc.status(phase, "Logout Testing", "complete", "Done", 5, 5)
+    vc.log("[logout] Phase complete", "SUCCESS")
 
 
 # ─────────────────────────────────────────────
@@ -15854,6 +17431,21 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                     break
             except Exception:
                 pass
+
+        # 405 Method Not Allowed means the endpoint rejects the HTTP method entirely —
+        # the authentication logic is never reached, so no conclusion about rate limiting
+        # can be drawn. Skip the finding; log the method mismatch for visibility.
+        # Similarly skip on 404/501 which indicate the endpoint does not exist at all.
+        _invalid_method_codes = {405, 404, 501}
+        if status_codes and all(s in _invalid_method_codes for s in status_codes):
+            _dominant = max(set(status_codes), key=status_codes.count)
+            vc.log(
+                f"[account_lockout] All {len(status_codes)} probes returned HTTP {_dominant} "
+                f"on {action} — endpoint does not accept {method} requests; "
+                "rate-limiting cannot be assessed via this method. Skipping finding.",
+                "INFO",
+            )
+            continue
 
         if len(status_codes) >= 10:
             # All 10 requests succeeded without lockout — capture evidence
@@ -17174,7 +18766,7 @@ def main() -> None:
     if args.no_ffuf:
         cfg["phases"]["ffuf"] = False
     if args.no_auth:
-        for auth_phase in ("auth_recon", "authorization", "session", "csrf", "cross_user"):
+        for auth_phase in ("auth_recon", "authorization", "session", "csrf", "cross_user", "logout"):
             cfg["phases"][auth_phase] = False
     if args.browser_auth:
         cfg["browser_auth"] = True
@@ -18802,6 +20394,24 @@ def main() -> None:
             except Exception as e:
                 vc.error(f"Phase access_matrix error: {e}")
                 pm.set_phase_status("access_matrix", "error", detail=str(e))
+
+        # ── Phase 22: logout ──
+        # Deliberately placed AFTER access_matrix so that concurrent session limit
+        # testing (which re-authenticates with the same credentials) cannot disrupt
+        # the pre-built sessions that access_matrix relies on.
+        if not _skip("logout"):
+            if not _completed_role_sessions:
+                vc.log("[logout] No authenticated sessions completed — skipping", "WARNING")
+                pm.set_phase_status("logout", "skipped", "logout")
+            else:
+                pm.set_phase_status("logout", "running", "Logout Testing")
+                try:
+                    _phase_logout(target, cfg, pm, out,
+                                  _completed_role_sessions, _all_crawl_links)
+                    pm.set_phase_status("logout", "complete", "Logout Testing")
+                except Exception as e:
+                    vc.error(f"Phase logout error: {e}")
+                    pm.set_phase_status("logout", "error", detail=str(e))
 
         # Write summary
         try:
