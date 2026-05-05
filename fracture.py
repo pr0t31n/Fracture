@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.26"
+VERSION = "2.12.27"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1821,7 +1821,7 @@ def _get_spa_browser() -> "str | None":
 # structural fingerprint of a login page plus a replay recipe so that future
 # encounters with matching pages can be authenticated without opening a browser.
 # ─────────────────────────────────────────────────────────────────────────────
-_LP_STORE_DIR       = Path("/opt/pr0t31n/Fracture/login_profiles")
+_LP_STORE_DIR       = Path.home() / ".fracture" / "login_profiles"
 _LP_INDEX_PATH      = _LP_STORE_DIR / "index.json"
 _LP_MATCH_THRESHOLD = 0.75
 
@@ -5908,6 +5908,15 @@ document.addEventListener('submit', function(e) {
         def _spa_render_login_url(url: str) -> str:
             """Render *url* in a headless browser, wait for the SPA to
             initialise, then scan the live DOM for login-nav links.
+
+            Two-pass strategy:
+              1. Scan rendered page_source with _scan_page_for_login_nav.
+              2. If that finds nothing (common for Angular/React buttons with
+                 no href/onclick attribute), locate login-text elements via
+                 XPath, click them in the live driver, and capture the URL
+                 the browser navigates to.  This handles Angular router links
+                 that emit navigation events on click rather than plain hrefs.
+
             Falls back gracefully if Selenium is unavailable.
             Returns the login URL on success, empty string otherwise.
             """
@@ -5919,6 +5928,7 @@ document.addEventListener('submit', function(e) {
             _drv = None
             try:
                 from selenium import webdriver as _swd2
+                from selenium.webdriver.common.by import By as _By2
                 if _br == "firefox":
                     from selenium.webdriver.firefox.options import Options as _FFO2
                     _fo = _FFO2()
@@ -5942,6 +5952,67 @@ document.addEventListener('submit', function(e) {
                 _time2.sleep(3)   # allow SPA framework to render
                 _rendered_html = _drv.page_source
                 _rendered_url  = _drv.current_url or url
+
+                # Pass 1: scan rendered HTML with the standard nav-link scanner
+                try:
+                    import types as _types2
+                    _fake = _types2.SimpleNamespace(text=_rendered_html, url=_rendered_url)
+                    _spa_found = _scan_page_for_login_nav(_fake)
+                    if _spa_found:
+                        vc.log(
+                            f"[auth] Login link found via browser-rendered DOM: {_spa_found}",
+                            "SUCCESS",
+                        )
+                        return _spa_found
+                except Exception:
+                    pass
+
+                # Pass 2: HTML scan found no clickable URL (Angular/React buttons
+                # that rely on router event listeners have no href or onclick in
+                # the DOM).  Find login-text elements via XPath and click them;
+                # capture the URL the browser lands on after the navigation.
+                _pre_click_url = (_drv.current_url or url).rstrip("/")
+                # XPath expressions ordered by specificity — exact match first,
+                # then contains-based fallback for labels with extra whitespace.
+                _lx_upper = "translate(normalize-space(.)," \
+                             "'abcdefghijklmnopqrstuvwxyz'," \
+                             "'ABCDEFGHIJKLMNOPQRSTUVWXYZ')"
+                _login_xpaths = [
+                    f"//*[{_lx_upper}='LOG IN']",
+                    f"//*[{_lx_upper}='LOGIN']",
+                    f"//*[{_lx_upper}='SIGN IN']",
+                    f"//*[{_lx_upper}='SIGNIN']",
+                    f"//*[contains({_lx_upper},'LOG IN')]",
+                    f"//*[contains({_lx_upper},'SIGN IN')]",
+                ]
+                for _lxp in _login_xpaths:
+                    try:
+                        _els2 = _drv.find_elements(_By2.XPATH, _lxp)
+                        for _el2 in _els2:
+                            try:
+                                if not (_el2.is_displayed() and _el2.is_enabled()):
+                                    continue
+                                _el_label = (_el2.text or "").strip()
+                                vc.log(
+                                    f"[auth] Clicking SPA login element: "
+                                    f"'{_el_label}' at {url}",
+                                    "INFO",
+                                )
+                                _el2.click()
+                                _time2.sleep(3)
+                                _post_click_url = (_drv.current_url or "").rstrip("/")
+                                if (_post_click_url
+                                        and _post_click_url != _pre_click_url):
+                                    vc.log(
+                                        f"[auth] Login URL found by clicking "
+                                        f"'{_el_label}': {_post_click_url}",
+                                        "SUCCESS",
+                                    )
+                                    return _post_click_url
+                            except Exception:
+                                continue
+                    except Exception:
+                        continue
             except Exception:
                 return ""
             finally:
@@ -5950,18 +6021,7 @@ document.addEventListener('submit', function(e) {
                         _drv.quit()
                     except Exception:
                         pass
-            try:
-                import types as _types2
-                _fake = _types2.SimpleNamespace(text=_rendered_html, url=_rendered_url)
-                _spa_found = _scan_page_for_login_nav(_fake)
-                if _spa_found:
-                    vc.log(
-                        f"[auth] Login link found via browser-rendered DOM: {_spa_found}",
-                        "SUCCESS",
-                    )
-                return _spa_found
-            except Exception:
-                return ""
+            return ""
 
         _scanned_pages: set = set()  # avoid rescanning same page in JS scan
 
@@ -6159,7 +6219,71 @@ document.addEventListener('submit', function(e) {
 
             if depth < 3:
                 _queued_hints: list = []
-                for raw_url, _link_text in _extract_spider_urls(r.text, r.url):
+                _spider_links = _extract_spider_urls(r.text, r.url)
+
+                # SPA pages (Angular/React/Vue) produce HTML shells with no
+                # static <a href> links — the browser renders navigation
+                # dynamically.  If static extraction found nothing and Selenium
+                # is available, render the page to extract links from the live DOM.
+                if not _spider_links and _check_selenium():
+                    try:
+                        from selenium import webdriver as _swd3
+                        from selenium.webdriver.common.by import By as _By3
+                        _br3 = _get_spa_browser()
+                        _drv3 = None
+                        if _br3:
+                            try:
+                                if _br3 == "firefox":
+                                    from selenium.webdriver.firefox.options import (
+                                        Options as _FFO3)
+                                    _fo3 = _FFO3()
+                                    _fo3.add_argument("-headless")
+                                    _fo3.accept_insecure_certs = True
+                                    _drv3 = _swd3.Firefox(
+                                        service=_build_firefox_service(), options=_fo3)
+                                else:
+                                    from selenium.webdriver.chrome.options import (
+                                        Options as _CHO3)
+                                    _co3 = _CHO3()
+                                    for _a3 in ("--headless", "--no-sandbox",
+                                                "--disable-dev-shm-usage",
+                                                "--disable-gpu",
+                                                "--ignore-certificate-errors"):
+                                        _co3.add_argument(_a3)
+                                    _drv3 = _swd3.Chrome(
+                                        service=_build_chrome_service(), options=_co3)
+                                _drv3.set_page_load_timeout(20)
+                                import time as _t3
+                                try:
+                                    _drv3.get(r.url)
+                                except Exception:
+                                    pass
+                                _t3.sleep(3)
+                                _spa_anchors = _drv3.find_elements(_By3.TAG_NAME, "a")
+                                for _anc in _spa_anchors:
+                                    try:
+                                        _anc_href = _anc.get_attribute("href") or ""
+                                        _anc_txt  = (_anc.text or "").strip()
+                                        if _anc_href:
+                                            _spider_links.append((_anc_href, _anc_txt))
+                                    except Exception:
+                                        continue
+                                if _spider_links:
+                                    vc.log(
+                                        f"[auth] Spider: found {len(_spider_links)} "
+                                        f"link(s) via SPA render of {r.url}",
+                                        "INFO",
+                                    )
+                            finally:
+                                if _drv3:
+                                    try:
+                                        _drv3.quit()
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+
+                for raw_url, _link_text in _spider_links:
                     if raw_url.lower().startswith(
                             ("javascript:", "mailto:", "tel:", "#", "data:")):
                         continue
