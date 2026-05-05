@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.33"
+VERSION = "2.12.34"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5050,8 +5050,16 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             return None
 
         # ── Interactive session capture ───────────────────────────────────────
-        _dom_events: list = []
-        _net_events: list = []
+        _dom_events:    list = []
+        _net_events:    list = []
+        _nav_urls:      list = []   # CDP Document navigation chain
+        _bg_events:     list = []   # cross-page DOM events (background poller)
+        _is_chrome_br        = any(
+            k in (_used_name or "").lower()
+            for k in ("chrome", "brave", "chromium")
+        )
+        _bg_stop_ev  = None
+        _bg_thr      = None
 
         # JS recorder injected after page load — captures clicks, inputs, form
         # submissions, and URL navigations without any browser-specific APIs.
@@ -5116,6 +5124,40 @@ document.addEventListener('submit', function(e) {
             except Exception:
                 pass
 
+            if _is_chrome_br:
+                # Inject recorder on every new document so external IdP pages
+                # (CAS, Okta, ADFS, Ping) also capture click/input/submit events.
+                try:
+                    driver.execute_cdp_cmd(
+                        "Page.addScriptToEvaluateOnNewDocument",
+                        {"source": _RECORDER_JS},
+                    )
+                except Exception:
+                    pass
+                # Background thread drains window._fracture_events every 250 ms
+                # so events are not lost when the browser navigates to a new page
+                # and the JS context is destroyed.
+                try:
+                    import threading as _brl_thr
+                    _bg_stop_ev = _brl_thr.Event()
+                    def _bg_drain(_drv=driver, _buf=_bg_events, _stop=_bg_stop_ev):
+                        while not _stop.is_set():
+                            try:
+                                _ev = _drv.execute_script(
+                                    "return typeof window._fracture_events!=='undefined'"
+                                    "?window._fracture_events.splice(0):[]"
+                                ) or []
+                                if _ev:
+                                    _buf.extend(_ev)
+                            except Exception:
+                                pass
+                            _stop.wait(0.25)
+                    _bg_thr = _brl_thr.Thread(target=_bg_drain, daemon=True)
+                    _bg_thr.start()
+                    vc.log("[auth] Cross-page event recording active", "INFO")
+                except Exception:
+                    pass
+
             vc.log(
                 "[auth] Complete login in the browser window, then click OK (or press Enter) "
                 "to capture the session and continue …",
@@ -5127,37 +5169,56 @@ document.addEventListener('submit', function(e) {
                 skippable=True,
             )
 
+            # Stop background poller before reading final state
+            if _bg_stop_ev is not None:
+                try:
+                    _bg_stop_ev.set()
+                except Exception:
+                    pass
+            if _bg_thr is not None:
+                try:
+                    _bg_thr.join(timeout=3)
+                except Exception:
+                    pass
+
             captured_url    = driver.current_url
             browser_cookies = driver.get_cookies()
 
-            # Collect DOM events recorded by the injected JS
+            # Collect remaining DOM events from the current (final) page,
+            # then merge with events gathered by the background poller.
             try:
-                _dom_events = driver.execute_script(
+                _cur_pg_evts = driver.execute_script(
                     "return window._fracture_events || [];"
                 ) or []
+                _dom_events = _bg_events + _cur_pg_evts
             except Exception:
-                pass
+                _dom_events = list(_bg_events)
 
             # For Chrome-engine browsers: collect network events from the CDP
-            # performance log.  Firefox does not expose this API, so it falls
-            # back to the JS-only DOM events collected above.
-            _used_lower = (_used_name or "").lower()
-            if any(k in _used_lower for k in ("chrome", "brave", "chromium")):
+            # performance log.  Also capture top-level GET Document navigations
+            # to build the full URL chain.
+            if _is_chrome_br:
                 try:
                     for _pl in driver.get_log("performance"):
                         try:
                             _msg = json.loads(_pl["message"])["message"]
                             if _msg.get("method") == "Network.requestWillBeSent":
-                                _req = _msg["params"].get("request", {})
-                                _url = _req.get("url", "")
-                                if _url.startswith("http"):
+                                _req  = _msg["params"].get("request", {})
+                                _url  = _req.get("url", "")
+                                _meth = _req.get("method", "GET")
+                                if not _url.startswith("http"):
+                                    continue
+                                if _meth in ("POST", "PUT", "PATCH"):
                                     _net_events.append({
-                                        "url":    _url,
-                                        "method": _req.get("method", "GET"),
-                                        "body":   _req.get("postData", ""),
-                                        "ct":     (_req.get("headers") or {}).get(
-                                                      "content-type", ""),
+                                        "url":  _url,
+                                        "method": _meth,
+                                        "body": _req.get("postData", ""),
+                                        "ct":   (_req.get("headers") or {}).get(
+                                                    "content-type", ""),
                                     })
+                                elif (_meth == "GET"
+                                        and _msg["params"].get("type") == "Document"):
+                                    _nav_urls.append(_url)
                         except Exception:
                             pass
                 except Exception:
@@ -5187,6 +5248,12 @@ document.addEventListener('submit', function(e) {
             f"Captured: {datetime.now().isoformat(timespec='seconds')}",
             "",
         ]
+        # Prepend CDP navigation chain (full URL sequence the browser visited)
+        if _nav_urls:
+            _rec_lines.append("URL CHAIN")
+            for _nu_i, _nu in enumerate(_nav_urls, 1):
+                _rec_lines.append(f"  {_nu_i:03d}  {_nu}")
+            _rec_lines.append("")
         _step_n = 0
         _step_n += 1
         _rec_lines.append(f"STEP {_step_n:03d}  NAVIGATE  {login_url}")
@@ -6019,7 +6086,21 @@ return null;
                             f"[auth] JS-clicked SPA login element: '{_js_result}'",
                             "INFO",
                         )
-                        _time2.sleep(5)
+                        # Angular/React routers may take time to process the
+                        # click before redirecting to an external IdP (CAS/Okta).
+                        # Use WebDriverWait (up to 15 s) instead of a fixed sleep
+                        # so we catch both fast in-SPA route changes and slower
+                        # cross-domain SSO redirects.
+                        try:
+                            from selenium.webdriver.support.ui import (
+                                WebDriverWait as _WDW2,
+                            )
+                            _WDW2(_drv, 15).until(
+                                lambda _d: _d.current_url.rstrip("/")
+                                != _pre_click_url
+                            )
+                        except Exception:
+                            pass
                         _post_js_url = (_drv.current_url or "").rstrip("/")
                         vc.log(
                             f"[auth] Post-click URL: {_post_js_url} "
@@ -6032,6 +6113,17 @@ return null;
                                 "SUCCESS",
                             )
                             return _post_js_url
+                        # Button was clicked but URL did not change — the SPA
+                        # router is doing internal auth setup (or a CAS redirect
+                        # that did not complete in time).  Return the rendered
+                        # entry URL so _step_to_login_form detects the JS shell
+                        # and escalates to browser-assisted login automatically.
+                        vc.log(
+                            "[auth] JS click did not change URL — returning "
+                            "SPA entry URL for browser-auth handoff",
+                            "INFO",
+                        )
+                        return _rendered_url
                     else:
                         vc.log(
                             "[auth] JS pass 2: no login element found in DOM",
