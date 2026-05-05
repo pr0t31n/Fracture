@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.35"
+VERSION = "2.12.36"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6079,7 +6079,7 @@ document.addEventListener('submit', function(e) {
                             if _drv.execute_script(_JS_LOGIN_PRESENT):
                                 break
                         except Exception:
-                            break
+                            pass  # page still loading — keep polling
                         _time2b.sleep(0.5)
                 except Exception:
                     pass
@@ -7434,6 +7434,12 @@ return null;
                     vc.log(
                         f"[auth:auto] Success with method '{_auto_m}' — "
                         "using this session", "SUCCESS")
+                    # Propagate login_url discovered by the sub-call back to the
+                    # outer auth dict so it reaches cfg["auth"]["login_url"] and
+                    # is captured by the deepcopy at _r1_cfg / _cred_contexts.
+                    _auto_lp = _auto_cfg.get("auth", {}).get("login_url", "").strip()
+                    if _auto_lp and not auth.get("login_url"):
+                        auth["login_url"] = _auto_lp
                     return _auto_sess
                 vc.log(f"[auth:auto] Method '{_auto_m}' produced no auth signal — skipping",
                        "INFO")
@@ -7448,6 +7454,8 @@ return null;
         if _auto_ba_url and not no_interactive:
             if cfg.get("browser_auth"):
                 vc.log("[auth:auto] Falling back to browser-assisted login", "INFO")
+                if not auth.get("login_url"):
+                    auth["login_url"] = _auto_ba_url
                 return _browser_assisted_login(_auto_ba_url)
             _auto_ba_sfx = f" for role '{role_label}'" if role_label else ""
             _auto_ba_choice = vc.prompt(
@@ -7457,6 +7465,8 @@ return null;
                 role=role_label,
             ).strip()
             if _auto_ba_choice.lower() in ("yes", "y", "1"):
+                if not auth.get("login_url"):
+                    auth["login_url"] = _auto_ba_url
                 return _browser_assisted_login(_auto_ba_url)
             vc.log("[auth:auto] Browser login declined", "WARNING")
         return None
