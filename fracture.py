@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.15"
+VERSION = "2.12.16"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5372,6 +5372,42 @@ document.addEventListener('submit', function(e) {
                 )
                 _base_host      = _redir_netloc
                 _effective_base = _base_r0.url.rstrip("/")
+            # Follow JavaScript / meta-refresh redirects that requests cannot
+            # follow on its own (they are delivered as HTTP 200 with JS/HTML
+            # redirect instructions rather than HTTP 3xx headers).
+            if _base_r0.status_code == 200:
+                _js_redir_cand = ""
+                _pt = _base_r0.text
+                # <meta http-equiv="refresh" content="0;url=/home/">
+                _meta_rr = _re4.search(
+                    r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+'
+                    r'content=["\'][\d]*;\s*url=([^"\'>\s]+)',
+                    _pt, _re4.IGNORECASE)
+                if _meta_rr:
+                    _js_redir_cand = _uj4(_base_r0.url, _meta_rr.group(1).strip())
+                if not _js_redir_cand:
+                    # window.location[.href] = '/path'  |  location.href = '/path'
+                    _js_loc_m = _re4.search(
+                        r'(?:window\.location(?:\.href)?|location(?:\.href)?)'
+                        r'\s*(?:=|\.(?:replace|assign)\s*\()\s*["\']([^"\']+)["\']',
+                        _pt, _re4.IGNORECASE)
+                    if _js_loc_m:
+                        _jc = _js_loc_m.group(1).strip()
+                        if _jc and not _jc.startswith(("javascript:", "mailto:", "#")):
+                            _js_redir_cand = _uj4(_base_r0.url, _jc)
+                if _js_redir_cand and _up4(_js_redir_cand).netloc == _base_host:
+                    vc.log(
+                        f"[auth] JS/meta redirect detected: {_base_r0.url}"
+                        f" → {_js_redir_cand}",
+                        "INFO",
+                    )
+                    try:
+                        _base_r0 = sess.get(
+                            _js_redir_cand, timeout=timeout, allow_redirects=True)
+                        _effective_base = _base_r0.url.rstrip("/")
+                        _base_host = _up4(_base_r0.url).netloc or _base_host
+                    except Exception:
+                        pass
             if _base_r0.status_code == 200:
                 # Extract (href, anchor_text) from all <a> tags on the base page
                 _login_link_found = False
