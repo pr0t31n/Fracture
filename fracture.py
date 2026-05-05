@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.31"
+VERSION = "2.12.32"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -13284,13 +13284,20 @@ def _crawl_page(page_url: str, sess: requests.Session,
             return result
 
         # Detect XML body regardless of Content-Type.  Some servers send XML
-        # (sitemaps, XHTML, RSS/Atom) with Content-Type: text/html, causing
-        # BeautifulSoup to raise XMLParsedAsHTMLWarning.  Route these through
-        # an XML parser and extract <loc> / <a href> links, then return early.
+        # (sitemaps, XHTML, RSS/Atom, SVG, Spring beans, SOAP) with
+        # Content-Type: text/html, causing BeautifulSoup to emit
+        # XMLParsedAsHTMLWarning.  Route these through an XML parser instead.
         _rtext_head = resp.text.lstrip()
         _is_xml_body = (
             _rtext_head.startswith("<?xml")
-            or bool(re.match(r'<(?:rss|feed|urlset|sitemapindex)\b', _rtext_head))
+            or bool(re.match(
+                r'<(?:rss|feed|urlset|sitemapindex|svg|beans|web-app|'
+                r'configuration|project|module|wsdl:definitions|'
+                r'definitions|schema|S:|SOAP-ENV:)\b',
+                _rtext_head,
+            ))
+            or bool(re.match(r'<!DOCTYPE\s+\S+\s+PUBLIC\s+["\'][^"\']*//DTD', _rtext_head))
+            or "xmlns" in _rtext_head[:512]
         )
         if _is_xml_body:
             for _xml_parser in ("lxml-xml", "xml", "lxml"):
@@ -13313,7 +13320,10 @@ def _crawl_page(page_url: str, sess: requests.Session,
                     continue
             return result
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        import warnings as _bsw
+        with _bsw.catch_warnings():
+            _bsw.filterwarnings("ignore", message=".*XMLParsedAsHTML.*")
+            soup = BeautifulSoup(resp.text, "html.parser")
 
         # --- Hyperlinks and asset references ---------------------------------
         # <a href>, <link href>
