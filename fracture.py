@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.7"
+VERSION = "2.12.8"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2051,6 +2051,72 @@ def _lp_replay(profile_id: str, login_url: str, cfg: dict,
     if not sess.cookies:
         return None
     return sess
+
+
+def _write_auth_status(project_dir: "Path | str", role: str, username: str,
+                       status: str, session: "requests.Session | None",
+                       landing_url: str = "", landing_body: str = "",
+                       landing_code: int = 0) -> None:
+    """Upsert one role entry into <project_dir>/authentication_status.json.
+
+    Schema per entry:
+      role          — role label ("Admin", "User", "unauthenticated", …)
+      username      — account username (empty for unauthenticated)
+      status        — "success" | "failed" | "unauthenticated"
+      cookies       — list of cookie dicts {name, value, domain, path,
+                      secure, httpOnly, expires}
+      headers       — list of auth-related request headers {name, value}
+      landing_url   — URL reached immediately after login
+      landing_code  — HTTP status code of that page
+      landing_body  — first 8 KB of the response body (for the pop-up preview)
+    """
+    _AUTH_HDR_NAMES_WR = frozenset({
+        "authorization", "x-auth-token", "x-api-key", "x-access-token",
+        "x-session-token", "x-csrf-token", "token",
+    })
+    cookies: list = []
+    auth_headers: list = []
+    if session is not None:
+        for ck in session.cookies:
+            cookies.append({
+                "name":     ck.name,
+                "value":    ck.value,
+                "domain":   ck.domain or "",
+                "path":     ck.path   or "",
+                "secure":   bool(ck.secure),
+                "httpOnly": bool(getattr(ck, "_rest", {}).get("HttpOnly", False)
+                                 or getattr(ck, "has_nonstandard_attr", lambda _: False)("HttpOnly")),
+                "expires":  ck.expires,
+            })
+        for hname, hval in session.headers.items():
+            if hname.lower() in _AUTH_HDR_NAMES_WR:
+                auth_headers.append({"name": hname, "value": hval})
+
+    entry = {
+        "role":         role,
+        "username":     username,
+        "status":       status,
+        "cookies":      cookies,
+        "auth_headers": auth_headers,
+        "landing_url":  landing_url,
+        "landing_code": landing_code,
+        "landing_body": landing_body[:8192],
+    }
+
+    try:
+        p = Path(project_dir) / "authentication_status.json"
+        existing: list = []
+        if p.exists():
+            try:
+                existing = json.loads(p.read_text())
+            except Exception:
+                existing = []
+        # Replace existing entry for same role, otherwise append
+        updated = [e for e in existing if e.get("role") != role]
+        updated.append(entry)
+        p.write_text(json.dumps(updated, indent=2, default=str))
+    except Exception:
+        pass
 
 
 def _lp_parse_recording(recording_txt: str, login_url: str) -> "dict | None":
@@ -19340,6 +19406,40 @@ def main() -> None:
             else:
                 _ctx_user = (_ctx_cfg.get("auth", {}).get("username") or "").strip() or _ctx_label
                 out.set_auth_context([{"username": _ctx_user, "role": _ctx_label}])
+
+            # ── Write authentication_status.json entry for this role ──────────
+            # Probe the base target URL with this session to capture the
+            # post-login landing page (URL, HTTP code, and a body snippet for
+            # the Crucible Authentication tab pop-up preview).
+            try:
+                _as_username = (
+                    "" if _ctx_label == "unauthenticated"
+                    else (_ctx_cfg.get("auth", {}).get("username") or "").strip() or _ctx_label
+                )
+                _as_status = (
+                    "unauthenticated" if _ctx_label == "unauthenticated"
+                    else ("success" if _ctx_auth is not None else "failed")
+                )
+                _as_landing_url = ""
+                _as_landing_code = 0
+                _as_landing_body = ""
+                if _ctx_auth is not None:
+                    try:
+                        _as_r = _ctx_auth.get(
+                            target["url"], timeout=cfg.get("timeout", 10),
+                            allow_redirects=True,
+                        )
+                        _as_landing_url  = _as_r.url
+                        _as_landing_code = _as_r.status_code
+                        _as_landing_body = _as_r.text[:8192]
+                    except Exception:
+                        pass
+                _write_auth_status(
+                    out.root, _ctx_label, _as_username, _as_status,
+                    _ctx_auth, _as_landing_url, _as_landing_body, _as_landing_code,
+                )
+            except Exception:
+                pass
 
             if _ctx_auth:
                 vc.log(f"Auth [{_ctx_label}]: enabled", "INFO")
