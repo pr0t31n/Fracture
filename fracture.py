@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.32"
+VERSION = "2.12.33"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5980,47 +5980,65 @@ document.addEventListener('submit', function(e) {
                 # Pass 2: JS-based text search + click.
                 # Angular/React buttons that rely on router event listeners have
                 # no href or onclick in the DOM, so Pass 1 cannot extract a URL.
-                # execute_script clicks the element inside the browser JS runtime,
-                # which fires Angular's (click) binding regardless of CSS visibility
-                # or viewport position.
+                # IMPORTANT: execute_script requires an explicit top-level
+                # 'return' to pass a value back to Python — an IIFE that returns
+                # internally does NOT work; the script body must return directly.
                 _pre_click_url = (_drv.current_url or url).rstrip("/")
                 _js_click = """
-(function() {
-    var labels = ['log in','login','sign in','signin','log-in','sign-on'];
-    var tags = ['button','a','input','[role="button"]','[role="link"]'];
-    var sel = tags.join(',');
-    var els = Array.from(document.querySelectorAll(sel));
-    for (var i = 0; i < els.length; i++) {
-        var el = els[i];
-        var txt = (el.innerText || el.textContent || el.value ||
-                   el.getAttribute('aria-label') || '').trim().toLowerCase();
-        for (var j = 0; j < labels.length; j++) {
-            if (txt === labels[j] || txt.startsWith(labels[j])) {
-                el.click();
-                return el.tagName + ':' + (el.id || el.className || txt);
-            }
-        }
+var TEXT_LABELS = ['log in','login','sign in','signin','log-in','sign-on'];
+var ID_HINTS    = ['login','log-in','log_in','signin','sign-in','sign_in','auth'];
+function _matchLogin(el) {
+    var txt = (el.innerText || el.textContent || el.value || '').trim().toLowerCase();
+    for (var i = 0; i < TEXT_LABELS.length; i++) {
+        if (txt === TEXT_LABELS[i] || txt.indexOf(TEXT_LABELS[i]) === 0) return true;
     }
-    return null;
-})()
+    var meta = ((el.id || '') + ' ' + (el.getAttribute('name') || '') + ' ' +
+                (el.className || '') + ' ' +
+                (el.getAttribute('aria-label') || '')).toLowerCase();
+    for (var j = 0; j < ID_HINTS.length; j++) {
+        if (meta.indexOf(ID_HINTS[j]) >= 0) return true;
+    }
+    return false;
+}
+var candidates = Array.from(document.querySelectorAll(
+    'button,a,input[type="button"],input[type="submit"],[role="button"],[role="link"]'
+));
+for (var k = 0; k < candidates.length; k++) {
+    if (_matchLogin(candidates[k])) {
+        candidates[k].click();
+        return (candidates[k].id || candidates[k].className ||
+                (candidates[k].innerText || '').trim()).substring(0, 80);
+    }
+}
+return null;
 """
                 try:
                     _js_result = _drv.execute_script(_js_click)
                     if _js_result:
                         vc.log(
-                            f"[auth] JS-clicked SPA login element: {_js_result}",
+                            f"[auth] JS-clicked SPA login element: '{_js_result}'",
                             "INFO",
                         )
-                        _time2.sleep(3)
+                        _time2.sleep(5)
                         _post_js_url = (_drv.current_url or "").rstrip("/")
+                        vc.log(
+                            f"[auth] Post-click URL: {_post_js_url} "
+                            f"(pre: {_pre_click_url})",
+                            "INFO",
+                        )
                         if _post_js_url and _post_js_url != _pre_click_url:
                             vc.log(
                                 f"[auth] Login URL found via JS click: {_post_js_url}",
                                 "SUCCESS",
                             )
                             return _post_js_url
-                except Exception:
-                    pass
+                    else:
+                        vc.log(
+                            "[auth] JS pass 2: no login element found in DOM",
+                            "INFO",
+                        )
+                except Exception as _js_exc:
+                    vc.log(f"[auth] JS pass 2 error: {_js_exc}", "INFO")
 
                 # Pass 3: XPath find + JS-click fallback.  Catches elements
                 # where innerText is empty but aria-label or title carries the
@@ -6035,15 +6053,28 @@ document.addEventListener('submit', function(e) {
                     f"//*[{_lx_u}='SIGN IN']",
                     f"//*[contains({_lx_u},'LOG IN')]",
                     f"//*[contains({_lx_u},'SIGN IN')]",
+                    "//*[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                    "'abcdefghijklmnopqrstuvwxyz'),'login')]",
+                    "//*[contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                    "'abcdefghijklmnopqrstuvwxyz'),'signin')]",
                 ):
                     try:
                         _els2 = _drv.find_elements(_By2.XPATH, _lxp)
                         for _el2 in _els2:
                             try:
                                 _el_label = (_el2.text or "").strip()
+                                vc.log(
+                                    f"[auth] XPath pass 3: clicking '{_el_label}' "
+                                    f"id='{_el2.get_attribute('id')}'",
+                                    "INFO",
+                                )
                                 _drv.execute_script("arguments[0].click();", _el2)
-                                _time2.sleep(3)
+                                _time2.sleep(5)
                                 _post_xp_url = (_drv.current_url or "").rstrip("/")
+                                vc.log(
+                                    f"[auth] Post-XPath-click URL: {_post_xp_url}",
+                                    "INFO",
+                                )
                                 if _post_xp_url and _post_xp_url != _pre_click_url:
                                     vc.log(
                                         f"[auth] Login URL found via XPath+JS click "
@@ -6797,6 +6828,8 @@ document.addEventListener('submit', function(e) {
                                 "falling back to browser-assisted login",
                                 "INFO",
                             )
+                            if not auth.get("login_url"):
+                                auth["login_url"] = _ba_url_for_guard
                             return _browser_assisted_login(_ba_url_for_guard)
                         if no_interactive:
                             vc.log(
@@ -6820,6 +6853,8 @@ document.addEventListener('submit', function(e) {
                                 role=role_label,
                             ).strip()
                             if _br_choice_g.lower() in ("yes", "y", "1"):
+                                if not auth.get("login_url"):
+                                    auth["login_url"] = _ba_url_for_guard
                                 return _browser_assisted_login(_ba_url_for_guard)
                             vc.log(
                                 "[auth] Browser login declined — continuing without authentication",
@@ -6893,6 +6928,8 @@ document.addEventListener('submit', function(e) {
                         "INFO",
                     )
                 if cfg.get("browser_auth") and not no_interactive:
+                    if not auth.get("login_url"):
+                        auth["login_url"] = _ba_url
                     return _browser_assisted_login(_ba_url)
                 if no_interactive:
                     vc.log(
@@ -6909,6 +6946,8 @@ document.addEventListener('submit', function(e) {
                         role=role_label,
                     ).strip()
                     if _ba_choice.lower() in ("yes", "y", "1"):
+                        if not auth.get("login_url"):
+                            auth["login_url"] = _ba_url
                         return _browser_assisted_login(_ba_url)
                     vc.log(
                         "[auth] Browser login declined — continuing without authentication",
@@ -14344,6 +14383,20 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                 _root_html or "", {}, [])
         if _crawl_structure and _crawl_structure != "Unknown":
             _write_target_profile(out, web_structure=_crawl_structure)
+        # Extract framework names from SPA evidence and write to technologies
+        if _spa_evidence:
+            _crawl_fw_names = {n for _, n in _SPA_INLINE_MARKERS} | {"Angular"}
+            _crawl_fw_names.discard("History API routing")
+            _crawl_tp_techs: list = []
+            for _cfe in _spa_evidence:
+                for _cfn in sorted(_crawl_fw_names, key=len, reverse=True):
+                    if _cfe.startswith(_cfn) and not any(
+                        t.get("name") == _cfn for t in _crawl_tp_techs
+                    ):
+                        _crawl_tp_techs.append({"name": _cfn})
+                        break
+            if _crawl_tp_techs:
+                _write_target_profile(out, technologies=_crawl_tp_techs)
     except Exception:
         pass
 
@@ -20529,16 +20582,15 @@ def main() -> None:
 
             # Emit an INFO finding whenever a login page was discovered so there
             # is an explicit record of where authentication happens, visible in
-            # Crucible's Findings tab.  Only emit for authenticated contexts that
-            # have a login URL distinct from the base target URL (e.g. an external
-            # CAS/SSO page would not be visible from the target's findings otherwise).
+            # Crucible's Findings tab.  Emit for all authenticated contexts that
+            # have a login URL — including SPAs where the entry point URL equals
+            # the base target URL (browser redirects to CAS/SSO from there).
             try:
                 _lp_found_url = (
                     _ctx_cfg.get("auth", {}).get("login_url", "").strip()
                 )
                 if (_ctx_label != "unauthenticated"
-                        and _lp_found_url
-                        and _lp_found_url.rstrip("/") != target["url"].rstrip("/")):
+                        and _lp_found_url):
                     _lp_role_sfx = f" (role: {_ctx_label})" if _ctx_label else ""
                     _lp_rel = urllib.parse.urlparse(_lp_found_url).path or "/"
                     out.add_finding(
