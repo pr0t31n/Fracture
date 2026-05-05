@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.18"
+VERSION = "2.12.20"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5699,6 +5699,106 @@ document.addEventListener('submit', function(e) {
                     return _found3
             return ""
 
+        # Regex to find auth-related full URLs embedded in JS bundles.
+        # Matches quoted URL strings that contain CAS / SSO / SAML / OIDC /
+        # OAuth / generic login path segments.
+        _JS_AUTH_URL_RE = _re4.compile(
+            r'''["'`](https?://[^\s"'`]{8,}?'''
+            r'''(?:/cas/|/sso/|/saml2?/|/oidc/|/oauth2?/|/auth/login|'''
+            r'''/authenticate|/Authentication|/login[^a-zA-Z])[^\s"'`<>]*)["'`]''',
+            _re4.IGNORECASE,
+        )
+
+        def _scan_js_for_auth_url(js_text: str, page_url: str) -> str:
+            """
+            Scan a JS file's text for embedded auth/login URLs.
+            Returns the first one that resolves to a login page, or "".
+            """
+            for _jm in _JS_AUTH_URL_RE.finditer(js_text):
+                _ju = _jm.group(1).strip()
+                try:
+                    vc.log(f"[auth] JS bundle auth URL candidate: {_ju}", "INFO")
+                    _jr = sess.get(_ju, timeout=timeout, allow_redirects=True)
+                    if _jr.status_code not in (200, 301, 302):
+                        continue
+                    _jp = _analyse_form_page(_jr.text, _jr.url)
+                    if (_jp["login_form"]
+                            or (_jp["has_username"] and _jp["has_checkbox"])
+                            or _jp.get("js_rendered_login")):
+                        vc.log(
+                            f"[auth] Login page found via JS bundle URL: {_jr.url}",
+                            "SUCCESS")
+                        return _jr.url
+                except Exception:
+                    continue
+            return ""
+
+        def _scan_page_scripts(resp_obj: "requests.Response") -> str:
+            """
+            Extract <script src="..."> tags from a page, fetch each JS file
+            (same host, ≤ 512 KB), and scan for embedded auth URLs.
+            Returns the first confirmed login URL found, or "".
+            """
+            import re as _re6
+            from urllib.parse import urljoin as _uj6, urlparse as _up6
+            _pg_host2 = _up6(resp_obj.url).netloc
+            _seen_js:  set = set()
+            _js_limit  = 512 * 1024  # 512 KB per file
+            _js_count  = 0
+            _js_max    = 6            # max JS files to scan
+            for _sm in _re6.finditer(
+                    r'<script\b[^>]+\bsrc=["\']([^"\']+)["\']',
+                    resp_obj.text, _re6.IGNORECASE):
+                if _js_count >= _js_max:
+                    break
+                _src = _sm.group(1).strip()
+                _js_full = _uj6(resp_obj.url, _src)
+                if _up6(_js_full).netloc != _pg_host2:
+                    continue  # skip CDN/external scripts
+                if _js_full in _seen_js:
+                    continue
+                _seen_js.add(_js_full)
+                try:
+                    _jsr = sess.get(_js_full, timeout=timeout, stream=True)
+                    _js_body = b""
+                    for _chunk in _jsr.iter_content(chunk_size=65536):
+                        _js_body += _chunk
+                        if len(_js_body) > _js_limit:
+                            break
+                    _js_text = _js_body.decode("utf-8", errors="replace")
+                    _js_count += 1
+                    _found_in_js = _scan_js_for_auth_url(_js_text, _js_full)
+                    if _found_in_js:
+                        return _found_in_js
+                except Exception:
+                    continue
+            return ""
+
+        _scanned_pages: set = set()  # avoid rescanning same page in JS scan
+
+        # Scan JS bundles of the base page first (SPA entry points carry the
+        # auth URL in their compiled bundle even when the HTML has no links).
+        try:
+            if "_base_r0" in dir() or "_base_r0" in locals():
+                pass  # already fetched
+        except Exception:
+            pass
+        try:
+            _base_r0_js = sess.get(base, timeout=timeout, allow_redirects=True)
+            if _base_r0_js.status_code == 200:
+                _base_js_sig = _base_r0_js.url.rstrip("/")
+                if _base_js_sig not in _scanned_pages:
+                    _scanned_pages.add(_base_js_sig)
+                    vc.log(
+                        f"[auth] Scanning JS bundles on base page: {_base_r0_js.url}",
+                        "INFO",
+                    )
+                    _base_js_found = _scan_page_scripts(_base_r0_js)
+                    if _base_js_found:
+                        return _base_js_found
+        except Exception:
+            pass
+
         for _lp in _LANDING_PATHS:
             _lp_url = base + _lp
             try:
@@ -5712,6 +5812,18 @@ document.addEventListener('submit', function(e) {
                 _lp_result = _scan_page_for_login_nav(_lp_r)
                 if _lp_result:
                     return _lp_result
+                # HTML scan found nothing — try the page's linked JS bundles
+                _lp_html_sig = _lp_r.url.rstrip("/")
+                if _lp_html_sig not in _scanned_pages:
+                    _scanned_pages.add(_lp_html_sig)
+                    vc.log(
+                        f"[auth] No login link in HTML — scanning JS bundles"
+                        f" for {_lp_r.url}",
+                        "INFO",
+                    )
+                    _lp_js_result = _scan_page_scripts(_lp_r)
+                    if _lp_js_result:
+                        return _lp_js_result
             except Exception:
                 continue
 
@@ -6722,9 +6834,22 @@ document.addEventListener('submit', function(e) {
         })
 
         def _auto_has_auth(s: "requests.Session") -> bool:
+            # Only count server-issued signals (cookies / auth response headers).
+            # Deliberately excludes s.auth — client-side credential storage is
+            # not evidence the server accepted the credentials; a verification
+            # request is needed for methods like basic/digest/ntlm.
             return (bool(s.cookies)
-                    or any(k.lower() in _auto_hdr_names for k in s.headers)
-                    or s.auth is not None)
+                    or any(k.lower() in _auto_hdr_names for k in s.headers))
+
+        _auto_base_url = (
+            cfg.get("target_url", "")
+            or (cfg.get("target_urls", [None]) or [None])[0]
+            or ""
+        ).rstrip("/")
+
+        # Methods that set sess.auth without making any requests — these need
+        # an extra verification GET to confirm the server accepted the credentials.
+        _AUTO_NEEDS_VERIFY = frozenset({"basic", "digest", "ntlm", "ntlm_v2"})
 
         _auto_succeeded = False
         for _auto_m in _auto_methods:
@@ -6736,7 +6861,31 @@ document.addEventListener('submit', function(e) {
             try:
                 _auto_sess = _build_auth_session(
                     _auto_cfg, auth_key, scope_hostnames, role_label=role_label)
-                if _auto_sess is not None and _auto_has_auth(_auto_sess):
+                if _auto_sess is None:
+                    vc.log(f"[auth:auto] Method '{_auto_m}' produced no session — skipping",
+                           "INFO")
+                    continue
+                # For credential-only methods verify that the server accepted them
+                # by checking that the test response does NOT contain a login form.
+                if _auto_m in _AUTO_NEEDS_VERIFY and _auto_base_url:
+                    try:
+                        _av_r = _auto_sess.get(
+                            _auto_base_url, timeout=timeout, allow_redirects=True)
+                        if _av_r.status_code == 401:
+                            vc.log(
+                                f"[auth:auto] {_auto_m} rejected (HTTP 401) — skipping",
+                                "INFO")
+                            continue
+                        _av_p = _analyse_form_page(_av_r.text, _av_r.url)
+                        if _av_p["login_form"] or _av_p.get("js_rendered_login"):
+                            vc.log(
+                                f"[auth:auto] {_auto_m} rejected"
+                                " (server returned login page) — skipping",
+                                "INFO")
+                            continue
+                    except Exception:
+                        pass
+                if _auto_has_auth(_auto_sess):
                     vc.log(
                         f"[auth:auto] Success with method '{_auto_m}' — "
                         "using this session", "SUCCESS")
@@ -6745,8 +6894,26 @@ document.addEventListener('submit', function(e) {
                        "INFO")
             except Exception as _auto_e:
                 vc.log(f"[auth:auto] Method '{_auto_m}' error: {_auto_e} — skipping", "INFO")
+
         vc.log("[auth:auto] All username/password methods exhausted — no session established",
                "WARNING")
+        # Browser-auth fallback: open a real browser so the user (or headless
+        # automation) can complete login manually when no automated method works.
+        _auto_ba_url = auth.get("login_url", "").strip() or _auto_base_url
+        if _auto_ba_url and not no_interactive:
+            if cfg.get("browser_auth"):
+                vc.log("[auth:auto] Falling back to browser-assisted login", "INFO")
+                return _browser_assisted_login(_auto_ba_url)
+            _auto_ba_sfx = f" for role '{role_label}'" if role_label else ""
+            _auto_ba_choice = vc.prompt(
+                f"Open a browser window to complete login manually{_auto_ba_sfx}?",
+                prompt_type="confirm",
+                options=["Yes", "No"],
+                role=role_label,
+            ).strip()
+            if _auto_ba_choice.lower() in ("yes", "y", "1"):
+                return _browser_assisted_login(_auto_ba_url)
+            vc.log("[auth:auto] Browser login declined", "WARNING")
         return None
 
     # Transfer auth state (cookies + key headers) to a scoped session for scanning.
