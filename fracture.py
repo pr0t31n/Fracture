@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.17"
+VERSION = "2.12.18"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5451,8 +5451,8 @@ document.addEventListener('submit', function(e) {
                             continue
                         _a_href = _a_url_m.group(1).strip()
                     _a_cand = _uj4(_base_r0.url, _a_href)
-                    if _up4(_a_cand).netloc != _base_host:
-                        continue
+                    # Login links may point to an external SSO/CAS server —
+                    # do not restrict to same host.
                     _a_label = _a_text or _a_title
                     vc.log(
                         f"[auth] Login link identified: '{_a_label}' → {_a_cand}",
@@ -5541,7 +5541,7 @@ document.addEventListener('submit', function(e) {
                                     _nearest_fa = _furl
                                     break
                             _b_cand = _nearest_fa
-                        if not _b_cand or _up4(_b_cand).netloc not in ("", _base_host):
+                        if not _b_cand:
                             continue
                         _b_display = _b_label_text or _b_attrs[:40]
                         vc.log(
@@ -5582,6 +5582,138 @@ document.addEventListener('submit', function(e) {
                     )
         except Exception:
             pass
+
+        # 0.5 — Landing-page nav scan ─────────────────────────────────────────
+        # When the base URL is a JS/SPA entry point (e.g. / → /home/ via
+        # client-side routing), requests won't follow the client-side redirect
+        # and step 0 scans a page with no navigable links.  Probe common
+        # "home/portal" landing paths and scan each one for login navigation
+        # links the same way step 0 scans the base URL.
+        _LANDING_PATHS = [
+            "/home", "/home/", "/main", "/main/",
+            "/portal", "/portal/", "/dashboard", "/dashboard/",
+            "/welcome", "/welcome/", "/app", "/app/",
+        ]
+
+        def _scan_page_for_login_nav(resp_obj: "requests.Response") -> str:
+            """
+            Scan an already-fetched page for login-text <a> / <button> elements.
+            Returns the discovered login URL or empty string.
+            """
+            import re as _re5
+            from urllib.parse import urljoin as _uj5, urlparse as _up5
+            _pg_host = _up5(resp_obj.url).netloc
+            _LT_RE   = _LOGIN_TEXT_RE  # closure
+            _pt2     = resp_obj.text
+
+            def _try_url(cand: str, label: str) -> str:
+                if not cand:
+                    return ""
+                # Login links may target an external SSO/CAS — allow any host.
+                try:
+                    vc.log(f"[auth] Visiting login nav target: {cand}", "INFO")
+                    _nr = sess.get(cand, timeout=timeout, allow_redirects=True)
+                    if _nr.status_code not in (200, 301, 302):
+                        return ""
+                    _np = _analyse_form_page(_nr.text, _nr.url)
+                    if _np["login_form"] or (_np["has_username"] and _np["has_checkbox"]):
+                        vc.log(
+                            f"[auth] Login form found via nav '{label}': {_nr.url}",
+                            "SUCCESS")
+                        return _nr.url
+                    if _np.get("js_rendered_login"):
+                        vc.log(
+                            f"[auth] JS-rendered login via nav '{label}': {_nr.url}",
+                            "INFO")
+                        return _nr.url
+                except Exception:
+                    pass
+                return ""
+
+            def _onclick_url(oc_val: str) -> str:
+                _om = _re5.search(
+                    r'''(?:window\.location(?:\.href)?|location(?:\.href)?|'''
+                    r'''location\.(?:replace|assign)\s*\()\s*[=\(]\s*["\']([^"\']+)["\']''',
+                    oc_val, _re5.IGNORECASE)
+                if not _om:
+                    _om = _re5.search(r'''["\']([/][^"\'?\s]{1,200})["\']''', oc_val)
+                return _om.group(1).strip() if _om else ""
+
+            # <a> tags
+            for _am2 in _re5.finditer(
+                    r'<a\b([^>]*)>(.*?)</a>',
+                    _pt2, _re5.IGNORECASE | _re5.DOTALL):
+                _at, _ai = _am2.group(1), _am2.group(2)
+                _atxt  = _re5.sub(r'<[^>]+>', '', _ai).strip()
+                _atitl = (_re5.search(
+                    r'\b(?:title|aria-label)=["\']([^"\']+)["\']',
+                    _at, _re5.IGNORECASE) or type("", (), {"group": lambda s, n: ""})()).group(1) or ""
+                if not (_LT_RE.search(_atxt) or _LT_RE.search(_atitl)):
+                    continue
+                _ah_m  = _re5.search(r'\bhref=["\']([^"\']+)["\']', _at, _re5.IGNORECASE)
+                _ah    = _ah_m.group(1).strip() if _ah_m else ""
+                if _ah.lower().startswith(("javascript:", "mailto:", "tel:", "#", "data:")):
+                    _oc_m = _re5.search(r'\bonclick=["\']([^"\']+)["\']', _at, _re5.IGNORECASE)
+                    _ah   = _onclick_url(_oc_m.group(1)) if _oc_m else ""
+                if not _ah:
+                    continue
+                _cand2 = _uj5(resp_obj.url, _ah)
+                _lbl2  = _atxt or _atitl
+                vc.log(f"[auth] Login link on landing page: '{_lbl2}' → {_cand2}", "INFO")
+                _found2 = _try_url(_cand2, _lbl2)
+                if _found2:
+                    return _found2
+
+            # <button> / <input> elements
+            _fa2: list = []
+            for _fm2 in _re5.finditer(r'<form\b([^>]*)>', _pt2, _re5.IGNORECASE):
+                _fa2_m = _re5.search(
+                    r'\baction=["\']([^"\']+)["\']', _fm2.group(1), _re5.IGNORECASE)
+                _fa2.append((
+                    _fm2.start(),
+                    _uj5(resp_obj.url, _fa2_m.group(1).strip()) if _fa2_m else ""))
+            for _bm2 in _re5.finditer(
+                    r'<(?:button|input)\b([^>]*)(?:>(.*?)</(?:button|input)>|/>)',
+                    _pt2, _re5.IGNORECASE | _re5.DOTALL):
+                _bat  = _bm2.group(1)
+                _btxt = _re5.sub(r'<[^>]+>', '', (_bm2.group(2) or "")).strip()
+                _bval = (_re5.search(r'\bvalue=["\']([^"\']+)["\']',
+                                     _bat, _re5.IGNORECASE) or
+                         type("", (), {"group": lambda s, n: ""})()).group(1) or ""
+                _blbl = _btxt or _bval
+                if not _LT_RE.search(_blbl):
+                    continue
+                _bc_m = _re5.search(r'\bonclick=["\']([^"\']+)["\']', _bat, _re5.IGNORECASE)
+                _bc   = _uj5(resp_obj.url, _onclick_url(_bc_m.group(1))) if _bc_m else ""
+                if not _bc:
+                    _bp = _bm2.start()
+                    for _fp, _fu in reversed(_fa2):
+                        if _fp < _bp and _fu:
+                            _bc = _fu
+                            break
+                if not _bc:
+                    continue
+                vc.log(f"[auth] Login button on landing page: '{_blbl}' → {_bc}", "INFO")
+                _found3 = _try_url(_bc, _blbl)
+                if _found3:
+                    return _found3
+            return ""
+
+        for _lp in _LANDING_PATHS:
+            _lp_url = base + _lp
+            try:
+                vc.log(f"[auth] Probing landing path: {_lp_url}", "INFO")
+                _lp_r = sess.get(_lp_url, timeout=timeout, allow_redirects=True)
+                if _lp_r.status_code != 200:
+                    continue
+                # Skip if server echoed back the base page (no distinct content)
+                if _lp_r.url.rstrip("/") == base.rstrip("/"):
+                    continue
+                _lp_result = _scan_page_for_login_nav(_lp_r)
+                if _lp_result:
+                    return _lp_result
+            except Exception:
+                continue
 
         # 1. Common paths
         for path in _LOGIN_CANDIDATE_PATHS:
