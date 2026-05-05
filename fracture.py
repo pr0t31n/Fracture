@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.1"
+VERSION = "2.12.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -4485,6 +4485,53 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             opts.set_preference("browser.sessionstore.max_windows_undo", 0)
             if bin_path:
                 opts.binary_location = bin_path
+            # ── Selenium BiDi / websocket compatibility ────────────────────────
+            # Selenium 4.x auto-enables WebDriver BiDi when geckodriver reports
+            # bidi support (geckodriver 0.34+).  In some installations — partial
+            # upgrades, dev/nightly Selenium builds, pip cache collisions — the
+            # selenium.webdriver.common.bidi package is absent or unimportable,
+            # causing driver.__init__ to raise ImportError before the browser
+            # ever launches.
+            #
+            # Two-layer defence:
+            #   1. Explicitly opt out of BiDi so Selenium does not import the
+            #      module at all when the capability is clear.
+            #   2. Pre-register empty stub modules under the affected package
+            #      path so that if Selenium still tries to import them (e.g. in
+            #      a version that unconditionally imports at module load), the
+            #      import resolves to a no-op stub rather than an error.
+            import sys as _bidi_sys, types as _bidi_types
+            try:
+                opts.enable_bidi = False
+            except AttributeError:
+                pass
+            try:
+                opts.set_capability("webSocketUrl", False)
+            except Exception:
+                pass
+            _bidi_base = "selenium.webdriver.common.bidi"
+            if _bidi_base not in _bidi_sys.modules:
+                try:
+                    __import__(_bidi_base)
+                except ImportError:
+                    for _bidi_mod_name in (
+                        _bidi_base,
+                        f"{_bidi_base}.script",
+                        f"{_bidi_base}.cdp",
+                        f"{_bidi_base}.browsing_context",
+                        f"{_bidi_base}.session",
+                        f"{_bidi_base}.network",
+                        f"{_bidi_base}.input",
+                        f"{_bidi_base}.log",
+                    ):
+                        _bidi_sys.modules.setdefault(
+                            _bidi_mod_name, _bidi_types.ModuleType(_bidi_mod_name)
+                        )
+                    vc.log(
+                        "[auth] selenium.webdriver.common.bidi unavailable — "
+                        "stub registered; upgrade selenium if bidi features are needed",
+                        "INFO",
+                    )
             _log_fd, _log_path = _tf2.mkstemp(prefix="fracture_gd_", suffix=".log")
             _os.close(_log_fd)
             if drv_path:
