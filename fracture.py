@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.8"
+VERSION = "2.12.9"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1741,25 +1741,19 @@ def _get_spa_browser() -> "str | None":
         _SPA_BROWSER_CACHE   = None
         return None
 
-    # Chrome: prefer if chromedriver or chrome binary is locatable
+    # Chrome: only if a real chromedriver or Chrome binary is present on this machine.
+    # webdriver_manager is intentionally excluded here — it attempts a network
+    # download at runtime and fails silently on offline/restricted systems.
     try:
         from selenium.webdriver.chrome.options import Options as _CO  # noqa: F401
         if _find_chromedriver() or _find_chrome_binary():
             _SPA_BROWSER_CHECKED = True
             _SPA_BROWSER_CACHE   = "chrome"
             return "chrome"
-        # webdriver_manager can fetch chromedriver on demand
-        try:
-            from webdriver_manager.chrome import ChromeDriverManager as _CDM  # noqa: F401
-            _SPA_BROWSER_CHECKED = True
-            _SPA_BROWSER_CACHE   = "chrome"
-            return "chrome"
-        except ImportError:
-            pass
     except ImportError:
         pass
 
-    # Firefox fallback: geckodriver or firefox binary locatable
+    # Firefox: geckodriver or Firefox binary locatable, or webdriver_manager can supply
     try:
         from selenium.webdriver.firefox.options import Options as _FO  # noqa: F401
         if _find_geckodriver() or _find_firefox_binary():
@@ -1771,6 +1765,19 @@ def _get_spa_browser() -> "str | None":
             _SPA_BROWSER_CHECKED = True
             _SPA_BROWSER_CACHE   = "firefox"
             return "firefox"
+        except ImportError:
+            pass
+    except ImportError:
+        pass
+
+    # Last-chance Chrome via webdriver_manager (online systems / macOS dev boxes)
+    try:
+        from selenium.webdriver.chrome.options import Options as _CO2  # noqa: F401
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager as _CDM  # noqa: F401
+            _SPA_BROWSER_CHECKED = True
+            _SPA_BROWSER_CACHE   = "chrome"
+            return "chrome"
         except ImportError:
             pass
     except ImportError:
@@ -9463,11 +9470,16 @@ def _gobuster_run(
 def _capture_screenshot_to(ep_url: str, out_path: Path,
                             target: dict, cfg: dict) -> bool:
     """Take a headless screenshot of ep_url and save to out_path.
-    Returns True on success."""
+    Returns True on success.  Tries Chrome first, falls back to Firefox."""
     if not _check_selenium():
         return False
-    try:
-        from selenium import webdriver
+    from selenium import webdriver
+
+    browser = _get_spa_browser()
+    if browser is None:
+        return False
+
+    def _do_chrome():
         from selenium.webdriver.chrome.options import Options
         opts = Options()
         opts.add_argument("--headless=new")
@@ -9489,10 +9501,35 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                 _ip = None
         if hostname and _ip and _ip != hostname:
             opts.add_argument(f"--host-resolver-rules=MAP {hostname} {_ip}")
-        svc    = _build_chrome_service()
-        driver = webdriver.Chrome(service=svc, options=opts)
+        svc = _build_chrome_service()
+        return webdriver.Chrome(service=svc, options=opts)
+
+    def _do_firefox():
+        from selenium.webdriver.firefox.options import Options
+        opts = Options()
+        opts.add_argument("-headless")
+        opts.accept_insecure_certs = True
+        ff_bin = _find_firefox_binary()
+        if ff_bin:
+            opts.binary = ff_bin
+        svc = _build_firefox_service()
+        return webdriver.Firefox(service=svc, options=opts)
+
+    driver = None
+    _used_browser = browser
+    try:
+        if browser == "firefox":
+            driver = _do_firefox()
+        else:
+            try:
+                driver = _do_chrome()
+            except Exception:
+                driver = _do_firefox()
+                _used_browser = "firefox"
         try:
             driver.set_page_load_timeout(15)
+            if _used_browser == "firefox":
+                driver.set_window_size(1280, 800)
             try:
                 driver.get(ep_url)
             except Exception:
@@ -11728,8 +11765,9 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
 
 def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                       out: OutputManager) -> None:
-    """Capture a screenshot of the target URL using headless Chrome via Selenium.
+    """Capture a screenshot of the target URL using a headless browser via Selenium.
 
+    Tries Chrome first; falls back to Firefox (GeckoDriver) if Chrome is unavailable.
     Saved to: recon/screenshot_<hostname>_<port>.png
     Creates an INFO finding "Web Screenshot Captured" with output_file pointing
     to the PNG so it can be viewed via Crucible's Evidence tab.
@@ -11743,6 +11781,11 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
         vc.log("[screenshot] selenium not available — skipping", "WARNING")
         return
 
+    browser = _get_spa_browser()
+    if browser is None:
+        vc.log("[screenshot] no headless browser available — skipping", "WARNING")
+        return
+
     vc.status(phase, "Screenshot", "running", "Launching browser", 0, 1)
 
     save_dir  = out.root / "recon"
@@ -11752,34 +11795,61 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
 
     try:
         from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
 
-        opts = Options()
-        opts.add_argument("--headless=new")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu")
-        opts.add_argument("--ignore-certificate-errors")
-        opts.add_argument("--allow-insecure-localhost")
-        opts.add_argument("--window-size=1280,800")
-        opts.add_experimental_option("excludeSwitches", ["enable-logging"])
-        chrome_bin = _find_chrome_binary()
-        if chrome_bin:
-            opts.binary_location = chrome_bin
-        # Resolve IP for --host-resolver-rules (enables SNI virtual host rendering)
-        _ip = target.get("ip")
-        if not _ip:
+        def _do_chrome_ss():
+            from selenium.webdriver.chrome.options import Options
+            _opts = Options()
+            _opts.add_argument("--headless=new")
+            _opts.add_argument("--no-sandbox")
+            _opts.add_argument("--disable-dev-shm-usage")
+            _opts.add_argument("--disable-gpu")
+            _opts.add_argument("--ignore-certificate-errors")
+            _opts.add_argument("--allow-insecure-localhost")
+            _opts.add_argument("--window-size=1280,800")
+            _opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+            _cb = _find_chrome_binary()
+            if _cb:
+                _opts.binary_location = _cb
+            _ip = target.get("ip")
+            if not _ip:
+                try:
+                    _ip = socket.gethostbyname(hostname)
+                except Exception:
+                    _ip = None
+            if hostname and _ip and _ip != hostname:
+                _opts.add_argument(f"--host-resolver-rules=MAP {hostname} {_ip}")
+            _svc = _build_chrome_service()
+            return webdriver.Chrome(service=_svc, options=_opts)
+
+        def _do_firefox_ss():
+            from selenium.webdriver.firefox.options import Options
+            _opts = Options()
+            _opts.add_argument("-headless")
+            _opts.accept_insecure_certs = True
+            _fb = _find_firefox_binary()
+            if _fb:
+                _opts.binary = _fb
+            _svc = _build_firefox_service()
+            return webdriver.Firefox(service=_svc, options=_opts)
+
+        _used_browser = browser
+        if browser == "firefox":
+            driver = _do_firefox_ss()
+            vc.log("[screenshot] Using Firefox (GeckoDriver)", "INFO")
+        else:
             try:
-                _ip = socket.gethostbyname(hostname)
-            except Exception:
-                _ip = None
-        if hostname and _ip and _ip != hostname:
-            opts.add_argument(f"--host-resolver-rules=MAP {hostname} {_ip}")
+                driver = _do_chrome_ss()
+                vc.log("[screenshot] Using Chrome", "INFO")
+            except Exception as _ce:
+                vc.log(f"[screenshot] Chrome unavailable ({_ce}), trying Firefox", "WARNING")
+                driver = _do_firefox_ss()
+                _used_browser = "firefox"
+                vc.log("[screenshot] Using Firefox (GeckoDriver)", "INFO")
 
-        svc    = _build_chrome_service()
-        driver = webdriver.Chrome(service=svc, options=opts)
         try:
             driver.set_page_load_timeout(15)
+            if _used_browser == "firefox":
+                driver.set_window_size(1280, 800)
             try:
                 driver.get(url)
             except Exception:
@@ -12701,40 +12771,56 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
         vc.log("[crawl/spa] selenium not importable — skipping headless crawl", "WARNING")
         return {}
 
+    def _spa_make_firefox_driver():
+        from selenium.webdriver.firefox.options import Options as _FFO
+        _opts = _FFO()
+        _opts.add_argument("-headless")
+        if not verify_ssl:
+            _opts.accept_insecure_certs = True
+        _ff_bin = _find_firefox_binary()
+        if _ff_bin:
+            _opts.binary = _ff_bin
+        _svc = _build_firefox_service()
+        _drv = webdriver.Firefox(service=_svc, options=_opts)
+        return _drv
+
+    def _spa_make_chrome_driver():
+        from selenium.webdriver.chrome.options import Options as _CHO
+        _opts = _CHO()
+        _opts.add_argument("--headless=new")
+        _opts.add_argument("--no-sandbox")
+        _opts.add_argument("--disable-dev-shm-usage")
+        _opts.add_argument("--disable-gpu")
+        _opts.add_argument("--disable-extensions")
+        _opts.add_argument("--disable-notifications")
+        _opts.add_argument("--disable-popup-blocking")
+        _opts.add_argument("--log-level=3")
+        _opts.add_argument("--silent")
+        if not verify_ssl:
+            _opts.add_argument("--ignore-certificate-errors")
+            _opts.add_argument("--allow-insecure-localhost")
+        _cb = _find_chrome_binary()
+        if _cb:
+            _opts.binary_location = _cb
+        _svc = _build_chrome_service()
+        return webdriver.Chrome(service=_svc, options=_opts)
+
     try:
         if browser == "firefox":
-            from selenium.webdriver.firefox.options import Options
-            opts = Options()
-            opts.add_argument("-headless")
-            if not verify_ssl:
-                opts.accept_insecure_certs = True
-            ff_bin = _find_firefox_binary()
-            if ff_bin:
-                opts.binary = ff_bin
-            service = _build_firefox_service()
-            driver  = webdriver.Firefox(service=service, options=opts)
+            driver = _spa_make_firefox_driver()
             vc.log("[crawl/spa] Using Firefox (GeckoDriver) for headless crawl", "INFO")
         else:
-            from selenium.webdriver.chrome.options import Options
-            opts = Options()
-            opts.add_argument("--headless=new")
-            opts.add_argument("--no-sandbox")
-            opts.add_argument("--disable-dev-shm-usage")
-            opts.add_argument("--disable-gpu")
-            opts.add_argument("--disable-extensions")
-            opts.add_argument("--disable-notifications")
-            opts.add_argument("--disable-popup-blocking")
-            opts.add_argument("--log-level=3")
-            opts.add_argument("--silent")
-            if not verify_ssl:
-                opts.add_argument("--ignore-certificate-errors")
-                opts.add_argument("--allow-insecure-localhost")
-            chrome_bin = _find_chrome_binary()
-            if chrome_bin:
-                opts.binary_location = chrome_bin
-            service = _build_chrome_service()
-            driver  = webdriver.Chrome(service=service, options=opts)
-            vc.log("[crawl/spa] Using Chrome for headless crawl", "INFO")
+            try:
+                driver = _spa_make_chrome_driver()
+                vc.log("[crawl/spa] Using Chrome for headless crawl", "INFO")
+            except Exception as _chrome_exc:
+                vc.log(
+                    f"[crawl/spa] Chrome unavailable ({_chrome_exc}), trying Firefox",
+                    "WARNING",
+                )
+                browser = "firefox"
+                driver  = _spa_make_firefox_driver()
+                vc.log("[crawl/spa] Using Firefox (GeckoDriver) for headless crawl", "INFO")
 
         driver.set_page_load_timeout(max(timeout * 2, 60))
         driver.implicitly_wait(2)
