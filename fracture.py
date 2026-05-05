@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.13"
+VERSION = "2.12.14"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5354,8 +5354,22 @@ document.addEventListener('submit', function(e) {
         #    explicitly names a login action (e.g. "Log In", "Sign In").
         #    These links may point to non-obvious URLs that common-path probing
         #    would miss entirely.
+        #
+        #    Important: if the base URL redirects to a different hostname
+        #    (e.g. example.com → www.example.com, or http → https subdomain),
+        #    update _base_host to the final URL so netloc checks in this step
+        #    and in the spider below accept links from the redirected page.
+        _effective_base = base  # updated below if redirect changes the hostname
         try:
             _base_r0 = sess.get(base, timeout=timeout, allow_redirects=True)
+            _redir_netloc = _up4(_base_r0.url).netloc
+            if _redir_netloc and _redir_netloc != _base_host:
+                vc.log(
+                    f"[auth] Base URL redirected: {_base_host} → {_redir_netloc}",
+                    "INFO",
+                )
+                _base_host    = _redir_netloc
+                _effective_base = _base_r0.url.rstrip("/")
             if _base_r0.status_code == 200:
                 # Extract (href, anchor_text) from all <a> tags on the base page
                 for _am in _re4.finditer(
@@ -5423,9 +5437,9 @@ document.addEventListener('submit', function(e) {
                 continue
 
         # 2. Spider up to depth 3
-        vc.log(f"[auth] Common paths yielded no login form — spidering {base} (depth 3)", "INFO")
-        _visited: set = {base, base + "/"}
-        _queue:   list = [(base, 0)]
+        vc.log(f"[auth] Common paths yielded no login form — spidering {_effective_base} (depth 3)", "INFO")
+        _visited: set = {base, base + "/", _effective_base, _effective_base + "/"}
+        _queue:   list = [(_effective_base, 0)]
 
         # Hint keywords for URL-path prioritisation
         _LOGIN_HINTS = (
