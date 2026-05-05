@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.14"
+VERSION = "2.12.15"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3261,6 +3261,8 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
     sess    = _make_session(cfg, None)
     timeout = cfg.get("timeout", 10)
     method  = (auth.get("method") or auth.get("auth_type") or "form_login").strip().lower()
+    _role_tag = f" [{role_label}]" if role_label else ""
+    vc.log(f"[auth] Auth method: {method}{_role_tag}", "INFO")
 
     # ── CSRF prefetch helper (used by form_login / totp_mfa) ─────────────────
     def _csrf_prefetch(url: str) -> "tuple[str, dict]":
@@ -5365,13 +5367,14 @@ document.addEventListener('submit', function(e) {
             _redir_netloc = _up4(_base_r0.url).netloc
             if _redir_netloc and _redir_netloc != _base_host:
                 vc.log(
-                    f"[auth] Base URL redirected: {_base_host} → {_redir_netloc}",
+                    f"[auth] Base URL redirected: {base} → {_base_r0.url}",
                     "INFO",
                 )
-                _base_host    = _redir_netloc
+                _base_host      = _redir_netloc
                 _effective_base = _base_r0.url.rstrip("/")
             if _base_r0.status_code == 200:
                 # Extract (href, anchor_text) from all <a> tags on the base page
+                _login_link_found = False
                 for _am in _re4.finditer(
                         r'<a\b([^>]*)>(.*?)</a>',
                         _base_r0.text, _re4.IGNORECASE | _re4.DOTALL):
@@ -5396,24 +5399,46 @@ document.addEventListener('submit', function(e) {
                     _a_cand = _uj4(_base_r0.url, _a_href)
                     if _up4(_a_cand).netloc != _base_host:
                         continue
+                    _a_label = _a_text or _a_title
+                    vc.log(
+                        f"[auth] Login link identified: '{_a_label}' → {_a_cand}",
+                        "INFO",
+                    )
+                    _login_link_found = True
                     try:
+                        vc.log(f"[auth] Visiting login link: {_a_cand}", "INFO")
                         _a_r = sess.get(_a_cand, timeout=timeout, allow_redirects=True)
                         if _a_r.status_code not in (200, 301, 302):
+                            vc.log(
+                                f"[auth] Login link returned HTTP {_a_r.status_code}"
+                                f" — skipping",
+                                "INFO",
+                            )
                             continue
                         _a_page = _analyse_form_page(_a_r.text, _a_r.url)
                         if (_a_page["login_form"]
                                 or (_a_page["has_username"] and _a_page["has_checkbox"])):
                             vc.log(
                                 f"[auth] Login form found via base-page link"
-                                f" '{_a_text or _a_title}': {_a_r.url}", "SUCCESS")
+                                f" '{_a_label}': {_a_r.url}", "SUCCESS")
                             return _a_r.url
                         if _a_page.get("js_rendered_login"):
                             vc.log(
                                 f"[auth] JS-rendered login via base-page link"
-                                f" '{_a_text or _a_title}': {_a_r.url}", "INFO")
+                                f" '{_a_label}': {_a_r.url}", "INFO")
                             return _a_r.url
+                        vc.log(
+                            f"[auth] No login form at '{_a_label}' target"
+                            f" ({_a_r.url}) — continuing",
+                            "INFO",
+                        )
                     except Exception:
                         continue
+                if not _login_link_found:
+                    vc.log(
+                        f"[auth] No login links identified on base page ({_base_r0.url})",
+                        "INFO",
+                    )
         except Exception:
             pass
 
@@ -5437,7 +5462,11 @@ document.addEventListener('submit', function(e) {
                 continue
 
         # 2. Spider up to depth 3
-        vc.log(f"[auth] Common paths yielded no login form — spidering {_effective_base} (depth 3)", "INFO")
+        vc.log(
+            f"[auth] Common paths yielded no login form — spidering {_effective_base}"
+            f" up to depth 3",
+            "INFO",
+        )
         _visited: set = {base, base + "/", _effective_base, _effective_base + "/"}
         _queue:   list = [(_effective_base, 0)]
 
@@ -5498,11 +5527,17 @@ document.addEventListener('submit', function(e) {
             cur_url, depth = _queue.pop(0)
             if depth > 3:
                 continue
+            vc.log(f"[auth] Spidering (depth {depth}): {cur_url}", "INFO")
             try:
                 r = sess.get(cur_url, timeout=timeout, allow_redirects=True)
-            except Exception:
+            except Exception as _se:
+                vc.log(f"[auth] Spider fetch failed: {_se}", "INFO")
                 continue
             if r.status_code != 200:
+                vc.log(
+                    f"[auth] Spider skipping {cur_url} — HTTP {r.status_code}",
+                    "INFO",
+                )
                 continue
 
             page = _analyse_form_page(r.text, r.url)
@@ -5516,6 +5551,7 @@ document.addEventListener('submit', function(e) {
                 return r.url
 
             if depth < 3:
+                _queued_hints: list = []
                 for raw_url, _link_text in _extract_spider_urls(r.text, r.url):
                     if raw_url.lower().startswith(
                             ("javascript:", "mailto:", "tel:", "#", "data:")):
@@ -5534,10 +5570,19 @@ document.addEventListener('submit', function(e) {
                     _text_hint = bool(_link_text and _LOGIN_TEXT_RE.search(_link_text))
                     if _is_login_hint(norm) or _text_hint:
                         _queue.insert(0, (candidate, depth + 1))
+                        _queued_hints.append(
+                            candidate + (f" (link text: '{_link_text}')" if _link_text else "")
+                        )
                     else:
                         _queue.append((candidate, depth + 1))
+                if _queued_hints:
+                    vc.log(
+                        f"[auth] Login-hint links prioritised from {cur_url}: "
+                        + ", ".join(_queued_hints),
+                        "INFO",
+                    )
 
-        vc.log(f"[auth] Could not locate a login form via spidering", "WARNING")
+        vc.log(f"[auth] Login page not found — spidering exhausted {len(_visited)} URL(s)", "WARNING")
         return ""
 
     # ── Login POST helper ─────────────────────────────────────────────────────
@@ -6018,6 +6063,9 @@ document.addEventListener('submit', function(e) {
                     elif _guard_r.url != _login_url:
                         _login_url = _guard_r.url
                         auth["login_url"] = _login_url
+                        vc.log(f"[auth] Guard followed redirect — login URL updated: {_login_url}", "INFO")
+                    else:
+                        vc.log(f"[auth] Login form confirmed at {_login_url}", "INFO")
             except Exception as _ge:
                 vc.log(f"[auth] Could not verify login form at {_login_url}: {_ge}", "WARNING")
 
@@ -6027,6 +6075,11 @@ document.addEventListener('submit', function(e) {
             _post_resp, _ = _login_post(_login_url)
             _login_post_called = True
             if _post_resp is not None:
+                vc.log(
+                    f"[auth] Credential POST → HTTP {_post_resp.status_code}"
+                    + (f", {len(sess.cookies)} cookie(s) set" if sess.cookies else ", no cookies set"),
+                    "INFO",
+                )
                 _handle_post_login_page(_post_resp)
         else:
             vc.log("[auth] Skipping credential submission — no login URL available", "WARNING")
