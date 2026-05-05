@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.11"
+VERSION = "2.12.12"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5336,10 +5336,72 @@ document.addEventListener('submit', function(e) {
         to locate a form with username + password fields.  Returns the
         discovered URL or empty string if none found.
         """
+        import re as _re4
         from urllib.parse import urljoin as _uj4, urlparse as _up4
-        base = base_url.rstrip("/")
+        base       = base_url.rstrip("/")
+        _base_host = _up4(base).netloc
 
-        vc.log(f"[auth] No login-url configured — probing common login paths on {base}", "INFO")
+        # Regex for login-related visible text on links / buttons
+        _LOGIN_TEXT_RE = _re4.compile(
+            r'\b(log[\s\-]?in|sign[\s\-]?in|login|signin|log[\s\-]?on|'
+            r'sign[\s\-]?on|authenticate?)\b',
+            _re4.IGNORECASE,
+        )
+
+        vc.log(f"[auth] No login-url configured — scanning {base} for login links", "INFO")
+
+        # 0. Fetch base URL and follow any <a> or <button> whose visible text
+        #    explicitly names a login action (e.g. "Log In", "Sign In").
+        #    These links may point to non-obvious URLs that common-path probing
+        #    would miss entirely.
+        try:
+            _base_r0 = sess.get(base, timeout=timeout, allow_redirects=True)
+            if _base_r0.status_code == 200:
+                # Extract (href, anchor_text) from all <a> tags on the base page
+                for _am in _re4.finditer(
+                        r'<a\b([^>]*)>(.*?)</a>',
+                        _base_r0.text, _re4.IGNORECASE | _re4.DOTALL):
+                    _a_attrs, _a_inner = _am.group(1), _am.group(2)
+                    _a_text = _re4.sub(r'<[^>]+>', '', _a_inner).strip()
+                    # Also check title= and aria-label= on the tag itself
+                    _a_title_m = _re4.search(
+                        r'\b(?:title|aria-label)=["\']([^"\']+)["\']',
+                        _a_attrs, _re4.IGNORECASE)
+                    _a_title = _a_title_m.group(1) if _a_title_m else ""
+                    if not (_LOGIN_TEXT_RE.search(_a_text)
+                            or _LOGIN_TEXT_RE.search(_a_title)):
+                        continue
+                    _a_href_m = _re4.search(
+                        r'\bhref=["\']([^"\']+)["\']', _a_attrs, _re4.IGNORECASE)
+                    if not _a_href_m:
+                        continue
+                    _a_href = _a_href_m.group(1).strip()
+                    if _a_href.lower().startswith(
+                            ("javascript:", "mailto:", "tel:", "#", "data:")):
+                        continue
+                    _a_cand = _uj4(_base_r0.url, _a_href)
+                    if _up4(_a_cand).netloc != _base_host:
+                        continue
+                    try:
+                        _a_r = sess.get(_a_cand, timeout=timeout, allow_redirects=True)
+                        if _a_r.status_code not in (200, 301, 302):
+                            continue
+                        _a_page = _analyse_form_page(_a_r.text, _a_r.url)
+                        if (_a_page["login_form"]
+                                or (_a_page["has_username"] and _a_page["has_checkbox"])):
+                            vc.log(
+                                f"[auth] Login form found via base-page link"
+                                f" '{_a_text or _a_title}': {_a_r.url}", "SUCCESS")
+                            return _a_r.url
+                        if _a_page.get("js_rendered_login"):
+                            vc.log(
+                                f"[auth] JS-rendered login via base-page link"
+                                f" '{_a_text or _a_title}': {_a_r.url}", "INFO")
+                            return _a_r.url
+                    except Exception:
+                        continue
+        except Exception:
+            pass
 
         # 1. Common paths
         for path in _LOGIN_CANDIDATE_PATHS:
@@ -5364,10 +5426,8 @@ document.addEventListener('submit', function(e) {
         vc.log(f"[auth] Common paths yielded no login form — spidering {base} (depth 3)", "INFO")
         _visited: set = {base, base + "/"}
         _queue:   list = [(base, 0)]
-        import re as _re4
-        _base_host = _up4(base).netloc
 
-        # Hint keywords for queue prioritisation
+        # Hint keywords for URL-path prioritisation
         _LOGIN_HINTS = (
             "login", "signin", "sign-in", "log-in", "logon", "signon",
             "auth", "authenticate", "authentication",
@@ -5384,19 +5444,29 @@ document.addEventListener('submit', function(e) {
             _lc = url_norm.lower()
             return any(h in _lc for h in _LOGIN_HINTS)
 
-        def _extract_spider_urls(html: str, base_r_url: str) -> "list[str]":
+        def _extract_spider_urls(html: str, base_r_url: str) -> "list[tuple[str, str]]":
             """
             Collect candidate navigation URLs from a page.
             Covers: <a href>, <form action>, onclick/data-* URL values.
+            Returns list of (raw_url, anchor_text) tuples; anchor_text is empty
+            for non-anchor sources.
             """
             _cands: list = []
-            # Standard href links
-            for _h in _re4.findall(r'href=["\']([^"\']+)["\']', html, _re4.IGNORECASE):
-                _cands.append(_h)
+            # Standard href links — include anchor text for login-hint detection
+            for _am in _re4.finditer(
+                    r'<a\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+                    html, _re4.IGNORECASE | _re4.DOTALL):
+                _cands.append((_am.group(1),
+                               _re4.sub(r'<[^>]+>', '', _am.group(2)).strip()))
+            # href= not inside <a> (standalone attribute scan for other tags)
+            for _h in _re4.findall(
+                    r'(?<!<a\b[^>]{0,200})\bhref=["\']([^"\']+)["\']',
+                    html, _re4.IGNORECASE):
+                _cands.append((_h, ""))
             # Form action attributes — critical for .action / .do / .jsf pages
             for _a in _re4.findall(
                     r'<form\b[^>]+\baction=["\']([^"\']+)["\']', html, _re4.IGNORECASE):
-                _cands.append(_a)
+                _cands.append((_a, ""))
             # onclick / data-href / data-url / data-action containing URL-like values
             for _attr_val in _re4.findall(
                     r'(?:onclick|data-href|data-url|data-action|data-link)\s*='
@@ -5407,7 +5477,7 @@ document.addEventListener('submit', function(e) {
                         r'["\']?([/\w\-\.%]+\.(?:action|do|jsf|faces|xhtml|cfm'
                         r'|asp|aspx|jsp|php|html?))["\']?',
                         _attr_val, _re4.IGNORECASE):
-                    _cands.append(_m.group(1))
+                    _cands.append((_m.group(1), ""))
             return _cands
 
         while _queue:
@@ -5432,7 +5502,7 @@ document.addEventListener('submit', function(e) {
                 return r.url
 
             if depth < 3:
-                for raw_url in _extract_spider_urls(r.text, r.url):
+                for raw_url, _link_text in _extract_spider_urls(r.text, r.url):
                     if raw_url.lower().startswith(
                             ("javascript:", "mailto:", "tel:", "#", "data:")):
                         continue
@@ -5444,7 +5514,11 @@ document.addEventListener('submit', function(e) {
                     if norm in _visited:
                         continue
                     _visited.add(norm)
-                    if _is_login_hint(norm):
+                    # Front-queue if the URL path OR the link's visible text
+                    # contains a login hint — covers "Log In" buttons pointing
+                    # to non-obvious URLs like /account or /portal/access.
+                    _text_hint = bool(_link_text and _LOGIN_TEXT_RE.search(_link_text))
+                    if _is_login_hint(norm) or _text_hint:
                         _queue.insert(0, (candidate, depth + 1))
                     else:
                         _queue.append((candidate, depth + 1))
