@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.36"
+VERSION = "2.12.37"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6030,6 +6030,16 @@ document.addEventListener('submit', function(e) {
                 _rendered_html = _drv.page_source
                 _rendered_url  = _drv.current_url or url
 
+                # If the page redirected (e.g. SPA auth-guard → CAS/SSO), that
+                # destination IS the login URL — return it without running passes.
+                if _rendered_url.rstrip("/") != url.rstrip("/"):
+                    vc.log(
+                        f"[auth] Headless render: {url} redirected to "
+                        f"{_rendered_url} — using as login URL",
+                        "INFO",
+                    )
+                    return _rendered_url
+
                 # Pass 1: scan rendered HTML with the standard nav-link scanner
                 try:
                     import types as _types2
@@ -7441,9 +7451,25 @@ return null;
                     if _auto_lp and not auth.get("login_url"):
                         auth["login_url"] = _auto_lp
                     return _auto_sess
+                # Propagate any login_url discovered during this failed attempt
+                # (e.g. form_login ran _discover_login_url and found CAS URL
+                # but the form submission failed — we still want the URL).
+                if not auth.get("login_url"):
+                    _auto_lp_fail = _auto_cfg.get("auth", {}).get("login_url", "").strip()
+                    if _auto_lp_fail:
+                        auth["login_url"] = _auto_lp_fail
+                        vc.log(
+                            f"[auth:auto] login_url from failed '{_auto_m}': "
+                            f"{_auto_lp_fail}",
+                            "INFO",
+                        )
                 vc.log(f"[auth:auto] Method '{_auto_m}' produced no auth signal — skipping",
                        "INFO")
             except Exception as _auto_e:
+                if not auth.get("login_url"):
+                    _auto_lp_ex = _auto_cfg.get("auth", {}).get("login_url", "").strip()
+                    if _auto_lp_ex:
+                        auth["login_url"] = _auto_lp_ex
                 vc.log(f"[auth:auto] Method '{_auto_m}' error: {_auto_e} — skipping", "INFO")
 
         vc.log("[auth:auto] All username/password methods exhausted — no session established",
