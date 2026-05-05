@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.5"
+VERSION = "2.12.6"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2157,8 +2157,18 @@ def _lp_parse_recording(recording_txt: str, login_url: str) -> "dict | None":
         elif _request and _request.get("url"):
             recipe["submit_url"] = _request["url"]
 
+    # Final fallback: SUBMIT event with empty action (SPA / React / Angular forms
+    # that POST to their own page), or no network capture (Firefox without CDP).
+    # Use the login URL itself — by far the most common pattern.
     if not recipe["submit_url"]:
-        return None
+        if _submit is not None:
+            recipe["submit_url"] = login_url
+        elif _nav_urls:
+            # No SUBMIT event either — derive from the last recorded login-path
+            # navigate; the form likely POSTed to login_url.
+            recipe["submit_url"] = login_url
+        else:
+            return None
 
     if _rec_ct:
         recipe["content_type"] = _rec_ct
@@ -5112,6 +5122,22 @@ document.addEventListener('submit', function(e) {
                     _si_submit_url = _nreq["url"]
                     _si_method     = _nreq["method"]
                     break
+
+        # Fallback: SUBMIT event with no action — form POSTs to current page (SPA pattern)
+        if not _si_submit_url:
+            for _ev in _dom_events:
+                if _ev.get("t") == "SUBMIT":
+                    _si_submit_url = login_url
+                    _si_method     = _ev.get("method", "POST")
+                    for _f in _ev.get("fields", []):
+                        if _f.lower() not in _cred_names_lp and len(_f) > 2:
+                            _si_csrf = _f
+                            break
+                    break
+
+        # Final fallback: assume POST to login URL (most common pattern)
+        if not _si_submit_url:
+            _si_submit_url = login_url
 
         # Success URL pattern
         _si_success = ""
