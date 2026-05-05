@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.37"
+VERSION = "2.12.38"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6221,6 +6221,23 @@ return null;
                                 continue
                     except Exception:
                         continue
+                # All three passes exhausted.  Check whether the browser ended
+                # up at a different URL — the Angular/SPA auth-guard may have
+                # redirected AFTER the initial 3-second sleep (e.g. during the
+                # 8-second DOM polling loop) so the early redirect check above
+                # did not fire.  In that case the redirect destination IS the
+                # login page.
+                try:
+                    _final_redir = (_drv.current_url or "").rstrip("/")
+                    if _final_redir and _final_redir != url.rstrip("/"):
+                        vc.log(
+                            f"[auth] Late SPA redirect detected: "
+                            f"{url} → {_final_redir} — using as login URL",
+                            "INFO",
+                        )
+                        return _final_redir
+                except Exception:
+                    pass
             except Exception:
                 return ""
             finally:
