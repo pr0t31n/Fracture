@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.4"
+VERSION = "2.12.5"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -4502,7 +4502,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             #      Using __path__ = [] makes the stub a proper package, which
             #      prevents the "is not a package" error raised when the first
             #      fix alone registers plain ModuleType stubs.
-            import sys as _bidi_sys, types as _bidi_types
+            import sys as _bidi_sys, types as _bidi_types, importlib.machinery as _bidi_imm
             try:
                 opts.enable_bidi = False
             except AttributeError:
@@ -4515,12 +4515,26 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             try:
                 __import__(_bidi_base)
             except ImportError:
+                # Python 3.12+ calls find_spec/exec_module exclusively; the old
+                # find_module/load_module API is no longer invoked.  This finder
+                # implements both interfaces so it works on all Python 3.x.
                 class _BiDiStubFinder:
                     _PREFIX = _bidi_base
-                    def find_module(self, fullname, path=None):
-                        if fullname == self._PREFIX or fullname.startswith(self._PREFIX + "."):
-                            return self
+                    def _matches(self, n):
+                        return n == self._PREFIX or n.startswith(self._PREFIX + ".")
+                    # ── Modern API (Python 3.4+ / 3.12 required) ──────────────
+                    def find_spec(self, fullname, path, target=None):
+                        if not self._matches(fullname):
+                            return None
+                        return _bidi_imm.ModuleSpec(fullname, self, is_package=True)
+                    def create_module(self, spec):
                         return None
+                    def exec_module(self, module):
+                        module.__path__    = []
+                        module.__package__ = module.__name__
+                    # ── Legacy API (Python 3.3 compat) ────────────────────────
+                    def find_module(self, fullname, path=None):
+                        return self if self._matches(fullname) else None
                     def load_module(self, fullname):
                         if fullname in _bidi_sys.modules:
                             return _bidi_sys.modules[fullname]
@@ -4529,11 +4543,15 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         _m.__package__ = fullname
                         _bidi_sys.modules[fullname] = _m
                         return _m
-                _bidi_finder = _BiDiStubFinder()
                 if not any(getattr(f, "_PREFIX", None) == _bidi_base
                            for f in _bidi_sys.meta_path):
-                    _bidi_sys.meta_path.append(_bidi_finder)
-                _bidi_finder.load_module(_bidi_base)
+                    _bidi_sys.meta_path.append(_BiDiStubFinder())
+                # Pre-populate the base package so the first import hits sys.modules
+                if _bidi_base not in _bidi_sys.modules:
+                    _bidi_m = _bidi_types.ModuleType(_bidi_base)
+                    _bidi_m.__path__    = []
+                    _bidi_m.__package__ = _bidi_base
+                    _bidi_sys.modules[_bidi_base] = _bidi_m
             _log_fd, _log_path = _tf2.mkstemp(prefix="fracture_gd_", suffix=".log")
             _os.close(_log_fd)
             if drv_path:
