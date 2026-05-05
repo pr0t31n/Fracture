@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.38"
+VERSION = "2.12.39"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5116,6 +5116,33 @@ document.addEventListener('submit', function(e) {
         try:
             vc.log(f"[auth] {_used_name} opened — navigate to {login_url} and log in", "INFO")
             driver.get(login_url)
+
+            # Wait for any auth-guard redirect (e.g. Angular SPA → CAS/SSO)
+            # and capture the actual login-page URL.  This is the ground-truth
+            # URL — it's where the user actually authenticates, regardless of
+            # what URL was passed in.  Poll until the URL changes or 8 s elapse.
+            try:
+                import time as _bal_t
+                _bal_end = _bal_t.time() + 8
+                _bal_pre = login_url.rstrip("/")
+                while _bal_t.time() < _bal_end:
+                    try:
+                        _bal_cur = (driver.current_url or "").rstrip("/")
+                        if _bal_cur and _bal_cur != _bal_pre:
+                            break
+                    except Exception:
+                        pass
+                    _bal_t.sleep(0.4)
+                _actual_login_url = (driver.current_url or login_url)
+                if _actual_login_url.rstrip("/") != login_url.rstrip("/"):
+                    vc.log(
+                        f"[auth] Browser redirected to actual login URL: "
+                        f"{_actual_login_url}",
+                        "INFO",
+                    )
+                    auth["login_url"] = _actual_login_url
+            except Exception:
+                pass
 
             # Inject the event recorder into the current page
             try:
