@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.12"
+VERSION = "2.12.13"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5909,6 +5909,7 @@ document.addEventListener('submit', function(e) {
             if _login_url:
                 # Persist so _login_post and _csrf_prefetch can use it
                 auth["login_url"] = _login_url
+                vc.log(f"[auth] Login URL: {_login_url}", "INFO")
             else:
                 vc.log("[auth] No login form located — form_login cannot proceed", "WARNING")
                 _login_url = ""
