@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.23"
+VERSION = "2.12.24"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1306,7 +1306,16 @@ def _buster_auth_flags(sess: "requests.Session") -> list:
     flags: list = []
 
     # Session cookies → Cookie header
-    cookie_str = "; ".join(f"{c.name}={c.value}" for c in sess.cookies)
+    # Strip RFC-invalid quoted names (e.g. "institutionName" stored literally
+    # with quote chars by requests when the server sends Set-Cookie: "name"=val).
+    # Also drop any cookie whose name/value contains header-breaking characters.
+    _ck_parts = []
+    for _ck in sess.cookies:
+        _ck_name  = (_ck.name  or "").strip().strip('"').strip("'")
+        _ck_value = (_ck.value or "").replace("\n", "").replace("\r", "")
+        if _ck_name and '"' not in _ck_name:
+            _ck_parts.append(f"{_ck_name}={_ck_value}")
+    cookie_str = "; ".join(_ck_parts)
     if cookie_str:
         flags += ["-H", f"Cookie: {cookie_str}"]
 
@@ -10314,7 +10323,7 @@ def _phase_endpoint_tools(
                 title="Web Screenshot Captured",
                 url=ep_url, port=target["port"], risk="INFO",
                 description=f"A screenshot of discovered endpoint {ep_url} was captured. HTTP {_ss_http_code}.",
-                affected=_rel_affected(_ep_rel),
+                affected=out._rel_affected(_ep_rel),
                 output=f"Saved: {ep_shot.name}",
                 sources="fracture-screenshot", service=target["scheme"],
                 output_file=str(ep_shot),
@@ -12555,7 +12564,7 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             title="Web Screenshot Captured",
             url=url, port=port, risk="INFO",
             description=f"A screenshot of {url} was captured during reconnaissance.{_ss_code_str}",
-            affected=_rel_affected(_ss_rel),
+            affected=out._rel_affected(_ss_rel),
             output=f"Saved: {out_path.name}",
             sources="fracture-screenshot", service=target["scheme"],
             output_file=str(out_path),
@@ -12679,7 +12688,7 @@ def _phase_webfiles(target: dict, cfg: dict, pm: ProgressManager,
             title="Web Files Downloaded",
             url=url, port=port, risk="INFO",
             description=f"File downloaded from {base_url}{_wf_path} during reconnaissance. HTTP {_wf_http_code}.",
-            affected=_rel_affected(_wf_path),
+            affected=_wf_path,
             output=Path(_wf_fpath).name,
             sources="fracture-webfiles", service=target["scheme"],
             output_file=_wf_fpath,
