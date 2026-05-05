@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.22"
+VERSION = "2.12.23"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1949,6 +1949,14 @@ def _lp_match(login_url: str) -> "dict | None":
     Fingerprint *login_url* and return the best matching profile entry from the
     index (with an added 'confidence' key as int 0-100), or None if nothing
     scores at or above the threshold (_LP_MATCH_THRESHOLD = 0.75).
+
+    Matching is attempted against two stored fingerprints per profile:
+      • fingerprint            — entry-point page (e.g. SPA shell)
+      • login_page_fingerprint — actual login form page (e.g. CAS/Okta/ADFS)
+
+    This enables recognition from either direction: Fracture may be called with
+    the application entry URL (SPA) or with the directly-discovered auth-
+    provider URL, and will match the same stored profile either way.
     """
     index = _lp_load_index()
     if not index:
@@ -1957,7 +1965,9 @@ def _lp_match(login_url: str) -> "dict | None":
     best_s: float         = 0.0
     best_e: "dict | None" = None
     for entry in index:
-        s = _lp_score(observed, entry.get("fingerprint", {}))
+        s_entry = _lp_score(observed, entry.get("fingerprint", {}))
+        s_login = _lp_score(observed, entry.get("login_page_fingerprint", {}))
+        s = max(s_entry, s_login)
         if s > best_s:
             best_s = s
             best_e = entry
@@ -1993,13 +2003,23 @@ def _lp_replay(profile_id: str, login_url: str, cfg: dict,
 
     sess = _make_session(cfg, scope_hostnames or set())
 
+    # Prefer the stored login_page_url (e.g. the CAS login page) for CSRF
+    # harvest because it is the actual form page — not the entry-point URL
+    # (e.g. an Angular SPA) which carries no form fields at all.
+    # Fall back: submit_url → login_url (original entry point).
+    _csrf_source_url = (
+        profile.get("login_page_url", "").strip()
+        or submit_url
+        or login_url
+    )
+
     # Harvest CSRF token if required by the recipe
     csrf_token = ""
     if csrf_strat == "hidden_field" and csrf_field:
         try:
             import html.parser as _hp2
 
-            r_get = sess.get(login_url, timeout=10, verify=False)
+            r_get = sess.get(_csrf_source_url, timeout=10, verify=False)
 
             class _CT(_hp2.HTMLParser):
                 def __init__(self):
@@ -2019,7 +2039,7 @@ def _lp_replay(profile_id: str, login_url: str, cfg: dict,
             pass
     elif csrf_strat == "cookie" and csrf_field:
         try:
-            sess.get(login_url, timeout=10, verify=False)
+            sess.get(_csrf_source_url, timeout=10, verify=False)
             csrf_token = sess.cookies.get(csrf_field, "")
         except Exception:
             pass
@@ -2282,17 +2302,32 @@ def _lp_parse_recording(recording_txt: str, login_url: str) -> "dict | None":
 
 
 def _lp_save_profile(profile_id: str, login_url: str, browser_used: str,
-                     recipe: dict) -> None:
-    """Persist a new profile to disk and add it to the shared index."""
+                     recipe: dict, login_page_url: str = "",
+                     login_page_fingerprint: "dict | None" = None) -> None:
+    """Persist a new profile to disk and add it to the shared index.
+
+    login_url              — entry-point URL passed to browser-assisted login
+                             (e.g. the Angular SPA base URL)
+    login_page_url         — actual login-form URL discovered during the browser
+                             session (e.g. the CAS login page URL).  Used as the
+                             authoritative source for CSRF token harvest on replay.
+    login_page_fingerprint — structural fingerprint of the actual login page.
+                             Enables cross-app matching when the same auth
+                             provider (CAS, Okta, ADFS, …) is used by multiple
+                             different applications.
+    """
     _lp_ensure_dir()
     fp = _lp_fingerprint_url(login_url)
+    _lp_fp = login_page_fingerprint or {}
     profile = {
-        "id":           profile_id,
-        "created":      datetime.now().isoformat(timespec="seconds"),
-        "target_url":   login_url,
-        "browser_used": browser_used,
-        "recipe":       recipe,
-        "fingerprint":  fp,
+        "id":                     profile_id,
+        "created":                datetime.now().isoformat(timespec="seconds"),
+        "target_url":             login_url,
+        "login_page_url":         login_page_url,
+        "browser_used":           browser_used,
+        "recipe":                 recipe,
+        "fingerprint":            fp,
+        "login_page_fingerprint": _lp_fp,
     }
     (_LP_STORE_DIR / f"{profile_id}.json").write_text(
         json.dumps(profile, indent=2), encoding="utf-8"
@@ -2300,17 +2335,19 @@ def _lp_save_profile(profile_id: str, login_url: str, browser_used: str,
     index = _lp_load_index()
     index = [e for e in index if e.get("id") != profile_id]
     index.append({
-        "id":         profile_id,
-        "file":       f"{profile_id}.json",
-        "created":    profile["created"],
-        "target_url": login_url,
+        "id":                     profile_id,
+        "file":                   f"{profile_id}.json",
+        "created":                profile["created"],
+        "target_url":             login_url,
+        "login_page_url":         login_page_url,
         "description": (
             f"{recipe.get('submit_method','POST')} "
             f"{recipe.get('content_type','').split(';')[0]} "
             f"csrf={recipe.get('csrf_strategy','none')} "
             f"carrier={','.join(recipe.get('session_carriers',[]))}"
         ).strip(),
-        "fingerprint": fp,
+        "fingerprint":            fp,
+        "login_page_fingerprint": _lp_fp,
     })
     _lp_save_index(index)
 
@@ -5270,7 +5307,26 @@ document.addEventListener('submit', function(e) {
                             (_recipe.get("submit_url") or login_url).encode()
                           ).hexdigest()[:6]
                     )
-                    _lp_save_profile(_pid, login_url, _used_name, _recipe)
+                    # Fingerprint the actual login form page (submit_url or the
+                    # page the browser captured credentials from).  This differs
+                    # from login_url when the entry point is a SPA that redirects
+                    # to an external auth provider (CAS, Okta, ADFS, etc.).
+                    _lp_page_url = (_recipe.get("submit_url") or "").strip()
+                    _lp_page_fp: dict = {}
+                    if _lp_page_url and _lp_page_url != login_url:
+                        try:
+                            vc.log(
+                                f"[auth] Fingerprinting login form page: {_lp_page_url}",
+                                "INFO",
+                            )
+                            _lp_page_fp = _lp_fingerprint_url(_lp_page_url)
+                        except Exception:
+                            pass
+                    _lp_save_profile(
+                        _pid, login_url, _used_name, _recipe,
+                        login_page_url=_lp_page_url,
+                        login_page_fingerprint=_lp_page_fp,
+                    )
                     vc.log(f"[auth] Login profile saved: {_pid}", "SUCCESS")
                 else:
                     vc.log(
