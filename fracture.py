@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.25"
+VERSION = "2.12.26"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2039,38 +2039,40 @@ def _lp_replay(profile_id: str, login_url: str, cfg: dict,
         or login_url
     )
 
-    # Harvest CSRF token if required by the recipe
-    csrf_token = ""
-    if csrf_strat == "hidden_field" and csrf_field:
-        try:
-            import html.parser as _hp2
+    # Fetch the login page and extract ALL hidden form fields.
+    # Complex form frameworks (CAS Webflow, JSF, Spring Security) require every
+    # hidden input — lt, execution, _eventId, javax.faces.ViewState, etc. — to be
+    # present in the POST body.  Extracting all of them unconditionally is safe:
+    # sites that only need a single CSRF token will have exactly that one hidden
+    # field.  For cookie-strategy forms the GET also sets the CSRF cookie in the
+    # session.
+    hidden_fields: dict = {}
+    try:
+        import html.parser as _hp2
 
-            r_get = sess.get(_csrf_source_url, timeout=10, verify=False)
+        r_get = sess.get(_csrf_source_url, timeout=10, verify=False)
 
-            class _CT(_hp2.HTMLParser):
-                def __init__(self):
-                    super().__init__()
-                    self.token = ""
+        class _HF(_hp2.HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.fields: dict = {}
 
-                def handle_starttag(self, tag, attrs):
-                    if tag == "input":
-                        a = dict(attrs)
-                        if a.get("name") == csrf_field and a.get("type") == "hidden":
-                            self.token = a.get("value", "")
+            def handle_starttag(self, tag, attrs):
+                if tag == "input":
+                    a = dict(attrs)
+                    if a.get("type", "").lower() == "hidden" and a.get("name"):
+                        self.fields[a["name"]] = a.get("value", "")
 
-            _p2 = _CT()
-            _p2.feed(r_get.text)
-            csrf_token = _p2.token
-        except Exception:
-            pass
-    elif csrf_strat == "cookie" and csrf_field:
-        try:
-            sess.get(_csrf_source_url, timeout=10, verify=False)
-            csrf_token = sess.cookies.get(csrf_field, "")
-        except Exception:
-            pass
+        _hfp = _HF()
+        _hfp.feed(r_get.text)
+        hidden_fields = _hfp.fields
+    except Exception:
+        pass
 
-    # Build credential payload from stored field selectors + scan auth config
+    # Build credential payload: start with all hidden fields so that
+    # framework-required tokens (lt, execution, javax.faces.ViewState, …) are
+    # included, then overlay user-provided credentials on top.
+    # Profiles store only CSS selectors — never credential values.
     auth   = cfg.get("auth", {})
     cred   = recipe.get("credential_fields", {})
 
@@ -2082,12 +2084,13 @@ def _lp_replay(profile_id: str, login_url: str, cfg: dict,
 
     u_field = _sel_to_name(cred.get("email") or cred.get("username") or "username")
     p_field = _sel_to_name(cred.get("password") or "password")
-    payload: dict = {
-        u_field: auth.get("username", ""),
-        p_field: auth.get("password", ""),
-    }
-    if csrf_token and csrf_field:
-        payload[csrf_field] = csrf_token
+    payload: dict = dict(hidden_fields)
+    payload[u_field] = auth.get("username", "")
+    payload[p_field] = auth.get("password", "")
+    if csrf_strat == "cookie" and csrf_field:
+        _ck_csrf = sess.cookies.get(csrf_field, "")
+        if _ck_csrf:
+            payload[csrf_field] = _ck_csrf
 
     try:
         if "json" in ct.lower():
