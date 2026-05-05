@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.29"
+VERSION = "2.12.31"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -20517,6 +20517,45 @@ def main() -> None:
                 _ctx_user = (_ctx_cfg.get("auth", {}).get("username") or "").strip() or _ctx_label
                 out.set_auth_context([{"username": _ctx_user, "role": _ctx_label}])
 
+            # Emit an INFO finding whenever a login page was discovered so there
+            # is an explicit record of where authentication happens, visible in
+            # Crucible's Findings tab.  Only emit for authenticated contexts that
+            # have a login URL distinct from the base target URL (e.g. an external
+            # CAS/SSO page would not be visible from the target's findings otherwise).
+            try:
+                _lp_found_url = (
+                    _ctx_cfg.get("auth", {}).get("login_url", "").strip()
+                )
+                if (_ctx_label != "unauthenticated"
+                        and _lp_found_url
+                        and _lp_found_url.rstrip("/") != target["url"].rstrip("/")):
+                    _lp_role_sfx = f" (role: {_ctx_label})" if _ctx_label else ""
+                    _lp_rel = urllib.parse.urlparse(_lp_found_url).path or "/"
+                    out.add_finding(
+                        title="Login Page Discovered",
+                        url=_lp_found_url,
+                        port=target["port"],
+                        risk="INFO",
+                        description=(
+                            f"A login page was identified at {_lp_found_url}"
+                            f"{_lp_role_sfx}. This is the authentication entry "
+                            f"point used during testing."
+                        ),
+                        affected=_lp_rel,
+                        output=_lp_found_url,
+                        sources="fracture-auth",
+                        service=target["scheme"],
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="IA-8",
+                        remediation=(
+                            "Ensure the login page enforces HTTPS, uses "
+                            "anti-brute-force controls, and does not disclose "
+                            "version or framework information."
+                        ),
+                    )
+            except Exception:
+                pass
+
             # ── Write authentication_status.json entry for this role ──────────
             # Probe the base target URL with this session to capture the
             # post-login landing page (URL, HTTP code, and a body snippet for
@@ -20548,6 +20587,104 @@ def main() -> None:
                     out.root, _ctx_label, _as_username, _as_status,
                     _ctx_auth, _as_landing_url, _as_landing_body, _as_landing_code,
                 )
+
+                # Screenshot the login URL and the authenticated landing URL.
+                # Phase 0b only screenshots the base target URL; for SPA/SSO apps
+                # the login page (CAS, Okta, ADFS, …) and the post-login landing
+                # page are different URLs that are never visited by gobuster or the
+                # static crawl, so they would never otherwise be captured.
+                _ss_save_dir  = out.root / "recon"
+                _ss_save_dir.mkdir(parents=True, exist_ok=True)
+                _ss_safe_host = target["hostname"].replace(".", "_")
+                _ss_port      = target["port"]
+                _ss_role_slug = _ctx_label.replace(" ", "_").lower()
+                _ss_base_norm = target["url"].rstrip("/")
+                _ss_login_url = ""
+
+                # Login URL screenshot — skip if it's the same as the base URL
+                # (already captured by Phase 0b) or if auth is not in use.
+                if _ctx_auth is not None and not _is_reduced_ctx:
+                    _ss_login_url = (
+                        _ctx_cfg.get("auth", {}).get("login_url", "").strip()
+                        or ""
+                    )
+                    if (_ss_login_url
+                            and _ss_login_url.rstrip("/") != _ss_base_norm):
+                        try:
+                            _ss_lp = (
+                                _ss_save_dir
+                                / f"screenshot_{_ss_safe_host}_{_ss_port}"
+                                  f"_login_{_ss_role_slug}.png"
+                            )
+                            if _capture_screenshot_to(_ss_login_url, _ss_lp, target, cfg):
+                                _ss_lp_rel = urllib.parse.urlparse(_ss_login_url).path or "/"
+                                out.add_finding(
+                                    title="Web Screenshot Captured",
+                                    url=_ss_login_url, port=_ss_port, risk="INFO",
+                                    description=(
+                                        f"Screenshot of login page for role "
+                                        f"'{_ctx_label}': {_ss_login_url}"
+                                    ),
+                                    affected=_ss_lp_rel,
+                                    output=f"Saved: {_ss_lp.name}",
+                                    sources="fracture-screenshot",
+                                    service=target["scheme"],
+                                    output_file=str(_ss_lp),
+                                    owasp="A05:2025 Security Misconfiguration",
+                                    nist="CM-7",
+                                    remediation="Review screenshot for exposed sensitive content.",
+                                )
+                                vc.log(
+                                    f"[screenshot] Login page [{_ctx_label}]: {_ss_lp.name}",
+                                    "SUCCESS",
+                                )
+                        except Exception:
+                            pass
+
+                # Authenticated landing URL screenshot — the page the session
+                # lands on after login.  Skip if it's the base URL (Phase 0b
+                # already captured it) or if it's the same as the login URL.
+                if (_as_landing_url
+                        and _as_landing_code in range(200, 400)
+                        and _as_landing_url.rstrip("/") != _ss_base_norm
+                        and _as_landing_url.rstrip("/") != _ss_login_url.rstrip("/")):
+                    try:
+                        _ss_lnd = (
+                            _ss_save_dir
+                            / f"screenshot_{_ss_safe_host}_{_ss_port}"
+                              f"_landing_{_ss_role_slug}.png"
+                        )
+                        if _capture_screenshot_to(_as_landing_url, _ss_lnd, target, cfg):
+                            _ss_lnd_rel = urllib.parse.urlparse(_as_landing_url).path or "/"
+                            _lnd_ctx = (
+                                f" (role: {_ctx_label})"
+                                if _ctx_label != "unauthenticated" else ""
+                            )
+                            out.add_finding(
+                                title="Web Screenshot Captured",
+                                url=_as_landing_url, port=_ss_port, risk="INFO",
+                                description=(
+                                    f"Screenshot of authenticated landing page"
+                                    f"{_lnd_ctx}: {_as_landing_url}"
+                                    f" HTTP {_as_landing_code}."
+                                ),
+                                affected=_ss_lnd_rel,
+                                output=f"Saved: {_ss_lnd.name}",
+                                sources="fracture-screenshot",
+                                service=target["scheme"],
+                                output_file=str(_ss_lnd),
+                                http_code=_as_landing_code,
+                                owasp="A05:2025 Security Misconfiguration",
+                                nist="CM-7",
+                                remediation="Review screenshot for exposed sensitive content.",
+                            )
+                            vc.log(
+                                f"[screenshot] Landing page [{_ctx_label}]: {_ss_lnd.name}",
+                                "SUCCESS",
+                            )
+                    except Exception:
+                        pass
+
             except Exception:
                 pass
 
