@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.21"
+VERSION = "2.12.22"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2986,6 +2986,8 @@ class OutputManager:
                 "missing secure cookie attribute:",
                 "misconfigured secure cookie attribute:",
                 "broken function level authorization (bfla)",
+                "web files downloaded",
+                "web screenshot captured",
             )
             _is_global = any(_title_lower.startswith(_p) for _p in _GLOBAL_MERGE_PREFIXES)
             _norm_key  = (_title_lower, "" if _is_global else url.strip(),
@@ -10242,21 +10244,25 @@ def _phase_endpoint_tools(
         _ep_scope_ok = (scope_hostnames is None or _is_in_scope_url(ep_url, scope_hostnames))
         _ep_not_asset = not (_ep_path_low.endswith(".css") or _ep_path_low.endswith(".js"))
         _ep_screenshot_ok = _is_valid_endpoint_url(ep_url) and _ep_scope_ok and _ep_not_asset
+        _ss_http_code = None
         if _ep_screenshot_ok:
             try:
                 _ss_check = sess.head(ep_url, timeout=min(timeout, 5), allow_redirects=True)
-                _ep_screenshot_ok = 200 <= _ss_check.status_code < 300
+                _ss_http_code = _ss_check.status_code
+                _ep_screenshot_ok = (200 <= _ss_http_code < 300) or (400 <= _ss_http_code < 500)
             except Exception:
                 _ep_screenshot_ok = False
         if _ep_screenshot_ok and _capture_screenshot_to(ep_url, ep_shot, target, cfg):
             _ep_rel = urllib.parse.urlparse(ep_url).path or "/"
             out.add_finding(
-                title=f"Web Screenshot Captured: {_ep_rel}",
+                title="Web Screenshot Captured",
                 url=ep_url, port=target["port"], risk="INFO",
-                description=f"A screenshot of discovered endpoint {ep_url} was captured.",
+                description=f"A screenshot of discovered endpoint {ep_url} was captured. HTTP {_ss_http_code}.",
+                affected=_rel_affected(_ep_rel),
                 output=f"Saved: {ep_shot.name}",
                 sources="fracture-screenshot", service=target["scheme"],
                 output_file=str(ep_shot),
+                http_code=_ss_http_code,
                 owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                 remediation="Review screenshot for exposed sensitive content.",
             )
@@ -12484,13 +12490,20 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                 pass
 
         _ss_rel = urllib.parse.urlparse(url).path or "/"
+        try:
+            _ss_phase_code = requests.head(url, timeout=5, verify=False, allow_redirects=True).status_code
+        except Exception:
+            _ss_phase_code = None
+        _ss_code_str = f" HTTP {_ss_phase_code}." if _ss_phase_code is not None else ""
         out.add_finding(
-            title=f"Web Screenshot Captured: {_ss_rel}",
+            title="Web Screenshot Captured",
             url=url, port=port, risk="INFO",
-            description=f"A screenshot of {url} was captured during reconnaissance.",
+            description=f"A screenshot of {url} was captured during reconnaissance.{_ss_code_str}",
+            affected=_rel_affected(_ss_rel),
             output=f"Saved: {out_path.name}",
             sources="fracture-screenshot", service=target["scheme"],
             output_file=str(out_path),
+            http_code=_ss_phase_code,
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
             remediation="Review screenshot for exposed sensitive content.",
         )
@@ -12546,7 +12559,7 @@ def _phase_webfiles(target: dict, cfg: dict, pm: ProgressManager,
 
     vc.status(phase, "Web Files", "running", "Downloading", 0, len(_WEB_WELL_KNOWN))
 
-    def _get_and_save(path: str) -> "str | None":
+    def _get_and_save(path: str) -> "tuple[str, int] | None":
         if path in visited:
             return None
         visited.add(path)
@@ -12566,14 +12579,15 @@ def _phase_webfiles(target: dict, cfg: dict, pm: ProgressManager,
             fname = _web_path_to_filename(path)
             fpath = save_dir / fname
             fpath.write_text(text, encoding="utf-8")
-            return str(fpath)
+            return str(fpath), r.status_code
         except Exception:
             return None
 
     for path in _WEB_WELL_KNOWN:
-        fpath = _get_and_save(path)
-        if fpath:
-            saved.append((path, fpath))
+        _gs_result = _get_and_save(path)
+        if _gs_result:
+            fpath, _wf_code = _gs_result
+            saved.append((path, fpath, _wf_code))
             if path in ("/", "/index.html", "/index.php"):
                 try:
                     text = Path(fpath).read_text(encoding="utf-8", errors="replace")
@@ -12597,20 +12611,23 @@ def _phase_webfiles(target: dict, cfg: dict, pm: ProgressManager,
             continue
         if len(saved) >= _MAX_WEB_LINKS:
             break
-        fpath = _get_and_save(path)
-        if fpath:
-            saved.append((path, fpath))
+        _gs_result = _get_and_save(path)
+        if _gs_result:
+            fpath, _wf_code = _gs_result
+            saved.append((path, fpath, _wf_code))
 
     vc.status(phase, "Web Files", "running", f"{len(saved)} files", len(saved), max(len(saved), 1))
 
-    for _wf_path, _wf_fpath in saved:
+    for _wf_path, _wf_fpath, _wf_http_code in saved:
         out.add_finding(
-            title=f"Web Files Downloaded: {_wf_path}",
+            title="Web Files Downloaded",
             url=url, port=port, risk="INFO",
-            description=f"File downloaded from {base_url}{_wf_path} during reconnaissance.",
+            description=f"File downloaded from {base_url}{_wf_path} during reconnaissance. HTTP {_wf_http_code}.",
+            affected=_rel_affected(_wf_path),
             output=Path(_wf_fpath).name,
             sources="fracture-webfiles", service=target["scheme"],
             output_file=_wf_fpath,
+            http_code=_wf_http_code,
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
             remediation="Review downloaded files for sensitive information or misconfigurations.",
         )
