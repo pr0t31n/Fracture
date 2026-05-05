@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.16"
+VERSION = "2.12.17"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5429,9 +5429,27 @@ document.addEventListener('submit', function(e) {
                     if not _a_href_m:
                         continue
                     _a_href = _a_href_m.group(1).strip()
+                    # For href="#" / "javascript:..." try to extract the target
+                    # URL from an onclick attribute (common pattern for login buttons).
                     if _a_href.lower().startswith(
                             ("javascript:", "mailto:", "tel:", "#", "data:")):
-                        continue
+                        _a_onclick_m = _re4.search(
+                            r'\bonclick=["\']([^"\']+)["\']', _a_attrs, _re4.IGNORECASE)
+                        if not _a_onclick_m:
+                            continue
+                        _a_onclick_val = _a_onclick_m.group(1)
+                        _a_url_m = _re4.search(
+                            r'''(?:window\.location(?:\.href)?|location(?:\.href)?|'''
+                            r'''location\.(?:replace|assign)\s*\()\s*[=\(]\s*["\']([^"\']+)["\']''',
+                            _a_onclick_val, _re4.IGNORECASE)
+                        if not _a_url_m:
+                            # fallback: any quoted path starting with /
+                            _a_url_m = _re4.search(
+                                r'''["\']([/][^"\'?\s]{1,200})["\']''',
+                                _a_onclick_val)
+                        if not _a_url_m:
+                            continue
+                        _a_href = _a_url_m.group(1).strip()
                     _a_cand = _uj4(_base_r0.url, _a_href)
                     if _up4(_a_cand).netloc != _base_host:
                         continue
@@ -5470,6 +5488,93 @@ document.addEventListener('submit', function(e) {
                         )
                     except Exception:
                         continue
+
+                # Also scan <button> elements with login text.
+                # Buttons navigate via onclick or via the enclosing <form action="...">.
+                if not _login_link_found:
+                    # Build a quick form-action map: form_start_pos → action_url
+                    _form_actions: list = []
+                    for _fm in _re4.finditer(
+                            r'<form\b([^>]*)>', _base_r0.text, _re4.IGNORECASE):
+                        _fa_m = _re4.search(
+                            r'\baction=["\']([^"\']+)["\']',
+                            _fm.group(1), _re4.IGNORECASE)
+                        _fa_url = _uj4(_base_r0.url, _fa_m.group(1).strip()) if _fa_m else ""
+                        _form_actions.append((_fm.start(), _fa_url))
+
+                    for _bm in _re4.finditer(
+                            r'<(?:button|input)\b([^>]*)(?:>(.*?)</(?:button|input)>|/>)',
+                            _base_r0.text, _re4.IGNORECASE | _re4.DOTALL):
+                        _b_attrs = _bm.group(1)
+                        _b_inner = (_bm.group(2) or "").strip()
+                        _b_text  = _re4.sub(r'<[^>]+>', '', _b_inner).strip()
+                        # Also check value= on <input type="button|submit">
+                        _b_val_m = _re4.search(
+                            r'\bvalue=["\']([^"\']+)["\']', _b_attrs, _re4.IGNORECASE)
+                        _b_val   = _b_val_m.group(1) if _b_val_m else ""
+                        _b_label_text = _b_text or _b_val
+                        if not (_LOGIN_TEXT_RE.search(_b_label_text)
+                                or _LOGIN_TEXT_RE.search(
+                                    (_re4.search(r'\b(?:aria-label|title)=["\']([^"\']+)["\']',
+                                                 _b_attrs, _re4.IGNORECASE) or type("", (), {"group": lambda s, n: ""})()).group(1) or "")):
+                            continue
+                        # Try onclick first
+                        _b_oc_m = _re4.search(
+                            r'\bonclick=["\']([^"\']+)["\']', _b_attrs, _re4.IGNORECASE)
+                        _b_cand = ""
+                        if _b_oc_m:
+                            _b_oc = _b_oc_m.group(1)
+                            _b_url_m = _re4.search(
+                                r'''(?:window\.location(?:\.href)?|location(?:\.href)?|'''
+                                r'''location\.(?:replace|assign)\s*\()\s*[=\(]\s*["\']([^"\']+)["\']''',
+                                _b_oc, _re4.IGNORECASE)
+                            if not _b_url_m:
+                                _b_url_m = _re4.search(r'''["\']([/][^"\'?\s]{1,200})["\']''', _b_oc)
+                            if _b_url_m:
+                                _b_cand = _uj4(_base_r0.url, _b_url_m.group(1).strip())
+                        # Fallback: nearest enclosing form action
+                        if not _b_cand:
+                            _b_pos = _bm.start()
+                            _nearest_fa = ""
+                            for _fpos, _furl in reversed(_form_actions):
+                                if _fpos < _b_pos and _furl:
+                                    _nearest_fa = _furl
+                                    break
+                            _b_cand = _nearest_fa
+                        if not _b_cand or _up4(_b_cand).netloc not in ("", _base_host):
+                            continue
+                        _b_display = _b_label_text or _b_attrs[:40]
+                        vc.log(
+                            f"[auth] Login button identified: '{_b_display}' → {_b_cand}",
+                            "INFO",
+                        )
+                        _login_link_found = True
+                        try:
+                            vc.log(f"[auth] Visiting login button target: {_b_cand}", "INFO")
+                            _b_r = sess.get(_b_cand, timeout=timeout, allow_redirects=True)
+                            if _b_r.status_code not in (200, 301, 302):
+                                vc.log(
+                                    f"[auth] Login button target returned HTTP"
+                                    f" {_b_r.status_code} — skipping", "INFO")
+                                continue
+                            _b_page = _analyse_form_page(_b_r.text, _b_r.url)
+                            if (_b_page["login_form"]
+                                    or (_b_page["has_username"] and _b_page["has_checkbox"])):
+                                vc.log(
+                                    f"[auth] Login form found via button"
+                                    f" '{_b_display}': {_b_r.url}", "SUCCESS")
+                                return _b_r.url
+                            if _b_page.get("js_rendered_login"):
+                                vc.log(
+                                    f"[auth] JS-rendered login via button"
+                                    f" '{_b_display}': {_b_r.url}", "INFO")
+                                return _b_r.url
+                            vc.log(
+                                f"[auth] No login form at button target"
+                                f" ({_b_r.url}) — continuing", "INFO")
+                        except Exception:
+                            continue
+
                 if not _login_link_found:
                     vc.log(
                         f"[auth] No login links identified on base page ({_base_r0.url})",
