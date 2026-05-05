@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.39"
+VERSION = "2.12.40"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5117,30 +5117,31 @@ document.addEventListener('submit', function(e) {
             vc.log(f"[auth] {_used_name} opened — navigate to {login_url} and log in", "INFO")
             driver.get(login_url)
 
-            # Wait for any auth-guard redirect (e.g. Angular SPA → CAS/SSO)
-            # and capture the actual login-page URL.  This is the ground-truth
-            # URL — it's where the user actually authenticates, regardless of
-            # what URL was passed in.  Poll until the URL changes or 8 s elapse.
+            # Wait for a cross-domain auth-guard redirect (e.g. Angular SPA →
+            # CAS/Okta/ADFS).  We specifically look for a netloc change rather
+            # than any URL change — same-domain redirects like / → /home/ are
+            # not the login page.  Poll up to 10 s; if the browser leaves the
+            # origin domain we've found the IdP login URL.
             try:
                 import time as _bal_t
-                _bal_end = _bal_t.time() + 8
-                _bal_pre = login_url.rstrip("/")
+                from urllib.parse import urlparse as _ulp_bal
+                _bal_end     = _bal_t.time() + 10
+                _bal_netloc  = _ulp_bal(login_url).netloc
                 while _bal_t.time() < _bal_end:
                     try:
-                        _bal_cur = (driver.current_url or "").rstrip("/")
-                        if _bal_cur and _bal_cur != _bal_pre:
+                        _bal_cur_url = driver.current_url or ""
+                        _bal_cur_nl  = _ulp_bal(_bal_cur_url).netloc
+                        if _bal_cur_nl and _bal_cur_nl != _bal_netloc:
+                            auth["login_url"] = _bal_cur_url
+                            vc.log(
+                                f"[auth] Browser redirected to IdP login URL: "
+                                f"{_bal_cur_url}",
+                                "INFO",
+                            )
                             break
                     except Exception:
                         pass
                     _bal_t.sleep(0.4)
-                _actual_login_url = (driver.current_url or login_url)
-                if _actual_login_url.rstrip("/") != login_url.rstrip("/"):
-                    vc.log(
-                        f"[auth] Browser redirected to actual login URL: "
-                        f"{_actual_login_url}",
-                        "INFO",
-                    )
-                    auth["login_url"] = _actual_login_url
             except Exception:
                 pass
 
@@ -5264,6 +5265,26 @@ document.addEventListener('submit', function(e) {
         if not browser_cookies:
             vc.log("[auth] No cookies captured from browser — cannot build session", "WARNING")
             return None
+
+        # ── Post-login: extract login URL from CDP nav chain ──────────────────
+        # CDP gives us the definitive Document navigation sequence.  The first
+        # URL whose netloc differs from login_url is the IdP/CAS/SSO page —
+        # more reliable than the pre-login polling, and also works when the
+        # cross-domain redirect was too fast or too slow for the poll to catch.
+        if _nav_urls:
+            try:
+                from urllib.parse import urlparse as _ulp_nav
+                _nav_origin = _ulp_nav(login_url).netloc
+                for _n_url in _nav_urls:
+                    if _ulp_nav(_n_url).netloc != _nav_origin:
+                        auth["login_url"] = _n_url
+                        vc.log(
+                            f"[auth] Login URL confirmed from CDP nav chain: {_n_url}",
+                            "INFO",
+                        )
+                        break
+            except Exception:
+                pass
 
         # ── Build recording TXT ───────────────────────────────────────────────
         _cred_names_lp = {"email", "username", "user", "login",
