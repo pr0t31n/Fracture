@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.20"
+VERSION = "2.12.21"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5583,6 +5583,46 @@ document.addEventListener('submit', function(e) {
         except Exception:
             pass
 
+        # 0.1 — Auth-redirect probe ───────────────────────────────────────────
+        # Server-side SSO (Spring Security + CAS, Shibboleth, etc.) returns
+        # HTTP 302 to the login URL for unauthenticated requests.  Fetching
+        # common API / page paths with allow_redirects=False lets us read the
+        # Location header directly — no HTML or JS parsing needed.
+        _AUTH_PROBE_PATHS = [
+            "/api/user", "/api/me", "/api/profile", "/api/account",
+            "/api/auth/status", "/api/auth", "/api/session",
+            "/api/current-user", "/api/whoami", "/api/identity",
+            "/home/", "/home", "/app/", "/app",
+            "/dashboard/", "/dashboard", "/portal/", "/portal",
+        ]
+        for _ap in _AUTH_PROBE_PATHS:
+            try:
+                _apr = sess.get(base + _ap, timeout=timeout, allow_redirects=False)
+                if _apr.status_code not in (301, 302, 307, 308):
+                    continue
+                _loc = _apr.headers.get("Location", "").strip()
+                if not _loc:
+                    continue
+                _loc_abs = _uj4(base + _ap, _loc)
+                if _loc_abs.rstrip("/") in (base.rstrip("/"), (base + _ap).rstrip("/")):
+                    continue  # redirect back to same page — ignore
+                vc.log(f"[auth] Auth redirect detected: {base + _ap} → {_loc_abs}", "INFO")
+                try:
+                    _ar_r = sess.get(_loc_abs, timeout=timeout, allow_redirects=True)
+                    _ar_p = _analyse_form_page(_ar_r.text, _ar_r.url)
+                    if _ar_p["login_form"] or (_ar_p["has_username"] and _ar_p["has_checkbox"]):
+                        vc.log(f"[auth] Login form found via auth redirect: {_ar_r.url}",
+                               "SUCCESS")
+                        return _ar_r.url
+                    if _ar_p.get("js_rendered_login"):
+                        vc.log(f"[auth] JS-rendered login via auth redirect: {_ar_r.url}",
+                               "INFO")
+                        return _ar_r.url
+                except Exception:
+                    pass
+            except Exception:
+                continue
+
         # 0.5 — Landing-page nav scan ─────────────────────────────────────────
         # When the base URL is a JS/SPA entry point (e.g. / → /home/ via
         # client-side routing), requests won't follow the client-side redirect
@@ -6834,12 +6874,9 @@ document.addEventListener('submit', function(e) {
         })
 
         def _auto_has_auth(s: "requests.Session") -> bool:
-            # Only count server-issued signals (cookies / auth response headers).
-            # Deliberately excludes s.auth — client-side credential storage is
-            # not evidence the server accepted the credentials; a verification
-            # request is needed for methods like basic/digest/ntlm.
             return (bool(s.cookies)
-                    or any(k.lower() in _auto_hdr_names for k in s.headers))
+                    or any(k.lower() in _auto_hdr_names for k in s.headers)
+                    or s.auth is not None)
 
         _auto_base_url = (
             cfg.get("target_url", "")
@@ -6847,12 +6884,32 @@ document.addEventListener('submit', function(e) {
             or ""
         ).rstrip("/")
 
-        # Methods that set sess.auth without making any requests — these need
-        # an extra verification GET to confirm the server accepted the credentials.
-        _AUTO_NEEDS_VERIFY = frozenset({"basic", "digest", "ntlm", "ntlm_v2"})
+        # Pre-check: only try HTTP credential methods (basic/digest/ntlm) when
+        # the server actually issues a 401 challenge.  Web apps that use form or
+        # token login never 401, so trying basic/digest would set sess.auth,
+        # return a trivially non-None session, and falsely appear to succeed.
+        _auto_server_401 = False
+        if _auto_base_url:
+            try:
+                _auto_probe = sess.get(
+                    _auto_base_url, timeout=timeout, allow_redirects=False)
+                _auto_server_401 = (_auto_probe.status_code == 401)
+            except Exception:
+                pass
+        _HTTP_AUTH_METHODS = frozenset({"basic", "digest", "ntlm", "ntlm_v2"})
+        _auto_methods_run = [
+            m for m in _auto_methods
+            if _auto_server_401 or m not in _HTTP_AUTH_METHODS
+        ]
+        if not _auto_server_401:
+            vc.log(
+                "[auth:auto] Server does not issue HTTP 401 — "
+                "skipping basic/digest/ntlm",
+                "INFO",
+            )
 
         _auto_succeeded = False
-        for _auto_m in _auto_methods:
+        for _auto_m in _auto_methods_run:
             vc.log(f"[auth:auto] Trying method: {_auto_m}", "INFO")
             _auto_cfg = copy.deepcopy(cfg)
             _auto_cfg["auth"] = copy.deepcopy(auth)
@@ -6861,31 +6918,7 @@ document.addEventListener('submit', function(e) {
             try:
                 _auto_sess = _build_auth_session(
                     _auto_cfg, auth_key, scope_hostnames, role_label=role_label)
-                if _auto_sess is None:
-                    vc.log(f"[auth:auto] Method '{_auto_m}' produced no session — skipping",
-                           "INFO")
-                    continue
-                # For credential-only methods verify that the server accepted them
-                # by checking that the test response does NOT contain a login form.
-                if _auto_m in _AUTO_NEEDS_VERIFY and _auto_base_url:
-                    try:
-                        _av_r = _auto_sess.get(
-                            _auto_base_url, timeout=timeout, allow_redirects=True)
-                        if _av_r.status_code == 401:
-                            vc.log(
-                                f"[auth:auto] {_auto_m} rejected (HTTP 401) — skipping",
-                                "INFO")
-                            continue
-                        _av_p = _analyse_form_page(_av_r.text, _av_r.url)
-                        if _av_p["login_form"] or _av_p.get("js_rendered_login"):
-                            vc.log(
-                                f"[auth:auto] {_auto_m} rejected"
-                                " (server returned login page) — skipping",
-                                "INFO")
-                            continue
-                    except Exception:
-                        pass
-                if _auto_has_auth(_auto_sess):
+                if _auto_sess is not None and _auto_has_auth(_auto_sess):
                     vc.log(
                         f"[auth:auto] Success with method '{_auto_m}' — "
                         "using this session", "SUCCESS")
