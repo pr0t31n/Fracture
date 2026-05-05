@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.3"
+VERSION = "2.12.4"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -4534,11 +4534,6 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                            for f in _bidi_sys.meta_path):
                     _bidi_sys.meta_path.append(_bidi_finder)
                 _bidi_finder.load_module(_bidi_base)
-                vc.log(
-                    "[auth] selenium.webdriver.common.bidi unavailable — "
-                    "stub finder installed; upgrade selenium if bidi features are needed",
-                    "INFO",
-                )
             _log_fd, _log_path = _tf2.mkstemp(prefix="fracture_gd_", suffix=".log")
             _os.close(_log_fd)
             if drv_path:
