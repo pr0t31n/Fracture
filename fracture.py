@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.6"
+VERSION = "2.12.7"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -8977,19 +8977,14 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     for apath in _ADMIN_PATHS:
         try:
             r = sess.get(url.rstrip("/") + apath, timeout=timeout, allow_redirects=False)
-            if r.status_code in (200, 301, 302):
+            if r.status_code == 200:
                 # Wildcard baseline check: skip if response matches the catch-all pattern
                 if _is_wildcard_match(r, wc_baseline):
                     continue
-                # HTTP 200: panel accessible without authentication (CWE-306) → HIGH
-                # HTTP 301/302: panel exists and redirects (e.g. to login) → MEDIUM
-                _admin_risk = "HIGH" if r.status_code == 200 else "MEDIUM"
+                _admin_risk = "HIGH"
                 _admin_desc = (
                     f"Administrative interface accessible without authentication at {apath} "
                     f"(HTTP {r.status_code}). CWE-306 (Missing Authentication for Critical Function)."
-                    if r.status_code == 200 else
-                    f"Administrative interface found at {apath} (HTTP {r.status_code}). "
-                    f"Panel exists and redirects (likely to a login page)."
                 )
                 _admin_safe = apath.lstrip("/").replace("/", "_").replace(".", "_") or "root"
                 _admin_rq, _admin_rp = _save_http_evidence(out, phase, f"admin_{_admin_safe}", r)
