@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.9"
+VERSION = "2.12.11"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -12305,6 +12305,36 @@ def _crawl_page(page_url: str, sess: requests.Session,
             ]
             return result
 
+        # Detect XML body regardless of Content-Type.  Some servers send XML
+        # (sitemaps, XHTML, RSS/Atom) with Content-Type: text/html, causing
+        # BeautifulSoup to raise XMLParsedAsHTMLWarning.  Route these through
+        # an XML parser and extract <loc> / <a href> links, then return early.
+        _rtext_head = resp.text.lstrip()
+        _is_xml_body = (
+            _rtext_head.startswith("<?xml")
+            or bool(re.match(r'<(?:rss|feed|urlset|sitemapindex)\b', _rtext_head))
+        )
+        if _is_xml_body:
+            for _xml_parser in ("lxml-xml", "xml", "lxml"):
+                try:
+                    _xsoup = BeautifulSoup(resp.text, _xml_parser)
+                    for _loc in _xsoup.find_all("loc"):
+                        _ltxt = (_loc.get_text() or "").strip()
+                        if _ltxt:
+                            _norm = _normalize_url(page_url, _ltxt)
+                            if _norm:
+                                result["links"].append(_norm)
+                    for _tag in _xsoup.find_all(["a", "link"]):
+                        _href = _tag.get("href", "")
+                        if _href:
+                            _norm = _normalize_url(page_url, _href)
+                            if _norm:
+                                result["links"].append(_norm)
+                    break
+                except Exception:
+                    continue
+            return result
+
         soup = BeautifulSoup(resp.text, "html.parser")
 
         # --- Hyperlinks and asset references ---------------------------------
@@ -14326,6 +14356,11 @@ def _write_structure_map(out: "OutputManager", target: dict,
                 _add_url(pr_path)
                 if pr_path in paths:
                     paths[pr_path]["redirect_to"] = rt
+                # Register the redirect destination as its own path so it
+                # appears in the structure tree and gets probed by the access
+                # matrix phase.  Status is left unset — it will be filled in
+                # when the path is probed.
+                _add_url(rt)
 
     if crawl_data:
         for lnk in crawl_data.get("links", []):
