@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.24"
+VERSION = "2.12.25"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1305,18 +1305,35 @@ def _buster_auth_flags(sess: "requests.Session") -> list:
     """
     flags: list = []
 
-    # Session cookies → Cookie header
-    # Strip RFC-invalid quoted names (e.g. "institutionName" stored literally
-    # with quote chars by requests when the server sends Set-Cookie: "name"=val).
-    # Also drop any cookie whose name/value contains header-breaking characters.
+    # Session cookies → Cookie header.
+    # Some SSO/CAS servers set cookies with RFC-invalid quoted names or values
+    # (e.g. Set-Cookie: "institutionName"="University Name").  requests stores
+    # these literally, including the quote characters.  gobuster rejects any
+    # -H argument whose name or value contains control chars or lone quotes.
+    # Sanitise aggressively: strip outer quote pairs, drop inner quotes and
+    # control characters so the assembled Cookie: header is clean ASCII.
     _ck_parts = []
     for _ck in sess.cookies:
-        _ck_name  = (_ck.name  or "").strip().strip('"').strip("'")
-        _ck_value = (_ck.value or "").replace("\n", "").replace("\r", "")
-        if _ck_name and '"' not in _ck_name:
-            _ck_parts.append(f"{_ck_name}={_ck_value}")
+        _ck_name = (_ck.name or "").strip()
+        # Remove balanced outer quote pairs ("foo" → foo, 'foo' → foo)
+        for _q in ('"', "'"):
+            if len(_ck_name) >= 2 and _ck_name[0] == _q and _ck_name[-1] == _q:
+                _ck_name = _ck_name[1:-1].strip()
+        # Drop any remaining quotes and control characters from the name
+        _ck_name = _ck_name.replace('"', '').replace("'", "")
+        _ck_name = "".join(c for c in _ck_name if 0x21 <= ord(c) <= 0x7E
+                           and c not in ('(', ')', '<', '>', '@', ',', ';',
+                                         ':', '\\', '/', '[', ']', '?', '=',
+                                         '{', '}', ' '))
+        if not _ck_name:
+            continue
+        # Strip control characters and quotes from the value
+        _ck_value = (_ck.value or "")
+        _ck_value = _ck_value.replace("\n", "").replace("\r", "").replace('"', "")
+        _ck_parts.append(f"{_ck_name}={_ck_value}")
     cookie_str = "; ".join(_ck_parts)
     if cookie_str:
+        vc.log(f"[buster] Cookie header: {cookie_str[:120]}{'...' if len(cookie_str) > 120 else ''}", "INFO")
         flags += ["-H", f"Cookie: {cookie_str}"]
 
     # Auth-relevant headers already set on the session
@@ -5659,6 +5676,10 @@ document.addEventListener('submit', function(e) {
             "/api/user", "/api/me", "/api/profile", "/api/account",
             "/api/auth/status", "/api/auth", "/api/session",
             "/api/current-user", "/api/whoami", "/api/identity",
+            # Spring Security / generic SSO entry points: these paths are
+            # protected by the security filter and 302→CAS on unauthenticated
+            # access even when the root URL returns 200 (SPA shell).
+            "/login", "/signin", "/secure", "/protected",
             "/home/", "/home", "/app/", "/app",
             "/dashboard/", "/dashboard", "/portal/", "/portal",
         ]
@@ -5850,9 +5871,9 @@ document.addEventListener('submit', function(e) {
             from urllib.parse import urljoin as _uj6, urlparse as _up6
             _pg_host2 = _up6(resp_obj.url).netloc
             _seen_js:  set = set()
-            _js_limit  = 512 * 1024  # 512 KB per file
+            _js_limit  = 4 * 1024 * 1024  # 4 MB per file (Angular bundles are 1-3 MB)
             _js_count  = 0
-            _js_max    = 6            # max JS files to scan
+            _js_max    = 10           # max JS files to scan
             for _sm in _re6.finditer(
                     r'<script\b[^>]+\bsrc=["\']([^"\']+)["\']',
                     resp_obj.text, _re6.IGNORECASE):
@@ -5880,6 +5901,64 @@ document.addEventListener('submit', function(e) {
                 except Exception:
                     continue
             return ""
+
+        def _spa_render_login_url(url: str) -> str:
+            """Render *url* in a headless browser, wait for the SPA to
+            initialise, then scan the live DOM for login-nav links.
+            Falls back gracefully if Selenium is unavailable.
+            Returns the login URL on success, empty string otherwise.
+            """
+            if not _check_selenium():
+                return ""
+            _br = _get_spa_browser()
+            if _br is None:
+                return ""
+            _drv = None
+            try:
+                from selenium import webdriver as _swd2
+                if _br == "firefox":
+                    from selenium.webdriver.firefox.options import Options as _FFO2
+                    _fo = _FFO2()
+                    _fo.add_argument("-headless")
+                    _fo.accept_insecure_certs = True
+                    _drv = _swd2.Firefox(service=_build_firefox_service(), options=_fo)
+                else:
+                    from selenium.webdriver.chrome.options import Options as _CHO2
+                    _co = _CHO2()
+                    for _arg in ("--headless", "--no-sandbox",
+                                 "--disable-dev-shm-usage", "--disable-gpu",
+                                 "--ignore-certificate-errors"):
+                        _co.add_argument(_arg)
+                    _drv = _swd2.Chrome(service=_build_chrome_service(), options=_co)
+                _drv.set_page_load_timeout(20)
+                try:
+                    _drv.get(url)
+                except Exception:
+                    pass
+                import time as _time2
+                _time2.sleep(3)   # allow SPA framework to render
+                _rendered_html = _drv.page_source
+                _rendered_url  = _drv.current_url or url
+            except Exception:
+                return ""
+            finally:
+                if _drv:
+                    try:
+                        _drv.quit()
+                    except Exception:
+                        pass
+            try:
+                import types as _types2
+                _fake = _types2.SimpleNamespace(text=_rendered_html, url=_rendered_url)
+                _spa_found = _scan_page_for_login_nav(_fake)
+                if _spa_found:
+                    vc.log(
+                        f"[auth] Login link found via browser-rendered DOM: {_spa_found}",
+                        "SUCCESS",
+                    )
+                return _spa_found
+            except Exception:
+                return ""
 
         _scanned_pages: set = set()  # avoid rescanning same page in JS scan
 
@@ -5913,24 +5992,57 @@ document.addEventListener('submit', function(e) {
                 _lp_r = sess.get(_lp_url, timeout=timeout, allow_redirects=True)
                 if _lp_r.status_code != 200:
                     continue
-                # Skip if server echoed back the base page (no distinct content)
-                if _lp_r.url.rstrip("/") == base.rstrip("/"):
-                    continue
-                _lp_result = _scan_page_for_login_nav(_lp_r)
-                if _lp_result:
-                    return _lp_result
-                # HTML scan found nothing — try the page's linked JS bundles
+                # When the server returns the base URL after redirects the final
+                # URL matches the base — that can mean the SPA handles routing
+                # client-side (URL stays /home/ in the browser but requests
+                # follows to /) OR the server truly echoes the same page.
+                # Either way the HTML is identical to the base page, so skip
+                # static-HTML parsing (already done in step 0) but still run
+                # the JS bundle scan and Selenium render for this path because
+                # the client-side route may surface login links at this URL.
+                _url_is_base = _lp_r.url.rstrip("/") == base.rstrip("/")
+                if not _url_is_base:
+                    _lp_result = _scan_page_for_login_nav(_lp_r)
+                    if _lp_result:
+                        return _lp_result
+                # HTML scan found nothing (or URL collapsed to base) —
+                # try the page's linked JS bundles.
                 _lp_html_sig = _lp_r.url.rstrip("/")
                 if _lp_html_sig not in _scanned_pages:
                     _scanned_pages.add(_lp_html_sig)
                     vc.log(
-                        f"[auth] No login link in HTML — scanning JS bundles"
-                        f" for {_lp_r.url}",
+                        f"[auth] Scanning JS bundles for {_lp_url}",
                         "INFO",
                     )
-                    _lp_js_result = _scan_page_scripts(_lp_r)
+                    # Scan using the original landing URL's response (not
+                    # _lp_r.url) so that same-host JS detection uses the right
+                    # host when the final URL redirected to base.
+                    _lp_scan_r = _lp_r
+                    if _url_is_base:
+                        # Re-fetch the landing URL to get a response whose
+                        # .url matches the requested path, so script src URLs
+                        # resolve correctly.
+                        try:
+                            _lp_scan_r = sess.get(
+                                _lp_url, timeout=timeout, allow_redirects=False)
+                            if _lp_scan_r.status_code not in (200, 304):
+                                _lp_scan_r = _lp_r  # fall back to followed response
+                        except Exception:
+                            _lp_scan_r = _lp_r
+                    _lp_js_result = _scan_page_scripts(_lp_scan_r)
                     if _lp_js_result:
                         return _lp_js_result
+                # Step 0.5c: neither static HTML nor JS bundles found a login
+                # link — render the page in a headless browser so the SPA JS
+                # framework can execute and surface dynamically-rendered nav.
+                vc.log(
+                    f"[auth] No link in static HTML or JS — rendering {_lp_url} "
+                    "in headless browser",
+                    "INFO",
+                )
+                _lp_sel_result = _spa_render_login_url(_lp_url)
+                if _lp_sel_result:
+                    return _lp_sel_result
             except Exception:
                 continue
 
