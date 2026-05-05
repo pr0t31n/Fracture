@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.27"
+VERSION = "2.12.29"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5909,13 +5909,16 @@ document.addEventListener('submit', function(e) {
             """Render *url* in a headless browser, wait for the SPA to
             initialise, then scan the live DOM for login-nav links.
 
-            Two-pass strategy:
-              1. Scan rendered page_source with _scan_page_for_login_nav.
-              2. If that finds nothing (common for Angular/React buttons with
-                 no href/onclick attribute), locate login-text elements via
-                 XPath, click them in the live driver, and capture the URL
-                 the browser navigates to.  This handles Angular router links
-                 that emit navigation events on click rather than plain hrefs.
+            Three-pass strategy:
+              1. Scan rendered page_source with _scan_page_for_login_nav (handles
+                 links and buttons that have an href / onclick / form action).
+              2. JS-based text search + click — uses execute_script to find any
+                 interactive element (button, a, [role=button], input) whose
+                 innerText/value matches a login label, then clicks it via JS
+                 (bypasses Selenium visibility constraints and viewport limits).
+              3. XPath find + JS click fallback for edge cases where innerText
+                 is unavailable (e.g. hidden shadow DOM, icon-only buttons with
+                 aria-label).
 
             Falls back gracefully if Selenium is unavailable.
             Returns the login URL on success, empty string otherwise.
@@ -5940,10 +5943,17 @@ document.addEventListener('submit', function(e) {
                     _co = _CHO2()
                     for _arg in ("--headless", "--no-sandbox",
                                  "--disable-dev-shm-usage", "--disable-gpu",
-                                 "--ignore-certificate-errors"):
+                                 "--ignore-certificate-errors",
+                                 "--window-size=1920,1080"):
                         _co.add_argument(_arg)
                     _drv = _swd2.Chrome(service=_build_chrome_service(), options=_co)
                 _drv.set_page_load_timeout(20)
+                # Set a full-HD viewport so elements that are positioned with
+                # CSS fixed/absolute layout are inside the visible area.
+                try:
+                    _drv.set_window_size(1920, 1080)
+                except Exception:
+                    pass
                 try:
                     _drv.get(url)
                 except Exception:
@@ -5967,48 +5977,80 @@ document.addEventListener('submit', function(e) {
                 except Exception:
                     pass
 
-                # Pass 2: HTML scan found no clickable URL (Angular/React buttons
-                # that rely on router event listeners have no href or onclick in
-                # the DOM).  Find login-text elements via XPath and click them;
-                # capture the URL the browser lands on after the navigation.
+                # Pass 2: JS-based text search + click.
+                # Angular/React buttons that rely on router event listeners have
+                # no href or onclick in the DOM, so Pass 1 cannot extract a URL.
+                # execute_script clicks the element inside the browser JS runtime,
+                # which fires Angular's (click) binding regardless of CSS visibility
+                # or viewport position.
                 _pre_click_url = (_drv.current_url or url).rstrip("/")
-                # XPath expressions ordered by specificity — exact match first,
-                # then contains-based fallback for labels with extra whitespace.
-                _lx_upper = "translate(normalize-space(.)," \
-                             "'abcdefghijklmnopqrstuvwxyz'," \
-                             "'ABCDEFGHIJKLMNOPQRSTUVWXYZ')"
-                _login_xpaths = [
-                    f"//*[{_lx_upper}='LOG IN']",
-                    f"//*[{_lx_upper}='LOGIN']",
-                    f"//*[{_lx_upper}='SIGN IN']",
-                    f"//*[{_lx_upper}='SIGNIN']",
-                    f"//*[contains({_lx_upper},'LOG IN')]",
-                    f"//*[contains({_lx_upper},'SIGN IN')]",
-                ]
-                for _lxp in _login_xpaths:
+                _js_click = """
+(function() {
+    var labels = ['log in','login','sign in','signin','log-in','sign-on'];
+    var tags = ['button','a','input','[role="button"]','[role="link"]'];
+    var sel = tags.join(',');
+    var els = Array.from(document.querySelectorAll(sel));
+    for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        var txt = (el.innerText || el.textContent || el.value ||
+                   el.getAttribute('aria-label') || '').trim().toLowerCase();
+        for (var j = 0; j < labels.length; j++) {
+            if (txt === labels[j] || txt.startsWith(labels[j])) {
+                el.click();
+                return el.tagName + ':' + (el.id || el.className || txt);
+            }
+        }
+    }
+    return null;
+})()
+"""
+                try:
+                    _js_result = _drv.execute_script(_js_click)
+                    if _js_result:
+                        vc.log(
+                            f"[auth] JS-clicked SPA login element: {_js_result}",
+                            "INFO",
+                        )
+                        _time2.sleep(3)
+                        _post_js_url = (_drv.current_url or "").rstrip("/")
+                        if _post_js_url and _post_js_url != _pre_click_url:
+                            vc.log(
+                                f"[auth] Login URL found via JS click: {_post_js_url}",
+                                "SUCCESS",
+                            )
+                            return _post_js_url
+                except Exception:
+                    pass
+
+                # Pass 3: XPath find + JS-click fallback.  Catches elements
+                # where innerText is empty but aria-label or title carries the
+                # login label (icon-only buttons, SVG buttons, etc.).
+                _lx_u = ("translate(normalize-space(concat(text(),"
+                          "' ',@aria-label,' ',@title,' ',@value)),"
+                          "'abcdefghijklmnopqrstuvwxyz',"
+                          "'ABCDEFGHIJKLMNOPQRSTUVWXYZ')")
+                for _lxp in (
+                    f"//*[{_lx_u}='LOG IN']",
+                    f"//*[{_lx_u}='LOGIN']",
+                    f"//*[{_lx_u}='SIGN IN']",
+                    f"//*[contains({_lx_u},'LOG IN')]",
+                    f"//*[contains({_lx_u},'SIGN IN')]",
+                ):
                     try:
                         _els2 = _drv.find_elements(_By2.XPATH, _lxp)
                         for _el2 in _els2:
                             try:
-                                if not (_el2.is_displayed() and _el2.is_enabled()):
-                                    continue
                                 _el_label = (_el2.text or "").strip()
-                                vc.log(
-                                    f"[auth] Clicking SPA login element: "
-                                    f"'{_el_label}' at {url}",
-                                    "INFO",
-                                )
-                                _el2.click()
+                                _drv.execute_script("arguments[0].click();", _el2)
                                 _time2.sleep(3)
-                                _post_click_url = (_drv.current_url or "").rstrip("/")
-                                if (_post_click_url
-                                        and _post_click_url != _pre_click_url):
+                                _post_xp_url = (_drv.current_url or "").rstrip("/")
+                                if _post_xp_url and _post_xp_url != _pre_click_url:
                                     vc.log(
-                                        f"[auth] Login URL found by clicking "
-                                        f"'{_el_label}': {_post_click_url}",
+                                        f"[auth] Login URL found via XPath+JS click "
+                                        f"'{_el_label}': {_post_xp_url}",
                                         "SUCCESS",
                                     )
-                                    return _post_click_url
+                                    return _post_xp_url
                             except Exception:
                                 continue
                     except Exception:
@@ -20348,11 +20390,22 @@ def main() -> None:
             # auth_sess is intentionally left None here; it is built lazily at the
             # start of each context iteration so that browser-auth prompts for roles
             # 2..n appear AFTER role 1 finishes, not before any phases have run.
+            # Propagate the login URL that role 1 discovered/used so that roles
+            # 2..n skip the full discovery phase (including Selenium rendering,
+            # JS bundle scanning, and spidering) and go straight to the login
+            # page.  The same login URL is shared by all roles on a given target.
+            # Also propagate the login profile fingerprint match — _lp_match will
+            # be called with the same URL and will find the same stored profile,
+            # allowing _lp_replay to authenticate subsequent roles automatically
+            # using their own credentials without opening a browser window.
+            _r1_login_url = _r1_cfg.get("auth", {}).get("login_url", "").strip()
             for _ri, _rc in enumerate(_collected_roles[1:], start=1):
                 _rn_cfg = copy.deepcopy(cfg)
                 _rn_cfg["auth"]["enabled"]  = True
                 _rn_cfg["auth"]["username"] = _rc["username"]
                 _rn_cfg["auth"]["password"] = _rc["password"]
+                if _r1_login_url and not _rn_cfg.get("auth", {}).get("login_url", "").strip():
+                    _rn_cfg["auth"]["login_url"] = _r1_login_url
                 _cred_contexts.append({
                     "label": _rc["role"], "cfg": _rn_cfg, "auth_sess": None,
                     "reduced": True, "multi_role": True, "role_idx": _ri,
