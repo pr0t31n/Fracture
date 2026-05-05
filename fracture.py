@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.34"
+VERSION = "2.12.35"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6050,6 +6050,39 @@ document.addEventListener('submit', function(e) {
                 # IMPORTANT: execute_script requires an explicit top-level
                 # 'return' to pass a value back to Python — an IIFE that returns
                 # internally does NOT work; the script body must return directly.
+                #
+                # Some Angular apps (e.g. FSA PPO portal) take >3 s to bootstrap
+                # and render the login button after an async auth-state API call.
+                # Poll the live DOM for up to 8 additional seconds so the button
+                # is present before the JS click runs.
+                _JS_LOGIN_PRESENT = (
+                    "var _cds=document.querySelectorAll("
+                    "'button,a,input[type=\"button\"],input[type=\"submit\"],"
+                    "[role=\"button\"],[role=\"link\"]');"
+                    "var _lt=['log in','login','sign in','signin'];"
+                    "var _ih=['login','log-in','log_in','signin','sign-in','sign_in','auth'];"
+                    "for(var _ci=0;_ci<_cds.length;_ci++){"
+                    "var _tx=(_cds[_ci].innerText||_cds[_ci].textContent||'').trim().toLowerCase();"
+                    "for(var _li=0;_li<_lt.length;_li++){"
+                    "if(_tx===_lt[_li]||_tx.indexOf(_lt[_li])===0)return true;}"
+                    "var _me=((_cds[_ci].id||'')+' '+(_cds[_ci].getAttribute('name')||'')+' '+"
+                    "(_cds[_ci].className||'')+' '+(_cds[_ci].getAttribute('aria-label')||'')).toLowerCase();"
+                    "for(var _ii=0;_ii<_ih.length;_ii++){"
+                    "if(_me.indexOf(_ih[_ii])>=0)return true;}}"
+                    "return false;"
+                )
+                try:
+                    import time as _time2b
+                    _spa_wait_end = _time2b.time() + 8
+                    while _time2b.time() < _spa_wait_end:
+                        try:
+                            if _drv.execute_script(_JS_LOGIN_PRESENT):
+                                break
+                        except Exception:
+                            break
+                        _time2b.sleep(0.5)
+                except Exception:
+                    pass
                 _pre_click_url = (_drv.current_url or url).rstrip("/")
                 _js_click = """
 var TEXT_LABELS = ['log in','login','sign in','signin','log-in','sign-on'];
@@ -13691,7 +13724,10 @@ def _detect_spa(html: str, url: str, static_link_count: int) -> "tuple[bool, lis
 
     evidence: list = []
     try:
-        soup = BeautifulSoup(html, "html.parser")
+        import warnings as _bsw_spa
+        with _bsw_spa.catch_warnings():
+            _bsw_spa.filterwarnings("ignore", message=".*XMLParsedAsHTML.*")
+            soup = BeautifulSoup(html, "html.parser")
     except Exception:
         return False, []
 
@@ -20370,6 +20406,11 @@ def main() -> None:
                                             no_interactive=_is_redirect_target)
             if auth_sess:
                 _role_sessions[0] = auth_sess
+        vc.log(
+            f"[auth] login_url after build_auth_session: "
+            f"{cfg.get('auth', {}).get('login_url', '(empty)')!r}",
+            "INFO",
+        )
         if _is_redirect_target and "auth2" in _role_sessions:
             auth2_sess = _role_sessions["auth2"]
         else:
@@ -20527,6 +20568,11 @@ def main() -> None:
             # Role 1 — full scan (most permissive user)
             _r1 = _collected_roles[0]
             _r1_cfg = copy.deepcopy(cfg)
+            vc.log(
+                f"[auth] _r1_cfg login_url after deepcopy: "
+                f"{_r1_cfg.get('auth', {}).get('login_url', '(empty)')!r}",
+                "INFO",
+            )
             _r1_cfg["auth"]["enabled"]  = True
             _r1_cfg["auth"]["username"] = _r1["username"]
             _r1_cfg["auth"]["password"] = _r1["password"]
@@ -20681,6 +20727,11 @@ def main() -> None:
                 _lp_found_url = (
                     _ctx_cfg.get("auth", {}).get("login_url", "").strip()
                 )
+                vc.log(
+                    f"[auth] login_url for finding ({_ctx_label}): "
+                    f"{_lp_found_url!r}",
+                    "INFO",
+                )
                 if (_ctx_label != "unauthenticated"
                         and _lp_found_url):
                     _lp_role_sfx = f" (role: {_ctx_label})" if _ctx_label else ""
@@ -20707,8 +20758,8 @@ def main() -> None:
                             "version or framework information."
                         ),
                     )
-            except Exception:
-                pass
+            except Exception as _lp_ex:
+                vc.log(f"[auth] Login Page Discovered finding error: {_lp_ex}", "WARNING")
 
             # ── Write authentication_status.json entry for this role ──────────
             # Probe the base target URL with this session to capture the
