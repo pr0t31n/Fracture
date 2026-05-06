@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.42"
+VERSION = "2.12.43"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6655,6 +6655,94 @@ return null;
         except Exception:
             return None, post_url
 
+    # ── MFA provider detector ─────────────────────────────────────────────────
+    def _detect_mfa(html: str, url: str) -> "list[str]":
+        """Return a deduplicated list of MFA provider names detected in html/url."""
+        _html_l = html.lower()
+        _url_l  = url.lower()
+        _FINGERPRINTS = [
+            ("Duo Security",
+             ["duo_web", "duosecurity.com", "duo-frame", "duo-security",
+              "duoform", "duo.min.js", "duo_iframe"],
+             ["duo.com", "duosecurity"]),
+            ("Symantec VIP",
+             ["vip.symantec.com", "vipsecurity", "symantec vip", "vip access",
+              "vipaccess", "verisign vip"],
+             ["vip.symantec", "vipsecurity"]),
+            ("Google Authenticator",
+             ["google authenticator", "google_authenticator", "gauth"],
+             []),
+            ("Microsoft Authenticator",
+             ["microsoft authenticator", "msauthenticator", "ms authenticator",
+              "microsoft identity platform"],
+             ["login.microsoftonline.com", "microsoft.com/auth"]),
+            ("Okta Verify",
+             ["okta-verify", "okta verify", "okta.com", "okta_widget",
+              "okta-signin-widget"],
+             ["okta.com/", ".okta.com/"]),
+            ("RSA SecurID",
+             ["rsa securid", "rsasecurid", "rsa token", "securid", "pinvalue",
+              "rsa authentication"],
+             ["rsa.com/securid", "rsasecurity"]),
+            ("Azure AD MFA",
+             ["azure mfa", "azure ad mfa", "login.microsoftonline",
+              "microsoft identity", "azure active directory"],
+             ["login.microsoftonline.com"]),
+            ("Ping Identity",
+             ["pingone", "pingidentity", "pingfederate", "ping.fm"],
+             ["pingone.com", "pingidentity.com"]),
+            ("Auth0",
+             ["auth0", "auth0.js", "cdn.auth0.com"],
+             ["auth0.com", ".auth0.com/"]),
+            ("Oracle OAM",
+             ["oam-form", "oam.sso", "oracle access manager", "oamconsole",
+              "ms_wls_oam"],
+             ["oam", "oracle-access"]),
+            ("Yubico YubiKey",
+             ["yubikey", "yubico", "otp_input", "yubikey otp"],
+             []),
+            ("Salesforce Authenticator",
+             ["salesforce authenticator", "salesforceauthenticator"],
+             []),
+            ("TOTP / Authenticator App",
+             ["totp", "time-based one-time", "authenticator app",
+              "scan the qr code", "scan qr code"],
+             []),
+            ("SMS OTP",
+             ["sms code", "text message", "sent to your phone",
+              "enter the code we sent", "via sms"],
+             []),
+            ("Email OTP",
+             ["email verification code", "check your email for a code",
+              "sent to your email", "one-time code to your email",
+              "code to your inbox"],
+             []),
+            ("Generic OTP",
+             ["one-time password", "one time password", "one-time code",
+              "enter your otp", "enter otp", "enter code",
+              "verification code", "security code", "passcode",
+              "access code", "mfa code", "two-factor", "2fa"],
+             []),
+        ]
+        _found: list = []
+        for _pname, _hpats, _upats in _FINGERPRINTS:
+            if _pname in _found:
+                continue
+            for _p in _hpats:
+                if _p in _html_l:
+                    _found.append(_pname)
+                    break
+            if _pname in _found:
+                continue
+            for _p in _upats:
+                if _p in _url_l:
+                    _found.append(_pname)
+                    break
+        # Remove generic catch-all when a specific provider was already identified
+        if len(_found) > 1 and "Generic OTP" in _found:
+            _found = [_p for _p in _found if _p != "Generic OTP"]
+        return _found
+
     # ── Post-login interactive form finder ───────────────────────────────────
     def _find_interactive_forms(html: str, page_url: str) -> "list":
         """
@@ -6869,6 +6957,18 @@ return null;
 
             # ── 4. Interactive prompt detection ────────────────────────────────
             _forms = _find_interactive_forms(_html, _url)
+
+            # ── 4a. MFA provider detection ────────────────────────────────────
+            _step_mfa = _detect_mfa(_html, _url)
+            if _step_mfa:
+                _mfa_log_str = ", ".join(_step_mfa)
+                vc.log(f"[auth] MFA detected: {_mfa_log_str}", "INFO")
+                _existing_mfa = auth.get("mfa_providers", [])
+                for _mp in _step_mfa:
+                    if _mp not in _existing_mfa:
+                        _existing_mfa.append(_mp)
+                auth["mfa_providers"] = _existing_mfa
+
             if not _forms:
                 vc.log(f"[auth] Post-login page appears clean at: {_url}", "INFO")
                 break
@@ -6958,7 +7058,15 @@ return null;
                     _filled[_fn] = vc.prompt(f"{_flbl}", prompt_type="password")
 
                 else:  # text, email, tel, number, search, otp, textarea
-                    _filled[_fn] = vc.prompt(f"{_flbl}", prompt_type="text").strip()
+                    _otp_hint = ""
+                    _is_otp_field = _ft == "otp" or any(
+                        _kw in (_fn + " " + _flbl).lower()
+                        for _kw in ("otp", "token", "code", "mfa", "totp",
+                                    "passcode", "pin", "2fa")
+                    )
+                    if _is_otp_field and _step_mfa:
+                        _otp_hint = f" [{_step_mfa[0]}]"
+                    _filled[_fn] = vc.prompt(f"{_flbl}{_otp_hint}", prompt_type="text").strip()
 
             # ── 6. Submit completed form ───────────────────────────────────────
             vc.log(f"[auth] Submitting post-login form → {_form['action']}", "INFO")
@@ -15549,6 +15657,12 @@ def _write_target_profile(out: "OutputManager", **updates) -> None:
                 if _e and _e not in _es:
                     _es.append(_e)
             existing["edge_security"] = _es
+        elif key == "mfa_providers":
+            _mfa = existing.get("mfa_providers", [])
+            for _m in (val if isinstance(val, list) else [val]):
+                if _m and _m not in _mfa:
+                    _mfa.append(_m)
+            existing["mfa_providers"] = _mfa
         else:
             if existing.get(key) and not val:
                 continue
@@ -20888,6 +21002,39 @@ def main() -> None:
             except Exception as _lp_ex:
                 vc.log(f"[auth] Login Page Discovered finding error: {_lp_ex}", "WARNING")
 
+            # Emit an INFO finding when MFA was detected during authentication.
+            try:
+                _mfa_detected = _ctx_cfg.get("auth", {}).get("mfa_providers", [])
+                if (_ctx_label != "unauthenticated" and _mfa_detected):
+                    _mfa_str = ", ".join(_mfa_detected)
+                    _mfa_url = (
+                        _ctx_cfg.get("auth", {}).get("login_url", "").strip()
+                        or target["url"]
+                    )
+                    out.add_finding(
+                        title="Multi-Factor Authentication Detected",
+                        url=_mfa_url,
+                        port=target["port"],
+                        risk="INFO",
+                        description=(
+                            f"Multi-factor authentication was detected during the "
+                            f"login process. Provider(s) identified: {_mfa_str}."
+                        ),
+                        affected=urllib.parse.urlparse(_mfa_url).path or "/",
+                        output=_mfa_str,
+                        sources="fracture-auth",
+                        service=target["scheme"],
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="IA-3",
+                        remediation=(
+                            "MFA adds a valuable authentication layer. Ensure the "
+                            "MFA implementation is resistant to bypass and phishing "
+                            "(e.g., prefer TOTP or hardware tokens over SMS)."
+                        ),
+                    )
+            except Exception as _mfa_ex:
+                vc.log(f"[auth] MFA finding error: {_mfa_ex}", "WARNING")
+
             # ── Write authentication_status.json entry for this role ──────────
             # Probe the base target URL with this session to capture the
             # post-login landing page (URL, HTTP code, and a body snippet for
@@ -21444,9 +21591,11 @@ def main() -> None:
                     _auth_meth  = (_auth_cfg.get("auth_method")
                                    or ("enabled" if _auth_cfg.get("enabled") else "none"))
                     _auth_login = (_auth_cfg.get("login_url") or "")
+                    _auth_mfa   = _auth_cfg.get("mfa_providers", [])
                     _write_target_profile(out,
                         auth_method=_auth_meth,
                         auth_page=_auth_login,
+                        mfa_providers=_auth_mfa,
                     )
                 except Exception:
                     pass
