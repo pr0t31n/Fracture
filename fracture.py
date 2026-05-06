@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.41"
+VERSION = "2.12.42"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5597,7 +5597,16 @@ document.addEventListener('submit', function(e) {
                         _jc = _js_loc_m.group(1).strip()
                         if _jc and not _jc.startswith(("javascript:", "mailto:", "#")):
                             _js_redir_cand = _uj4(_base_r0.url, _jc)
-                if _js_redir_cand and _up4(_js_redir_cand).netloc == _base_host:
+                # Normalise netloc for comparison: strip the default port so that
+                # https://host:443/path and https://host/path are treated as the
+                # same host.  Servers like Oracle E-Business Suite embed :443
+                # explicitly in meta-refresh URLs even though it is redundant.
+                def _norm_netloc(nl: str) -> str:
+                    _h, _, _p = nl.partition(":")
+                    if _p in ("80", "443", ""):
+                        return _h
+                    return nl
+                if _js_redir_cand and _norm_netloc(_up4(_js_redir_cand).netloc) == _norm_netloc(_base_host):
                     vc.log(
                         f"[auth] JS/meta redirect detected: {_base_r0.url}"
                         f" → {_js_redir_cand}",
