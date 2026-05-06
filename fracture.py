@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.40"
+VERSION = "2.12.41"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6074,7 +6074,24 @@ document.addEventListener('submit', function(e) {
                 except Exception:
                     pass
                 import time as _time2
-                _time2.sleep(3)   # allow SPA framework to render
+                # Wait for the URL to settle — poll until it has not changed
+                # for 2 consecutive seconds, up to 12 s total.  This handles
+                # both fast same-domain SPA routing and slow async auth-guard
+                # redirects (e.g. Angular → CAS auth-state API call taking 4-8 s).
+                _spa_last_url = ""
+                _spa_stable_since = _time2.time()
+                _spa_settle_end   = _time2.time() + 12
+                while _time2.time() < _spa_settle_end:
+                    try:
+                        _spa_cur = _drv.current_url or ""
+                        if _spa_cur != _spa_last_url:
+                            _spa_last_url = _spa_cur
+                            _spa_stable_since = _time2.time()
+                        elif _time2.time() - _spa_stable_since >= 2.0:
+                            break  # URL stable for 2 s — settled
+                    except Exception:
+                        pass
+                    _time2.sleep(0.3)
                 _rendered_html = _drv.page_source
                 _rendered_url  = _drv.current_url or url
 
