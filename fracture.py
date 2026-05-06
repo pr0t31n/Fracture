@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.43"
+VERSION = "2.12.44"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6647,6 +6647,12 @@ return null;
             if p and pf not in data: data[pf] = p
             for k, v in hidden.items():
                 if k not in data: data[k] = v
+        # Merge any extra fields collected from the login page (e.g. Symantec VIP token)
+        _extra_login = auth.get("login_extra_fields", {})
+        if _extra_login:
+            for _ek, _ev in _extra_login.items():
+                if _ek not in data:
+                    data[_ek] = _ev
         ct = auth.get("login_content_type", "application/x-www-form-urlencoded")
         try:
             if "json" in ct:
@@ -6742,6 +6748,69 @@ return null;
         if len(_found) > 1 and "Generic OTP" in _found:
             _found = [_p for _p in _found if _p != "Generic OTP"]
         return _found
+
+    # ── Login form extra-field collector ──────────────────────────────────────
+    def _collect_login_form_extras(html: str, page_url: str) -> "tuple[list, list]":
+        """
+        Parse the login form (first form containing a password field) and return:
+          extra_fields   – list of {name, type, label} for visible non-credential
+                           inputs (e.g. Symantec VIP token, TOTP code)
+          mfa_providers  – list of MFA provider names detected via _detect_mfa
+
+        Fields matching the configured username / password field names are excluded,
+        as are hidden inputs and decorative/remember-me checkboxes.
+        """
+        import re as _re_lfe
+        _uf = auth.get("login_username_field", "username")
+        _pf = auth.get("login_password_field", "password")
+        _SKIP_TYPES = frozenset({
+            "hidden", "submit", "image", "reset", "button",
+            "file", "color", "range", "date", "datetime-local",
+            "month", "week", "time",
+        })
+        _SKIP_NAMES = frozenset({
+            "remember", "rememberme", "stay_signed", "keeplogged",
+            "persistent", "stayloggedin", "captcha", "recaptcha",
+            "g-recaptcha-response",
+        })
+        _mfa = _detect_mfa(html, page_url)
+        _extras: list = []
+
+        # Build label map: input id/name → label text
+        _lmap: dict = {}
+        for _lm in _re_lfe.finditer(
+                r'<label\b[^>]*\bfor=["\']([^"\']+)["\'][^>]*>(.*?)</label>',
+                html, _re_lfe.IGNORECASE | _re_lfe.DOTALL):
+            _lmap[_lm.group(1)] = _re_lfe.sub(r'<[^>]+>', '', _lm.group(2)).strip()
+
+        for _fm in _re_lfe.finditer(r'(?s)<form\b[^>]*>(.+?)</form>', html, _re_lfe.IGNORECASE):
+            _fbody = _fm.group(1)
+            if not _re_lfe.search(
+                    r'<input[^>]+type=["\']?password["\']?', _fbody, _re_lfe.IGNORECASE):
+                continue  # only the password form
+            for _inp in _re_lfe.finditer(r'<input\b([^>]*)/?>', _fbody, _re_lfe.IGNORECASE):
+                _a   = _inp.group(1)
+                _t_m = _re_lfe.search(r'\btype=["\']?(\w+)["\']?', _a, _re_lfe.IGNORECASE)
+                _t   = _t_m.group(1).lower() if _t_m else "text"
+                if _t in _SKIP_TYPES or _t == "password":
+                    continue
+                _n_m  = _re_lfe.search(r'\bname=["\']([^"\']+)["\']', _a, _re_lfe.IGNORECASE)
+                _id_m = _re_lfe.search(r'\bid=["\']([^"\']+)["\']',   _a, _re_lfe.IGNORECASE)
+                _ph_m = _re_lfe.search(r'\bplaceholder=["\']([^"\']+)["\']', _a, _re_lfe.IGNORECASE)
+                if not _n_m:
+                    continue
+                _iname = _n_m.group(1)
+                _iid   = _id_m.group(1) if _id_m else ""
+                _iph   = _ph_m.group(1) if _ph_m else ""
+                if _iname in (_uf, _pf):
+                    continue
+                if _iname.lower() in _SKIP_NAMES or any(
+                        _sk in _iname.lower() for _sk in _SKIP_NAMES):
+                    continue
+                _ilabel = (_lmap.get(_iid) or _lmap.get(_iname) or _iph or _iname)
+                _extras.append({"name": _iname, "type": _t, "label": _ilabel})
+            break  # only the first password form
+        return _extras, _mfa
 
     # ── Post-login interactive form finder ───────────────────────────────────
     def _find_interactive_forms(html: str, page_url: str) -> "list":
@@ -7208,6 +7277,63 @@ return null;
                         vc.log(f"[auth] Guard followed redirect — login URL updated: {_login_url}", "INFO")
                     else:
                         vc.log(f"[auth] Login form confirmed at {_login_url}", "INFO")
+
+                    # ── MFA detection + extra field collection on login page ──
+                    # Runs whenever the login form was confirmed (not cleared above).
+                    # Detects MFA provider fingerprints and collects any visible
+                    # non-credential fields (e.g. Symantec VIP token) so they can
+                    # be prompted for and included in the credential POST.
+                    if _login_url and _guard_p.get("login_form"):
+                        try:
+                            import sys as _sys_guard
+                            _lp_extras, _lp_mfa = _collect_login_form_extras(
+                                _guard_r.text, _guard_r.url)
+                            if _lp_mfa:
+                                _lp_mfa_str = ", ".join(_lp_mfa)
+                                vc.log(
+                                    f"[auth] MFA detected on login page: {_lp_mfa_str}",
+                                    "INFO",
+                                )
+                                _ex_mfa = auth.get("mfa_providers", [])
+                                for _mp in _lp_mfa:
+                                    if _mp not in _ex_mfa:
+                                        _ex_mfa.append(_mp)
+                                auth["mfa_providers"] = _ex_mfa
+                            if _lp_extras and _sys_guard.stdin.isatty() and not no_interactive:
+                                vc.log(
+                                    f"[auth] Login page has {len(_lp_extras)} additional "
+                                    "field(s) — please provide values below:",
+                                    "INFO",
+                                )
+                                _lp_ex_vals: dict = {}
+                                for _ef in _lp_extras:
+                                    _ef_key = (_ef["name"] + " " + _ef["label"]).lower()
+                                    _is_otp = any(
+                                        _kw in _ef_key
+                                        for _kw in ("otp", "token", "code", "mfa",
+                                                    "totp", "passcode", "pin", "2fa",
+                                                    "credentials", "vip", "securid")
+                                    )
+                                    _hint = (
+                                        f" [{_lp_mfa[0]}]"
+                                        if _is_otp and _lp_mfa else ""
+                                    )
+                                    _lp_ex_vals[_ef["name"]] = vc.prompt(
+                                        f"{_ef['label']}{_hint}",
+                                        prompt_type="text",
+                                    ).strip()
+                                if _lp_ex_vals:
+                                    auth["login_extra_fields"] = _lp_ex_vals
+                            elif _lp_extras:
+                                _ef_names = ", ".join(e["name"] for e in _lp_extras)
+                                vc.log(
+                                    f"[auth] Login page has extra field(s) ({_ef_names}) "
+                                    "but stdin is not a TTY — cannot prompt; "
+                                    "configure values via login_extra_fields in auth config",
+                                    "WARNING",
+                                )
+                        except Exception:
+                            pass
             except Exception as _ge:
                 vc.log(f"[auth] Could not verify login form at {_login_url}: {_ge}", "WARNING")
 
