@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.44"
+VERSION = "2.12.45"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5617,6 +5617,19 @@ document.addEventListener('submit', function(e) {
                             _js_redir_cand, timeout=timeout, allow_redirects=True)
                         _effective_base = _base_r0.url.rstrip("/")
                         _base_host = _up4(_base_r0.url).netloc or _base_host
+                        # The redirect destination may itself be the login form
+                        # (e.g. Oracle OAM /OA_HTML/AppsLogin). Check immediately
+                        # before scanning for login links on the page.
+                        if _base_r0.status_code == 200:
+                            _redir_dest_page = _analyse_form_page(
+                                _base_r0.text, _base_r0.url)
+                            if _redir_dest_page.get("login_form"):
+                                vc.log(
+                                    f"[auth] Login form found at redirect destination:"
+                                    f" {_base_r0.url}",
+                                    "SUCCESS",
+                                )
+                                return _base_r0.url
                     except Exception:
                         pass
             if _base_r0.status_code == 200:
@@ -6647,12 +6660,23 @@ return null;
             if p and pf not in data: data[pf] = p
             for k, v in hidden.items():
                 if k not in data: data[k] = v
-        # Merge any extra fields collected from the login page (e.g. Symantec VIP token)
+        # Merge any extra fields collected from the login page (e.g. token/OTP)
         _extra_login = auth.get("login_extra_fields", {})
         if _extra_login:
             for _ek, _ev in _extra_login.items():
                 if _ek not in data:
                     data[_ek] = _ev
+        # Fill shadow-copy password hidden fields (e.g. Oracle OAM's hiddenpwd):
+        # Some apps use JS to copy the password into a hidden field before form
+        # submission. _csrf_prefetch captures these with their initial empty value.
+        # Replicate the JS copy so the server receives the password in all expected fields.
+        if p:
+            for _shk in list(data.keys()):
+                if (data.get(_shk, "__sentinel__") == ""
+                        and _shk != pf
+                        and any(_pw in _shk.lower()
+                                for _pw in ("pwd", "password", "passwd"))):
+                    data[_shk] = p
         ct = auth.get("login_content_type", "application/x-www-form-urlencoded")
         try:
             if "json" in ct:
@@ -6702,8 +6726,9 @@ return null;
              ["auth0.com", ".auth0.com/"]),
             ("Oracle OAM",
              ["oam-form", "oam.sso", "oracle access manager", "oamconsole",
-              "ms_wls_oam"],
-             ["oam", "oracle-access"]),
+              "ms_wls_oam", "auth_cred_submit", "tfaportal",
+              "register token", "lost/forgot token", "forgot token"],
+             ["oa_html", "appslogin", "/oam/", "oracle-access"]),
             ("Yubico YubiKey",
              ["yubikey", "yubico", "otp_input", "yubikey otp"],
              []),
@@ -6794,20 +6819,22 @@ return null;
                 _t   = _t_m.group(1).lower() if _t_m else "text"
                 if _t in _SKIP_TYPES or _t == "password":
                     continue
-                _n_m  = _re_lfe.search(r'\bname=["\']([^"\']+)["\']', _a, _re_lfe.IGNORECASE)
-                _id_m = _re_lfe.search(r'\bid=["\']([^"\']+)["\']',   _a, _re_lfe.IGNORECASE)
+                _n_m  = _re_lfe.search(r'\bname=["\']([^"\']+)["\']',        _a, _re_lfe.IGNORECASE)
+                _id_m = _re_lfe.search(r'\bid=["\']([^"\']+)["\']',          _a, _re_lfe.IGNORECASE)
                 _ph_m = _re_lfe.search(r'\bplaceholder=["\']([^"\']+)["\']', _a, _re_lfe.IGNORECASE)
+                _ti_m = _re_lfe.search(r'\btitle=["\']([^"\']+)["\']',       _a, _re_lfe.IGNORECASE)
                 if not _n_m:
                     continue
                 _iname = _n_m.group(1)
                 _iid   = _id_m.group(1) if _id_m else ""
                 _iph   = _ph_m.group(1) if _ph_m else ""
+                _iti   = _ti_m.group(1) if _ti_m else ""
                 if _iname in (_uf, _pf):
                     continue
                 if _iname.lower() in _SKIP_NAMES or any(
                         _sk in _iname.lower() for _sk in _SKIP_NAMES):
                     continue
-                _ilabel = (_lmap.get(_iid) or _lmap.get(_iname) or _iph or _iname)
+                _ilabel = (_lmap.get(_iid) or _lmap.get(_iname) or _iti or _iph or _iname)
                 _extras.append({"name": _iname, "type": _t, "label": _ilabel})
             break  # only the first password form
         return _extras, _mfa
