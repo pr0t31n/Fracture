@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.45"
+VERSION = "2.12.50"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -7069,7 +7069,7 @@ return null;
                 vc.log(f"[auth] Post-login page appears clean at: {_url}", "INFO")
                 break
 
-            if not _is_tty:
+            if not _is_tty and not vc._managed:
                 vc.log(
                     f"[auth] Post-login page has {len(_forms)} interactive form(s) "
                     "but stdin is not a TTY — cannot prompt for input; "
@@ -7200,8 +7200,29 @@ return null;
         elif _base_target_url:
             _login_url = _discover_login_url(_base_target_url)
             if _login_url:
-                # Persist so _login_post and _csrf_prefetch can use it
-                auth["login_url"] = _login_url
+                # When the base target URL itself redirects (HTTP or JS) to the
+                # login form, store the base URL as the canonical login entry
+                # point.  Browser-auth and future replays start from the base
+                # URL so that any pre-login app state / cookie initialisation
+                # (session tokens, CSRF cookies, JS bootstrap) happens before
+                # the login page is presented.  The actual form action URL
+                # (_login_url) is still used for CSRF prefetch and credential
+                # POST within this auth session.
+                _auth_entry_url = _login_url
+                if _login_url.rstrip("/") != _base_target_url.rstrip("/"):
+                    try:
+                        _base_chk = sess.get(
+                            _base_target_url, timeout=timeout, allow_redirects=True)
+                        if _base_chk.url.rstrip("/") == _login_url.rstrip("/"):
+                            _auth_entry_url = _base_target_url
+                            vc.log(
+                                f"[auth] Base URL {_base_target_url} redirects directly "
+                                f"to login form — storing base URL as login entry point",
+                                "INFO",
+                            )
+                    except Exception:
+                        pass
+                auth["login_url"] = _auth_entry_url
                 vc.log(f"[auth] Login URL: {_login_url}", "INFO")
             else:
                 vc.log("[auth] No login form located — form_login cannot proceed", "WARNING")
@@ -7326,7 +7347,7 @@ return null;
                                     if _mp not in _ex_mfa:
                                         _ex_mfa.append(_mp)
                                 auth["mfa_providers"] = _ex_mfa
-                            if _lp_extras and _sys_guard.stdin.isatty() and not no_interactive:
+                            if _lp_extras and (vc._managed or _sys_guard.stdin.isatty()) and not no_interactive:
                                 vc.log(
                                     f"[auth] Login page has {len(_lp_extras)} additional "
                                     "field(s) — please provide values below:",
@@ -7351,7 +7372,7 @@ return null;
                                     ).strip()
                                 if _lp_ex_vals:
                                     auth["login_extra_fields"] = _lp_ex_vals
-                            elif _lp_extras:
+                            elif _lp_extras and not vc._managed:
                                 _ef_names = ", ".join(e["name"] for e in _lp_extras)
                                 vc.log(
                                     f"[auth] Login page has extra field(s) ({_ef_names}) "
@@ -7367,6 +7388,8 @@ return null;
         # 3. POST credentials, then handle any post-login pages
         if _login_url:
             vc.log(f"[auth] Submitting credentials to: {_login_url}", "INFO")
+            # Snapshot cookie names BEFORE credential submission for comparison
+            _pre_login_cookie_names: set = {c.name for c in sess.cookies}
             _post_resp, _ = _login_post(_login_url)
             _login_post_called = True
             if _post_resp is not None:
@@ -7376,6 +7399,89 @@ return null;
                     "INFO",
                 )
                 _handle_post_login_page(_post_resp)
+
+            # ── Multi-signal authentication success verification ───────────────
+            # HTTP status codes alone are insufficient — use URL, cookies, form
+            # presence, error text, and logged-in content to produce a verdict.
+            try:
+                import re as _re_av, urllib.parse as _up_av
+                _av_html = (_post_resp.text or "") if _post_resp else ""
+                _av_url  = (_post_resp.url  or "") if _post_resp else ""
+                _av_ok: "list[str]" = []
+                _av_fail: "list[str]" = []
+
+                # Signal 1: URL path changed away from login page (success)
+                _av_login_path = _up_av.urlparse(_login_url).path.rstrip("/")
+                _av_post_path  = _up_av.urlparse(_av_url).path.rstrip("/") if _av_url else ""
+                if _av_login_path and _av_post_path and _av_post_path != _av_login_path:
+                    _av_ok.append(f"URL changed post-login: {_av_login_path!r} → {_av_post_path!r}")
+                elif _av_login_path and _av_post_path == _av_login_path:
+                    _av_fail.append(f"URL unchanged — still on login page ({_av_login_path!r})")
+
+                # Signal 2: New cookies set that were absent before credential POST
+                _av_new_ck = {c.name for c in sess.cookies} - _pre_login_cookie_names
+                if _av_new_ck:
+                    _av_ok.append(f"New session cookies after login: {sorted(_av_new_ck)}")
+                elif sess.cookies and not _av_new_ck:
+                    _av_fail.append("No new cookies set by credential submission")
+
+                # Signal 3: Login form absent from post-login page (success)
+                _av_has_form = bool(_re_av.search(
+                    r'<input[^>]+type=["\']?password["\']?', _av_html, _re_av.IGNORECASE))
+                if not _av_has_form and _av_html:
+                    _av_ok.append("No login form on post-login page")
+                elif _av_has_form:
+                    _av_fail.append("Login form still present on post-login page")
+
+                # Signal 4: Authentication failure text in visible content (failure)
+                _av_vis = _re_av.sub(r'<[^>]+>', ' ', _av_html)
+                _av_err_m = _re_av.search(
+                    r'\b(?:invalid\s+(?:password|credentials?|username|e?mail)|'
+                    r'incorrect\s+(?:password|credentials?|username)|'
+                    r'(?:login|sign.?in|authentication)\s+(?:failed|unsuccessful|error|invalid)|'
+                    r'(?:password|credentials?)\s+(?:is\s+)?(?:wrong|incorrect|invalid)|'
+                    r'too\s+many\s+(?:failed\s+)?(?:attempts?|tries)|'
+                    r'account\s+(?:locked|suspended|disabled|blocked))\b',
+                    _av_vis[:5000], _re_av.IGNORECASE,
+                )
+                if _av_err_m:
+                    _av_ctx_s = max(0, _av_err_m.start() - 50)
+                    _av_ctx_e = min(len(_av_vis), _av_err_m.end() + 50)
+                    _av_snip  = _re_av.sub(r'\s+', ' ', _av_vis[_av_ctx_s:_av_ctx_e]).strip()
+                    _av_fail.append(f"Auth failure text: \"{_av_snip}\"")
+
+                # Signal 5: Logged-in content indicators (success)
+                _av_li_m = _re_av.search(
+                    r'\b(?:log(?:.?out|ging\s+out)|sign\s*out|my\s+(?:account|profile|dashboard)|'
+                    r'dashboard|welcome[,\s]|hello[,\s])\b',
+                    _av_html[:8000], _re_av.IGNORECASE,
+                )
+                if _av_li_m:
+                    _av_ok.append(f"Post-login indicators found (e.g. logout link / welcome)")
+
+                # Signal 6: HTTP 4xx after credential POST (failure)
+                if _post_resp and _post_resp.status_code in (401, 403):
+                    _av_fail.append(f"HTTP {_post_resp.status_code} returned after credential POST")
+
+                # Verdict: failure phrases override — any error text = fail
+                _av_verified = False
+                if _av_err_m:
+                    _av_verified = False
+                elif _post_resp and _post_resp.status_code in (401, 403):
+                    _av_verified = False
+                elif _av_ok:
+                    _av_verified = True
+
+                auth["auth_verified"]      = _av_verified
+                auth["auth_verify_signals"] = _av_ok + _av_fail
+                _av_sig_str = "; ".join((_av_ok + _av_fail)[:4])
+                vc.log(
+                    f"[auth] Authentication {'VERIFIED' if _av_verified else 'UNVERIFIED'}: "
+                    f"{_av_sig_str}",
+                    "SUCCESS" if _av_verified else "WARNING",
+                )
+            except Exception as _av_ex:
+                vc.log(f"[auth] Auth verification error: {_av_ex}", "WARNING")
         else:
             vc.log("[auth] Skipping credential submission — no login URL available", "WARNING")
 
@@ -7796,16 +7902,26 @@ return null;
                     vc.log(
                         f"[auth:auto] Success with method '{_auto_m}' — "
                         "using this session", "SUCCESS")
-                    # Propagate login_url discovered by the sub-call back to the
-                    # outer auth dict so it reaches cfg["auth"]["login_url"] and
-                    # is captured by the deepcopy at _r1_cfg / _cred_contexts.
+                    # Propagate login_url, mfa_providers, and login_extra_fields
+                    # discovered by the sub-call back to the outer auth dict so
+                    # they reach cfg["auth"] and are captured by the deepcopy at
+                    # _r1_cfg / _cred_contexts.
                     _auto_lp = _auto_cfg.get("auth", {}).get("login_url", "").strip()
                     if _auto_lp and not auth.get("login_url"):
                         auth["login_url"] = _auto_lp
+                    _auto_mfa = _auto_cfg.get("auth", {}).get("mfa_providers", [])
+                    if _auto_mfa:
+                        _auto_ex_mfa = auth.get("mfa_providers", [])
+                        for _amp in _auto_mfa:
+                            if _amp not in _auto_ex_mfa:
+                                _auto_ex_mfa.append(_amp)
+                        auth["mfa_providers"] = _auto_ex_mfa
+                    _auto_lef = _auto_cfg.get("auth", {}).get("login_extra_fields", {})
+                    if _auto_lef:
+                        auth.setdefault("login_extra_fields", {}).update(_auto_lef)
                     return _auto_sess
-                # Propagate any login_url discovered during this failed attempt
-                # (e.g. form_login ran _discover_login_url and found CAS URL
-                # but the form submission failed — we still want the URL).
+                # Propagate any login_url / mfa_providers from this failed attempt
+                # so they are available for findings even when auth did not succeed.
                 if not auth.get("login_url"):
                     _auto_lp_fail = _auto_cfg.get("auth", {}).get("login_url", "").strip()
                     if _auto_lp_fail:
@@ -7815,6 +7931,13 @@ return null;
                             f"{_auto_lp_fail}",
                             "INFO",
                         )
+                _auto_mfa_fail = _auto_cfg.get("auth", {}).get("mfa_providers", [])
+                if _auto_mfa_fail:
+                    _auto_ex_mfa_f = auth.get("mfa_providers", [])
+                    for _ampf in _auto_mfa_fail:
+                        if _ampf not in _auto_ex_mfa_f:
+                            _auto_ex_mfa_f.append(_ampf)
+                    auth["mfa_providers"] = _auto_ex_mfa_f
                 vc.log(f"[auth:auto] Method '{_auto_m}' produced no auth signal — skipping",
                        "INFO")
             except Exception as _auto_e:
@@ -7822,6 +7945,13 @@ return null;
                     _auto_lp_ex = _auto_cfg.get("auth", {}).get("login_url", "").strip()
                     if _auto_lp_ex:
                         auth["login_url"] = _auto_lp_ex
+                _auto_mfa_ex = _auto_cfg.get("auth", {}).get("mfa_providers", [])
+                if _auto_mfa_ex:
+                    _auto_ex_mfa_e = auth.get("mfa_providers", [])
+                    for _ampe in _auto_mfa_ex:
+                        if _ampe not in _auto_ex_mfa_e:
+                            _auto_ex_mfa_e.append(_ampe)
+                    auth["mfa_providers"] = _auto_ex_mfa_e
                 vc.log(f"[auth:auto] Method '{_auto_m}' error: {_auto_e} — skipping", "INFO")
 
         vc.log("[auth:auto] All username/password methods exhausted — no session established",
@@ -7940,6 +8070,9 @@ def _attach_redirect_hook(
                 return
             dest_host = p.hostname or ""
         except Exception:
+            return
+        # Suppress findings for redirects to Fracture's own NXDOMAIN probe hostnames
+        if dest_host.startswith("_fracture_nxdomain_"):
             return
         key = (r.url, abs_loc)
         if key in _redirect_seen:
@@ -8344,6 +8477,100 @@ _EDGE_SECURITY_BODY_PATTERNS = [
     (re.compile(r'arkose\.com|arkoselabs\.com', re.I),                   "Arkose Labs"),
     (re.compile(r'reblaze\.com', re.I),                                  "Reblaze"),
 ]
+# Headers whose presence identifies a specific technology/service/framework.
+# When WhatWeb reports one of these as "UncommonHeaders", emit a targeted
+# "HTTP Header Fingerprint" finding instead of "Unknown Header Identified".
+# Format: header_name_lowercase → (technology_name, description)
+_FINGERPRINT_HEADERS: "dict[str, tuple[str, str]]" = {
+    # Oracle
+    "oracle-ebs":                  ("Oracle E-Business Suite",
+                                    "Response header emitted by Oracle E-Business Suite (EBS) "
+                                    "application servers, identifying the platform."),
+    "x-oracle-dms-ecid":           ("Oracle Fusion Middleware / WebLogic",
+                                    "Oracle Dynamic Monitoring Service Execution Context ID. "
+                                    "Emitted by Oracle WebLogic Server and Oracle Fusion "
+                                    "Middleware; reveals the middleware stack."),
+    "x-oracle-dms-rid":            ("Oracle Fusion Middleware / WebLogic",
+                                    "Oracle DMS request ID, emitted by WebLogic/Fusion Middleware."),
+    "x-atg-version":               ("Oracle ATG Commerce",
+                                    "Identifies the Oracle ATG (Art Technology Group) "
+                                    "e-commerce platform version."),
+    # Microsoft
+    "x-aspnet-version":            ("ASP.NET",
+                                    "Discloses the exact ASP.NET runtime version running on "
+                                    "the server, aiding attacker reconnaissance."),
+    "x-aspnetmvc-version":         ("ASP.NET MVC",
+                                    "Discloses the ASP.NET MVC framework version."),
+    "x-ms-request-id":             ("Microsoft Azure",
+                                    "Azure platform request identifier, indicating "
+                                    "Azure-hosted infrastructure."),
+    "x-ms-correlation-request-id": ("Microsoft Azure",
+                                    "Azure correlation request ID for distributed tracing."),
+    # CMS platforms
+    "x-drupal-cache":              ("Drupal CMS",
+                                    "Cache status header emitted by the Drupal content "
+                                    "management system."),
+    "x-drupal-dynamic-cache":      ("Drupal CMS",
+                                    "Dynamic page cache status header emitted by Drupal CMS."),
+    "x-generator":                 ("CMS / Framework",
+                                    "Identifies the content management system or web framework "
+                                    "used to generate the page."),
+    # Web servers / proxies
+    "x-litespeed-tag":             ("LiteSpeed Web Server",
+                                    "Cache tag header emitted by the LiteSpeed web server."),
+    "x-litespeed-cache":           ("LiteSpeed Cache",
+                                    "Cache hit/miss indicator for the LiteSpeed web server."),
+    "x-turbo-charged-by":          ("LiteSpeed",
+                                    "LiteSpeed server turbo-charge identification header."),
+    # API gateways
+    "x-kong-upstream-latency":     ("Kong API Gateway",
+                                    "Upstream latency header emitted by Kong API Gateway, "
+                                    "revealing the API gateway layer."),
+    "x-kong-proxy-latency":        ("Kong API Gateway",
+                                    "Proxy latency header emitted by Kong API Gateway."),
+    "x-envoy-upstream-service-time": ("Envoy Proxy / Service Mesh",
+                                    "Service processing time emitted by Envoy proxy "
+                                    "(used in Kubernetes/Istio service mesh)."),
+    "x-envoy-decorator-operation": ("Envoy Proxy / Service Mesh",
+                                    "Envoy proxy operation decorator, potentially revealing "
+                                    "internal service mesh topology."),
+    # AWS
+    "x-amzn-requestid":            ("Amazon Web Services",
+                                    "AWS-generated request identifier, revealing the "
+                                    "application is hosted on AWS infrastructure."),
+    "x-amzn-trace-id":             ("AWS X-Ray",
+                                    "AWS X-Ray distributed trace ID, indicating the "
+                                    "application uses AWS tracing infrastructure."),
+    # Cloud / PaaS
+    "x-heroku-dynos-in-use":       ("Heroku",
+                                    "Reveals Heroku PaaS deployment details including "
+                                    "dyno count."),
+    "x-heroku-queue-depth":        ("Heroku",
+                                    "Heroku request queue depth, revealing deployment details."),
+    # E-commerce
+    "x-shopify-stage":             ("Shopify",
+                                    "Identifies a Shopify-hosted store and its deployment stage."),
+    "x-shopid":                    ("Shopify",
+                                    "Shopify internal shop identifier."),
+    "x-magento-cache-debug":       ("Magento",
+                                    "Identifies the Magento e-commerce platform cache layer."),
+    # Infrastructure leakage
+    "x-shardid":                   ("Distributed System (Shard Disclosure)",
+                                    "Database or service shard identifier, potentially "
+                                    "revealing horizontal scaling architecture."),
+    "x-cluster-client-ip":         ("Load Balancer / Cluster",
+                                    "Client IP forwarded by a cluster load balancer, "
+                                    "revealing load balancing infrastructure."),
+    "x-request-id":                ("Application Framework / APM",
+                                    "Unique per-request identifier emitted by frameworks, "
+                                    "reverse proxies, or APM systems for tracing."),
+    "x-correlation-id":            ("Application Framework / APM",
+                                    "Correlation identifier for distributed tracing, emitted "
+                                    "by frameworks or APM agents."),
+    "x-cobalt":                    ("Cobalt Web Framework",
+                                    "Emitted by the Cobalt web publishing framework."),
+}
+
 _BI_PATTERNS = {
     "Grafana":         [re.compile(r'grafana|/grafana/|GrafanaApp', re.I)],
     "Kibana":          [re.compile(r'kbn-name.*kibana|kbn-version|/app/kibana', re.I)],
@@ -8358,6 +8585,8 @@ _BI_PATTERNS = {
     "Power BI":        [re.compile(r'powerbi-client|PowerBI\.embed', re.I)],
     "Looker":          [re.compile(r'\blooker\b|LookerBrowser|/looker/', re.I)],
     "IBM Cognos":      [re.compile(r'ibmcognos|cam_passport|/bi/v1/|xts\.run|IBM\s+Cognos|cognos\.js', re.I)],
+    "Oracle E-Business Suite": [re.compile(r'Oracle-EBS|Oracle E-Business Suite|AppsLocalLogin|AppsLogin', re.I)],
+    "Oracle Fusion Middleware": [re.compile(r'x-oracle-dms-ecid|oracle\.fusion|oracle-fusion', re.I)],
 }
 # Paths that require authentication on each BI platform — HTTP 200 without
 # credentials indicates unauthenticated access.  Paths known to be public
@@ -10283,6 +10512,37 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                                     break
                                         if _ww_known:
                                             continue
+                                        # Check known-fingerprint headers before
+                                        # emitting "Unknown Header" — if this header
+                                        # identifies a specific technology, emit a
+                                        # targeted finding instead.
+                                        _ww_fp = _FINGERPRINT_HEADERS.get(_ww_hn_l)
+                                        if _ww_fp:
+                                            _fp_tech, _fp_desc = _ww_fp
+                                            out.add_finding(
+                                                title=f"HTTP Header Fingerprints {_fp_tech}: {hdr_name}",
+                                                url=url, port=target["port"], risk="INFO",
+                                                description=(
+                                                    f"The response header '{hdr_name}' identifies "
+                                                    f"{_fp_tech}. {_fp_desc}"
+                                                    + (f" Value: {hdr_value}" if hdr_value else "")
+                                                ),
+                                                output=(f"HTTP Status: {_ww_http_status}\n"
+                                                        if _ww_http_status else "")
+                                                       + f"Header: {hdr_name}"
+                                                       + (f"\nValue: {hdr_value}" if hdr_value else ""),
+                                                sources="whatweb", service=target["scheme"],
+                                                output_file=str(ww_out),
+                                                owasp="A05:2025 Security Misconfiguration",
+                                                nist="CM-7",
+                                                remediation=(
+                                                    f"Remove or genericise the '{hdr_name}' header "
+                                                    "to prevent technology disclosure that aids "
+                                                    "attacker reconnaissance."
+                                                ),
+                                                http_code=_ww_http_status or 0,
+                                            )
+                                            continue
                                         out.add_finding(
                                             title=f"Unknown Header Identified: {hdr_name}",
                                             url=url, port=target["port"], risk="INFO",
@@ -10336,6 +10596,33 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                             _ww_pn_known = True
                                             break
                                 if _ww_pn_known:
+                                    continue
+                                # Check known-fingerprint headers before emitting unknown
+                                _ww_pn_fp = _FINGERPRINT_HEADERS.get(_ww_pn_l)
+                                if _ww_pn_fp:
+                                    _pn_fp_tech, _pn_fp_desc = _ww_pn_fp
+                                    out.add_finding(
+                                        title=f"HTTP Header Fingerprints {_pn_fp_tech}: {pname}",
+                                        url=url, port=target["port"], risk="INFO",
+                                        description=(
+                                            f"The response header '{pname}' identifies "
+                                            f"{_pn_fp_tech}. {_pn_fp_desc}"
+                                            + (f" Value: {version}" if version else "")
+                                        ),
+                                        output=((f"HTTP Status: {_ww_http_status}\n"
+                                                 if _ww_http_status else "")
+                                                + f"Header: {pname}"
+                                                + (f"\nValue: {version}" if version else "")),
+                                        sources="whatweb", service=target["scheme"],
+                                        output_file=str(ww_out),
+                                        owasp="A05:2025 Security Misconfiguration",
+                                        nist="CM-7",
+                                        remediation=(
+                                            f"Remove or genericise the '{pname}' header "
+                                            "to prevent technology disclosure."
+                                        ),
+                                        http_code=_ww_http_status or 0,
+                                    )
                                     continue
                                 out.add_finding(
                                     title=f"Unknown Header Identified: {pname}",
@@ -10692,7 +10979,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     # feroxbuster — recursive directory discovery
     feroxbuster = _find_tool("feroxbuster")
     if feroxbuster and Path(wordlist).exists():
-        fer_out = out.output_path(phase, "feroxbuster_" + target["hostname"])
+        _fer_subdir = out.root / phase / "feroxbuster" / target["hostname"]
+        _fer_subdir.mkdir(parents=True, exist_ok=True)
+        fer_out = _fer_subdir / f"feroxbuster_dirs_{target['hostname']}.txt"
         _fer_threads = "5" if _recon_cdn else str(_SCAN_SEM.limit)
         # When a CDN/WAF is present, 403 and 401 responses come from the WAF
         # block page for every non-existent path — not from the origin app.
@@ -10786,7 +11075,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     pass
         # feroxbuster files
         if feroxbuster:
-            fer_files_out = out.output_path(phase, "feroxbuster_files_" + target["hostname"])
+            fer_files_out = _fer_subdir / f"feroxbuster_files_{target['hostname']}.txt"
             _fer_files_threads = "5" if _recon_cdn else str(_SCAN_SEM.limit)
             cmd = [
                 feroxbuster, "--url", url, "--wordlist", wordlist_files,
@@ -11251,10 +11540,10 @@ def _phase_endpoint_tools(
                                + (f", Fields: {_fm_fields}" if _fm_fields else ""))
                 if _fm_has_pwd:
                     out.add_finding(
-                        title="Login Page Detected",
+                        title="Login Page Identified",
                         url=ep_url, port=target["port"], risk="INFO",
                         description=(
-                            f"A login form containing a password field was detected at "
+                            f"A login form containing a password field was identified at "
                             f"{ep_url}. Login pages should implement multi-factor "
                             "authentication, CSRF protection, and account lockout policies."
                         ),
@@ -13012,11 +13301,18 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
 
     # ── TRACE method detection (XST) ─────────────────────────────────────────
     try:
-        _tr = sess.request("TRACE", url, timeout=timeout, allow_redirects=False)
-        if _tr.status_code < 500 and (
-            "TRACE" in (_tr.text or "").upper()[:500]
-            or _tr.status_code in (200, 204)
-        ):
+        _tr = sess.request("TRACE", url, timeout=timeout, allow_redirects=False,
+                           headers={"X-Fracture-Trace": "1"})
+        # Only report when the server actually echoes the request back (true TRACE
+        # behaviour) on a success status.  A 405/403/501 means the method is
+        # explicitly disabled — that is correct server behaviour and must NOT fire.
+        _tr_echoes = (
+            _tr.status_code in (200, 204)
+            and any(tok in (_tr.text or "").upper()[:1500]
+                    for tok in ("X-FRACTURE-TRACE", "HOST:", "USER-AGENT:",
+                                "ACCEPT:", "ACCEPT-ENCODING:"))
+        )
+        if _tr_echoes:
             out.add_finding(
                 title="HTTP TRACE Method Enabled (Cross-Site Tracing)",
                 url=url, port=target["port"], risk="LOW",
@@ -13469,6 +13765,8 @@ def _phase_webfiles(target: dict, cfg: dict, pm: ProgressManager,
                 body += chunk
                 if len(body) >= _MAX_FILE_BYTES:
                     break
+            if r.status_code == 404:
+                return None
             digest = hashlib.sha256(body).hexdigest()
             if digest in seen_hashes:
                 return None
@@ -15977,30 +16275,9 @@ def _write_structure_map(out: "OutputManager", target: dict,
     except Exception:
         pass
 
-    # Emit / update the single "Web Structure Identified" finding for this target.
-    # Only new paths (not seen on previous calls) are reported so the description
-    # grows incrementally without duplicating lines already in the finding.
-    try:
-        _newly_added = sorted(set(paths.keys()) - _old_path_keys)
-        if _newly_added:
-            _ev_str = ",".join(str(f) for f in (evidence_files or []) if f)
-            _desc   = "\n".join(_newly_added)
-            out.add_finding(
-                title="Web Structure Identified",
-                url=target["url"],
-                port=target["port"],
-                risk="INFO",
-                description=_desc,
-                output=_desc,
-                affected=target["url"],
-                output_file=_ev_str,
-                sources="fracture-structure",
-                service=target["scheme"],
-                owasp="",
-                nist="",
-            )
-    except Exception:
-        pass
+    # Web Structure findings are no longer emitted incrementally from here.
+    # A "No Web Structure Identified" finding is emitted at the end of the
+    # first (non-reduced) context pass if no paths were discovered.
 
     # Keep access_matrix.json in sync with every structure_map update so
     # Crucible can show a growing path list from the very first HTTP probe.
@@ -19305,7 +19582,65 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
             continue
 
         if len(status_codes) >= 10:
-            # All 10 requests succeeded without lockout — capture evidence
+            # Before firing, verify the endpoint was actually processing auth
+            # attempts and not just returning a static page for every request.
+            # False-positive sources: endpoints that return 200 for unrelated
+            # reasons, or login pages that use HTTP 200 for soft-fails without
+            # any detectable lockout or rate-limiting behaviour.
+            # Require at least one probe to exhibit an auth-processing signal:
+            #   (a) URL of response matches the login action (stayed on login page)
+            #   (b) Response body still contains a password input (login form present)
+            #   (c) Response body contains an auth-failure phrase
+            _auth_processing_confirmed = False
+            _lockout_skip_phrases = re.compile(
+                r'\b(?:invalid|incorrect|failed|wrong|denied|'
+                r'username\s+or\s+password|bad\s+(?:credentials?|login)|'
+                r'try\s+again|please\s+enter|sign\s+in\s+again)\b',
+                re.IGNORECASE,
+            )
+            for _chk_r in probe_responses[:5]:
+                _chk_text  = _chk_r.text or ""
+                _chk_path  = urllib.parse.urlparse(_chk_r.url).path.rstrip("/")
+                _act_path  = urllib.parse.urlparse(action).path.rstrip("/")
+                _has_form  = bool(re.search(
+                    r'<input[^>]+type=["\']?password["\']?', _chk_text, re.I))
+                _has_err   = bool(_lockout_skip_phrases.search(
+                    re.sub(r'<[^>]+>', ' ', _chk_text[:4000])))
+                _stayed_on = (_chk_path == _act_path)
+                if _stayed_on or _has_form or _has_err:
+                    _auth_processing_confirmed = True
+                    break
+            if not _auth_processing_confirmed:
+                vc.log(
+                    f"[account_lockout] Probe responses for {action} show no auth "
+                    "processing signals (no form, no error text, no URL match) "
+                    "— skipping finding to avoid false positive",
+                    "INFO",
+                )
+                continue
+            # Also skip if all responses redirect away from the login URL
+            # (could indicate successful auth with the dummy credentials, which
+            # would mean the endpoint returned 200 from the redirect destination,
+            # not that rate-limiting is absent).
+            _action_host = urllib.parse.urlparse(action).netloc
+            _all_redirected_away = all(
+                urllib.parse.urlparse(r.url).netloc != _action_host
+                or urllib.parse.urlparse(r.url).path.rstrip("/") not in (
+                    urllib.parse.urlparse(action).path.rstrip("/"), "")
+                for r in probe_responses
+            )
+            if _all_redirected_away and not any(
+                    bool(re.search(r'<input[^>]+type=["\']?password["\']?',
+                                   r.text or "", re.I))
+                    for r in probe_responses[:3]):
+                vc.log(
+                    f"[account_lockout] All probe responses for {action} redirected "
+                    "away from login page — possible auth success with dummy creds; "
+                    "skipping rate-limit finding to avoid false positive",
+                    "WARNING",
+                )
+                continue
+            # All 10 requests processed by auth endpoint without lockout — evidence
             evidence_files: list = []
             for _ai, _ar in enumerate(probe_responses):
                 try:
@@ -21131,7 +21466,7 @@ def main() -> None:
                     _lp_role_sfx = f" (role: {_ctx_label})" if _ctx_label else ""
                     _lp_rel = urllib.parse.urlparse(_lp_found_url).path or "/"
                     out.add_finding(
-                        title="Login Page Discovered",
+                        title="Login Page Identified",
                         url=_lp_found_url,
                         port=target["port"],
                         risk="INFO",
@@ -21192,6 +21527,9 @@ def main() -> None:
             # Probe the base target URL with this session to capture the
             # post-login landing page (URL, HTTP code, and a body snippet for
             # the Crucible Authentication tab pop-up preview).
+            # For the unauthenticated context, use effective_auth (the fresh
+            # unauthenticated session) so that unauthenticated cookies set by the
+            # server during the scan are visible in the Crucible Auth tab.
             try:
                 _as_username = (
                     "" if _ctx_label == "unauthenticated"
@@ -21201,23 +21539,29 @@ def main() -> None:
                     "unauthenticated" if _ctx_label == "unauthenticated"
                     else ("success" if _ctx_auth is not None else "failed")
                 )
+                # Use multi-signal verification result when available
+                _as_auth_verified = _ctx_cfg.get("auth", {}).get("auth_verified")
+                if _as_auth_verified is not None and not _as_auth_verified:
+                    _as_status = "failed"
                 _as_landing_url = ""
                 _as_landing_code = 0
                 _as_landing_body = ""
-                if _ctx_auth is not None:
-                    try:
-                        _as_r = _ctx_auth.get(
-                            target["url"], timeout=cfg.get("timeout", 10),
-                            allow_redirects=True,
-                        )
-                        _as_landing_url  = _as_r.url
-                        _as_landing_code = _as_r.status_code
-                        _as_landing_body = _as_r.text[:8192]
-                    except Exception:
-                        pass
+                # Session to probe with: authenticated session or (for unauth) the
+                # fresh unauthenticated session that accumulated cookies during phases.
+                _as_session = _ctx_auth if _ctx_auth is not None else effective_auth
+                try:
+                    _as_r = _as_session.get(
+                        target["url"], timeout=cfg.get("timeout", 10),
+                        allow_redirects=True,
+                    )
+                    _as_landing_url  = _as_r.url
+                    _as_landing_code = _as_r.status_code
+                    _as_landing_body = _as_r.text[:8192]
+                except Exception:
+                    pass
                 _write_auth_status(
                     out.root, _ctx_label, _as_username, _as_status,
-                    _ctx_auth, _as_landing_url, _as_landing_body, _as_landing_code,
+                    _as_session, _as_landing_url, _as_landing_body, _as_landing_code,
                 )
 
                 # Screenshot the login URL and the authenticated landing URL.
@@ -22399,6 +22743,126 @@ def main() -> None:
                         "multi_role": True,
                         "role_idx":   _next_idx,
                     })
+
+        # ── Post-context: "No Web Structure" check ──────────────────────────
+        # Emit an INFO finding if no meaningful paths were discovered during
+        # the scan (only the root "/" in structure_map, or map absent entirely).
+        try:
+            _sm_path_final = out.root / "structure_map.json"
+            _sm_paths_found: list = []
+            if _sm_path_final.exists():
+                _sm_data = json.loads(_sm_path_final.read_text(encoding="utf-8"))
+                _sm_paths_found = [
+                    p for p in _sm_data.get("paths", {}).keys()
+                    if p not in ("/", "")
+                ]
+            if not _sm_paths_found:
+                out.add_finding(
+                    title="No Web Structure Identified",
+                    url=target["url"],
+                    port=target["port"],
+                    risk="INFO",
+                    description=(
+                        "No directories or files were discovered during testing beyond "
+                        "the application root. This may indicate the wordlists did not "
+                        "match the application structure, all paths require authentication, "
+                        "or the application relies entirely on front-end routing (SPA)."
+                    ),
+                    output="No paths discovered beyond /",
+                    affected="/",
+                    sources="fracture-structure",
+                    service=target["scheme"],
+                    owasp="",
+                    nist="",
+                )
+        except Exception:
+            pass
+
+        # ── Post-context: end-of-scan auth verification review ───────────────
+        # Read authentication_status.json, compare each authenticated role's
+        # landing URL and cookies against the unauthenticated baseline to
+        # identify possible authentication failures that were not caught during
+        # the live scan.  Prompt the user to re-test any suspicious roles.
+        try:
+            _auth_status_path = out.root / "authentication_status.json"
+            if _auth_status_path.exists():
+                _auth_entries: list = json.loads(_auth_status_path.read_text(encoding="utf-8"))
+                _unauth_entry = next(
+                    (e for e in _auth_entries if e.get("role") == "unauthenticated"),
+                    None
+                )
+                _unauth_url     = (_unauth_entry or {}).get("landing_url", "")
+                _unauth_cookies = {c["name"] for c in (_unauth_entry or {}).get("cookies", [])}
+
+                for _ae in _auth_entries:
+                    if _ae.get("role") in ("unauthenticated", ""):
+                        continue
+                    if _ae.get("status") == "failed":
+                        # Already marked failed — flag but don't re-evaluate
+                        vc.log(
+                            f"[auth-verify] Role '{_ae['role']}' status=failed "
+                            f"(user: {_ae.get('username','?')})",
+                            "WARNING",
+                        )
+                        _should_prompt_retest = True
+                    else:
+                        # Heuristic cross-check against unauthenticated baseline
+                        _ae_url     = _ae.get("landing_url", "")
+                        _ae_cookies = {c["name"] for c in _ae.get("cookies", [])}
+                        _ae_signals: list = []
+
+                        # Same landing URL as unauthenticated = auth likely failed
+                        if _ae_url and _unauth_url and _ae_url == _unauth_url:
+                            _ae_signals.append("landing URL same as unauthenticated")
+
+                        # No cookies beyond what unauthenticated has
+                        _ae_extra = _ae_cookies - _unauth_cookies
+                        if not _ae_extra and not _ae.get("auth_headers"):
+                            _ae_signals.append("no new cookies or auth headers beyond unauthenticated state")
+
+                        _should_prompt_retest = bool(_ae_signals)
+                        if _ae_signals:
+                            vc.log(
+                                f"[auth-verify] Role '{_ae['role']}' may have failed: "
+                                f"{'; '.join(_ae_signals)}",
+                                "WARNING",
+                            )
+
+                    if _should_prompt_retest and not no_interactive:
+                        try:
+                            _retest_role  = _ae["role"]
+                            _retest_user  = _ae.get("username", "")
+                            _retest_label = f"'{_retest_role}'" + (f" ({_retest_user})" if _retest_user else "")
+                            _retest_ans = vc.prompt(
+                                f"Authentication for role {_retest_label} appears to have failed. "
+                                f"Re-test this role? (If Yes, re-run Fracture with valid credentials "
+                                f"for this role.)",
+                                prompt_type="confirm",
+                                options=["Yes", "No"],
+                            ).strip().lower()
+                            if _retest_ans in ("yes", "y", "1"):
+                                out.add_finding(
+                                    title="Authentication Failure Detected",
+                                    url=target["url"],
+                                    port=target["port"],
+                                    risk="HIGH",
+                                    description=(
+                                        f"Authentication for role {_retest_label} was not "
+                                        f"verified during testing. Test results for this role "
+                                        "may be incomplete or inaccurate. Re-run Fracture "
+                                        "with valid credentials for this role."
+                                    ),
+                                    output=f"Role: {_retest_role}\nUser: {_retest_user}",
+                                    affected="/",
+                                    sources="fracture-auth",
+                                    service=target["scheme"],
+                                    owasp="A07:2025 Identification and Authentication Failures",
+                                    nist="IA-2",
+                                )
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
         # ── Post-context: privilege-escalation / cross-credential phases ───
         _scan_ctx["role"] = ""  # context loop complete; clear role tracker
