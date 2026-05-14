@@ -221,6 +221,7 @@ OFFLINE_BUNDLE_URLS = {
     "beautifulsoup4": "https://raw.githubusercontent.com/pr0t31n/OfflineInstallers/main/beautifulsoup4_offline_kali.tar.gz",
     "selenium":       "https://raw.githubusercontent.com/pr0t31n/OfflineInstallers/main/selenium_offline_kali.tar.gz",
     "sqlmap":         "https://raw.githubusercontent.com/pr0t31n/OfflineInstallers/main/sqlmap_offline_kali.tar.gz",
+    "dalfox":         "https://raw.githubusercontent.com/pr0t31n/OfflineInstallers/main/dalfox_offline_kali.tar.gz",
 }
 
 _OFFLINE_REPO_DIR = "/opt/OfflineInstallers"
