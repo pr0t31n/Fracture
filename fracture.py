@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.12.51"
+VERSION = "2.13.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -404,6 +404,32 @@ def _write_project_meta(project_dir: Path, tool: str, client_short: str,
         )
     except Exception:
         pass
+
+
+def _u_dual_write_meta(project_dir: Path, *, tool: str, version: str,
+                       client_short: str = "", client_name: str = "",
+                       engagement_name: str = "", target: str = "") -> bool:
+    """Dual-write universal meta.json (schema 1.0) alongside project_meta.json.
+    Graceful no-op when /opt/pr0t31n/shared/pr0t31n_schema.py is not installed."""
+    try:
+        import sys as _s
+        if "/opt/pr0t31n/shared" not in _s.path:
+            _s.path.insert(0, "/opt/pr0t31n/shared")
+        import pr0t31n_schema as _us
+    except ImportError:
+        return False
+    try:
+        meta = _us.make_meta(
+            tool=tool, version=version,
+            client_short=client_short or "unknown",
+            client_name=client_name or client_short or "unknown",
+            engagement_name=engagement_name or f"{tool} run",
+            target=target or "",
+        )
+        _us.atomic_write_json(Path(project_dir) / "meta.json", meta)
+        return True
+    except Exception:
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -21111,6 +21137,15 @@ def main() -> None:
             client_short=eng.get("client_short", ""),
             year=(eng.get("start_date", "") or "")[:4] or datetime.now().strftime("%Y"),
             version=VERSION,
+        )
+        # Dual-write universal meta.json (schema 1.0) for Prometheus UniversalParser.
+        _u_dual_write_meta(
+            Path(cfg["project"]).resolve(),
+            tool="fracture", version=VERSION,
+            client_short=eng.get("client_short", ""),
+            client_name=eng.get("client_name", ""),
+            engagement_name=eng.get("engagement_name", ""),
+            target=target.get("url", "") if isinstance(target, dict) else "",
         )
 
         if pm.get_state()["completed_phases"]:
