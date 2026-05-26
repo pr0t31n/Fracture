@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.14.0"
+VERSION = "2.15.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6654,18 +6654,106 @@ return null;
         vc.log(f"[auth] Login page not found — spidering exhausted {len(_visited)} URL(s)", "WARNING")
         return ""
 
+    # ── Username-field resolver (handles email-style fields) ──────────────────
+    # The configured `login_username_field` defaults to "username", but many real
+    # login forms use <input name="email">, <input type="email">, or other
+    # synonyms. If the configured name isn't found in the form, fall back to
+    # heuristic detection so the supplied credentials still get auto-filled
+    # AND the field doesn't end up in the "extra fields" list.
+    _USERNAME_FIELD_RE = re.compile(
+        r'^(e-?mail(?:[_-]?addr(?:ess)?)?|'
+        r'user(?:[_-]?name|[_-]?id)?|'
+        r'login(?:[_-]?id)?|'
+        r'account(?:[_-]?name)?|'
+        r'uid|userid|loginname|username|signin|sign[_-]?in)$',
+        re.IGNORECASE,
+    )
+
+    def _resolve_username_field(html: str, configured_uf: str) -> str:
+        """
+        Given the login-form HTML and the configured login_username_field name,
+        return the actual field name to use. Resolution order:
+          1. Exact match on configured name in any <input> (manual override wins)
+          2. <input type="email"> inside the password form
+          3. <input> whose name matches _USERNAME_FIELD_RE
+          4. <input id> matches _USERNAME_FIELD_RE (some forms use id but not name)
+          5. First non-password, non-hidden text/email input in the password form
+          6. Fall back to the configured name (preserves prior behaviour)
+        """
+        import re as _re_uf
+        if not html:
+            return configured_uf
+        # Find the form containing the password input
+        pw_form_body = None
+        for _fm in _re_uf.finditer(r'(?s)<form\b[^>]*>(.+?)</form>', html, _re_uf.IGNORECASE):
+            _body = _fm.group(1)
+            if _re_uf.search(r'<input[^>]+type=["\']?password["\']?',
+                              _body, _re_uf.IGNORECASE):
+                pw_form_body = _body
+                break
+        scope = pw_form_body or html
+        # Walk inputs in the password form
+        candidates = []
+        for _inp in _re_uf.finditer(r'<input\b([^>]*)/?>', scope, _re_uf.IGNORECASE):
+            attrs = _inp.group(1)
+            _t_m  = _re_uf.search(r'\btype=["\']?(\w+)["\']?', attrs, _re_uf.IGNORECASE)
+            _t    = _t_m.group(1).lower() if _t_m else "text"
+            if _t in ("password", "hidden", "submit", "button", "image", "reset",
+                      "checkbox", "radio", "file"):
+                continue
+            _n_m  = _re_uf.search(r'\bname=["\']([^"\']+)["\']', attrs, _re_uf.IGNORECASE)
+            _id_m = _re_uf.search(r'\bid=["\']([^"\']+)["\']',  attrs, _re_uf.IGNORECASE)
+            _name = _n_m.group(1) if _n_m else ""
+            _id   = _id_m.group(1) if _id_m else ""
+            candidates.append({"name": _name, "id": _id, "type": _t})
+        # 1. exact match on configured name
+        for c in candidates:
+            if c["name"] == configured_uf:
+                return c["name"]
+        # 2. <input type="email">
+        for c in candidates:
+            if c["type"] == "email" and c["name"]:
+                return c["name"]
+        # 3. name matches _USERNAME_FIELD_RE
+        for c in candidates:
+            if c["name"] and _USERNAME_FIELD_RE.match(c["name"]):
+                return c["name"]
+        # 4. id matches and name is present
+        for c in candidates:
+            if c["id"] and _USERNAME_FIELD_RE.match(c["id"]) and c["name"]:
+                return c["name"]
+        # 5. first text/email input (positional fallback)
+        for c in candidates:
+            if c["type"] in ("text", "email", "tel") and c["name"]:
+                return c["name"]
+        # 6. unchanged
+        return configured_uf
+
     # ── Login POST helper ─────────────────────────────────────────────────────
     def _login_post(base_url: str) -> "tuple[requests.Response | None, str]":
         """CSRF prefetch + POST credentials to resolved form action. Returns (resp, post_url)."""
         if not base_url:
             return None, ""
         login_mode = auth.get("login_mode", "fields")
-        uf = auth.get("login_username_field", "username")
+        configured_uf = auth.get("login_username_field", "username")
         pf = auth.get("login_password_field", "password")
         u  = auth.get("username", "")
         p  = auth.get("password", "")
         form_action, hidden = _csrf_prefetch(base_url)
         post_url = form_action if form_action else base_url
+        # Resolve the actual username field — handles forms that use
+        # <input type="email"> or name="email" instead of name="username".
+        # Re-fetches the login page (small extra cost; once per login attempt).
+        uf = configured_uf
+        try:
+            _r_html = sess.get(base_url, timeout=timeout).text
+            uf = _resolve_username_field(_r_html, configured_uf)
+            if uf != configured_uf:
+                vc.log(f"[auth] Username field auto-resolved: "
+                       f"'{configured_uf}' → '{uf}' (form uses email/synonym field)",
+                       "INFO")
+        except Exception:
+            pass
         if login_mode == "fields":
             data: dict = dict(hidden)
             if u: data[uf] = u
@@ -6713,7 +6801,15 @@ return null;
 
     # ── MFA provider detector ─────────────────────────────────────────────────
     def _detect_mfa(html: str, url: str) -> "list[str]":
-        """Return a deduplicated list of MFA provider names detected in html/url."""
+        """Return a deduplicated list of MFA provider names detected in html/url.
+
+        Detection runs in three passes:
+          1. Vendor / generic fingerprint substrings in HTML body and URL
+          2. URL path patterns (/mfa, /2fa, /verify, /challenge, /otp, /step-up …)
+          3. Input-element attributes that almost always indicate an OTP field
+             (autocomplete="one-time-code", maxlength=4-8 numeric input, etc.)
+        """
+        import re as _re_mfa
         _html_l = html.lower()
         _url_l  = url.lower()
         _FINGERPRINTS = [
@@ -6730,11 +6826,13 @@ return null;
              []),
             ("Microsoft Authenticator",
              ["microsoft authenticator", "msauthenticator", "ms authenticator",
-              "microsoft identity platform"],
+              "microsoft identity platform", "approve sign in",
+              "approve sign-in", "approve the sign in", "approve the sign-in",
+              "approve a notification", "open your authenticator app"],
              ["login.microsoftonline.com", "microsoft.com/auth"]),
             ("Okta Verify",
              ["okta-verify", "okta verify", "okta.com", "okta_widget",
-              "okta-signin-widget"],
+              "okta-signin-widget", "send push", "push notification"],
              ["okta.com/", ".okta.com/"]),
             ("RSA SecurID",
              ["rsa securid", "rsasecurid", "rsa token", "securid", "pinvalue",
@@ -6742,7 +6840,8 @@ return null;
              ["rsa.com/securid", "rsasecurity"]),
             ("Azure AD MFA",
              ["azure mfa", "azure ad mfa", "login.microsoftonline",
-              "microsoft identity", "azure active directory"],
+              "microsoft identity", "azure active directory",
+              "additional security verification"],
              ["login.microsoftonline.com"]),
             ("Ping Identity",
              ["pingone", "pingidentity", "pingfederate", "ping.fm"],
@@ -6756,29 +6855,60 @@ return null;
               "register token", "lost/forgot token", "forgot token"],
              ["oa_html", "appslogin", "/oam/", "oracle-access"]),
             ("Yubico YubiKey",
-             ["yubikey", "yubico", "otp_input", "yubikey otp"],
+             ["yubikey", "yubico", "otp_input", "yubikey otp",
+              "touch your security key", "insert your security key",
+              "tap your security key"],
+             []),
+            ("WebAuthn / FIDO2",
+             ["webauthn", "navigator.credentials", "use your security key",
+              "security key or biometric", "use a passkey", "use your passkey",
+              "use windows hello", "touch id", "face id"],
              []),
             ("Salesforce Authenticator",
              ["salesforce authenticator", "salesforceauthenticator"],
              []),
             ("TOTP / Authenticator App",
              ["totp", "time-based one-time", "authenticator app",
-              "scan the qr code", "scan qr code"],
+              "scan the qr code", "scan qr code", "code from your authenticator",
+              "code from your authenticator app",
+              "open your authenticator", "enter the code from your app"],
              []),
             ("SMS OTP",
              ["sms code", "text message", "sent to your phone",
-              "enter the code we sent", "via sms"],
+              "enter the code we sent", "via sms", "code sent to your mobile",
+              "we sent a text", "we texted you", "we've texted you"],
              []),
             ("Email OTP",
              ["email verification code", "check your email for a code",
               "sent to your email", "one-time code to your email",
-              "code to your inbox"],
+              "code to your inbox", "we emailed you a code",
+              "we've emailed you a code", "check your inbox"],
+             []),
+            ("Voice OTP",
+             ["call you with a code", "phone call with your code",
+              "we'll call you", "voice call"],
+             []),
+            ("Backup / Recovery Code",
+             ["backup code", "recovery code", "use a recovery code",
+              "use a backup code"],
+             []),
+            ("Security Question",
+             ["security question", "answer your security question",
+              "memorable word", "memorable answer"],
              []),
             ("Generic OTP",
              ["one-time password", "one time password", "one-time code",
-              "enter your otp", "enter otp", "enter code",
+              "one time code", "enter your otp", "enter otp", "enter code",
+              "enter the code", "enter the 4-digit", "enter the 5-digit",
+              "enter the 6-digit", "enter the 7-digit", "enter the 8-digit",
               "verification code", "security code", "passcode",
-              "access code", "mfa code", "two-factor", "2fa"],
+              "access code", "mfa code", "two-factor", "2-factor", "2fa",
+              "multi-factor", "multifactor", "second factor", "step-up",
+              "step up authentication", "additional verification",
+              "additional authentication", "verify your identity",
+              "identity verification", "confirm your identity",
+              "confirm it's you", "we need to verify", "extra step",
+              "almost there"],
              []),
         ]
         _found: list = []
@@ -6795,6 +6925,70 @@ return null;
                 if _p in _url_l:
                     _found.append(_pname)
                     break
+
+        # ── Pass 2: URL-path patterns ────────────────────────────────────────
+        # Match path segments commonly used for MFA challenges. Use word
+        # boundaries to avoid false positives on /verifying-data or /mfastats.
+        _PATH_PATTERNS = [
+            (r'/(?:mfa|2fa|2-factor|two-factor|twofactor)(?:[/?#]|$)',
+             "Generic OTP"),
+            (r'/(?:otp|totp|hotp)(?:[/?#]|$)',
+             "Generic OTP"),
+            (r'/(?:challenge|verify|verification|verify-identity)(?:[/?#]|$)',
+             "Generic OTP"),
+            (r'/(?:step-?up|stepup)(?:[/?#]|$)',
+             "Generic OTP"),
+            (r'/(?:authenticator|authn|second-?factor)(?:[/?#]|$)',
+             "Generic OTP"),
+            (r'/(?:sms|sms-code|sms-verify)(?:[/?#]|$)',
+             "SMS OTP"),
+            (r'/(?:email-?verify|email-?code|email-?otp)(?:[/?#]|$)',
+             "Email OTP"),
+        ]
+        for _pat, _pname in _PATH_PATTERNS:
+            if _pname in _found:
+                continue
+            if _re_mfa.search(_pat, _url_l):
+                _found.append(_pname)
+
+        # ── Pass 3: input-element attribute fingerprints ─────────────────────
+        # autocomplete="one-time-code" is the WHATWG-standard hint for OTPs and
+        # is the strongest single signal. inputmode="numeric" + short maxlength
+        # (4-8) on a non-hidden input is almost always an OTP field too.
+        if "Generic OTP" not in _found and _re_mfa.search(
+                r'<input\b[^>]*\bautocomplete=["\']one-?time-?code["\']',
+                html, _re_mfa.IGNORECASE):
+            _found.append("Generic OTP")
+
+        if "Generic OTP" not in _found:
+            for _im in _re_mfa.finditer(r'<input\b([^>]*)>', html, _re_mfa.IGNORECASE):
+                _ia = _im.group(1)
+                if _re_mfa.search(r'\btype=["\']?hidden["\']?', _ia, _re_mfa.IGNORECASE):
+                    continue
+                _has_numeric = bool(_re_mfa.search(
+                    r'\binputmode=["\']?(?:numeric|tel)["\']?', _ia, _re_mfa.IGNORECASE))
+                _has_pattern = bool(_re_mfa.search(
+                    r'\bpattern=["\']\\?d', _ia, _re_mfa.IGNORECASE))
+                _ml_m = _re_mfa.search(r'\bmaxlength=["\']?(\d+)', _ia, _re_mfa.IGNORECASE)
+                _ml = int(_ml_m.group(1)) if _ml_m else 0
+                if (_has_numeric or _has_pattern) and 3 <= _ml <= 10:
+                    _found.append("Generic OTP")
+                    break
+                # name / id / placeholder containing strong OTP keywords
+                _ni_text = ""
+                for _attr in ("name", "id", "placeholder", "aria-label"):
+                    _am = _re_mfa.search(
+                        rf'\b{_attr}=["\']([^"\']+)["\']', _ia, _re_mfa.IGNORECASE)
+                    if _am:
+                        _ni_text += " " + _am.group(1).lower()
+                if any(_kw in _ni_text for _kw in (
+                        "otp", "totp", "mfa", "2fa", "passcode",
+                        "verification-code", "verification_code",
+                        "verificationcode", "auth-code", "auth_code",
+                        "authcode", "one-time", "onetime")):
+                    _found.append("Generic OTP")
+                    break
+
         # Remove generic catch-all when a specific provider was already identified
         if len(_found) > 1 and "Generic OTP" in _found:
             _found = [_p for _p in _found if _p != "Generic OTP"]
@@ -6809,11 +7003,16 @@ return null;
           mfa_providers  – list of MFA provider names detected via _detect_mfa
 
         Fields matching the configured username / password field names are excluded,
-        as are hidden inputs and decorative/remember-me checkboxes.
+        as are hidden inputs and decorative/remember-me checkboxes. The username
+        field is auto-resolved via _resolve_username_field so forms with
+        <input name="email"> or <input type="email"> don't end up listing those
+        as "extra" fields.
         """
         import re as _re_lfe
-        _uf = auth.get("login_username_field", "username")
+        _configured_uf = auth.get("login_username_field", "username")
         _pf = auth.get("login_password_field", "password")
+        # Auto-resolve the actual username field (handles email-style forms)
+        _uf = _resolve_username_field(html, _configured_uf)
         _SKIP_TYPES = frozenset({
             "hidden", "submit", "image", "reset", "button",
             "file", "color", "range", "date", "datetime-local",
@@ -7052,6 +7251,44 @@ return null;
         _is_tty = _sys7.stdin.isatty()
         current_resp = initial_resp
 
+        # ── Pre-scan the redirect chain for MFA pages ─────────────────────────
+        # _login_post follows redirects with allow_redirects=True. If the
+        # server flow is POST /login → 302 /mfa → 302 /home, the terminal
+        # page (/home) is what ends up in initial_resp.text, and an MFA
+        # challenge that lived in an intermediate 200 response would be
+        # invisible. Scan every Response in initial_resp.history so we can
+        # still announce "MFA detected" even when the chain has moved past
+        # the challenge page.
+        try:
+            _redir_chain = list(getattr(initial_resp, "history", []) or [])
+        except Exception:
+            _redir_chain = []
+        _redir_mfa: list = []
+        for _hr in _redir_chain:
+            try:
+                _h_html = _hr.text or ""
+                _h_url  = _hr.url or ""
+            except Exception:
+                continue
+            if not _h_html and not _h_url:
+                continue
+            _h_mfa = _detect_mfa(_h_html, _h_url)
+            for _mp in _h_mfa:
+                if _mp not in _redir_mfa:
+                    _redir_mfa.append(_mp)
+        if _redir_mfa:
+            vc.log(
+                f"[auth] MFA detected during login redirect chain: "
+                f"{', '.join(_redir_mfa)} (intermediate page consumed by "
+                f"automatic redirect follow)",
+                "INFO",
+            )
+            _existing_mfa = auth.get("mfa_providers", [])
+            for _mp in _redir_mfa:
+                if _mp not in _existing_mfa:
+                    _existing_mfa.append(_mp)
+            auth["mfa_providers"] = _existing_mfa
+
         for _step in range(_POST_MAX_STEPS):
             if current_resp is None:
                 break
@@ -7092,7 +7329,16 @@ return null;
                 auth["mfa_providers"] = _existing_mfa
 
             if not _forms:
-                vc.log(f"[auth] Post-login page appears clean at: {_url}", "INFO")
+                if _step_mfa:
+                    vc.log(
+                        f"[auth] MFA challenge present at {_url} but no "
+                        f"interactive HTML form was found (likely JavaScript-"
+                        f"rendered or out-of-band push/biometric). Use "
+                        f"--browser-auth to complete the challenge interactively.",
+                        "WARNING",
+                    )
+                else:
+                    vc.log(f"[auth] Post-login page appears clean at: {_url}", "INFO")
                 break
 
             if not _is_tty and not vc._managed:
@@ -7794,8 +8040,16 @@ return null;
             for lu in _login_urls():
                 try:
                     otp = _totp(totp_secret)
+                    # Auto-resolve username field (handles email-style forms)
+                    _conf_uf = auth.get("login_username_field", "username")
+                    _resolved_uf = _conf_uf
+                    try:
+                        _resolved_uf = _resolve_username_field(
+                            sess.get(lu, timeout=timeout).text, _conf_uf)
+                    except Exception:
+                        pass
                     data = {
-                        auth.get("login_username_field", "username"): auth.get("username", ""),
+                        _resolved_uf: auth.get("username", ""),
                         auth.get("login_password_field", "password"): auth.get("password", ""),
                         mfa_field: otp,
                     }
