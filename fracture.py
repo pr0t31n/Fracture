@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.16.2"
+VERSION = "2.17.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6747,6 +6747,31 @@ return null;
         pf = auth.get("login_password_field", "password")
         u  = auth.get("username", "")
         p  = auth.get("password", "")
+
+        # ── Credential visibility log ────────────────────────────────────
+        # Show the operator EXACTLY which credentials Fracture is about to
+        # submit so they can confirm Crucible / engagement settings match
+        # what works in the browser. Username/email is shown in full (it's
+        # not a secret — the user typed it into the engagement settings).
+        # Password is masked (first char + length + last char) so the
+        # operator can spot truncation / copy-paste errors without leaking
+        # the password into logs / ZIPs / Crucible UI.
+        def _mask_pwd(pw: str) -> str:
+            if not pw:
+                return "<EMPTY>"
+            if len(pw) == 1:
+                return f"{pw}* (length: 1)"
+            if len(pw) == 2:
+                return f"{pw[0]}{pw[-1]} (length: 2)"
+            return f"{pw[0]}{'*' * max(1, len(pw) - 2)}{pw[-1]} (length: {len(pw)})"
+        vc.log(
+            f"[auth] Credentials in use: username/email={u!r}  "
+            f"password={_mask_pwd(p)}  "
+            f"(login_mode={login_mode}, configured username_field={configured_uf!r}, "
+            f"password_field={pf!r})",
+            "INFO",
+        )
+
         # Single GET via _csrf_prefetch — captures CSRF token, hidden inputs,
         # AND the HTML body. Re-using the HTML for username resolution avoids
         # a second GET that would regenerate the CSRF token on frameworks
@@ -6803,6 +6828,22 @@ return null;
                                 for _pw in ("pwd", "password", "passwd"))):
                     data[_shk] = p
         ct = auth.get("login_content_type", "application/x-www-form-urlencoded")
+        # ── Build same-origin Referer + Origin headers ───────────────────
+        # Flask-WTF (WTF_CSRF_SSL_STRICT=True, the default) and many other
+        # CSRF middlewares validate that HTTPS POSTs carry a Referer (and
+        # increasingly Origin) header matching the request origin. Without
+        # them the server rejects the POST with a generic "session token
+        # expired" message even though the token is fresh and the cookie
+        # matches. The fix is to send the same headers the browser would.
+        _post_headers: dict = {}
+        try:
+            from urllib.parse import urlparse as _uparse_lp
+            _lp = _uparse_lp(base_url)
+            if _lp.scheme and _lp.netloc:
+                _post_headers["Referer"] = base_url
+                _post_headers["Origin"]  = f"{_lp.scheme}://{_lp.netloc}"
+        except Exception:
+            pass
         # ── Diagnostic: log the POST request shape ──────────────────────
         # Field NAMES only (never values — passwords would leak), plus
         # whether each known field carries a non-empty value. Helps prove
@@ -6814,15 +6855,19 @@ return null;
                 _diag_fields.append(f"{_fk}={'<empty>' if _empty else '<set>'}")
             vc.log(
                 f"[auth] POST → {post_url}  fields=[{', '.join(_diag_fields)}]  "
-                f"content-type={ct}  username_field={uf!r}  password_field={pf!r}",
+                f"content-type={ct}  username_field={uf!r}  password_field={pf!r}  "
+                f"headers=[Referer={_post_headers.get('Referer', '(none)')}, "
+                f"Origin={_post_headers.get('Origin', '(none)')}]",
                 "INFO",
             )
         except Exception:
             pass
         try:
             if "json" in ct:
-                return sess.post(post_url, json=data, timeout=timeout, allow_redirects=True), post_url
-            return sess.post(post_url, data=data, timeout=timeout, allow_redirects=True), post_url
+                return sess.post(post_url, json=data, headers=_post_headers,
+                                 timeout=timeout, allow_redirects=True), post_url
+            return sess.post(post_url, data=data, headers=_post_headers,
+                             timeout=timeout, allow_redirects=True), post_url
         except Exception:
             return None, post_url
 
@@ -7400,15 +7445,35 @@ return null;
                     except Exception:
                         _origin = ""
 
+                    # Probe candidates fall into three categories:
+                    #   (a) explicit MFA endpoints — most apps that defer MFA
+                    #       to a separate route name them obviously
+                    #       (/mfa, /mfa/verify, /2fa, /verify, etc.)
+                    #   (b) the configured target / origin — apps that defer
+                    #       MFA to ANY protected page (the partial-auth
+                    #       cookie triggers it everywhere)
+                    #   (c) common protected paths — /dashboard, /home,
+                    #       /account, /profile
                     _probe_urls: list = []
-                    for _u in (
-                        _cfg_target,
-                        _origin,
-                        f"{_origin}/dashboard" if _origin else "",
-                        f"{_origin}/home"      if _origin else "",
-                        f"{_origin}/account"   if _origin else "",
-                        f"{_origin}/profile"   if _origin else "",
-                    ):
+                    _mfa_paths = [
+                        "/mfa", "/mfa/verify", "/mfa/challenge", "/mfa/login",
+                        "/2fa", "/2fa/verify",
+                        "/auth/mfa", "/auth/2fa", "/auth/verify",
+                        "/verify", "/verification",
+                        "/security/verify", "/account/verify",
+                        "/login/verify", "/login/mfa",
+                        "/totp", "/totp/verify",
+                        "/otp", "/otp/verify",
+                        "/challenge",
+                    ]
+                    _candidates: list = [_cfg_target, _origin]
+                    if _origin:
+                        for _p in _mfa_paths:
+                            _candidates.append(f"{_origin}{_p}")
+                        for _p in ("/dashboard", "/home",
+                                   "/account", "/profile"):
+                            _candidates.append(f"{_origin}{_p}")
+                    for _u in _candidates:
                         _u_n = (_u or "").strip().rstrip("/")
                         if _u_n and _u_n != _url and _u_n not in _probe_urls:
                             _probe_urls.append(_u_n)
@@ -7421,10 +7486,15 @@ return null;
                     )
 
                     _probe_hit = False
+                    # Cap per-probe wait at min(timeout, 8s). 22 candidate
+                    # URLs at the default timeout (20 s) is 440 s worst-case;
+                    # 8 s caps the worst case at ~3 min and most probes 404
+                    # back in <100 ms.
+                    _probe_timeout = min(timeout, 8)
                     for _probe_url in _probe_urls:
                         try:
                             _probe_resp = sess.get(
-                                _probe_url, timeout=timeout, allow_redirects=True)
+                                _probe_url, timeout=_probe_timeout, allow_redirects=True)
                             _probe_chain = (
                                 [_probe_resp]
                                 + list(getattr(_probe_resp, "history", []) or [])
@@ -7577,15 +7647,31 @@ return null;
 
             # ── 6. Submit completed form ───────────────────────────────────────
             vc.log(f"[auth] Submitting post-login form → {_form['action']}", "INFO")
+            # Same Referer/Origin headers as the credential POST — Flask-WTF
+            # and similar CSRF middlewares enforce them on every HTTPS POST,
+            # not just the login. Without them, the MFA OTP submission would
+            # also be silently rejected with "session token expired".
+            _form_headers: dict = {}
+            try:
+                from urllib.parse import urlparse as _uparse_fp
+                _fp_origin_src = current_resp.url or _form["action"]
+                _fp = _uparse_fp(_fp_origin_src)
+                if _fp.scheme and _fp.netloc:
+                    _form_headers["Referer"] = _fp_origin_src
+                    _form_headers["Origin"]  = f"{_fp.scheme}://{_fp.netloc}"
+            except Exception:
+                pass
             try:
                 if _form["method"] == "get":
                     current_resp = sess.get(
                         _form["action"], params=_filled,
+                        headers=_form_headers,
                         timeout=timeout, allow_redirects=True,
                     )
                 else:
                     current_resp = sess.post(
                         _form["action"], data=_filled,
+                        headers=_form_headers,
                         timeout=timeout, allow_redirects=True,
                     )
                 vc.log(
