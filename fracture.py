@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.15.2"
+VERSION = "2.16.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3359,15 +3359,23 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
     vc.log(f"[auth] Auth method: {method}{_role_tag}", "INFO")
 
     # ── CSRF prefetch helper (used by form_login / totp_mfa) ─────────────────
-    def _csrf_prefetch(url: str) -> "tuple[str, dict]":
-        """GET login page; return (form_action_url, hidden_input_fields)."""
+    def _csrf_prefetch(url: str) -> "tuple[str, dict, str]":
+        """GET login page; return (form_action_url, hidden_input_fields, html).
+
+        The third return value (html) lets callers re-use the fetched page
+        for additional form analysis (e.g. username-field resolution) WITHOUT
+        issuing a second GET. A second GET regenerates the CSRF token on
+        frameworks that mint per-render tokens (Flask-WTF, Rails, Django
+        with template-rendered tokens, etc.), which invalidates the token
+        captured here and causes the POST to be silently rejected.
+        """
         import re as _re2
         from urllib.parse import urljoin as _urljoin2
         try:
             r    = sess.get(url, timeout=timeout)
             html = r.text
         except Exception:
-            return "", {}
+            return "", {}, ""
         hidden: dict = {}
         form_action  = ""
         for form_m in _re2.finditer(r"(?s)<form[^>]*>(.+?)</form>", html, _re2.IGNORECASE):
@@ -3390,7 +3398,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 if n_m:
                     hidden[n_m.group(1)] = v_m.group(1) if v_m else ""
             break
-        return form_action, hidden
+        return form_action, hidden, html
 
     # ── Form page analyser ────────────────────────────────────────────────────
     def _analyse_form_page(html: str, page_url: str) -> "dict":
@@ -6739,21 +6747,24 @@ return null;
         pf = auth.get("login_password_field", "password")
         u  = auth.get("username", "")
         p  = auth.get("password", "")
-        form_action, hidden = _csrf_prefetch(base_url)
+        # Single GET via _csrf_prefetch — captures CSRF token, hidden inputs,
+        # AND the HTML body. Re-using the HTML for username resolution avoids
+        # a second GET that would regenerate the CSRF token on frameworks
+        # using per-render tokens (Flask-WTF, Rails, Django template CSRF).
+        form_action, hidden, _login_html = _csrf_prefetch(base_url)
         post_url = form_action if form_action else base_url
         # Resolve the actual username field — handles forms that use
         # <input type="email"> or name="email" instead of name="username".
-        # Re-fetches the login page (small extra cost; once per login attempt).
         uf = configured_uf
-        try:
-            _r_html = sess.get(base_url, timeout=timeout).text
-            uf = _resolve_username_field(_r_html, configured_uf)
-            if uf != configured_uf:
-                vc.log(f"[auth] Username field auto-resolved: "
-                       f"'{configured_uf}' → '{uf}' (form uses email/synonym field)",
-                       "INFO")
-        except Exception:
-            pass
+        if _login_html:
+            try:
+                uf = _resolve_username_field(_login_html, configured_uf)
+                if uf != configured_uf:
+                    vc.log(f"[auth] Username field auto-resolved: "
+                           f"'{configured_uf}' → '{uf}' (form uses email/synonym field)",
+                           "INFO")
+            except Exception:
+                pass
         if login_mode == "fields":
             data: dict = dict(hidden)
             if u: data[uf] = u
@@ -6792,6 +6803,22 @@ return null;
                                 for _pw in ("pwd", "password", "passwd"))):
                     data[_shk] = p
         ct = auth.get("login_content_type", "application/x-www-form-urlencoded")
+        # ── Diagnostic: log the POST request shape ──────────────────────
+        # Field NAMES only (never values — passwords would leak), plus
+        # whether each known field carries a non-empty value. Helps prove
+        # the request is well-formed before blaming the server.
+        try:
+            _diag_fields = []
+            for _fk in data:
+                _empty = data.get(_fk) in ("", None)
+                _diag_fields.append(f"{_fk}={'<empty>' if _empty else '<set>'}")
+            vc.log(
+                f"[auth] POST → {post_url}  fields=[{', '.join(_diag_fields)}]  "
+                f"content-type={ct}  username_field={uf!r}  password_field={pf!r}",
+                "INFO",
+            )
+        except Exception:
+            pass
         try:
             if "json" in ct:
                 return sess.post(post_url, json=data, timeout=timeout, allow_redirects=True), post_url
@@ -7351,36 +7378,74 @@ return null;
                 #                              factor before issuing a full
                 #                              session.
                 # The POST response itself shows no MFA, so the first-step
-                # _detect_mfa above returns []. Probe the target URL with a
-                # follow-up GET and re-run the detector — this catches the
-                # deferred case without touching the existing happy path.
+                # _detect_mfa above returns []. Probe a handful of likely
+                # post-login destinations with a follow-up GET and re-run
+                # the detector on each (plus their redirect chains) — this
+                # catches the deferred case without touching the happy path.
                 if _step == 0:
-                    _probe_url = (
+                    # Build the probe-URL list: configured target first,
+                    # then common post-login paths the partial-auth cookie
+                    # is most likely to redirect through.
+                    _cfg_target = (
                         cfg.get("target_url", "")
                         or (cfg.get("target_urls", [None]) or [None])[0]
                         or ""
                     ).strip().rstrip("/")
-                    if _probe_url and _probe_url != _url:
+                    # Derive scheme+host from the login URL so the probes
+                    # work even when cfg doesn't carry a target_url.
+                    try:
+                        from urllib.parse import urlparse as _uparse_dm
+                        _login_p = _uparse_dm(_url)
+                        _origin  = f"{_login_p.scheme}://{_login_p.netloc}"
+                    except Exception:
+                        _origin = ""
+
+                    _probe_urls: list = []
+                    for _u in (
+                        _cfg_target,
+                        _origin,
+                        f"{_origin}/dashboard" if _origin else "",
+                        f"{_origin}/home"      if _origin else "",
+                        f"{_origin}/account"   if _origin else "",
+                        f"{_origin}/profile"   if _origin else "",
+                    ):
+                        _u_n = (_u or "").strip().rstrip("/")
+                        if _u_n and _u_n != _url and _u_n not in _probe_urls:
+                            _probe_urls.append(_u_n)
+
+                    vc.log(
+                        f"[auth] Deferred-MFA probe: checking "
+                        f"{len(_probe_urls)} URL(s) "
+                        f"[{', '.join(_probe_urls) if _probe_urls else '(none)'}]",
+                        "INFO",
+                    )
+
+                    _probe_hit = False
+                    for _probe_url in _probe_urls:
                         try:
                             _probe_resp = sess.get(
                                 _probe_url, timeout=timeout, allow_redirects=True)
-                            _probe_mfa = _detect_mfa(
-                                _probe_resp.text or "", _probe_resp.url or "")
-                            # Also scan the probe's redirect chain — the MFA
-                            # page may sit at an intermediate hop.
-                            for _ph in getattr(_probe_resp, "history", []) or []:
+                            _probe_chain = (
+                                [_probe_resp]
+                                + list(getattr(_probe_resp, "history", []) or [])
+                            )
+                            _probe_mfa: list = []
+                            for _pr in _probe_chain:
                                 try:
-                                    for _mp in _detect_mfa(_ph.text or "", _ph.url or ""):
+                                    for _mp in _detect_mfa(
+                                            _pr.text or "", _pr.url or ""):
                                         if _mp not in _probe_mfa:
                                             _probe_mfa.append(_mp)
                                 except Exception:
-                                    pass
+                                    continue
+                            _probe_chain_urls = " → ".join(
+                                _pr.url for _pr in _probe_chain[::-1])
                             if _probe_mfa:
                                 vc.log(
-                                    f"[auth] Deferred MFA detected via probe of "
-                                    f"{_probe_url} → {_probe_resp.url}: "
-                                    f"{', '.join(_probe_mfa)} (app serves the "
-                                    f"MFA challenge only after credential "
+                                    f"[auth] Deferred MFA detected via "
+                                    f"probe of {_probe_url} ({_probe_chain_urls}): "
+                                    f"{', '.join(_probe_mfa)} (app serves "
+                                    f"the MFA challenge only after credential "
                                     f"POST + navigation to a protected page)",
                                     "INFO",
                                 )
@@ -7392,12 +7457,25 @@ return null;
                                 # Continue the interactive loop using the
                                 # probe response so we can present its form.
                                 current_resp = _probe_resp
-                                continue
+                                _probe_hit = True
+                                break
+                            else:
+                                vc.log(
+                                    f"[auth] Deferred-MFA probe: no MFA at "
+                                    f"{_probe_url} (chain: {_probe_chain_urls}, "
+                                    f"final HTTP {_probe_resp.status_code}, "
+                                    f"{len(_probe_resp.text or '')} bytes)",
+                                    "INFO",
+                                )
                         except Exception as _pe:
                             vc.log(
-                                f"[auth] Deferred-MFA probe failed: {_pe}",
+                                f"[auth] Deferred-MFA probe of {_probe_url} "
+                                f"failed: {_pe}",
                                 "WARNING",
                             )
+
+                    if _probe_hit:
+                        continue
 
                 vc.log(f"[auth] Post-login page appears clean at: {_url}", "INFO")
                 break
@@ -7726,11 +7804,92 @@ return null;
             _post_resp, _ = _login_post(_login_url)
             _login_post_called = True
             if _post_resp is not None:
+                # Diagnostic snippet so login-page-bounceback vs MFA-page
+                # responses are visible in the log without instrumentation.
+                try:
+                    _post_body_len = len(_post_resp.text or "")
+                except Exception:
+                    _post_body_len = 0
+                try:
+                    import re as _re_diag
+                    _title_m = _re_diag.search(
+                        r'<title[^>]*>([^<]{0,80})</title>',
+                        _post_resp.text or "", _re_diag.IGNORECASE)
+                    _title_s = (_title_m.group(1).strip() if _title_m else "")
+                    _h1_m = _re_diag.search(
+                        r'<h1[^>]*>([^<]{0,80})</h1>',
+                        _post_resp.text or "", _re_diag.IGNORECASE)
+                    _h1_s = (_h1_m.group(1).strip() if _h1_m else "")
+                except Exception:
+                    _title_s = _h1_s = ""
                 vc.log(
                     f"[auth] Credential POST → HTTP {_post_resp.status_code}"
-                    + (f", {len(sess.cookies)} cookie(s) set" if sess.cookies else ", no cookies set"),
+                    + (f", {len(sess.cookies)} cookie(s) set" if sess.cookies else ", no cookies set")
+                    + f", {_post_body_len} bytes"
+                    + (f", <title>{_title_s}</title>" if _title_s else "")
+                    + (f", <h1>{_h1_s}</h1>" if _h1_s else ""),
                     "INFO",
                 )
+                # ── Diagnostic: scan POST response for explicit errors ──
+                # If credentials were rejected, Flask-WTF / Django / Rails
+                # apps typically include a flash message or alert block.
+                # Surface anything that looks like one so the operator can
+                # immediately tell "wrong credentials" from "CSRF rejected".
+                try:
+                    import re as _re_pe
+                    _pe_html = _post_resp.text or ""
+                    _pe_findings: list = []
+                    # flash/alert/error blocks by CSS class
+                    for _pm in _re_pe.finditer(
+                            r'<(?:div|p|span|li)\b[^>]*'
+                            r'class=["\'][^"\']*'
+                            r'(?:alert|flash|error|danger|invalid-feedback|'
+                            r'is-invalid|has-error|help-block|form-error)'
+                            r'[^"\']*["\'][^>]*>'
+                            r'([\s\S]{1,300}?)'
+                            r'</(?:div|p|span|li)>',
+                            _pe_html, _re_pe.IGNORECASE):
+                        _t = _re_pe.sub(r'<[^>]+>', ' ', _pm.group(1))
+                        _t = _re_pe.sub(r'\s+', ' ', _t).strip()
+                        if 3 < len(_t) < 200 and _t not in _pe_findings:
+                            _pe_findings.append(_t)
+                    # Common explicit phrases anywhere on the page
+                    _vis = _re_pe.sub(r'<[^>]+>', ' ', _pe_html)
+                    _vis = _re_pe.sub(r'\s+', ' ', _vis)
+                    for _phrase in (
+                        "invalid email", "invalid password", "invalid credentials",
+                        "incorrect password", "incorrect email", "incorrect credentials",
+                        "wrong password", "wrong email", "wrong credentials",
+                        "user not found", "account not found", "no such user",
+                        "login failed", "sign in failed", "authentication failed",
+                        "csrf token", "csrf verification failed",
+                        "session expired", "too many attempts",
+                        "account locked", "account disabled",
+                    ):
+                        _idx = _vis.lower().find(_phrase)
+                        if _idx >= 0:
+                            _ctx = _vis[max(0, _idx-30):_idx+len(_phrase)+50].strip()
+                            if _ctx not in _pe_findings:
+                                _pe_findings.append(f"phrase: \"{_ctx}\"")
+                    if _pe_findings:
+                        for _pf in _pe_findings[:3]:
+                            vc.log(f"[auth] POST response error/flash: {_pf}", "WARNING")
+                    else:
+                        # Did the email value get echoed back? Classic sign
+                        # of form re-render after server-side validation.
+                        _u = auth.get("username", "")
+                        if _u and _u in _pe_html:
+                            vc.log(
+                                f"[auth] POST response echoes submitted username "
+                                f"({_u!r}) — server re-rendered the login form "
+                                f"without an error message (silent rejection: "
+                                f"check that the username/password are correct, "
+                                f"that the form has no extra hidden tokens, and "
+                                f"that the User-Agent is not being filtered)",
+                                "WARNING",
+                            )
+                except Exception:
+                    pass
                 _handle_post_login_page(_post_resp)
 
             # ── Multi-signal authentication success verification ───────────────
@@ -7784,9 +7943,19 @@ return null;
                     _av_fail.append(f"Auth failure text: \"{_av_snip}\"")
 
                 # Signal 5: Logged-in content indicators (success)
+                # Stricter than before: bare 'dashboard' is too broad — many
+                # public/landing/login/MFA pages link to /dashboard in their
+                # nav. Require context that implies arrival (logout, sign-out,
+                # "my <area>", "welcome", "hello,", "your dashboard").
                 _av_li_m = _re_av.search(
-                    r'\b(?:log(?:.?out|ging\s+out)|sign\s*out|my\s+(?:account|profile|dashboard)|'
-                    r'dashboard|welcome[,\s]|hello[,\s])\b',
+                    r'\b(?:'
+                    r'log(?:.?out|ging\s+out|\s*out)'
+                    r'|sign\s*out|signed\s+in\s+as'
+                    r'|my\s+(?:account|profile|dashboard|settings|inbox)'
+                    r'|(?:your|the)\s+dashboard'
+                    r'|welcome[,\s]+\w'
+                    r'|hello[,\s]+\w'
+                    r')\b',
                     _av_html[:8000], _re_av.IGNORECASE,
                 )
                 if _av_li_m:
@@ -7796,22 +7965,75 @@ return null;
                 if _post_resp and _post_resp.status_code in (401, 403):
                     _av_fail.append(f"HTTP {_post_resp.status_code} returned after credential POST")
 
-                # Verdict: failure phrases override — any error text = fail
+                # Signal 7: MFA detected during post-login handling.
+                # _handle_post_login_page populates auth["mfa_providers"] from
+                # the POST response, redirect-chain pre-scan, and the deferred-
+                # MFA probe. A non-empty list means the session is at best
+                # half-authenticated until the second factor completes —
+                # downstream scanning will run unauthenticated unless an OTP
+                # was provided interactively.
+                _av_mfa = auth.get("mfa_providers", [])
+                if _av_mfa:
+                    _av_fail.append(
+                        f"MFA challenge detected ({', '.join(_av_mfa)}) — "
+                        f"session is partial until second factor completes"
+                    )
+
+                # ── Verdict ────────────────────────────────────────────────
+                # Hard-fail signals (override everything):
+                #   - Auth-failure text in the body (invalid credentials etc.)
+                #   - HTTP 401/403 after credential POST
+                #   - MFA detected and not yet completed
+                #
+                # Soft-fail combinations (any one demotes a single OK signal):
+                #   - Login form still present  +  No new cookies set
+                #     This is the classic "credentials silently rejected"
+                #     pattern — server re-renders the login form with no
+                #     session bootstrap. A bare nav-link "logout"/"dashboard"
+                #     match in unrelated chrome (footer / branding) is not
+                #     enough to call this VERIFIED.
+                #
+                # OK signals only verify when no fail signals fire.
                 _av_verified = False
+                _av_login_form_still = any(
+                    s.startswith("Login form still present") for s in _av_fail
+                )
+                _av_no_new_cookies = any(
+                    s.startswith("No new cookies set") for s in _av_fail
+                )
+                _av_partial = bool(_av_mfa)
+
                 if _av_err_m:
                     _av_verified = False
                 elif _post_resp and _post_resp.status_code in (401, 403):
                     _av_verified = False
-                elif _av_ok:
+                elif _av_partial:
+                    _av_verified = False
+                elif _av_login_form_still and _av_no_new_cookies:
+                    _av_verified = False
+                elif _av_ok and not _av_fail:
                     _av_verified = True
+                elif _av_ok and _av_fail:
+                    # Mixed signals: require at least TWO OK signals to
+                    # outvote any fail signal — single OK is too noisy.
+                    _av_verified = len(_av_ok) >= 2
 
                 auth["auth_verified"]      = _av_verified
+                auth["auth_needs_mfa"]     = _av_partial
                 auth["auth_verify_signals"] = _av_ok + _av_fail
                 _av_sig_str = "; ".join((_av_ok + _av_fail)[:4])
+                if _av_partial:
+                    _av_verdict = "NEEDS_MFA"
+                    _av_level   = "WARNING"
+                elif _av_verified:
+                    _av_verdict = "VERIFIED"
+                    _av_level   = "SUCCESS"
+                else:
+                    _av_verdict = "UNVERIFIED"
+                    _av_level   = "WARNING"
                 vc.log(
-                    f"[auth] Authentication {'VERIFIED' if _av_verified else 'UNVERIFIED'}: "
-                    f"{_av_sig_str}",
-                    "SUCCESS" if _av_verified else "WARNING",
+                    f"[auth] Authentication {_av_verdict}: {_av_sig_str}",
+                    _av_level,
                 )
             except Exception as _av_ex:
                 vc.log(f"[auth] Auth verification error: {_av_ex}", "WARNING")
