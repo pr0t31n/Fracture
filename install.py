@@ -144,8 +144,37 @@ def apt_install(packages):
     run(["apt-get", "install", "-y"] + packages)
 
 
+def apt_install_optional(packages):
+    """Install each package individually — never fail the whole install.
+
+    Used for packages whose names vary across Debian/Ubuntu/Kali releases
+    (e.g. firefox vs firefox-esr) or that may be missing from a given apt
+    source list. A missing optional package emits a warning and continues.
+    """
+    global _apt_updated
+    if not _apt_updated:
+        info("Running apt update ...")
+        run(["apt-get", "update", "-y"], check=False)
+        _apt_updated = True
+    for pkg in packages:
+        try:
+            run(["apt-get", "install", "-y", pkg], check=True)
+            info(f"  installed (optional): {pkg}")
+        except subprocess.CalledProcessError:
+            warn(f"  optional package not available: {pkg} — skipping")
+
+
 def dnf_install(packages):
     run(["dnf", "install", "-y"] + packages)
+
+
+def dnf_install_optional(packages):
+    for pkg in packages:
+        try:
+            run(["dnf", "install", "-y", pkg], check=True)
+            info(f"  installed (optional): {pkg}")
+        except subprocess.CalledProcessError:
+            warn(f"  optional package not available: {pkg} — skipping")
 
 
 def zypper_install(packages):
@@ -164,8 +193,12 @@ APT_PACKAGES = [
     "libssl-dev", "libcurl4-openssl-dev",
     # Headless browser for SPA crawl (chromium-driver provides chromedriver)
     "chromium", "chromium-driver",
-    # Firefox fallback for SPA crawl
-    "firefox", "firefox-geckodriver",
+]
+# Best-effort browsers/drivers — names vary across distros and releases.
+# Kali ships firefox-esr (not firefox) and geckodriver (no firefox- prefix).
+# Older Debian/Ubuntu use firefox-geckodriver. Try each; tolerate misses.
+APT_PACKAGES_OPTIONAL = [
+    "firefox-esr", "firefox", "geckodriver", "firefox-geckodriver",
 ]
 DNF_PACKAGES = [
     "nikto", "sqlmap", "sslscan", "whatweb", "ffuf",
@@ -175,7 +208,8 @@ DNF_PACKAGES = [
     "openssl-devel", "libcurl-devel",
     # Headless browser for SPA crawl
     "chromium", "chromedriver",
-    # Firefox fallback for SPA crawl
+]
+DNF_PACKAGES_OPTIONAL = [
     "firefox", "geckodriver",
 ]
 BREW_PACKAGES = [
@@ -192,8 +226,12 @@ def install_system():
     banner("Phase: system packages")
     if OS == "apt":
         apt_install(APT_PACKAGES)
+        info("Installing optional Firefox / geckodriver (Chromium remains primary)...")
+        apt_install_optional(APT_PACKAGES_OPTIONAL)
     elif OS == "dnf":
         dnf_install(DNF_PACKAGES)
+        info("Installing optional Firefox / geckodriver (Chromium remains primary)...")
+        dnf_install_optional(DNF_PACKAGES_OPTIONAL)
     elif OS == "zypper":
         zypper_install(["nikto", "python3-pip", "git", "golang", "ruby"])
     elif OS == "macos":
