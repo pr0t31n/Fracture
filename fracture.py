@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.15.1"
+VERSION = "2.15.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -7337,8 +7337,69 @@ return null;
                         f"--browser-auth to complete the challenge interactively.",
                         "WARNING",
                     )
-                else:
-                    vc.log(f"[auth] Post-login page appears clean at: {_url}", "INFO")
+                    break
+
+                # ── 4b. Deferred-MFA probe ───────────────────────────────
+                # Some apps split the auth flow into two steps:
+                #   POST /login with creds  → 200 OK at /login (sets a
+                #                              partial-auth cookie; body is
+                #                              the same login form or an
+                #                              empty acknowledgement page)
+                #   GET  /<any protected>   → MFA challenge served because
+                #                              the server sees the partial
+                #                              cookie and demands the second
+                #                              factor before issuing a full
+                #                              session.
+                # The POST response itself shows no MFA, so the first-step
+                # _detect_mfa above returns []. Probe the target URL with a
+                # follow-up GET and re-run the detector — this catches the
+                # deferred case without touching the existing happy path.
+                if _step == 0:
+                    _probe_url = (
+                        cfg.get("target_url", "")
+                        or (cfg.get("target_urls", [None]) or [None])[0]
+                        or ""
+                    ).strip().rstrip("/")
+                    if _probe_url and _probe_url != _url:
+                        try:
+                            _probe_resp = sess.get(
+                                _probe_url, timeout=timeout, allow_redirects=True)
+                            _probe_mfa = _detect_mfa(
+                                _probe_resp.text or "", _probe_resp.url or "")
+                            # Also scan the probe's redirect chain — the MFA
+                            # page may sit at an intermediate hop.
+                            for _ph in getattr(_probe_resp, "history", []) or []:
+                                try:
+                                    for _mp in _detect_mfa(_ph.text or "", _ph.url or ""):
+                                        if _mp not in _probe_mfa:
+                                            _probe_mfa.append(_mp)
+                                except Exception:
+                                    pass
+                            if _probe_mfa:
+                                vc.log(
+                                    f"[auth] Deferred MFA detected via probe of "
+                                    f"{_probe_url} → {_probe_resp.url}: "
+                                    f"{', '.join(_probe_mfa)} (app serves the "
+                                    f"MFA challenge only after credential "
+                                    f"POST + navigation to a protected page)",
+                                    "INFO",
+                                )
+                                _existing_mfa = auth.get("mfa_providers", [])
+                                for _mp in _probe_mfa:
+                                    if _mp not in _existing_mfa:
+                                        _existing_mfa.append(_mp)
+                                auth["mfa_providers"] = _existing_mfa
+                                # Continue the interactive loop using the
+                                # probe response so we can present its form.
+                                current_resp = _probe_resp
+                                continue
+                        except Exception as _pe:
+                            vc.log(
+                                f"[auth] Deferred-MFA probe failed: {_pe}",
+                                "WARNING",
+                            )
+
+                vc.log(f"[auth] Post-login page appears clean at: {_url}", "INFO")
                 break
 
             if not _is_tty and not vc._managed:
