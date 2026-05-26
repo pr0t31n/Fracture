@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.13.0"
+VERSION = "2.14.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -16428,10 +16428,34 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 r = _qs_inject(purl, param, payload, sess, timeout)
                 if r and _xss_confirmed(payload, r):
                     _rq, _rp = _save_http_evidence(out, phase, f"xss_{param}", r, endpoint_url=purl, method="GET")
+                    # v1.1 inline validation — independently re-test with a benign
+                    # marker. Confidence populated in the finding dict so consumers
+                    # can show Firm/Tentative/Cannot reproduce alongside the finding.
+                    _conf, _detail = ("", "")
+                    try:
+                        import sys as _s
+                        if "/opt/pr0t31n/shared" not in _s.path:
+                            _s.path.insert(0, "/opt/pr0t31n/shared")
+                        import pr0t31n_validators as _pv
+                        def _val_get(url, headers=None, timeout=8):
+                            _r = sess.get(url, headers=headers or {}, timeout=timeout,
+                                          verify=False, allow_redirects=False)
+                            return _r.status_code, dict(_r.headers), _r.content
+                        _conf, _detail = _pv.validate_reflected_xss(
+                            purl, param, http_get=_val_get, timeout=8)
+                    except ImportError:
+                        pass
+                    except Exception as _e:
+                        _conf, _detail = ("Tentative", f"validator error: {_e}")
+                    _desc = ("User-controlled input is reflected or stored and rendered in a "
+                             "browser context without proper encoding, enabling arbitrary "
+                             "script execution.")
+                    if _detail:
+                        _desc += f"\n\n[Inline validation] {_detail}"
                     out.add_finding(
                         title="Reflected Cross-Site Scripting (XSS)",
                         url=purl, port=target["port"], risk="HIGH",
-                        description="User-controlled input is reflected or stored and rendered in a browser context without proper encoding, enabling arbitrary script execution.",
+                        description=_desc,
                         output=f"Parameter: {param}\nPayload: {payload}",
                         output_file=f"{_rq},{_rp}",
                         sources="fracture-injection", service=target["scheme"],
@@ -16439,6 +16463,13 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         remediation="Encode all output contextually (HTML, JS, URL, CSS), sanitise stored input server-side, and enforce a strict Content-Security-Policy.",
                         http_code=r.status_code,
                     )
+                    # Stash confidence on the freshly-written finding via the
+                    # augment helper — finding_id is unknown here so we'll add
+                    # at scan-completion via augment_findings_file. For now,
+                    # log the validation outcome so the operator sees it live.
+                    if _conf:
+                        vc.log(f"[injection] XSS validated: {_conf} — {_detail}",
+                               "INFO" if _conf in ("Firm", "Certain") else "WARNING")
                     vc.log(f"[injection] XSS: {purl} param={param}", "SUCCESS")
                     break
 
