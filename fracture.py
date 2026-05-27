@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.17.0"
+VERSION = "2.18.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2700,8 +2700,14 @@ class VantageConsole:
 
     def prompt(self, question: str, prompt_type: str = "text",
                options: list = None, skippable: bool = False,
-               role: str = "") -> str:
-        """Request user input. Blocks until an answer is received."""
+               role: str = "", username: str = "") -> str:
+        """Request user input. Blocks until an answer is received.
+
+        role/username are surfaced in Crucible's prompt modal so operators
+        responding to an MFA / OTP / consent prompt can immediately see
+        which login the prompt belongs to (matters when a project uses
+        multiple roles or multi-role engagements).
+        """
         if self._managed:
             payload = {
                 "id":        str(_uuid.uuid4()),
@@ -2712,6 +2718,8 @@ class VantageConsole:
             }
             if role:
                 payload["role"] = role
+            if username:
+                payload["username"] = username
             with self._lock:
                 sys.stdout.write(_VP_PROMPT + json.dumps(payload) + "\n")
                 sys.stdout.flush()
@@ -3119,28 +3127,65 @@ class OutputManager:
                     _ex_aff.discard("")
                     if _ex_aff:
                         ex["affected"] = "\n".join(sorted(_ex_aff))
-                    # merge output_file — handle JSON array ({url,req,resp}) and
-                    # legacy comma-separated path formats
+                    # ── merge output_file — preserve BOTH formats ──────────
+                    # output_file can be in two formats:
+                    #   - JSON array of HTTP-exchange dicts:
+                    #         [{"url": "...", "req": "...", "resp": "..."}, …]
+                    #   - Plain path(s), newline- or comma-separated.
+                    # The previous merge logic silently dropped plain paths
+                    # when crossed with a JSON-array side (and vice-versa).
+                    # The visible symptom: WhatWeb's output file disappeared
+                    # from the Evidence column and Crucible showed an empty
+                    # array "[]". Fix: convert plain paths to synthetic
+                    # entries {"file": "<path>"} so they round-trip through
+                    # the JSON-array form when needed; consumers (Crucible)
+                    # render entries with a "file" key as plain file links
+                    # and entries with "req"/"resp" keys as HTTP exchanges.
                     if output_file:
                         _ex_of  = (ex.get("output_file") or "").strip()
                         _in_of  = output_file.strip()
                         _ex_json = _ex_of.startswith("[")
                         _in_json = _in_of.startswith("[")
+
+                        def _to_entries(_s: str, _is_json: bool) -> "list":
+                            if not _s:
+                                return []
+                            if _is_json:
+                                try:
+                                    _e = json.loads(_s)
+                                    return _e if isinstance(_e, list) else []
+                                except Exception:
+                                    return []
+                            return [
+                                {"file": _p.strip()}
+                                for _p in re.split(r"[,\n]", _s) if _p.strip()
+                            ]
+
                         if _ex_json or _in_json:
-                            try:
-                                _ex_ents = json.loads(_ex_of) if _ex_json and _ex_of else []
-                                _in_ents = json.loads(_in_of) if _in_json else []
-                            except Exception:
-                                _ex_ents, _in_ents = [], []
-                            _seen_ev = {e.get("url", "") for e in _ex_ents}
+                            _ex_ents = _to_entries(_ex_of, _ex_json)
+                            _in_ents = _to_entries(_in_of, _in_json)
+                            def _entry_key(_e: dict) -> tuple:
+                                return (_e.get("url", ""), _e.get("file", ""),
+                                        _e.get("req", ""), _e.get("resp", ""))
+                            _seen_ev = {_entry_key(_e) for _e in _ex_ents}
                             for _e in _in_ents:
-                                if _e.get("url", "") not in _seen_ev:
+                                _k = _entry_key(_e)
+                                if _k not in _seen_ev and any(_k):
                                     _ex_ents.append(_e)
-                                    _seen_ev.add(_e.get("url", ""))
-                            ex["output_file"] = json.dumps(_ex_ents) if _ex_ents else _ex_of
+                                    _seen_ev.add(_k)
+                            ex["output_file"] = (
+                                json.dumps(_ex_ents) if _ex_ents else _ex_of
+                            )
                         else:
-                            ex_files = set(f.strip() for f in _ex_of.split(",") if f.strip())
-                            ex_files.add(_in_of)
+                            ex_files = set(
+                                f.strip()
+                                for f in re.split(r"[,\n]", _ex_of)
+                                if f.strip()
+                            )
+                            for _p in re.split(r"[,\n]", _in_of):
+                                _p = _p.strip()
+                                if _p:
+                                    ex_files.add(_p)
                             ex["output_file"] = ",".join(sorted(ex_files))
                     # merge description — findings with HTTP-status context
                     # replace stale entries rather than appending, so the most
@@ -3324,7 +3369,7 @@ def _make_session(cfg: dict, scope_hostnames: "set | None" = None) -> requests.S
     else:
         sess = requests.Session()
     sess.verify  = cfg.get("verify_ssl", False)
-    ua           = cfg.get("user_agent", "Mozilla/5.0 (compatible; Fracture/1.0; Security Assessment)")
+    ua           = cfg.get("user_agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
     sess.headers.update({"User-Agent": ua})
     extra = cfg.get("extra_headers", {})
     if extra:
@@ -3332,6 +3377,25 @@ def _make_session(cfg: dict, scope_hostnames: "set | None" = None) -> requests.S
     proxy = cfg.get("proxy", "")
     if proxy:
         sess.proxies = {"http": proxy, "https": proxy}
+    # ── Per-request delay (anti-WAF throttle) ─────────────────────────────
+    # When cfg["request_delay"] > 0, every response triggers a sleep before
+    # the calling code returns. Implemented as a response hook so it applies
+    # uniformly to GET/POST/HEAD/etc. issued through this session and the
+    # value can be raised mid-scan by phases that detect rate-limit signals.
+    try:
+        _req_delay = float(cfg.get("request_delay", 0) or 0)
+    except (TypeError, ValueError):
+        _req_delay = 0.0
+    if _req_delay > 0:
+        def _delay_hook(_response, *_args, **_kwargs):
+            try:
+                _d = float(cfg.get("request_delay", _req_delay) or 0)
+            except (TypeError, ValueError):
+                _d = _req_delay
+            if _d > 0:
+                time.sleep(_d)
+            return _response
+        sess.hooks.setdefault("response", []).append(_delay_hook)
     return sess
 
 
@@ -7177,6 +7241,32 @@ return null;
             _hidden: dict = {}
             _fields: list = []
 
+            # ── Preceding-label index ────────────────────────────────────────
+            # Many real-world forms write the label adjacent to (not for-
+            # attribute-linked with) its input, e.g.
+            #   <label class="form-label">6-digit code</label>
+            #   <input type="text" name="code" placeholder="000000" ...>
+            # The for=/id= map above doesn't catch these. Build a list of
+            # (offset, text) pairs for every <label> in this form body so
+            # each input can fall back to the closest preceding label.
+            _preceding_labels: list = []
+            for _lm2 in _re6.finditer(
+                    r'<label\b[^>]*>(.*?)</label>',
+                    _fbody, _re6.IGNORECASE | _re6.DOTALL):
+                _ltxt = _re6.sub(r'<[^>]+>', '', _lm2.group(1))
+                _ltxt = _re6.sub(r'\s+', ' ', _ltxt).strip()
+                if _ltxt:
+                    _preceding_labels.append((_lm2.end(), _ltxt))
+
+            def _nearest_preceding_label(_pos: int) -> str:
+                _best = ""
+                for _end, _txt in _preceding_labels:
+                    if _end <= _pos:
+                        _best = _txt
+                    else:
+                        break
+                return _best
+
             # ── <input> tags ─────────────────────────────────────────────────
             for _inp in _re6.finditer(r'<input\b([^>]*)/?>', _fbody, _re6.IGNORECASE):
                 _a    = _inp.group(1)
@@ -7186,6 +7276,7 @@ return null;
                 _id_m = _re6.search(r'\bid=["\']([^"\']+)["\']',      _a, _re6.IGNORECASE)
                 _v_m  = _re6.search(r'\bvalue=["\']([^"\']*)["\']',   _a, _re6.IGNORECASE)
                 _ph_m = _re6.search(r'\bplaceholder=["\']([^"\']+)["\']', _a, _re6.IGNORECASE)
+                _al_m = _re6.search(r'\baria-label=["\']([^"\']+)["\']', _a, _re6.IGNORECASE)
                 _chk  = bool(_re6.search(r'\bchecked\b',              _a, _re6.IGNORECASE))
                 if not _n_m:
                     continue
@@ -7193,12 +7284,27 @@ return null;
                 _iid   = _id_m.group(1) if _id_m else ""
                 _ival  = _v_m.group(1)  if _v_m  else ""
                 _iph   = _ph_m.group(1) if _ph_m else ""
+                _ialab = _al_m.group(1) if _al_m else ""
                 if _t == "hidden":
                     _hidden[_iname] = _ival
                     continue
                 if _t in ("submit", "image", "reset", "button"):
                     continue
-                _ilabel = _label_map.get(_iid) or _label_map.get(_iname) or _iph or _iname
+                # Resolution order:
+                #   1. <label for="id">      (page-wide for-attribute map)
+                #   2. <label for="name">    (some forms reuse name as the id)
+                #   3. aria-label="…"        (accessibility-tagged input)
+                #   4. nearest preceding <label> inside this form body
+                #   5. placeholder="…"       (last visible-text fallback)
+                #   6. input name attribute  (worst-case)
+                _ilabel = (
+                    _label_map.get(_iid)
+                    or _label_map.get(_iname)
+                    or _ialab
+                    or _nearest_preceding_label(_inp.start())
+                    or _iph
+                    or _iname
+                )
                 _fields.append({
                     "name": _iname, "type": _t, "label": _ilabel,
                     "value": _ival,  "checked": _chk, "options": [],
@@ -7270,7 +7376,16 @@ return null;
         """
         import re as _re7, sys as _sys7
 
-        _POST_MAX_STEPS = 6
+        # Per project-owner policy: the credential POST is depth 0
+        # (handled before this function). _handle_post_login_page is
+        # allowed depth 0 (initial scan of the post-credential response)
+        # and depth 1 (one additional step only if MFA/OTP appears to
+        # be necessary). Step 1 verifies the result and exits.
+        # _POST_MAX_STEPS is the hard ceiling on iterations of this
+        # loop; _MAX_PROMPTS caps how many form-prompt cycles can run.
+        _POST_MAX_STEPS = 2
+        _MAX_PROMPTS    = 1
+        _prompts_issued = 0
 
         # CSS class names that typically contain error messages
         _ERR_CLS_PAT = _re7.compile(
@@ -7445,33 +7560,21 @@ return null;
                     except Exception:
                         _origin = ""
 
-                    # Probe candidates fall into three categories:
-                    #   (a) explicit MFA endpoints — most apps that defer MFA
-                    #       to a separate route name them obviously
-                    #       (/mfa, /mfa/verify, /2fa, /verify, etc.)
-                    #   (b) the configured target / origin — apps that defer
-                    #       MFA to ANY protected page (the partial-auth
-                    #       cookie triggers it everywhere)
-                    #   (c) common protected paths — /dashboard, /home,
-                    #       /account, /profile
+                    # Probe candidates — kept SHORT (≤5) on purpose. A burst
+                    # of GETs to /mfa, /2fa, /otp, /verify, /challenge, etc.
+                    # is exactly the path-scanning pattern Cloudflare / Akamai
+                    # / PythonAnywhere flag and IP-blacklist on. Operators
+                    # who need deeper deferred-MFA detection can configure
+                    # an explicit MFA path in the engagement settings.
+                    #
+                    # The two highest-yield probes:
+                    #   - the configured target / origin: apps that defer MFA
+                    #     to ANY protected page will redirect us through it
+                    #   - /dashboard: by far the most common post-login route
                     _probe_urls: list = []
-                    _mfa_paths = [
-                        "/mfa", "/mfa/verify", "/mfa/challenge", "/mfa/login",
-                        "/2fa", "/2fa/verify",
-                        "/auth/mfa", "/auth/2fa", "/auth/verify",
-                        "/verify", "/verification",
-                        "/security/verify", "/account/verify",
-                        "/login/verify", "/login/mfa",
-                        "/totp", "/totp/verify",
-                        "/otp", "/otp/verify",
-                        "/challenge",
-                    ]
                     _candidates: list = [_cfg_target, _origin]
                     if _origin:
-                        for _p in _mfa_paths:
-                            _candidates.append(f"{_origin}{_p}")
-                        for _p in ("/dashboard", "/home",
-                                   "/account", "/profile"):
+                        for _p in ("/dashboard",):
                             _candidates.append(f"{_origin}{_p}")
                     for _u in _candidates:
                         _u_n = (_u or "").strip().rstrip("/")
@@ -7559,11 +7662,100 @@ return null;
                 )
                 break
 
+            # ── 4c. Auth-challenge gate ─────────────────────────────────────────
+            # The presence of an interactive form does NOT mean we're still in
+            # the auth flow. Once the OTP is submitted, the app may land on a
+            # dashboard / home page that contains its own forms (search bar,
+            # contact form, feedback widget, …). Without a gate, the loop would
+            # treat each of those as the next auth step and keep prompting.
+            #
+            # Treat the page as still part of the auth flow only when ANY of:
+            #   - MFA fingerprints are present (Pass 1/2/3 of _detect_mfa)
+            #   - The URL path looks like an auth endpoint
+            #   - The first form looks like an auth challenge (short, contains
+            #     an OTP/code/2fa/verify keyword)
+            # Otherwise: auth is done — break, harvest cookies, start scanning.
+            def _is_auth_path(_u: str) -> bool:
+                try:
+                    from urllib.parse import urlparse as _up_ag
+                    _p = _up_ag(_u or "").path.lower()
+                except Exception:
+                    return False
+                # Match common auth path segments. Anchored to '/' so
+                # /dashboard or /accounts/profile don't match accidentally.
+                for _seg in (
+                    "/mfa", "/2fa", "/otp", "/totp", "/hotp",
+                    "/login", "/signin", "/sign-in", "/log-in",
+                    "/verify", "/verification",
+                    "/challenge", "/auth", "/authentication",
+                    "/security/verify", "/account/verify",
+                    "/step-up", "/stepup",
+                ):
+                    if _p == _seg or _p.startswith(_seg + "/") or _p.endswith(_seg):
+                        return True
+                return False
+
+            def _form_looks_like_auth(_form_list: "list") -> bool:
+                """True if the first form looks like an auth challenge form.
+
+                STRICT: only fires when a field name or label contains an
+                explicit OTP/MFA/2FA keyword. Size-based heuristics ("small
+                form = auth form") are intentionally NOT used here because
+                they false-positive on search boxes, contact widgets, and
+                other single-field application forms.
+                """
+                if not _form_list:
+                    return False
+                _f0 = _form_list[0]
+                _flds = _f0.get("fields", []) or []
+                _AUTH_KW = (
+                    "otp", "totp", "hotp", "passcode",
+                    "mfa", "2fa", "two-factor", "twofactor",
+                    "verify", "verification", "verification-code",
+                    "verification_code", "auth-code", "auth_code",
+                    "authcode", "one-time", "onetime", "one_time",
+                    "security-code", "security_code", "securitycode",
+                )
+                for _fld in _flds:
+                    _hay = ((_fld.get("name") or "")
+                            + " " + (_fld.get("label") or "")).lower()
+                    if any(_kw in _hay for _kw in _AUTH_KW):
+                        return True
+                return False
+
+            # Hard cap: once one form has been submitted (the OTP), do NOT
+            # prompt again. Even if the post-OTP page contains another form,
+            # treat it as application content — the operator can fill it
+            # interactively through the browser if needed.
+            if _prompts_issued >= _MAX_PROMPTS:
+                vc.log(
+                    f"[auth] Maximum auth prompts reached "
+                    f"({_prompts_issued}/{_MAX_PROMPTS}). Post-login page at "
+                    f"{_url} contains {len(_forms)} additional form(s) — "
+                    f"treating them as application content (not auth "
+                    f"challenges). Cookies harvested; scanning will proceed.",
+                    "SUCCESS",
+                )
+                break
+
+            if not (_step_mfa or _is_auth_path(_url) or _form_looks_like_auth(_forms)):
+                vc.log(
+                    f"[auth] Post-login flow complete at {_url} — page has "
+                    f"{len(_forms)} non-auth form(s) (likely an application "
+                    f"page with a search box / contact form / etc.). "
+                    f"Stopping auth prompts; cookies harvested. Scanning will "
+                    f"now proceed.",
+                    "SUCCESS",
+                )
+                break
+
             # ── 5. Present form to user ────────────────────────────────────────
             _form = _forms[0]
+            _prompts_issued += 1
             vc.log(
                 f"[auth] Post-login page requires input "
-                f"({len(_form['fields'])} field(s)) — please respond below:",
+                f"({len(_form['fields'])} field(s)) — please respond below "
+                f"(prompt {_prompts_issued} of {_MAX_PROMPTS}):",
                 "INFO",
             )
 
@@ -7575,6 +7767,11 @@ return null;
                 _fn    = _field["name"]
                 _flbl  = _field["label"] or _fn
 
+                # Pass role + username context on every post-login prompt
+                # so the Crucible operator sees which login the OTP/consent
+                # answer belongs to.
+                _prompt_user = auth.get("username", "")
+
                 if _ft == "radio":
                     if _fn in _radio_done:
                         continue
@@ -7585,6 +7782,8 @@ return null;
                         f"{_flbl} — select one",
                         prompt_type="text",
                         options=_opt_labels,
+                        role=role_label,
+                        username=_prompt_user,
                     ).strip()
                     try:
                         _idx = int(_ans) - 1
@@ -7605,6 +7804,8 @@ return null;
                         f"{_flbl} [{_state}] — check this box?",
                         prompt_type="confirm",
                         options=["Yes", "No"],
+                        role=role_label,
+                        username=_prompt_user,
                     ).strip().lower()
                     if _ans not in ("no", "n", "2"):
                         _filled[_fn] = _field["value"] or "on"
@@ -7617,6 +7818,8 @@ return null;
                         f"{_flbl} — select one",
                         prompt_type="text",
                         options=_opt_labels,
+                        role=role_label,
+                        username=_prompt_user,
                     ).strip()
                     try:
                         _idx = int(_ans) - 1
@@ -7632,7 +7835,10 @@ return null;
                             _filled[_fn] = _opts[0][0] if _opts else ""
 
                 elif _ft == "password":
-                    _filled[_fn] = vc.prompt(f"{_flbl}", prompt_type="password")
+                    _filled[_fn] = vc.prompt(
+                        f"{_flbl}", prompt_type="password",
+                        role=role_label, username=_prompt_user,
+                    )
 
                 else:  # text, email, tel, number, search, otp, textarea
                     _otp_hint = ""
@@ -7643,7 +7849,10 @@ return null;
                     )
                     if _is_otp_field and _step_mfa:
                         _otp_hint = f" [{_step_mfa[0]}]"
-                    _filled[_fn] = vc.prompt(f"{_flbl}{_otp_hint}", prompt_type="text").strip()
+                    _filled[_fn] = vc.prompt(
+                        f"{_flbl}{_otp_hint}", prompt_type="text",
+                        role=role_label, username=_prompt_user,
+                    ).strip()
 
             # ── 6. Submit completed form ───────────────────────────────────────
             vc.log(f"[auth] Submitting post-login form → {_form['action']}", "INFO")
@@ -8838,7 +9047,7 @@ DEFAULT_SETTINGS: dict = {
         "threads":          _SCAN_CONCURRENCY,
         "timeout":          10,
         "follow_redirects": True,
-        "user_agent":       "Mozilla/5.0 (compatible; Fracture/1.0; Security Assessment)",
+        "user_agent":       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "extra_headers":    {},
         "proxy":            "",
         "verify_ssl":       False,
@@ -11011,6 +11220,22 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Recon", "running", "Tech fingerprint (whatweb)", 1, 10)
     _ww_versions: list = []   # [(name, version_str)] collected for searchsploit
     whatweb = _find_tool("whatweb")
+    # Skip WhatWeb entirely when stealth mode is active. WhatWeb at any
+    # aggression level sends signature-matching probes against well-known
+    # CMS paths (/wp-admin/, /typo3/, /joomla/, /administrator/, etc.) that
+    # Cloudflare's "Security Scanner Detection" rule matches as a known IoC.
+    # On a Cloudflare-fronted target the recon phase still captures server
+    # banners + screenshot via the cheap curl probe; WhatWeb's extra value
+    # isn't worth the IP block.
+    _ww_stealth = bool(cfg.get("_waf_stealth_applied"))
+    if whatweb and _ww_stealth:
+        vc.log(
+            "[recon] Skipping WhatWeb — stealth mode active (WAF/CDN "
+            "detected). WhatWeb's CMS-fingerprint probes are a known "
+            "Cloudflare-block trigger.",
+            "INFO",
+        )
+        whatweb = None
     if whatweb:
         ww_out = out.output_path(phase, "whatweb_" + target["hostname"])
         cmd = [whatweb, f"--log-json={ww_out}", "-a", "3", "--quiet", "--no-errors", url]
@@ -11576,6 +11801,17 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             "INFO",
         )
     gobuster = _find_tool("gobuster")
+    # Skip gobuster when stealth mode is active. Directory brute-force is
+    # the canonical Cloudflare bot-fight trigger — thousands of requests
+    # against a single host within seconds, every request a likely 404.
+    if gobuster and bool(cfg.get("_waf_stealth_applied")):
+        vc.log(
+            "[recon] Skipping gobuster — stealth mode active (WAF/CDN "
+            "detected). Directory brute-force is the canonical Cloudflare "
+            "bot-fight trigger.",
+            "INFO",
+        )
+        gobuster = None
     wordlist = _find_wordlist(
         "Discovery/Web-Content/raft-large-directories.txt",
         cfg.get("gobuster_wordlist", ""),
@@ -11627,6 +11863,21 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
 
     # feroxbuster — recursive directory discovery
     feroxbuster = _find_tool("feroxbuster")
+    # Skip feroxbuster entirely when stealth mode is active. Recursive
+    # directory discovery sends thousands of requests probing for files/
+    # dirs — exactly the burst pattern Cloudflare's bot-fight rules block
+    # on. Even with --rate-limit 25 the volume is enough to put the
+    # source IP on a 24–72h timeout. Disable rather than throttle: gobuster
+    # already covered the same ground in this phase before getting auto-
+    # disabled by the noisy-phases stealth list.
+    if feroxbuster and bool(cfg.get("_waf_stealth_applied")):
+        vc.log(
+            "[recon] Skipping feroxbuster — stealth mode active (WAF/CDN "
+            "detected). Recursive directory discovery sends thousands of "
+            "requests that Cloudflare bot-fight rules block on.",
+            "INFO",
+        )
+        feroxbuster = None
     if feroxbuster and Path(wordlist).exists():
         _fer_subdir = out.root / phase / "feroxbuster" / target["hostname"]
         _fer_subdir.mkdir(parents=True, exist_ok=True)
@@ -12845,17 +13096,37 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     remediation="Disable TLSv1.0 and CBC cipher suites.",
                 )
             if _cbc_suites:
+                # NOTE: LUCKY13 is a *timing* attack against CBC MAC
+                # verification; modern TLS stacks (OpenSSL ≥ 1.0.1g,
+                # recent Java/.NET, BoringSSL) mitigate it even when CBC
+                # cipher suites remain offered. sslscan can only see "CBC
+                # is offered" — it cannot probe the timing characteristic.
+                # Emit a (Potential) finding with INFO risk so it merges
+                # with testssl's "potentially VULNERABLE" verdict instead
+                # of inflating the severity. testssl probes timing and is
+                # authoritative; sslscan only contributes "CBC offered".
                 out.add_finding(
-                    title="SSL/TLS Vulnerability: LUCKY13",
-                    url=target["url"], port=port, risk="MEDIUM",
+                    title="SSL/TLS Vulnerability (Potential): LUCKY13",
+                    url=target["url"], port=port, risk="INFO",
                     description=(
-                        "sslscan: CBC cipher suites accepted — "
-                        "susceptible to LUCKY13 (CVE-2013-0169)"
+                        "sslscan: CBC cipher suites are accepted on this "
+                        "endpoint. LUCKY13 (CVE-2013-0169) is a timing "
+                        "attack against CBC MAC verification — modern TLS "
+                        "stacks mitigate it, so CBC presence alone is a "
+                        "necessary-but-not-sufficient precondition. Cross-"
+                        "check with the testssl finding (which probes the "
+                        "actual timing characteristic) before treating "
+                        "this as confirmed."
                     ),
                     cves="CVE-2013-0169", sources="sslscan", service="https",
                     output_file=str(out_f),
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
-                    remediation="Prefer AEAD cipher suites (AES-GCM/AES-CCM) over CBC.",
+                    remediation=(
+                        "Prefer AEAD cipher suites (AES-GCM / AES-CCM) over "
+                        "CBC. If CBC must remain offered for legacy client "
+                        "compatibility, ensure the TLS stack is current "
+                        "(OpenSSL ≥ 1.0.1g)."
+                    ),
                 )
         except Exception as e:
             out.log_error("sslscan", cmd, str(e))
@@ -21927,6 +22198,7 @@ def main() -> None:
 
         # Pre-scan connectivity check — retry up to 5 times before proceeding
         _alive_delays = [0, 5, 10, 15, 20]
+        _alive_r = None
         for _alive_attempt, _alive_delay in enumerate(_alive_delays, 1):
             if _alive_delay:
                 vc.log(
@@ -21946,6 +22218,177 @@ def main() -> None:
                     )
                 else:
                     vc.log(f"[pre-scan] Attempt {_alive_attempt} failed: {_alive_e}", "WARNING")
+
+        # ── Proactive WAF / CDN detection ──────────────────────────────────
+        # Inspect server header, cookies, and known hostnames to flag aggressive
+        # protection layers BEFORE the scan starts hammering them. The most
+        # common operator pain (and what got us blacklisted on
+        # app.hosting-example.com) is Cloudflare + PythonAnywhere — both
+        # block scanners on burst rate, suspicious User-Agent, and path-scan
+        # patterns. This warning is the single most important signal an
+        # operator needs before continuing.
+        if _alive_r is not None:
+            try:
+                from urllib.parse import urlparse as _up_waf
+                _waf_host = (_up_waf(target["url"]).netloc or "").lower()
+                _waf_server = (_alive_r.headers.get("Server") or "").lower()
+                _waf_cookies = " ".join(_alive_r.cookies.keys()).lower()
+                _waf_hdr_blob = " ".join(
+                    f"{k}:{v}" for k, v in _alive_r.headers.items()
+                ).lower()
+                _waf_signals: "list[str]" = []
+                if "cloudflare" in _waf_server or "cf-ray" in _waf_hdr_blob \
+                        or "__cf_bm" in _waf_cookies or "cf_clearance" in _waf_cookies:
+                    _waf_signals.append("Cloudflare")
+                if "akamai" in _waf_server or "akamaighost" in _waf_server:
+                    _waf_signals.append("Akamai")
+                if "awselb" in _waf_server or "x-amzn-trace-id" in _waf_hdr_blob:
+                    _waf_signals.append("AWS WAF/ELB")
+                if "fastly" in _waf_server or "fastly-debug" in _waf_hdr_blob:
+                    _waf_signals.append("Fastly")
+                if "imperva" in _waf_server or "incap_ses" in _waf_cookies \
+                        or "visid_incap" in _waf_cookies:
+                    _waf_signals.append("Imperva/Incapsula")
+                if "sucuri" in _waf_server or "x-sucuri" in _waf_hdr_blob:
+                    _waf_signals.append("Sucuri")
+                if "f5-bigip" in _waf_server or "bigipserver" in _waf_cookies \
+                        or "ts01" in _waf_cookies.lower():
+                    _waf_signals.append("F5 BIG-IP")
+                if "pythonanywhere" in _waf_host or "pythonanywhere" in _waf_hdr_blob:
+                    _waf_signals.append("PythonAnywhere (aggressive WAF + Cloudflare)")
+                if "x-served-by:" in _waf_hdr_blob and "github" in _waf_hdr_blob:
+                    _waf_signals.append("GitHub Pages")
+                if _waf_signals:
+                    # ── AUTOMATIC stealth-mode reconfiguration ─────────────
+                    # Printing recommendations is useless when the scanner
+                    # would keep going and burn the next IP anyway. We
+                    # IMPLEMENT the recommendations here instead of advising
+                    # them. The operator can override afterward by editing
+                    # the engagement settings, but the default safe path is
+                    # automatic.
+                    _NOISY_PHASES = (
+                        "ffuf", "vulnscan", "injection", "traversal",
+                        "ssrf", "deserialization", "mass_assignment",
+                        "file_upload_info", "open_redirect",
+                        "business_logic", "auth_bypass", "files",
+                        "subdomain_takeover",
+                        # webfiles: probes /.git, /.env, /robots.txt,
+                        # /backup.zip, etc. Each request is a known IoC.
+                        "webfiles",
+                        # account_lockout: by design sends N login attempts
+                        # — guaranteed to trip Cloudflare's bot-fight mode.
+                        "account_lockout",
+                        # bfla: many endpoints x several role sessions =
+                        # high request burst with auth header rotation.
+                        "bfla",
+                    )
+                    _SAFE_PHASES = (
+                        "recon", "screenshot", "tls", "headers",
+                        "shcheck", "auth_recon", "logout",
+                    )
+                    _disabled: list = []
+                    _phases_map = cfg.get("phases", {}) or {}
+                    for _ph in _NOISY_PHASES:
+                        if _phases_map.get(_ph):
+                            cfg.setdefault("phases", {})[_ph] = False
+                            _disabled.append(_ph)
+                    # Force single-threaded, 1.5s per-request delay
+                    _orig_threads = cfg.get("threads", 1)
+                    cfg["threads"] = 1
+                    _orig_delay = cfg.get("request_delay", 0)
+                    cfg["request_delay"] = 1.5
+                    # Reduce auth-time retry/backoff aggressiveness too
+                    cfg["timeout"] = max(int(cfg.get("timeout", 10) or 10), 15)
+
+                    vc.log("", "WARNING")
+                    vc.log("=" * 70, "WARNING")
+                    vc.log(
+                        f"[pre-scan] PROTECTION DETECTED on {_waf_host}: "
+                        f"{', '.join(_waf_signals)}",
+                        "WARNING",
+                    )
+                    vc.log(
+                        "[pre-scan] These services actively detect and block "
+                        "security scanners. Fracture is automatically "
+                        "switching to stealth mode to avoid IP blacklisting.",
+                        "WARNING",
+                    )
+                    vc.log(
+                        f"[pre-scan] APPLIED: threads "
+                        f"{_orig_threads} → 1  (concurrency disabled)",
+                        "WARNING",
+                    )
+                    vc.log(
+                        f"[pre-scan] APPLIED: request_delay "
+                        f"{_orig_delay} → 1.5s  (per-response sleep)",
+                        "WARNING",
+                    )
+                    if _disabled:
+                        vc.log(
+                            f"[pre-scan] APPLIED: disabled "
+                            f"{len(_disabled)} noisy phase(s): "
+                            f"{', '.join(_disabled)}",
+                            "WARNING",
+                        )
+                    else:
+                        vc.log(
+                            "[pre-scan] APPLIED: noisy phases already off",
+                            "WARNING",
+                        )
+                    _still_on = [
+                        p for p in _SAFE_PHASES
+                        if cfg.get("phases", {}).get(p)
+                    ]
+                    vc.log(
+                        f"[pre-scan] KEPT: {len(_still_on)} safe phase(s) "
+                        f"still enabled: {', '.join(_still_on) or '(none)'}",
+                        "WARNING",
+                    )
+                    vc.log(
+                        "[pre-scan] To OVERRIDE (use only with written "
+                        "authorization + an allow-listed source IP): edit "
+                        "the engagement settings to re-enable the disabled "
+                        "phases AND ensure the customer has allow-listed "
+                        "your egress IP at the CDN/WAF (Cloudflare IP "
+                        "Access Rules, Akamai Site Shield, etc.).",
+                        "WARNING",
+                    )
+                    vc.log("=" * 70, "WARNING")
+                    vc.log("", "WARNING")
+                    # Stash the signals so downstream phases can consult cfg.
+                    cfg["_waf_detected"] = _waf_signals
+                    cfg["_waf_stealth_applied"] = True
+                    # Re-apply throttle to the existing sess (response hook
+                    # is wired in _make_session and reads cfg dynamically, so
+                    # raising request_delay above already takes effect on the
+                    # next request through this session; but if this is the
+                    # very first session that was built before request_delay
+                    # was set, install the hook now).
+                    try:
+                        _have_delay_hook = any(
+                            getattr(_h, "__name__", "") == "_delay_hook"
+                            for _h in sess.hooks.get("response", []) or []
+                        )
+                    except Exception:
+                        _have_delay_hook = False
+                    if not _have_delay_hook:
+                        def _delay_hook(_response, *_args, **_kwargs):
+                            try:
+                                _d = float(cfg.get("request_delay", 0) or 0)
+                            except (TypeError, ValueError):
+                                _d = 0.0
+                            if _d > 0:
+                                time.sleep(_d)
+                            return _response
+                        sess.hooks.setdefault("response", []).append(_delay_hook)
+                        if auth_sess is not None:
+                            auth_sess.hooks.setdefault(
+                                "response", []).append(_delay_hook)
+                        if auth2_sess is not None:
+                            auth2_sess.hooks.setdefault(
+                                "response", []).append(_delay_hook)
+            except Exception:
+                pass
 
         # Redirect tracking — accumulates in-scope redirect destinations found during this scan
         _in_scope_new: list = []
