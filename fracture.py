@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.19.4"
+VERSION = "2.19.6"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -10797,8 +10797,23 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
 
     # Wildcard detection — run before any path-based checks so brute-forcers
     # can be skipped and individual URL findings can be validated.
+    # SKIPPED IN STEALTH MODE: _detect_wildcard sends 3 GETs to random
+    # nonexistent paths in quick succession — exactly the burst pattern
+    # Cloudflare / Akamai bot-fight rules flag. Stealth mode also disables
+    # gobuster / feroxbuster (the wildcard probe's main consumers), so the
+    # data wouldn't be used even if we collected it.
     vc.status(phase, "Recon", "running", "Wildcard probe", 0, 10)
-    wc_baseline = _detect_wildcard(url, sess, timeout)
+    if cfg.get("_waf_stealth_applied"):
+        vc.log(
+            "[recon] Skipping wildcard probe — stealth mode active. The "
+            "3 random-path GETs are a known CDN bot-fight trigger, and "
+            "gobuster/feroxbuster (the probe's consumers) are also "
+            "disabled in stealth.",
+            "INFO",
+        )
+        wc_baseline = None
+    else:
+        wc_baseline = _detect_wildcard(url, sess, timeout)
     if wc_baseline is not None:
         vc.log(
             f"[recon] Wildcard/catch-all detected (HTTP {wc_baseline['status']} "
@@ -12686,6 +12701,13 @@ def _phase_endpoint_tools(
         _same_host = (_ep_host == target["hostname"])
         if _url_is_file(ep_url):
             ep_wc = None  # file URLs are never brute-forced; no wildcard probe needed
+        elif cfg.get("_waf_stealth_applied"):
+            # Stealth mode: gobuster won't run (auto-disabled), and per-
+            # endpoint wildcard probes would otherwise send 3 random-path
+            # GETs each — multiplying the CF bot-fight trigger across every
+            # discovered endpoint. Skip the probe; the brute-force loop
+            # below will no-op anyway.
+            ep_wc = None
         elif wc_baseline is not None and _same_host:
             ep_wc = wc_baseline
             vc.log(f"[endpoint_tools] Parent wildcard — skipping brute-force for {ep_url}", "INFO")
@@ -12969,9 +12991,16 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             # followed by per-protocol result lines. The header line survives a
             # "not vulnerable" filter and falsely matches heartbleed patterns.
             _SSL_SECTION_HDR = re.compile(r'^\s+[\w ,()/-]+:\s*$')
+            # Drop "not vulnerable" AND "potentially vulnerable" lines so
+            # the per-pattern dict matcher below cannot fire on either.
+            # "potentially VULNERABLE" lines describe a precondition (CBC
+            # accepted etc.) that the dedicated sslscan emitter further
+            # down flags as (Potential) INFO — letting the dict matcher
+            # also flag them produces a duplicate confirmed-MEDIUM finding.
             _sslscan_filtered = "\n".join(
                 ln for ln in stdout.splitlines()
-                if "not vulnerable" not in ln.lower()
+                if "not vulnerable"          not in ln.lower()
+                and "potentially vulnerable" not in ln.lower()
                 and not _SSL_SECTION_HDR.match(ln)
             )
             for ftitle, (pat, risk, cve, _affected) in _TLS_VULN_PATTERNS.items():
@@ -13211,9 +13240,18 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 r'|make sure you don.t use this certificate',  # DROWN advisory continuation line
                 re.I,
             )
+            # Drop "(OK)" lines, noise lines, AND "potentially vulnerable"
+            # lines. testssl marks LUCKY13 / RC4 / etc. as "potentially
+            # VULNERABLE" when a precondition (CBC ciphers / RC4 offered)
+            # is met but the timing/oracle attack itself wasn't probed.
+            # The JSON parser path further down emits these correctly as
+            # "(Potential)" INFO findings; letting this stdout regex also
+            # fire produces a duplicate confirmed-MEDIUM finding.
             _ok_filtered = "\n".join(
                 ln for ln in stdout.splitlines()
-                if "(OK)" not in ln and not _TESTSSL_NOISE.search(ln)
+                if "(OK)" not in ln
+                and "potentially vulnerable" not in ln.lower()
+                and not _TESTSSL_NOISE.search(ln)
             )
             for ftitle, (pat, risk, cve, _affected) in _TLS_VULN_PATTERNS.items():
                 if pat.search(_ok_filtered):
