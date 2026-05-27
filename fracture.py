@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.19.8"
+VERSION = "2.19.9"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2936,9 +2936,15 @@ class OutputManager:
         if self._output_role:
             role_safe = _RE_UNSAFE_FNAME.sub("_", self._output_role)
             p = self.root / phase / role_safe / fname
-            p.parent.mkdir(exist_ok=True)
+            p.parent.mkdir(parents=True, exist_ok=True)
             return p
-        return self.root / phase / fname
+        p = self.root / phase / fname
+        # Ensure the phase dir exists for the role-less path too. Without
+        # this, the first caller in a phase would silently fail to write
+        # when the dir didn't pre-exist (caught by their try/except blocks,
+        # leaving findings with no Evidence file).
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
 
     def log_command(self, tool: str, command: "list | str", output_file: "Path | None",
                     extra: "dict | None" = None) -> None:
@@ -19778,6 +19784,19 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             pass
 
     if _sess_mgmt_found:
+        # Save the discovered session-management page as req/resp evidence.
+        # _r_sm is the 200-response that confirmed the endpoint exists.
+        _sm_evidence = ""
+        try:
+            _sm_rq, _sm_rp = _save_http_evidence(
+                out, phase, f"session_mgmt_{hostname}", _r_sm)
+            _sm_evidence = json.dumps([{
+                "url":  f"SESSION MGMT  GET {_sess_mgmt_found} (HTTP {_r_sm.status_code})",
+                "req":  str(_sm_rq),
+                "resp": str(_sm_rp),
+            }])
+        except Exception:
+            pass
         out.add_finding(
             title="Active Session Management Interface Detected",
             url=_sess_mgmt_found, port=target["port"], risk="INFO",
@@ -19786,9 +19805,15 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                 f"{_sess_mgmt_found}. This interface may allow users to view "
                 f"and revoke other sessions — verify it is properly "
                 f"access-controlled and cannot be abused to terminate other "
-                f"users' sessions."
+                f"users' sessions. The captured page HTML is in the Evidence "
+                f"panel."
             ),
-            output=f"Session management URL: {_sess_mgmt_found}",
+            output=(
+                f"Session management URL: {_sess_mgmt_found}\n"
+                f"HTTP status:            {_r_sm.status_code}\n"
+                f"Body size:              {len(_r_sm.text or '')} bytes"
+            ),
+            output_file=_sm_evidence,
             sources="fracture-session", service=target["scheme"],
             owasp="A07:2025 Identification and Authentication Failures",
             nist="AC-17",
@@ -20192,6 +20217,12 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                             phase,
                             f"excessive_timeout_{_ck.name}_{hostname}",
                         )
+                        # output_path skips the parent-mkdir when no output
+                        # role is set, so phase/ might not yet exist. Create
+                        # it explicitly — write_text was failing silently
+                        # inside the try/except and the finding had no
+                        # Evidence.
+                        _ev_path.parent.mkdir(parents=True, exist_ok=True)
                         _ev_path.write_text(_ev_body, encoding="utf-8")
                         _ev_rel = str(_ev_path)
                     except Exception:
