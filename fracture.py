@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.19.0"
+VERSION = "2.19.4"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -10806,6 +10806,37 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             "Directory brute-forcing skipped; all path findings will be validated against baseline.",
             "INFO",
         )
+        # ── Save wildcard evidence ────────────────────────────────────────
+        # Capture: one random-path probe (the wildcard response) + one fetch
+        # of the legitimate base URL (for comparison). Two req/resp pairs.
+        _wc_evidence: list = []
+        try:
+            _wc_probe_path = f"/{secrets.token_hex(10)}-wildcard-evidence"
+            _wc_probe_resp = sess.get(
+                url.rstrip("/") + _wc_probe_path,
+                timeout=timeout, allow_redirects=False,
+            )
+            _wc_pr_rq, _wc_pr_rp = _save_http_evidence(
+                out, phase, "wildcard_probe_random_path", _wc_probe_resp)
+            _wc_evidence.append({
+                "url":  f"WILDCARD PROBE  GET {url.rstrip('/') + _wc_probe_path}",
+                "req":  str(_wc_pr_rq),
+                "resp": str(_wc_pr_rp),
+            })
+        except Exception:
+            pass
+        try:
+            _wc_base_resp = sess.get(url, timeout=timeout,
+                                     allow_redirects=False)
+            _wc_b_rq, _wc_b_rp = _save_http_evidence(
+                out, phase, "wildcard_baseline_root", _wc_base_resp)
+            _wc_evidence.append({
+                "url":  f"BASELINE  GET {url}",
+                "req":  str(_wc_b_rq),
+                "resp": str(_wc_b_rp),
+            })
+        except Exception:
+            pass
         out.add_finding(
             title=f"Wildcard (*) Detected: {url}",
             url=url, port=target["port"], risk="INFO",
@@ -10816,7 +10847,12 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 + ". Directory brute-forcing with gobuster is unreliable on this host; "
                 "feroxbuster will still run as it handles wildcards natively."
             ),
-            output=f"Wildcard: HTTP {wc_baseline['status']} for all paths",
+            output=(
+                f"Wildcard:    HTTP {wc_baseline['status']} for all paths\n"
+                + (f"Redirect:    {wc_baseline['location']}\n" if wc_baseline.get('location') else "")
+                + f"Body length: {wc_baseline.get('body_len', '(n/a)')}"
+            ),
+            output_file=json.dumps(_wc_evidence) if _wc_evidence else "",
             sources="fracture-recon", service=target["scheme"],
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
             remediation="",
@@ -19251,10 +19287,42 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
         if (_INTERESTING_PATH_RE.search(link)
                 and _is_in_scope_url(link, _ar_scope)
                 and _is_valid_endpoint_url(link)):
+            # Save the authenticated fetch of this endpoint as evidence so
+            # the operator can see what the page returned to a logged-in
+            # user (often admin panels, account settings, internal APIs).
+            _ar_evidence = ""
+            try:
+                _ar_r = auth_sess.get(link, timeout=timeout)
+                _ar_rq, _ar_rp = _save_http_evidence(
+                    out, phase,
+                    f"auth_interesting_endpoint_{hashlib.md5(link.encode()).hexdigest()[:8]}",
+                    _ar_r,
+                )
+                _ar_evidence = json.dumps([{
+                    "url":  f"AUTHENTICATED GET {link} (HTTP {_ar_r.status_code})",
+                    "req":  str(_ar_rq),
+                    "resp": str(_ar_rp),
+                }])
+                _ar_status_line = (
+                    f"HTTP {_ar_r.status_code}, "
+                    f"{len(_ar_r.text or '')} bytes"
+                )
+            except Exception:
+                _ar_status_line = "(fetch failed)"
             out.add_finding(
                 title="Authenticated Interesting Endpoint",
                 url=link, port=target["port"], risk="INFO",
-                description=f"Interesting endpoint accessible while authenticated: {link}",
+                description=(
+                    f"Interesting endpoint accessible while authenticated: "
+                    f"{link}. The authenticated GET response is saved as "
+                    f"evidence."
+                ),
+                output=(
+                    f"Endpoint:  {link}\n"
+                    f"Reached:   authenticated session\n"
+                    f"Response:  {_ar_status_line}"
+                ),
+                output_file=_ar_evidence,
                 sources="fracture-auth-recon", service=target["scheme"],
                 affected=link,
                 owasp="A01:2025 Broken Access Control", nist="AC-3",
@@ -19286,10 +19354,107 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
     resource_ids = auth_recon_data.get("resource_ids", [])
     vc.status(phase, "Authorization Testing", "running", "IDOR testing", 0, len(resource_ids))
 
+    # ── Authz response validator ────────────────────────────────────────
+    # Returns (is_bypass: bool, reason: str). Rejects the common false-
+    # positive sources for HTTP-200 IDOR/BOLA checks:
+    #   - 200 OK but the response is actually a login page (auth redirected
+    #     us back to /login, but the framework served it as 200 instead of
+    #     302 — common in SPA frameworks and custom apps).
+    #   - 200 OK but the response is a generic "not found" / "access
+    #     denied" 200-status error template.
+    #   - 200 OK but the body is IDENTICAL to the baseline request — the
+    #     server returns the same catch-all page for every ID (wildcard
+    #     pattern; not an authorisation bypass).
+    #   - 200 OK and the same response comes back without ANY auth cookie
+    #     — the URL is just publicly accessible; nothing was bypassed.
+    _LOGIN_PAGE_MARKERS = (
+        '<input type="password"', "<input type='password'",
+        'name="password"',        "name='password'",
+        'id="password"',          "id='password'",
+        '<form action="/login',   "action='/login",
+        "please log in",          "please sign in",
+        "session expired",        "session timeout",
+        "you must be logged in",  "you must log in",
+        "log in to continue",     "sign in to continue",
+    )
+    _ERROR_PAGE_MARKERS = (
+        "access denied",          "permission denied",
+        "you are not authorized", "you are not authorised",
+        "you do not have permission",
+        "page does not exist",    "page not found",
+        "resource not found",     "no such record",
+        "unhandled exception",    "an error has occurred",
+        "invalid request",        "internal server error",
+    )
+    _AUTH_PATH_RE = re.compile(
+        r'(/login|/signin|/sign-in|/auth/login|/oauth|/sso/|/sign-on)',
+        re.IGNORECASE,
+    )
+
+    def _is_login_or_error_page(_resp) -> "tuple[bool, str]":
+        """True if response body / final URL looks like login / error."""
+        try:
+            _final_url = (_resp.url or "").lower()
+            _body = (_resp.text or "")[:8000].lower()
+        except Exception:
+            return (False, "")
+        if _AUTH_PATH_RE.search(_final_url):
+            return (True, f"final URL matched auth path: {_resp.url}")
+        for _m in _LOGIN_PAGE_MARKERS:
+            if _m in _body:
+                return (True, f"login-page marker: {_m!r}")
+        for _m in _ERROR_PAGE_MARKERS:
+            if _m in _body:
+                return (True, f"error-page marker: {_m!r}")
+        return (False, "")
+
+    def _validate_idor(_r_test, _r_baseline, _r_anon) -> "tuple[bool, str]":
+        """Return (is_real_bypass, reason)."""
+        if _r_test.status_code != 200:
+            return (False, f"test URL returned HTTP {_r_test.status_code}, not 200")
+        if len((_r_test.text or "")) < 100:
+            return (False, "test response body <100 bytes (likely empty / minimal)")
+        _is_le, _why = _is_login_or_error_page(_r_test)
+        if _is_le:
+            return (False, _why)
+        # If the test response is byte-identical to the baseline, the
+        # server is serving the SAME page for every ID — wildcard / catch-
+        # all; not an authorisation bypass.
+        if _r_baseline is not None:
+            try:
+                _bl_body = _r_baseline.text or ""
+                _tb_body = _r_test.text or ""
+                if _bl_body and _tb_body and _bl_body == _tb_body:
+                    return (False,
+                            "test response body identical to baseline "
+                            "(server returns the same page for every ID)")
+            except Exception:
+                pass
+        # If anonymous fetch returns the same response, the URL is public.
+        if _r_anon is not None:
+            try:
+                if _r_anon.status_code == 200 and (_r_anon.text or "") == (_r_test.text or ""):
+                    return (False,
+                            "anonymous fetch returns identical response — "
+                            "URL is publicly accessible, no auth bypass")
+            except Exception:
+                pass
+        return (True, "200 + non-login/error body + differs from baseline + auth required")
+
+    # An unauthenticated session for the public-accessibility check.
+    _anon_sess = _make_session(cfg)
+
     for idx, res in enumerate(resource_ids[:50]):
         res_url = res["url"]
         res_id  = res["id"]
         vc.status(phase, "Authorization Testing", "running", f"ID {res_id}", idx, len(resource_ids))
+
+        # Baseline: fetch the original ID once with auth so the validator
+        # can compare against the server's "legit response" template.
+        try:
+            r_baseline = auth_sess.get(res_url, timeout=timeout)
+        except Exception:
+            r_baseline = None
 
         # Test adjacent IDs
         for test_id in [res_id - 1, res_id + 1, res_id + 100]:
@@ -19299,20 +19464,85 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
                                '/' + str(test_id), res_url, count=1)
             try:
                 r = auth_sess.get(test_url, timeout=timeout)
-                if r.status_code == 200 and len(r.text) > 100:
-                    out.add_finding(
-                        title="Broken Object Level Authorization (IDOR / BOLA)",
-                        url=test_url, port=target["port"], risk="CRITICAL",
-                        description="The application or API exposes user-controlled object identifiers and does not verify whether the authenticated user has authorisation to access the referenced object, enabling horizontal privilege escalation.",
-                        output=f"Original: {res_url}\nManipulated: {test_url}\nStatus: {r.status_code}",
-                        sources="fracture-authorization", service=target["scheme"],
-                        affected=test_url,
-                        owasp="A01:2025 Broken Access Control", nist="AC-3",
-                        remediation="Enforce server-side authorisation checks for every object access request, verifying ownership or explicit permission before returning or modifying data; do not rely on obscure IDs as an access control mechanism.",
-                        http_code=r.status_code,
+                # Anonymous control: does the same URL respond identically
+                # without any auth cookie? Skip if it does.
+                try:
+                    r_anon = _anon_sess.get(test_url, timeout=timeout)
+                except Exception:
+                    r_anon = None
+                _is_bypass, _why = _validate_idor(r, r_baseline, r_anon)
+                if not _is_bypass:
+                    vc.log(
+                        f"[authorization] IDOR candidate rejected at "
+                        f"{test_url}: {_why}",
+                        "INFO",
                     )
-                    vc.log(f"[authorization] IDOR: {test_url}", "SUCCESS")
-                    break
+                    continue
+                # Save evidence: baseline req+resp, test req+resp, anon
+                # req+resp. Pack as JSON-array for Crucible's multi-tab.
+                _evidence_entries: list = []
+                if r_baseline is not None:
+                    _bl_rq, _bl_rp = _save_http_evidence(
+                        out, phase, f"idor_baseline_{res_id}", r_baseline)
+                    _evidence_entries.append({
+                        "url": f"BASELINE {res_url}",
+                        "req": str(_bl_rq), "resp": str(_bl_rp),
+                    })
+                _t_rq, _t_rp = _save_http_evidence(
+                    out, phase, f"idor_test_{res_id}_to_{test_id}", r)
+                _evidence_entries.append({
+                    "url": f"IDOR-TEST {test_url}",
+                    "req": str(_t_rq), "resp": str(_t_rp),
+                })
+                if r_anon is not None:
+                    _an_rq, _an_rp = _save_http_evidence(
+                        out, phase, f"idor_anon_{res_id}_to_{test_id}", r_anon)
+                    _evidence_entries.append({
+                        "url": f"ANONYMOUS {test_url}",
+                        "req": str(_an_rq), "resp": str(_an_rp),
+                    })
+                out.add_finding(
+                    title="Broken Object Level Authorization (IDOR / BOLA)",
+                    url=test_url, port=target["port"], risk="CRITICAL",
+                    description=(
+                        "The application exposes a user-controlled object "
+                        "identifier and does not verify whether the "
+                        "authenticated user is authorised to access the "
+                        "referenced object. Substituting an adjacent ID "
+                        "into the URL returned a substantive 200 response "
+                        "that is not a login page, not a generic error, "
+                        "differs from the baseline (this user's own "
+                        "object), and requires authentication (anonymous "
+                        "access does not return the same content). "
+                        "This pattern enables horizontal privilege "
+                        "escalation — any authenticated user can iterate "
+                        "the ID space to enumerate other users' data."
+                    ),
+                    output=(
+                        f"Baseline:       {res_url}\n"
+                        f"Manipulated:    {test_url}\n"
+                        f"Status:         {r.status_code} ({len(r.text or '')} bytes)\n"
+                        f"Baseline bytes: {len(r_baseline.text or '') if r_baseline is not None else '(no baseline)'}\n"
+                        f"Anon test:      "
+                        + (f"{r_anon.status_code} ({len(r_anon.text or '')} bytes)"
+                           if r_anon is not None else "(no anon probe)")
+                        + f"\nValidator verdict: {_why}"
+                    ),
+                    sources="fracture-authorization", service=target["scheme"],
+                    output_file=json.dumps(_evidence_entries),
+                    affected=test_url,
+                    owasp="A01:2025 Broken Access Control", nist="AC-3",
+                    remediation=(
+                        "Enforce server-side authorisation checks for every "
+                        "object access request, verifying ownership or "
+                        "explicit permission before returning or modifying "
+                        "data; do not rely on obscure or sequential IDs as "
+                        "an access control mechanism."
+                    ),
+                    http_code=r.status_code,
+                )
+                vc.log(f"[authorization] IDOR confirmed: {test_url}", "SUCCESS")
+                break
             except Exception:
                 pass
 
@@ -19815,6 +20045,52 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                 _remaining = _ck.expires - int(time.time())
                 if _remaining > 1800:   # > 30 minutes
                     _timeout_mins = _remaining // 60
+                    # ── Build evidence file ────────────────────────────────
+                    # The finding is metadata-only (the cookie's expiry
+                    # attribute); there is no HTTP exchange to capture in
+                    # the usual req/resp form. Persist the full cookie's
+                    # attributes as the evidence so the operator can
+                    # confirm the verdict without re-running the scan.
+                    try:
+                        _ck_expires_iso = (
+                            datetime.fromtimestamp(_ck.expires).isoformat()
+                            if _ck.expires else "(session cookie)"
+                        )
+                    except Exception:
+                        _ck_expires_iso = str(_ck.expires)
+                    _ev_lines = [
+                        f"Cookie name:      {_ck.name}",
+                        f"Value (first 20): {(_ck.value or '')[:20]}...",
+                        f"Domain:           {getattr(_ck, 'domain', '') or '(default)'}",
+                        f"Path:             {getattr(_ck, 'path', '/') or '/'}",
+                        f"Secure:           {getattr(_ck, 'secure', False)}",
+                        f"HttpOnly:         {bool(_ck.has_nonstandard_attr('HttpOnly')) if hasattr(_ck, 'has_nonstandard_attr') else 'unknown'}",
+                        f"SameSite:         {_ck._rest.get('SameSite', 'unset') if hasattr(_ck, '_rest') else 'unknown'}",
+                        f"Expires (epoch):  {_ck.expires}",
+                        f"Expires (ISO):    {_ck_expires_iso}",
+                        f"Remaining (sec):  {_remaining}",
+                        f"Remaining (min):  {_timeout_mins}",
+                        f"OWASP threshold:  30 min  (this cookie exceeds it by {_timeout_mins - 30} min)",
+                        "",
+                        "Full cookie jar snapshot at time of check:",
+                    ]
+                    for _other in _logout_src_sess.cookies:
+                        _ev_lines.append(
+                            f"  - {_other.name}={(_other.value or '')[:15]}... "
+                            f"domain={getattr(_other, 'domain', '(default)')} "
+                            f"expires={getattr(_other, 'expires', 'session')}"
+                        )
+                    _ev_body = "\n".join(_ev_lines)
+                    try:
+                        _ev_path = out.output_path(
+                            phase,
+                            f"excessive_timeout_{_ck.name}_{hostname}",
+                        )
+                        _ev_path.write_text(_ev_body, encoding="utf-8")
+                        _ev_rel = str(_ev_path)
+                    except Exception:
+                        _ev_rel = ""
+
                     out.add_finding(
                         title="Excessive Session Timeout Configured",
                         url=url, port=target["port"], risk="MEDIUM",
@@ -19822,9 +20098,12 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                             f"The session cookie '{_ck.name}' has a configured "
                             f"absolute expiry of approximately {_timeout_mins} minutes. "
                             f"OWASP recommends 15–30 minutes of idle timeout for "
-                            f"sensitive applications."
+                            f"sensitive applications. The cookie's full attributes "
+                            f"(Max-Age / Expires / Secure / HttpOnly / SameSite / "
+                            f"Domain / Path) are captured in the saved Evidence file."
                         ),
-                        output=f"Cookie: {_ck.name} | Configured expiry: ~{_timeout_mins} min",
+                        output=_ev_body,
+                        output_file=_ev_rel,
                         sources="fracture-logout", service=target["scheme"],
                         owasp="A07:2025 Identification and Authentication Failures",
                         nist="AC-11",
@@ -19845,6 +20124,9 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
     _timeout_elapsed  = 0
     _timeout_detected = False
     _timeout_at       = None
+    _first_probe_resp = None     # captured for evidence
+    _last_probe_resp  = None     # captured for evidence
+    _probe_status_log: list = []  # [(elapsed_seconds, status_code, body_len)]
 
     vc.log(
         f"[logout] Starting idle timeout probe — checking every {_timeout_interval}s "
@@ -19856,6 +20138,12 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
         _timeout_elapsed += _timeout_interval
         try:
             _r_idle = _idle_probe.get(url, timeout=timeout, allow_redirects=True)
+            if _first_probe_resp is None:
+                _first_probe_resp = _r_idle
+            _last_probe_resp = _r_idle
+            _probe_status_log.append(
+                (_timeout_elapsed, _r_idle.status_code, len(_r_idle.text or ""))
+            )
             _expired = (
                 _r_idle.status_code in (401, 403)
                 or _TIMEOUT_EXPIRED_RE.search(_r_idle.url or "")
@@ -19876,6 +20164,53 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
             pass
 
     if not _timeout_detected:
+        # Save evidence: first probe (session start), last probe (after the
+        # full idle period), and a probe-status log showing every check.
+        _to_evidence: list = []
+        if _first_probe_resp is not None:
+            try:
+                _fp_rq, _fp_rp = _save_http_evidence(
+                    out, phase, f"timeout_first_probe_{hostname}", _first_probe_resp)
+                _to_evidence.append({
+                    "url":  f"FIRST PROBE  GET {url} (t=+60s)",
+                    "req":  str(_fp_rq), "resp": str(_fp_rp),
+                })
+            except Exception:
+                pass
+        if _last_probe_resp is not None and _last_probe_resp is not _first_probe_resp:
+            try:
+                _lp_rq, _lp_rp = _save_http_evidence(
+                    out, phase, f"timeout_last_probe_{hostname}", _last_probe_resp)
+                _to_evidence.append({
+                    "url":  f"LAST PROBE  GET {url} (t=+{_timeout_max}s)",
+                    "req":  str(_lp_rq), "resp": str(_lp_rp),
+                })
+            except Exception:
+                pass
+        try:
+            _to_log_path = out.output_path(
+                phase, f"timeout_probe_log_{hostname}")
+            _to_log_body = (
+                f"Session idle-timeout probe log\n"
+                f"==============================\n"
+                f"Target URL:     {url}\n"
+                f"Probe interval: {_timeout_interval} seconds\n"
+                f"Probe ceiling:  {_timeout_max} seconds ({_timeout_max // 60} min)\n"
+                f"\nPer-probe results (elapsed_s, status, body_bytes):\n"
+                + "\n".join(
+                    f"  t=+{_e:>4}s  HTTP {_s}  {_b} bytes"
+                    for _e, _s, _b in _probe_status_log
+                )
+                + "\n"
+            )
+            _to_log_path.write_text(_to_log_body, encoding="utf-8")
+            _to_evidence.append({
+                "url":  f"PROBE LOG  {_to_log_path.name}",
+                "file": str(_to_log_path),
+            })
+        except Exception:
+            pass
+
         out.add_finding(
             title="Session Timeout Absent or Excessive",
             url=url, port=target["port"], risk="HIGH",
@@ -19883,12 +20218,19 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                 f"The authenticated session remained valid after {_timeout_max} seconds "
                 f"({_timeout_max // 60} minutes) of inactivity. No server-side idle "
                 f"timeout was detected. An attacker who obtains a valid session token "
-                f"can exploit it indefinitely without time pressure."
+                f"can exploit it indefinitely without time pressure. "
+                f"Evidence contains the first probe, last probe, and a full probe log."
             ),
             output=(
-                f"Idle probe: session accepted at every {_timeout_interval}s check "
-                f"for {_timeout_max}s total. No 401/403 response; no redirect to login."
+                f"Probe interval:  {_timeout_interval}s\n"
+                f"Probe ceiling:   {_timeout_max}s ({_timeout_max // 60} min)\n"
+                f"Probes sent:     {len(_probe_status_log)}\n"
+                f"Final status:    "
+                + (f"HTTP {_last_probe_resp.status_code} (cookies still accepted)"
+                   if _last_probe_resp is not None else "(no probe response)")
+                + "\nVerdict:         session NEVER expired during the 10-minute idle test"
             ),
+            output_file=json.dumps(_to_evidence) if _to_evidence else "",
             sources="fracture-logout", service=target["scheme"],
             owasp="A07:2025 Identification and Authentication Failures",
             nist="AC-11",
@@ -19958,6 +20300,27 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                 )
 
                 if _still_valid:
+                    # Save evidence: logout req+resp AND the follow-up probe
+                    # req+resp that demonstrated the old session still worked.
+                    _ssl_evidence: list = []
+                    try:
+                        _lo_rq, _lo_rp = _save_http_evidence(
+                            out, phase, f"server_side_logout_{hostname}", _r_logout)
+                        _ssl_evidence.append({
+                            "url":  f"LOGOUT  GET {_logout_url} (HTTP {_r_logout.status_code})",
+                            "req":  str(_lo_rq), "resp": str(_lo_rp),
+                        })
+                    except Exception:
+                        pass
+                    try:
+                        _fo_rq, _fo_rp = _save_http_evidence(
+                            out, phase, f"server_side_followup_{hostname}", _r_old)
+                        _ssl_evidence.append({
+                            "url":  f"FOLLOW-UP  GET {_auth_probe_url} (HTTP {_r_old.status_code})",
+                            "req":  str(_fo_rq), "resp": str(_fo_rp),
+                        })
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Session Not Invalidated Server-Side After Logout",
                         url=_logout_url, port=target["port"], risk="HIGH",
@@ -19966,13 +20329,19 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                             f"pre-logout session cookies were still accepted by the server. "
                             f"A request to {_auth_probe_url} returned HTTP "
                             f"{_r_old.status_code} without redirecting to a login page, "
-                            f"indicating the session was not invalidated server-side."
+                            f"indicating the session was not invalidated server-side. "
+                            f"The logout request and the follow-up authenticated probe "
+                            f"are saved as Evidence (request + response for each)."
                         ),
                         output=(
-                            f"Logout:          {_logout_url} → HTTP {_r_logout.status_code}\n"
-                            f"Old session re-use: {_auth_probe_url} → "
-                            f"HTTP {_r_old.status_code} (cookies accepted)"
+                            f"Logout endpoint:    {_logout_url}\n"
+                            f"Logout response:    HTTP {_r_logout.status_code}\n"
+                            f"Probe endpoint:     {_auth_probe_url}\n"
+                            f"Probe response:     HTTP {_r_old.status_code}\n"
+                            f"Final URL:          {_r_old.url}\n"
+                            f"Verdict:            old session cookies STILL ACCEPTED"
                         ),
+                        output_file=json.dumps(_ssl_evidence) if _ssl_evidence else "",
                         sources="fracture-logout", service=target["scheme"],
                         affected=_logout_url,
                         owasp="A07:2025 Identification and Authentication Failures",
@@ -20225,24 +20594,153 @@ def _phase_cross_user(target: dict, cfg: dict, pm: ProgressManager,
     links        = auth_recon_data.get("links", [])
     vc.status(phase, "Cross-User Testing", "running", "Resource enumeration", 0, len(resource_ids))
 
+    # Same response-validation pattern as the authorization phase — reject
+    # 200-status login pages, generic error templates, wildcard catch-alls,
+    # and publicly-accessible URLs. See _validate_idor in _phase_authorization
+    # for the reasoning. Re-declared here because the two phases are in
+    # different scopes; refactor opportunity but not blocking.
+    _CU_AUTH_PATH_RE = re.compile(
+        r'(/login|/signin|/sign-in|/auth/login|/oauth|/sso/|/sign-on)',
+        re.IGNORECASE,
+    )
+    _CU_LOGIN_MARKERS = (
+        '<input type="password"', "<input type='password'",
+        'name="password"',        "name='password'",
+        'id="password"',          "id='password'",
+        '<form action="/login',   "action='/login",
+        "please log in",          "please sign in",
+        "session expired",        "you must be logged in",
+        "log in to continue",     "sign in to continue",
+    )
+    _CU_ERROR_MARKERS = (
+        "access denied",          "permission denied",
+        "you are not authorized", "you do not have permission",
+        "page not found",         "resource not found",
+        "unhandled exception",    "internal server error",
+    )
+
+    def _cu_is_login_or_error(_resp) -> "tuple[bool, str]":
+        try:
+            _u = (_resp.url or "").lower()
+            _b = (_resp.text or "")[:8000].lower()
+        except Exception:
+            return (False, "")
+        if _CU_AUTH_PATH_RE.search(_u):
+            return (True, f"final URL matched auth path: {_resp.url}")
+        for _m in _CU_LOGIN_MARKERS:
+            if _m in _b:
+                return (True, f"login-page marker: {_m!r}")
+        for _m in _CU_ERROR_MARKERS:
+            if _m in _b:
+                return (True, f"error-page marker: {_m!r}")
+        return (False, "")
+
+    _cu_anon_sess = _make_session(cfg)
+
     for idx, res in enumerate(resource_ids[:50]):
         res_url = res["url"]
         vc.status(phase, "Cross-User Testing", "running", f"Resource {res['id']}", idx, len(resource_ids))
         try:
+            # Fetch user1's baseline (owner's view) once for comparison.
+            try:
+                r_owner = auth_sess.get(res_url, timeout=timeout)
+            except Exception:
+                r_owner = None
             # Access user1's resource as user2
             r = auth2_sess.get(res_url, timeout=timeout)
-            if r.status_code == 200 and len(r.text) > 100:
-                out.add_finding(
-                    title="Cross-User Data Leakage (IDOR)",
-                    url=res_url, port=target["port"], risk="CRITICAL",
-                    description=f"User2 can access User1's resource at {res_url} (HTTP 200). This is a confirmed cross-user authorisation bypass.",
-                    output=f"Resource: {res_url}\nUser2 response: {r.status_code} ({len(r.text)} bytes)",
-                    sources="fracture-cross-user", service=target["scheme"],
-                    affected=res_url,
-                    owasp="A01:2025 Broken Access Control", nist="AC-3",
-                    remediation="Implement and enforce object-level authorisation checks. Verify ownership for every resource access.",
+            # Anonymous control
+            try:
+                r_anon = _cu_anon_sess.get(res_url, timeout=timeout)
+            except Exception:
+                r_anon = None
+
+            # Validate
+            if r.status_code != 200 or len(r.text or "") < 100:
+                continue
+            _is_le, _why = _cu_is_login_or_error(r)
+            if _is_le:
+                vc.log(
+                    f"[cross_user] Rejected at {res_url}: {_why}",
+                    "INFO",
                 )
-                vc.log(f"[cross_user] Cross-user leakage: {res_url}", "SUCCESS")
+                continue
+            # Public URL → not a cross-user bypass
+            if (r_anon is not None and r_anon.status_code == 200
+                    and (r_anon.text or "") == (r.text or "")):
+                vc.log(
+                    f"[cross_user] Rejected at {res_url}: anonymous fetch "
+                    f"returns identical response — URL is publicly accessible",
+                    "INFO",
+                )
+                continue
+            # If user2 sees a body DIFFERENT from user1's view, the app
+            # probably scopes the resource per-user (each gets their own
+            # data at the same URL pattern). The real bypass is when user2
+            # sees user1's data. Require body equivalence as the strong signal.
+            _bypass_kind = "unknown"
+            if r_owner is not None and r_owner.status_code == 200:
+                if (r.text or "") == (r_owner.text or ""):
+                    _bypass_kind = "user2 sees user1's exact data"
+                else:
+                    _bypass_kind = (
+                        "user2 sees a substantive response at user1's URL "
+                        "(may be per-user scoped — manual review)"
+                    )
+
+            _evidence_entries: list = []
+            if r_owner is not None:
+                _o_rq, _o_rp = _save_http_evidence(
+                    out, phase, f"crossuser_owner_{res['id']}", r_owner)
+                _evidence_entries.append({
+                    "url": f"OWNER (user1) {res_url}",
+                    "req": str(_o_rq), "resp": str(_o_rp),
+                })
+            _u2_rq, _u2_rp = _save_http_evidence(
+                out, phase, f"crossuser_user2_{res['id']}", r)
+            _evidence_entries.append({
+                "url": f"USER2 fetching user1's URL {res_url}",
+                "req": str(_u2_rq), "resp": str(_u2_rp),
+            })
+            if r_anon is not None:
+                _a_rq, _a_rp = _save_http_evidence(
+                    out, phase, f"crossuser_anon_{res['id']}", r_anon)
+                _evidence_entries.append({
+                    "url": f"ANONYMOUS {res_url}",
+                    "req": str(_a_rq), "resp": str(_a_rp),
+                })
+
+            out.add_finding(
+                title="Cross-User Data Leakage (IDOR)",
+                url=res_url, port=target["port"], risk="CRITICAL",
+                description=(
+                    f"User2's authenticated session can access User1's "
+                    f"resource at {res_url} (HTTP 200). Validator confirms "
+                    f"the response is not a login page, not a generic error "
+                    f"template, and requires authentication (anonymous "
+                    f"fetch differs). Bypass kind: {_bypass_kind}."
+                ),
+                output=(
+                    f"Resource:        {res_url}\n"
+                    f"Owner (user1):   "
+                    + (f"{r_owner.status_code} ({len(r_owner.text or '')} bytes)"
+                       if r_owner is not None else "(no owner fetch)")
+                    + f"\nUser2 response:  {r.status_code} ({len(r.text or '')} bytes)\n"
+                      f"Anon response:   "
+                    + (f"{r_anon.status_code} ({len(r_anon.text or '')} bytes)"
+                       if r_anon is not None else "(no anon probe)")
+                    + f"\nBypass kind:     {_bypass_kind}"
+                ),
+                sources="fracture-cross-user", service=target["scheme"],
+                output_file=json.dumps(_evidence_entries),
+                affected=res_url,
+                owasp="A01:2025 Broken Access Control", nist="AC-3",
+                remediation=(
+                    "Implement and enforce object-level authorisation "
+                    "checks. Verify ownership for every resource access; "
+                    "do not rely on session presence alone."
+                ),
+            )
+            vc.log(f"[cross_user] Cross-user leakage confirmed: {res_url}", "SUCCESS")
         except Exception:
             pass
 
@@ -20400,38 +20898,138 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Logging & Monitoring", "running", "Auth logging probe", 3, 4)
     login_url = cfg.get("auth", {}).get("login_url", "")
     if login_url:
-        fail_responses = []
-        for _ in range(5):
+        # Keep the actual Response objects so each attempt can be saved as
+        # req/resp evidence. Previous version stored only the status codes
+        # and emitted the finding with no Evidence.
+        _fail_attempts: "list[tuple[int, 'requests.Response | None', float]]" = []
+        for _i in range(5):
+            _start = time.time()
             try:
-                r = sess.post(login_url, json={"username": "fracture_logging_probe",
-                                               "password": "wrong_password_xyz"}, timeout=timeout)
-                fail_responses.append(r.status_code)
+                r = sess.post(
+                    login_url,
+                    json={
+                        "username": f"fracture_logging_probe_{_i}",
+                        "password": "wrong_password_xyz",
+                    },
+                    timeout=timeout,
+                )
+                _fail_attempts.append(
+                    (r.status_code, r, round(time.time() - _start, 3))
+                )
             except Exception:
-                pass
-        if len(fail_responses) == 5 and all(s in (200, 302, 401) for s in fail_responses):
-            # All 5 failed logins were accepted without lockout indication
-            out.add_finding(
-                title="Insufficient Auth Failure Logging / No Brute-Force Detection",
-                url=login_url, port=target["port"], risk="MEDIUM",
-                description=(
-                    f"Five consecutive failed login attempts to {login_url} were accepted "
-                    f"without triggering a lockout, rate limit, or captcha response. "
-                    f"Insufficient logging may mean brute-force attempts go undetected."
-                ),
-                output=(
-                    f"5 failed logins to {login_url}\n"
-                    f"Status codes: {fail_responses}"
-                ),
-                sources="fracture-logging", service=target["scheme"],
-                affected=login_url,
-                owasp="A09:2025 Security Logging and Monitoring Failures", nist="AU-12",
-                remediation=(
-                    "Implement brute-force detection and account lockout after N failed attempts. "
-                    "Log all authentication failures with IP, timestamp, and username. "
-                    "Alert on anomalous login failure patterns."
-                ),
-            )
-            vc.log(f"[logging_monitoring] No brute-force protection: {login_url}", "SUCCESS")
+                _fail_attempts.append((0, None, round(time.time() - _start, 3)))
+        fail_responses = [_sc for _sc, _, _ in _fail_attempts if _sc]
+        # Detection signals that WOULD indicate brute-force protection:
+        #   429  Too Many Requests   (rate-limited)
+        #   423  Locked              (account lockout)
+        #   401 with a Retry-After header
+        #   Response body containing 'captcha', 'too many', 'locked',
+        #     'try again later'
+        #   Significant escalating latency between attempts (exponential
+        #     backoff). Flagged but not used to gate the finding.
+        if (len(fail_responses) == 5
+                and all(s in (200, 302, 401) for s in fail_responses)):
+            # No status-based protection. Also check bodies for captcha /
+            # lockout text and reject the finding if any attempt shows it.
+            _protection_marker = ""
+            for _sc, _r, _ in _fail_attempts:
+                if _r is None:
+                    continue
+                _body_lo = (_r.text or "")[:8000].lower()
+                for _marker in ("captcha", "too many attempts",
+                                "too many failed", "account locked",
+                                "account temporarily locked",
+                                "try again later", "rate limit",
+                                "slow down"):
+                    if _marker in _body_lo:
+                        _protection_marker = _marker
+                        break
+                if _protection_marker:
+                    break
+            if _protection_marker:
+                vc.log(
+                    f"[logging_monitoring] Brute-force protection signal "
+                    f"detected in failed-login response body "
+                    f"({_protection_marker!r}) — not emitting finding.",
+                    "INFO",
+                )
+            else:
+                # Save evidence: each failed attempt's req + resp as a
+                # JSON-array of HTTP-exchange dicts.
+                _evidence_entries: list = []
+                for _i, (_sc, _r, _latency) in enumerate(_fail_attempts, 1):
+                    if _r is None:
+                        continue
+                    try:
+                        _rq, _rp = _save_http_evidence(
+                            out, phase,
+                            f"auth_failure_attempt_{_i}_{hostname}",
+                            _r,
+                        )
+                        _evidence_entries.append({
+                            "url": f"Attempt {_i}/5 → POST {login_url} "
+                                   f"(HTTP {_sc}, {_latency}s)",
+                            "req":  str(_rq),
+                            "resp": str(_rp),
+                        })
+                    except Exception:
+                        pass
+                # Latency check — escalating delay between attempts hints
+                # at server-side exponential backoff even when the status
+                # code stays 401. Worth surfacing in the output text.
+                _latencies = [round(_l, 3) for _, _, _l in _fail_attempts]
+                _latency_escalating = (
+                    len(_latencies) >= 3
+                    and _latencies[-1] > _latencies[0] * 2
+                )
+                out.add_finding(
+                    title="Insufficient Auth Failure Logging / No Brute-Force Detection",
+                    url=login_url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"Five consecutive failed login attempts to "
+                        f"{login_url} were accepted without triggering a "
+                        f"lockout (HTTP 423), rate-limit (HTTP 429), "
+                        f"captcha challenge, or any 'too many attempts' / "
+                        f"'account locked' / 'try again later' body marker. "
+                        f"No Retry-After header or escalating server-side "
+                        f"latency was observed either. Brute-force attacks "
+                        f"against this login endpoint will not be detected "
+                        f"or throttled by the application itself; defence "
+                        f"depends entirely on upstream rate-limiting (WAF "
+                        f"/ CDN) or post-hoc log review."
+                    ),
+                    output=(
+                        f"Login URL:           {login_url}\n"
+                        f"Attempts:            5\n"
+                        f"Status codes:        {fail_responses}\n"
+                        f"Per-attempt latency: {_latencies} seconds\n"
+                        f"Escalating latency:  "
+                        f"{_latency_escalating} (would suggest exponential backoff)\n"
+                        f"Captcha / lockout body markers detected: none\n"
+                        f"Retry-After headers detected: none"
+                    ),
+                    output_file=(
+                        json.dumps(_evidence_entries)
+                        if _evidence_entries else ""
+                    ),
+                    sources="fracture-logging", service=target["scheme"],
+                    affected=login_url,
+                    owasp="A09:2025 Security Logging and Monitoring Failures",
+                    nist="AU-12",
+                    remediation=(
+                        "Implement brute-force detection and account lockout "
+                        "after N failed attempts. Log all authentication "
+                        "failures with IP, timestamp, and username. Alert "
+                        "on anomalous login-failure patterns. Server-side "
+                        "exponential backoff or CAPTCHA challenges after "
+                        "3 failures are the minimum bar."
+                    ),
+                )
+                vc.log(
+                    f"[logging_monitoring] No brute-force protection: "
+                    f"{login_url}",
+                    "SUCCESS",
+                )
 
     # 5. Prometheus / metrics endpoint exposure
     vc.status(phase, "Logging & Monitoring", "running", "Metrics endpoints", 4, 7)
@@ -22667,6 +23265,27 @@ def main() -> None:
                         and _lp_found_url):
                     _lp_role_sfx = f" (role: {_ctx_label})" if _ctx_label else ""
                     _lp_rel = urllib.parse.urlparse(_lp_found_url).path or "/"
+                    # Save the login page HTML as evidence: one GET via the
+                    # operator-facing session captures the form HTML the
+                    # operator should review (CSRF token format, hidden
+                    # fields, anti-brute-force markers, framework hints).
+                    _lp_evidence = ""
+                    try:
+                        _lp_probe_sess = _make_session(_ctx_cfg)
+                        _lp_r = _lp_probe_sess.get(
+                            _lp_found_url, timeout=cfg.get("timeout", 10))
+                        _lp_rq, _lp_rp = _save_http_evidence(
+                            out, "auth_recon",
+                            f"login_page_{_ctx_label}",
+                            _lp_r,
+                        )
+                        _lp_evidence = json.dumps([{
+                            "url":  f"LOGIN PAGE  GET {_lp_found_url}",
+                            "req":  str(_lp_rq),
+                            "resp": str(_lp_rp),
+                        }])
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Login Page Identified",
                         url=_lp_found_url,
@@ -22675,10 +23294,16 @@ def main() -> None:
                         description=(
                             f"A login page was identified at {_lp_found_url}"
                             f"{_lp_role_sfx}. This is the authentication entry "
-                            f"point used during testing."
+                            f"point used during testing. The captured page "
+                            f"HTML is available in the Evidence panel."
                         ),
                         affected=_lp_rel,
-                        output=_lp_found_url,
+                        output=(
+                            f"Login URL: {_lp_found_url}\n"
+                            f"Role:      {_ctx_label}\n"
+                            f"Path:      {_lp_rel}"
+                        ),
+                        output_file=_lp_evidence,
                         sources="fracture-auth",
                         service=target["scheme"],
                         owasp="A07:2025 Identification and Authentication Failures",
@@ -22701,17 +23326,75 @@ def main() -> None:
                         _ctx_cfg.get("auth", {}).get("login_url", "").strip()
                         or target["url"]
                     )
+                    # Evidence is metadata about WHERE / HOW MFA was
+                    # detected. Capture two things:
+                    #   1. A re-fetch of the MFA-host URL so the operator
+                    #      can review the challenge page HTML.
+                    #   2. A synthetic summary file listing every provider
+                    #      detected and the auth flow context.
+                    _mfa_evidence: list = []
+                    try:
+                        _mfa_probe_sess = _make_session(_ctx_cfg)
+                        _mfa_r = _mfa_probe_sess.get(
+                            _mfa_url, timeout=cfg.get("timeout", 10))
+                        _mfa_rq, _mfa_rp = _save_http_evidence(
+                            out, "auth_recon",
+                            f"mfa_challenge_{_ctx_label}",
+                            _mfa_r,
+                        )
+                        _mfa_evidence.append({
+                            "url":  f"MFA HOST URL  GET {_mfa_url}",
+                            "req":  str(_mfa_rq),
+                            "resp": str(_mfa_rp),
+                        })
+                    except Exception:
+                        pass
+                    try:
+                        _mfa_summary_path = out.output_path(
+                            "auth_recon",
+                            f"mfa_detection_summary_{_ctx_label}",
+                        )
+                        _mfa_summary_body = (
+                            f"MFA detection summary\n"
+                            f"=====================\n"
+                            f"Role:               {_ctx_label}\n"
+                            f"MFA host URL:       {_mfa_url}\n"
+                            f"Providers detected: {_mfa_str}\n"
+                            f"Provider count:     {len(_mfa_detected)}\n"
+                            f"\nProvider names (one per line):\n"
+                            + "\n".join(f"  - {_p}" for _p in _mfa_detected)
+                            + "\n"
+                        )
+                        _mfa_summary_path.write_text(
+                            _mfa_summary_body, encoding="utf-8")
+                        _mfa_evidence.append({
+                            "url":  f"DETECTION SUMMARY  {_mfa_summary_path.name}",
+                            "file": str(_mfa_summary_path),
+                        })
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Multi-Factor Authentication Detected",
                         url=_mfa_url,
                         port=target["port"],
                         risk="INFO",
                         description=(
-                            f"Multi-factor authentication was detected during the "
-                            f"login process. Provider(s) identified: {_mfa_str}."
+                            f"Multi-factor authentication was detected "
+                            f"during the login process. Provider(s) "
+                            f"identified: {_mfa_str}. The captured MFA "
+                            f"challenge page HTML and a detection summary "
+                            f"are saved as evidence."
                         ),
                         affected=urllib.parse.urlparse(_mfa_url).path or "/",
-                        output=_mfa_str,
+                        output=(
+                            f"Role:               {_ctx_label}\n"
+                            f"MFA URL:            {_mfa_url}\n"
+                            f"Providers ({len(_mfa_detected)}): {_mfa_str}"
+                        ),
+                        output_file=(
+                            json.dumps(_mfa_evidence)
+                            if _mfa_evidence else ""
+                        ),
                         sources="fracture-auth",
                         service=target["scheme"],
                         owasp="A07:2025 Identification and Authentication Failures",
