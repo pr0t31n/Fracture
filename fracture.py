@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.19.6"
+VERSION = "2.19.7"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -12340,6 +12340,23 @@ def _phase_endpoint_tools(
     max_ep       = cfg.get("max_endpoint_scan", 15)
     gobuster     = _find_tool("gobuster")
     feroxbuster  = _find_tool("feroxbuster")
+    # Stealth mode: disable both brute-forcers across the whole endpoint
+    # loop. _phase_endpoint_tools runs per discovered endpoint (default
+    # cap of 15) and each gobuster / feroxbuster invocation sends
+    # thousands of requests — the same CF bot-fight trigger the recon
+    # phase already guards against. Without this guard, stealth scans
+    # were still hammering CF via the endpoint-tools loop.
+    if cfg.get("_waf_stealth_applied"):
+        if gobuster or feroxbuster:
+            vc.log(
+                "[endpoint_tools] Skipping per-endpoint gobuster + "
+                "feroxbuster — stealth mode active. Directory brute-"
+                "force across N discovered endpoints would multiply the "
+                "CDN bot-fight trigger by N.",
+                "INFO",
+            )
+        gobuster    = None
+        feroxbuster = None
     wordlist_dir = _find_wordlist(
         "Discovery/Web-Content/raft-large-directories.txt",
         cfg.get("gobuster_wordlist", ""),
@@ -21908,6 +21925,20 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
 
     gobuster    = _find_tool("gobuster")
     feroxbuster = _find_tool("feroxbuster")
+    # Stealth mode: disable both brute-forcers. _run_buster_only is the
+    # per-role buster runner invoked from authenticated/cross-role
+    # contexts; same CF bot-fight concern as _phase_recon and
+    # _phase_endpoint_tools.
+    if cfg.get("_waf_stealth_applied"):
+        if gobuster or feroxbuster:
+            vc.log(
+                f"[buster] Skipping per-role gobuster + feroxbuster"
+                f"{(' for role ' + role_label) if role_label else ''} — "
+                "stealth mode active.",
+                "INFO",
+            )
+        gobuster    = None
+        feroxbuster = None
     wordlist_dir  = _find_wordlist(
         "Discovery/Web-Content/raft-large-directories.txt",
         cfg.get("gobuster_wordlist", ""),
