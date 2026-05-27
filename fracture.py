@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.19.7"
+VERSION = "2.19.8"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -10925,7 +10925,11 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
 
     # Fallback: probe /wp-login.php for WordPress sites that serve CDN-rewritten
     # HTML without wp-content/wp-includes references in the page source.
-    if "WordPress" not in detected_cms:
+    # Skipped in stealth — /wp-login.php is a top-3 path matched by CF's
+    # "Security Scanner Detection" managed rule. Operator log confirmed
+    # this probe was tripping CF on app.hosting-example.com.
+    if ("WordPress" not in detected_cms
+            and not cfg.get("_waf_stealth_applied")):
         try:
             _wplogin = sess.get(
                 url.rstrip("/") + "/wp-login.php",
@@ -10937,6 +10941,13 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 vc.log("[recon] WordPress detected via /wp-login.php probe", "INFO")
         except Exception:
             pass
+    elif cfg.get("_waf_stealth_applied"):
+        vc.log(
+            "[recon] Skipping /wp-login.php WordPress probe — stealth "
+            "mode active. The path is a CF Security Scanner Detection "
+            "match.",
+            "INFO",
+        )
 
     if server_hdr:
         out.add_finding(
@@ -11781,7 +11792,22 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             pass
 
     vc.status(phase, "Recon", "running", "Admin panel detection", 3, 10)
-    for apath in _ADMIN_PATHS:
+    # Stealth: 14 sequential probes against /admin, /administrator, /wp-admin,
+    # /phpmyadmin, /manager, /dashboard, /portal, /cpanel, /webadmin,
+    # /admin.php, /admincp, /admin/login, /admin/dashboard, /backend — every
+    # one of these is in CF's default scanner-detection ruleset. Skip
+    # entirely in stealth.
+    if cfg.get("_waf_stealth_applied"):
+        vc.log(
+            "[recon] Skipping admin-panel path probes — stealth mode "
+            "active. The 14 admin paths are all CF scanner-detection "
+            "matches.",
+            "INFO",
+        )
+        _admin_paths_iter = []
+    else:
+        _admin_paths_iter = _ADMIN_PATHS
+    for apath in _admin_paths_iter:
         try:
             r = sess.get(url.rstrip("/") + apath, timeout=timeout, allow_redirects=False)
             if r.status_code == 200:
@@ -11823,7 +11849,19 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             pass
 
     vc.status(phase, "Recon", "running", "Common paths probe", 4, 10)
-    for cpath in _COMMON_PATHS:
+    # Stealth: probes for /.well-known/security.txt, /api/, /v1/, /swagger,
+    # /openapi.json, /.git/HEAD, /.env, /robots.txt — most match CF's
+    # "exposure" rule (especially /.git/HEAD and /.env). Skip in stealth.
+    if cfg.get("_waf_stealth_applied"):
+        vc.log(
+            "[recon] Skipping common-paths probe — stealth mode active. "
+            "Paths like /.git/HEAD and /.env are CF exposure-rule matches.",
+            "INFO",
+        )
+        _common_paths_iter = []
+    else:
+        _common_paths_iter = _COMMON_PATHS
+    for cpath in _common_paths_iter:
         try:
             r = sess.get(url.rstrip("/") + cpath, timeout=timeout, allow_redirects=False)
             if r.status_code == 200 and cpath in ("/.git/HEAD", "/.env") \
@@ -11877,6 +11915,19 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     out_f    = out.output_path(phase, "gobuster_" + target["hostname"])
     if wc_baseline is not None:
         vc.log("[recon] Skipping directory brute-force (wildcard detected)", "INFO")
+    elif cfg.get("_waf_stealth_applied"):
+        # Critical guard: when gobuster was force-set to None above for
+        # stealth, the OLD code path fell through to the _TOP_200_PATHS
+        # fallback loop (80+ sequential probes against /admin, /wp-admin,
+        # /phpmyadmin, /.git/HEAD, /.env, /shell, /private, …). That is
+        # WORSE than gobuster from a CF-detection standpoint — concentrated
+        # canonical scanner paths. Explicitly skip the fallback too.
+        vc.log(
+            "[recon] Skipping directory discovery (top-paths fallback) — "
+            "stealth mode active. The 80-path fallback probe is a denser "
+            "CDN scanner-detection match than gobuster itself.",
+            "INFO",
+        )
     elif gobuster and Path(wordlist).exists():
         cmd = [gobuster, "dir", "-u", url, "-w", wordlist, "-t", _buster_threads,
                "-q", "-k", "-o", str(out_f)]
