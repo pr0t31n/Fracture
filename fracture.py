@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.18.2"
+VERSION = "2.19.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3081,6 +3081,13 @@ class OutputManager:
             _GLOBAL_MERGE_PREFIXES = (
                 "missing security header:",
                 "interesting endpoint discovered",
+                # auth_recon emits one "Authenticated Interesting Endpoint"
+                # finding per discovered link; without global merge each
+                # one became a separate finding (same title, different
+                # URL/port) and the operator saw N entries in the Findings
+                # tab instead of one entry whose affected list enumerates
+                # every endpoint.
+                "authenticated interesting endpoint",
                 "non-login form detected",
                 "login page detected",
                 "missing secure cookie attribute:",
@@ -12193,6 +12200,15 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
         opts.add_argument("--ignore-certificate-errors")
         opts.add_argument("--window-size=1280,800")
         opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+        # Override Chrome's default headless User-Agent (which contains
+        # "HeadlessChrome" — a Cloudflare bot-fight rule fingerprint).
+        # Reuse the same Chrome-on-Linux UA the requests Sessions send.
+        _ua_override = cfg.get(
+            "user_agent",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        )
+        opts.add_argument(f"--user-agent={_ua_override}")
         chrome_bin = _find_chrome_binary()
         if chrome_bin:
             opts.binary_location = chrome_bin
@@ -14542,6 +14558,13 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             _opts.add_argument("--allow-insecure-localhost")
             _opts.add_argument("--window-size=1280,800")
             _opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+            # Override HeadlessChrome UA to match the requests Session.
+            _ua_override = cfg.get(
+                "user_agent",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            )
+            _opts.add_argument(f"--user-agent={_ua_override}")
             _cb = _find_chrome_binary()
             if _cb:
                 _opts.binary_location = _cb
@@ -15587,6 +15610,13 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
         _opts.add_argument("--disable-popup-blocking")
         _opts.add_argument("--log-level=3")
         _opts.add_argument("--silent")
+        # Override HeadlessChrome UA — Cloudflare bot-fight fingerprint.
+        _ua_override = cfg.get(
+            "user_agent",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        )
+        _opts.add_argument(f"--user-agent={_ua_override}")
         if not verify_ssl:
             _opts.add_argument("--ignore-certificate-errors")
             _opts.add_argument("--allow-insecure-localhost")
@@ -19589,21 +19619,61 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                 logout_probe.cookies.set(k, v)
             r = logout_probe.get(url + lpath, timeout=timeout, allow_redirects=False)
             if r.status_code in (200, 302):
+                # Save logout request + response evidence
+                _logout_rq, _logout_rp = _save_http_evidence(
+                    out, phase, f"logout_request_{hostname}", r)
                 # Try to use old session cookies to confirm server-side invalidation
                 old_sess = _make_session(cfg)
                 for k, v in pre_cookies.items():
                     old_sess.cookies.set(k, v)
                 r2 = old_sess.get(url, timeout=timeout)
+                # Save the follow-up protected-endpoint request + response too
+                _follow_rq, _follow_rp = _save_http_evidence(
+                    out, phase, f"logout_followup_{hostname}", r2)
                 if r2.status_code == 200 and not re.search(r'login|sign.?in|auth', r2.url, re.I):
+                    # Evidence: 4 saved files — logout req, logout resp,
+                    # follow-up req, follow-up resp. Pass them as a JSON-
+                    # array of HTTP-exchange dicts so Crucible's Evidence
+                    # modal renders the multi-tab viewer correctly.
+                    _evidence = json.dumps([
+                        {"url": url + lpath,
+                         "req": str(_logout_rq),
+                         "resp": str(_logout_rp)},
+                        {"url": r2.url or url,
+                         "req": str(_follow_rq),
+                         "resp": str(_follow_rp)},
+                    ])
                     out.add_finding(
                         title="Session Not Invalidated After Logout",
                         url=url + lpath, port=target["port"], risk="HIGH",
-                        description="Session cookies remain valid after logout. Old sessions can be reused.",
-                        output=f"Logout: {url + lpath}\nOld session still valid: {r2.url}",
+                        description=(
+                            "Session cookies remain valid after the logout "
+                            "endpoint was called. The same cookies still "
+                            "authorise access to a protected page, meaning "
+                            "the server did not invalidate the session "
+                            "record on logout — only the client-side cookie "
+                            "removal happened. Recovered cookies (browser "
+                            "history, XSS, MITM, malware) can be replayed "
+                            "indefinitely until natural session timeout."
+                        ),
+                        output=(
+                            f"Logout endpoint:        {url + lpath}\n"
+                            f"Logout response:        HTTP {r.status_code}\n"
+                            f"Follow-up request:      GET {r2.url}\n"
+                            f"Follow-up response:     HTTP {r2.status_code}\n"
+                            f"Final URL after redirect: {r2.url}\n"
+                            f"Evidence files saved (logout + follow-up req/resp): 4"
+                        ),
                         sources="fracture-session", service=target["scheme"],
+                        output_file=_evidence,
                         owasp="A07:2025 Identification and Authentication Failures",
                         nist="SC-23",
-                        remediation="Invalidate session server-side on logout. Do not rely solely on client-side cookie deletion.",
+                        remediation=(
+                            "Invalidate the session server-side on logout "
+                            "(remove the session record from the store, do "
+                            "not just unset the Set-Cookie header). Do not "
+                            "rely on client-side cookie deletion."
+                        ),
                         http_code=r2.status_code,
                     )
                     vc.log("[session] Session not invalidated after logout", "SUCCESS")
