@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.19.9"
+VERSION = "2.19.12"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3099,6 +3099,11 @@ class OutputManager:
                 "missing secure cookie attribute:",
                 "misconfigured secure cookie attribute:",
                 "broken function level authorization (bfla)",
+                # BOLA/IDOR validator emits one finding per vulnerable
+                # endpoint+role pair; same global-merge rationale as BFLA
+                # so the Findings tab shows a single entry whose affected
+                # list enumerates every confirmed endpoint.
+                "broken object level authorization (idor / bola)",
                 "web files downloaded",
                 "web screenshot captured",
             )
@@ -9011,10 +9016,39 @@ def _attach_redirect_hook(
                     ),
                     http_code=r.status_code,
                 )
-            norm = abs_loc.rstrip("/")
-            if norm not in in_scope_new:
-                in_scope_new.append(norm)
-            vc.log(f"[redirect] In-scope {r.status_code}: {r.url} → {abs_loc}", "INFO")
+            # Normalise the queue key by stripping query + fragment. Without
+            # this, every protected URL redirected to /login?next=<encoded>
+            # produced a distinct queue entry (because each ?next= value is
+            # unique) and the outer scan loop kept re-scanning the same login
+            # page forever. The path-only form collapses the entire family
+            # to one entry.
+            _norm_dest = urllib.parse.urlunparse(
+                (_to_p.scheme, _to_p.netloc, _to_p.path, "", "", "")
+            )
+            norm = _norm_dest.rstrip("/")
+            # Skip the queue when the destination path is an auth-flow page
+            # (login / signin / sso / logout / auth). These are the redirect
+            # TARGET of every protected URL when the session is expired —
+            # enqueueing them spawns a recursive scan that finds the same
+            # protected URLs and queues the same auth redirects again,
+            # ad infinitum. The in-scope-redirect finding above is still
+            # recorded so the operator sees evidence of the redirect.
+            _AUTH_DEST_PARTS = (
+                "/login", "/signin", "/sign-in", "/sign_in", "/log-in",
+                "/auth", "/logout", "/signout", "/sign-out", "/sso",
+                "/session", "/account/login", "/user/login",
+            )
+            _dest_path_lo = (_to_p.path or "").lower()
+            if any(p in _dest_path_lo for p in _AUTH_DEST_PARTS):
+                vc.log(
+                    f"[redirect] In-scope auth-page destination (not queued): "
+                    f"{r.url} → {abs_loc}",
+                    "INFO",
+                )
+            else:
+                if norm not in in_scope_new:
+                    in_scope_new.append(norm)
+                vc.log(f"[redirect] In-scope {r.status_code}: {r.url} → {abs_loc}", "INFO")
         else:
             out.add_finding(
                 title="HTTP Redirect to External URL",
@@ -20212,21 +20246,41 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                             f"expires={getattr(_other, 'expires', 'session')}"
                         )
                     _ev_body = "\n".join(_ev_lines)
+                    # Build the JSON-array output_file with an inline synthetic
+                    # req/resp entry so Crucible can render Evidence even when
+                    # the disk write fails. Prior versions wrote a single .txt
+                    # file and put its absolute path in output_file — when the
+                    # write failed silently (caught by `except Exception`) the
+                    # operator was left with no Evidence whatsoever. Now the
+                    # inline entry is unconditional; the file-based entry is
+                    # appended only when the write actually succeeds.
+                    _ev_entries: list = [{
+                        "url":  f"COOKIE ANALYSIS  {_ck.name}  (metadata-only finding)",
+                        "req":  _ev_body,
+                        "resp": (
+                            "This finding is derived from a cookie's expiry attribute, "
+                            "not from a server response. The full cookie attributes "
+                            "and a snapshot of the cookie jar at probe time are in the "
+                            "Request pane on the left."
+                        ),
+                    }]
                     try:
                         _ev_path = out.output_path(
                             phase,
                             f"excessive_timeout_{_ck.name}_{hostname}",
                         )
-                        # output_path skips the parent-mkdir when no output
-                        # role is set, so phase/ might not yet exist. Create
-                        # it explicitly — write_text was failing silently
-                        # inside the try/except and the finding had no
-                        # Evidence.
                         _ev_path.parent.mkdir(parents=True, exist_ok=True)
                         _ev_path.write_text(_ev_body, encoding="utf-8")
-                        _ev_rel = str(_ev_path)
-                    except Exception:
-                        _ev_rel = ""
+                        _ev_entries.append({
+                            "url":  f"COOKIE ANALYSIS  {_ck.name}  (saved file)",
+                            "file": str(_ev_path),
+                        })
+                    except Exception as _ev_exc:
+                        vc.log(
+                            f"[logout] Failed to persist cookie-timeout evidence file "
+                            f"for {_ck.name}: {_ev_exc!r} — inline evidence still available",
+                            "WARNING",
+                        )
 
                     out.add_finding(
                         title="Excessive Session Timeout Configured",
@@ -20237,10 +20291,10 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                             f"OWASP recommends 15–30 minutes of idle timeout for "
                             f"sensitive applications. The cookie's full attributes "
                             f"(Max-Age / Expires / Secure / HttpOnly / SameSite / "
-                            f"Domain / Path) are captured in the saved Evidence file."
+                            f"Domain / Path) are captured in the Evidence panel."
                         ),
                         output=_ev_body,
-                        output_file=_ev_rel,
+                        output_file=json.dumps(_ev_entries),
                         sources="fracture-logout", service=target["scheme"],
                         owasp="A07:2025 Identification and Authentication Failures",
                         nist="AC-11",
@@ -20301,9 +20355,34 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
             pass
 
     if not _timeout_detected:
-        # Save evidence: first probe (session start), last probe (after the
-        # full idle period), and a probe-status log showing every check.
-        _to_evidence: list = []
+        # Build a probe-log body that can be embedded inline AND, when the
+        # disk write succeeds, persisted as a file. The inline entry is
+        # always added so that Evidence is present even when output_path /
+        # write_text fails (as has been observed when the per-target dir
+        # tree is missing or the role-less branch hits a permission edge).
+        _to_log_body = (
+            f"Session idle-timeout probe log\n"
+            f"==============================\n"
+            f"Target URL:     {url}\n"
+            f"Probe interval: {_timeout_interval} seconds\n"
+            f"Probe ceiling:  {_timeout_max} seconds ({_timeout_max // 60} min)\n"
+            f"\nPer-probe results (elapsed_s, status, body_bytes):\n"
+            + "\n".join(
+                f"  t=+{_e:>4}s  HTTP {_s}  {_b} bytes"
+                for _e, _s, _b in _probe_status_log
+            )
+            + "\n"
+        )
+        _to_evidence: list = [{
+            "url":  f"PROBE LOG  {url}  (inline summary)",
+            "req":  _to_log_body,
+            "resp": (
+                "This finding is derived from the absence of a server-side timeout. "
+                "The per-probe results are in the Request pane on the left; full "
+                "first/last HTTP exchanges are in the additional Evidence entries "
+                "below when the disk-write succeeded."
+            ),
+        }]
         if _first_probe_resp is not None:
             try:
                 _fp_rq, _fp_rp = _save_http_evidence(
@@ -20312,8 +20391,11 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                     "url":  f"FIRST PROBE  GET {url} (t=+60s)",
                     "req":  str(_fp_rq), "resp": str(_fp_rp),
                 })
-            except Exception:
-                pass
+            except Exception as _fp_exc:
+                vc.log(
+                    f"[logout] First-probe evidence write failed: {_fp_exc!r}",
+                    "WARNING",
+                )
         if _last_probe_resp is not None and _last_probe_resp is not _first_probe_resp:
             try:
                 _lp_rq, _lp_rp = _save_http_evidence(
@@ -20322,31 +20404,24 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                     "url":  f"LAST PROBE  GET {url} (t=+{_timeout_max}s)",
                     "req":  str(_lp_rq), "resp": str(_lp_rp),
                 })
-            except Exception:
-                pass
+            except Exception as _lp_exc:
+                vc.log(
+                    f"[logout] Last-probe evidence write failed: {_lp_exc!r}",
+                    "WARNING",
+                )
         try:
             _to_log_path = out.output_path(
                 phase, f"timeout_probe_log_{hostname}")
-            _to_log_body = (
-                f"Session idle-timeout probe log\n"
-                f"==============================\n"
-                f"Target URL:     {url}\n"
-                f"Probe interval: {_timeout_interval} seconds\n"
-                f"Probe ceiling:  {_timeout_max} seconds ({_timeout_max // 60} min)\n"
-                f"\nPer-probe results (elapsed_s, status, body_bytes):\n"
-                + "\n".join(
-                    f"  t=+{_e:>4}s  HTTP {_s}  {_b} bytes"
-                    for _e, _s, _b in _probe_status_log
-                )
-                + "\n"
-            )
             _to_log_path.write_text(_to_log_body, encoding="utf-8")
             _to_evidence.append({
-                "url":  f"PROBE LOG  {_to_log_path.name}",
+                "url":  f"PROBE LOG  {_to_log_path.name}  (saved file)",
                 "file": str(_to_log_path),
             })
-        except Exception:
-            pass
+        except Exception as _pl_exc:
+            vc.log(
+                f"[logout] Probe-log file write failed: {_pl_exc!r}",
+                "WARNING",
+            )
 
         out.add_finding(
             title="Session Timeout Absent or Excessive",
@@ -20356,7 +20431,8 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                 f"({_timeout_max // 60} minutes) of inactivity. No server-side idle "
                 f"timeout was detected. An attacker who obtains a valid session token "
                 f"can exploit it indefinitely without time pressure. "
-                f"Evidence contains the first probe, last probe, and a full probe log."
+                f"Evidence contains the probe log and (when disk-writes succeed) the "
+                f"first probe, last probe, and saved probe log."
             ),
             output=(
                 f"Probe interval:  {_timeout_interval}s\n"
@@ -20367,7 +20443,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                    if _last_probe_resp is not None else "(no probe response)")
                 + "\nVerdict:         session NEVER expired during the 10-minute idle test"
             ),
-            output_file=json.dumps(_to_evidence) if _to_evidence else "",
+            output_file=json.dumps(_to_evidence),
             sources="fracture-logout", service=target["scheme"],
             owasp="A07:2025 Identification and Authentication Failures",
             nist="AC-11",
