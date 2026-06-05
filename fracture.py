@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.19.12"
+VERSION = "2.21.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2947,7 +2947,23 @@ class OutputManager:
         return p
 
     def log_command(self, tool: str, command: "list | str", output_file: "Path | None",
-                    extra: "dict | None" = None) -> None:
+                    extra: "dict | None" = None,
+                    *,
+                    tool_path: "str | None" = None,
+                    stdout: "str | None" = None,
+                    stderr: "str | None" = None,
+                    started: "datetime | None" = None,
+                    ended:   "datetime | None" = None,
+                    exit_code: "int | None" = None) -> None:
+        """Append a structured invocation line to scan.log.
+
+        When the caller passes *stdout*/*stderr*/*started*/*ended*/*exit_code*
+        (and optionally *tool_path*), additionally emit a sibling .log file
+        next to *output_file* containing a bash-prompted transcript with
+        timing and version metadata — per CLAUDE.md Section 15.
+        Legacy callers that don't pass capture data continue to work; their
+        .log file is simply not written.
+        """
         ts      = self._ts()
         cmd_str = " ".join(command) if isinstance(command, list) else command
         out_str = str(output_file.relative_to(self.root)) if output_file else "n/a"
@@ -2959,6 +2975,28 @@ class OutputManager:
         with self._log_lock:
             with self.log_file.open("a", encoding="utf-8") as f:
                 f.write("\n".join(lines) + "\n")
+
+        # ── Per-invocation .log (bash-prompted transcript) ─────────────────
+        if stdout is not None or stderr is not None or started is not None:
+            try:
+                import sys as _s
+                if "/opt/pr0t31n/shared" not in _s.path:
+                    _s.path.insert(0, "/opt/pr0t31n/shared")
+                import pr0t31n_tool_runner as _ur
+                from datetime import datetime as _dt
+                _st = started or _dt.now().astimezone()
+                _ed = ended   or _dt.now().astimezone()
+                _ur.write_tool_log(
+                    cmd=command, started=_st, ended=_ed,
+                    exit_code=exit_code,
+                    stdout=stdout or "", stderr=stderr or "",
+                    tool_name=tool, tool_path=tool_path or tool,
+                    output_file=output_file,
+                    log_dir=self.root if not output_file else None,
+                    extra_header=extra,
+                )
+            except Exception:
+                pass
 
     def log_error(self, tool: str, command: "list | str", error: str) -> None:
         ts      = self._ts()
@@ -8874,9 +8912,19 @@ return null;
 # ─────────────────────────────────────────────
 # URL helpers
 # ─────────────────────────────────────────────
+_TLS_PORTS_WEB = {443, 8443, 4443, 9443, 7443}
+
 def _parse_target(url: str) -> dict:
     p = urllib.parse.urlparse(url)
-    scheme   = p.scheme or "http"
+    if p.scheme:
+        scheme = p.scheme
+    elif p.port and p.port in _TLS_PORTS_WEB:
+        # Why: an input like "host:443" with no scheme used to silently become
+        # http://host:443/, which sends plain HTTP to a TLS-only service and
+        # causes shcheck / gobuster / etc. to report every header missing.
+        scheme = "https"
+    else:
+        scheme = "http"
     hostname = p.hostname or url
     port     = p.port or (443 if scheme == "https" else 80)
     is_https = scheme == "https"
@@ -11350,11 +11398,19 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         cmd = [whatweb, f"--log-json={ww_out}", "-a", "3", "--quiet", "--no-errors", url]
         vc.log("[recon] Running whatweb ...", "INFO")
         try:
-            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            _ww_started = datetime.now().astimezone()
+            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             _register_proc(proc)
-            proc.communicate(timeout=60)
+            _ww_stdout, _ww_stderr = proc.communicate(timeout=60)
             _deregister_proc(proc)
-            out.log_command("whatweb", cmd, ww_out)
+            _ww_ended = datetime.now().astimezone()
+            out.log_command(
+                "whatweb", cmd, ww_out,
+                tool_path=whatweb,
+                stdout=_ww_stdout, stderr=_ww_stderr,
+                started=_ww_started, ended=_ww_ended,
+                exit_code=proc.returncode,
+            )
             if ww_out.exists():
                 # Security header names (from _SECURITY_HEADERS, defined further in this
                 # module — resolved at call-time, not definition-time)
@@ -12275,17 +12331,24 @@ def _gobuster_run(
     Returns True when results in *out_f* should be processed, False when the
     scan was skipped or failed and the output should be ignored.
     """
+    _gob_started = datetime.now().astimezone()
+    _gob_stdout = ""
+    _gob_stderr = ""
+    _gob_rc: "int | None" = None
+    _final_cmd = cmd
     try:
         proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         _register_proc(proc)
-        _, gob_err = proc.communicate(timeout=timeout)
+        _gob_stdout, gob_err = proc.communicate(timeout=timeout)
         _deregister_proc(proc)
+        _gob_stderr = gob_err or ""
+        _gob_rc = proc.returncode
     except Exception as e:
         out.log_error("gobuster", cmd, str(e))
         return False
 
-    if gob_err and "server returns a status code" in gob_err.lower():
-        m = _GOB_WILDCARD_RE.search(gob_err)
+    if _gob_stderr and "server returns a status code" in _gob_stderr.lower():
+        m = _GOB_WILDCARD_RE.search(_gob_stderr)
         if m:
             excl_len = m.group(1)
             vc.log(
@@ -12294,12 +12357,16 @@ def _gobuster_run(
                 "INFO",
             )
             retry_cmd = cmd + ["--exclude-length", excl_len]
+            _final_cmd = retry_cmd
             try:
                 proc2 = _popen(retry_cmd, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True)
                 _register_proc(proc2)
-                _, gob_err2 = proc2.communicate(timeout=timeout)
+                _gob_stdout2, gob_err2 = proc2.communicate(timeout=timeout)
                 _deregister_proc(proc2)
+                _gob_stdout = _gob_stdout2 or _gob_stdout
+                _gob_stderr = gob_err2 or ""
+                _gob_rc = proc2.returncode
                 if gob_err2:
                     if "server returns a status code" in gob_err2.lower():
                         vc.log(
@@ -12312,11 +12379,19 @@ def _gobuster_run(
                 out.log_error("gobuster", retry_cmd, str(e2))
                 return False
         else:
-            vc.log(f"[{label}] gobuster stderr: {gob_err[:500]}", "WARNING")
-    elif gob_err:
-        vc.log(f"[{label}] gobuster stderr: {gob_err[:500]}", "WARNING")
+            vc.log(f"[{label}] gobuster stderr: {_gob_stderr[:500]}", "WARNING")
+    elif _gob_stderr:
+        vc.log(f"[{label}] gobuster stderr: {_gob_stderr[:500]}", "WARNING")
 
-    out.log_command("gobuster", cmd, out_f)
+    _gob_ended = datetime.now().astimezone()
+    _gob_tool_path = _final_cmd[0] if _final_cmd else "gobuster"
+    out.log_command(
+        "gobuster", _final_cmd, out_f,
+        tool_path=_gob_tool_path,
+        stdout=_gob_stdout, stderr=_gob_stderr,
+        started=_gob_started, ended=_gob_ended,
+        exit_code=_gob_rc,
+    )
     return True
 
 
@@ -13088,12 +13163,20 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
         cmd   = [sslscan, "--no-colour", host_port]
         vc.log(f"[tls] Running sslscan on {host_port}", "INFO")
         try:
-            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            _ssl_started = datetime.now().astimezone()
+            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             _register_proc(proc)
-            stdout, _ = proc.communicate(timeout=120)
+            stdout, _ssl_stderr = proc.communicate(timeout=120)
             _deregister_proc(proc)
+            _ssl_ended = datetime.now().astimezone()
             out_f.write_text(stdout, encoding="utf-8")
-            out.log_command("sslscan", cmd, out_f)
+            out.log_command(
+                "sslscan", cmd, out_f,
+                tool_path=sslscan,
+                stdout=stdout, stderr=_ssl_stderr,
+                started=_ssl_started, ended=_ssl_ended,
+                exit_code=proc.returncode,
+            )
             # Filter "not vulnerable" lines and bare section headers.
             # sslscan emits lines like "  Heartbleed:" (header only, no result)
             # followed by per-protocol result lines. The header line survives a
@@ -14566,12 +14649,20 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
 
         vc.log(f"[shcheck] Running on {tgt_url}", "INFO")
         try:
+            _shc_started = datetime.now().astimezone()
             proc = subprocess.run(
                 cmd, capture_output=True, text=True,
                 timeout=timeout, errors="replace",
             )
+            _shc_ended = datetime.now().astimezone()
             combined = proc.stdout + (proc.stderr or "")
-            out.log_command("shcheck", cmd, out_f)
+            out.log_command(
+                "shcheck", cmd, out_f,
+                tool_path=shcheck,
+                stdout=proc.stdout, stderr=proc.stderr,
+                started=_shc_started, ended=_shc_ended,
+                exit_code=proc.returncode,
+            )
 
             # Retry with -d if SSL validation error produced no results
             _ssl_err = "SSL: Certificate validation error." in combined
@@ -14583,13 +14674,21 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
                 cmd_d = list(cmd)
                 cmd_d.insert(-1, "-d")
                 try:
+                    _shc_d_started = datetime.now().astimezone()
                     proc_d   = subprocess.run(
                         cmd_d, capture_output=True, text=True,
                         timeout=timeout, errors="replace",
                     )
+                    _shc_d_ended = datetime.now().astimezone()
                     combined = proc_d.stdout + (proc_d.stderr or "")
                     proc     = proc_d
-                    out.log_command("shcheck", cmd_d, out_f)
+                    out.log_command(
+                        "shcheck", cmd_d, out_f,
+                        tool_path=shcheck,
+                        stdout=proc_d.stdout, stderr=proc_d.stderr,
+                        started=_shc_d_started, ended=_shc_d_ended,
+                        exit_code=proc_d.returncode,
+                    )
                 except (subprocess.TimeoutExpired, OSError):
                     pass
 
@@ -19195,19 +19294,22 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
     if nuclei and not fast:
         nuc_out = out.output_path(phase, "nuclei_" + target["hostname"])
         _nuc_templates_dir = "/opt/nuclei-templates"
-        # Use -json (JSONL output to stdout); capture stdout directly so the
+        # Use -jsonl (JSONL output to stdout); capture stdout directly so the
         # output file is always written even when nuclei finds nothing.
         # stderr is captured and logged so flag errors are visible.
+        # -jsonl replaced -json in nuclei v3.x.
         cmd = [nuclei, "-u", url, "-s", "critical,high,medium",
-               "-silent", "-json", "-no-interactsh"]
+               "-silent", "-jsonl", "-no-interactsh"]
         if Path(_nuc_templates_dir).is_dir():
             cmd += ["-t", _nuc_templates_dir]
         vc.log("[vulnscan] Running nuclei ...", "INFO")
         try:
+            _nuc_started = datetime.now().astimezone()
             proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             _register_proc(proc)
             nuc_stdout, nuc_stderr = proc.communicate(timeout=timeout)
             _deregister_proc(proc)
+            _nuc_ended = datetime.now().astimezone()
             if nuc_stderr:
                 # Strip ANSI escape sequences nuclei emits to a terminal
                 _nuc_clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', nuc_stderr).strip()
@@ -19228,7 +19330,13 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
                     vc.log(f"[vulnscan] nuclei stderr: {_nuc_warn[:500]}", "WARNING")
             # Always write the output file (may be empty if no findings)
             nuc_out.write_text(nuc_stdout, encoding="utf-8")
-            out.log_command("nuclei", cmd, nuc_out)
+            out.log_command(
+                "nuclei", cmd, nuc_out,
+                tool_path=nuclei,
+                stdout=nuc_stdout, stderr=nuc_stderr,
+                started=_nuc_started, ended=_nuc_ended,
+                exit_code=proc.returncode,
+            )
             for line in nuc_stdout.splitlines():
                 try:
                     item    = json.loads(line)
@@ -19263,11 +19371,19 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
                    "-output", str(nik_out), "-nointeractive"]
         vc.log("[vulnscan] Running nikto ...", "INFO")
         try:
-            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            _nik_started = datetime.now().astimezone()
+            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             _register_proc(proc)
-            proc.communicate(timeout=600)
+            _nik_stdout, _nik_stderr = proc.communicate(timeout=600)
             _deregister_proc(proc)
-            out.log_command("nikto", cmd, nik_out)
+            _nik_ended = datetime.now().astimezone()
+            out.log_command(
+                "nikto", cmd, nik_out,
+                tool_path=nikto,
+                stdout=_nik_stdout, stderr=_nik_stderr,
+                started=_nik_started, ended=_nik_ended,
+                exit_code=proc.returncode,
+            )
             if nik_out.exists():
                 try:
                     ndata = json.loads(nik_out.read_text(encoding="utf-8"))
