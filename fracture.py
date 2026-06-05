@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.21.0"
+VERSION = "2.21.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2994,6 +2994,7 @@ class OutputManager:
                     output_file=output_file,
                     log_dir=self.root if not output_file else None,
                     extra_header=extra,
+                    errors_log=self.error_log,
                 )
             except Exception:
                 pass
