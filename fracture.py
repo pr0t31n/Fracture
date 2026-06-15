@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.21.1"
+VERSION = "2.25.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -11724,6 +11724,31 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                 ),
                                 http_code=_ww_http_status or 0,
                             )
+                            # 2026-06-11 review A06 fix: compare version against
+                            # an embedded vulnerable-version map. The map covers
+                            # the most commonly identified web stacks; extend in
+                            # findings_catalogue.json over time.
+                            if version:
+                                _vuln_summary = _check_component_vuln(pname, version)
+                                if _vuln_summary:
+                                    out.add_finding(
+                                        title=f"Vulnerable Component: {pname} {version}",
+                                        url=url, port=target["port"],
+                                        risk=_vuln_summary["risk"],
+                                        description=_vuln_summary["description"],
+                                        output=f"Component: {pname} {version}\n"
+                                               f"Match: {_vuln_summary['match']}",
+                                        sources="fracture-a06-version-check",
+                                        service=target["scheme"],
+                                        output_file=str(ww_out),
+                                        owasp="A06:2025 Vulnerable and Outdated Components",
+                                        nist="CM-7",
+                                        cves=",".join(_vuln_summary.get("cves") or []),
+                                        remediation=(
+                                            f"Upgrade {pname} to {_vuln_summary.get('fixed_in', 'latest')} "
+                                            f"or apply vendor patches."),
+                                        http_code=_ww_http_status or 0,
+                                    )
                         except Exception:
                             pass
 
@@ -12237,9 +12262,13 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         if re.search(r'Index of /|Directory listing|<title>Index of', r.text, re.I):
             _dl_out = out.output_path(phase, "dir_listing_" + target["hostname"])
             _dl_out.write_text(r.text[:10000], encoding="utf-8")
+            # Risk lowered MEDIUM→LOW per 2026-06-11 review: indexing alone
+            # is information disclosure without content classification. A
+            # follow-on phase that detects sensitive file names in the index
+            # may emit a separate higher-severity finding.
             out.add_finding(
                 title="Directory Listing Enabled",
-                url=url + "/", port=target["port"], risk="MEDIUM",
+                url=url + "/", port=target["port"], risk="LOW",
                 description="The web server is configured to display a browsable directory index, exposing file structure and potentially sensitive files to unauthenticated users.",
                 output=r.text[:500], sources="fracture-recon",
                 service=target["scheme"], output_file=str(_dl_out),
@@ -13998,11 +14027,115 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
 # ─────────────────────────────────────────────
 # Phase 2: Headers
 # ─────────────────────────────────────────────
+# ── 2026-06-11 A06 Vulnerable Component check ─────────────────────────
+# Embedded vulnerable-version map. Keys are lowercase plugin/component
+# names (matching whatweb output); values list (version_prefix, fixed_in,
+# risk, cves, description).
+#
+# This is intentionally narrow — high-confidence, well-known CVEs only.
+# Expansions belong in findings_catalogue.json so they update without
+# Fracture-source changes.
+
+_FRACTURE_VULN_MAP = {
+    "wordpress": [
+        ("5.0",   "5.0.1",  "HIGH",     ["CVE-2018-20148"], "WordPress < 5.0.1 — PHP object injection in unserialization."),
+        ("4.9",   "4.9.10", "HIGH",     ["CVE-2018-12895"], "WordPress 4.9.x < 4.9.10 — authenticated arbitrary file deletion."),
+        ("4.7",   "4.7.5",  "CRITICAL", ["CVE-2017-1001000"], "WordPress 4.7.0/4.7.1 — REST API content injection."),
+    ],
+    "apache": [
+        ("2.4.4",  "2.4.50", "CRITICAL", ["CVE-2021-41773"], "Apache 2.4.49 — path traversal + RCE (CVE-2021-41773)."),
+        ("2.4.50", "2.4.51", "CRITICAL", ["CVE-2021-42013"], "Apache 2.4.50 — path traversal + RCE (CVE-2021-42013)."),
+        ("2.4.7",  "2.4.50", "HIGH",     ["CVE-2017-3169"],  "Apache 2.4.7-2.4.25 — multiple HTTP smuggling and crashes."),
+    ],
+    "nginx": [
+        ("1.16",  "1.16.1",  "HIGH",     ["CVE-2019-9511"],  "nginx HTTP/2 DoS (CVE-2019-9511 series)."),
+        ("1.20",  "1.20.1",  "MEDIUM",   ["CVE-2021-23017"], "nginx DNS resolver heap overflow (1-byte) (CVE-2021-23017)."),
+    ],
+    "php":      [
+        ("7.4",   "7.4.33", "HIGH",     ["CVE-2022-31625"], "PHP 7.x < 7.4.33 — multiple CVEs; 7.x EOL."),
+        ("8.1.0", "8.1.21", "HIGH",     ["CVE-2023-3247"],  "PHP 8.1.x — multiple CVEs prior to 8.1.21."),
+    ],
+    "openssl": [
+        ("1.0",   "1.0.2u", "CRITICAL", ["CVE-2014-0160"],  "OpenSSL 1.0.x — multiple CVEs incl. Heartbleed. EOL."),
+        ("1.1",   "1.1.1q", "HIGH",     [],                  "OpenSSL 1.1.x EOL — upgrade to 3.x."),
+    ],
+    "drupal": [
+        ("7",     "7.96",   "CRITICAL", ["CVE-2018-7600"],  "Drupalgeddon2 — unauthenticated RCE."),
+        ("8.0",   "8.5.1",  "CRITICAL", ["CVE-2018-7600"],  "Drupalgeddon2 — unauthenticated RCE."),
+    ],
+    "joomla": [
+        ("3.7",   "3.7.1",  "CRITICAL", ["CVE-2017-8917"],  "Joomla 3.7.0 — SQL injection via com_fields."),
+    ],
+    "jquery": [
+        ("1",     "3.5.0",  "MEDIUM",   ["CVE-2020-11022","CVE-2020-11023"],  "jQuery <3.5.0 — XSS via .html()/.append() in IE/Edge legacy."),
+        ("2",     "3.5.0",  "MEDIUM",   ["CVE-2020-11022","CVE-2020-11023"],  "jQuery <3.5.0 — XSS via .html()/.append() in IE/Edge legacy."),
+        ("3.0",   "3.5.0",  "MEDIUM",   ["CVE-2020-11022","CVE-2020-11023"],  "jQuery <3.5.0 — XSS via .html()/.append() in IE/Edge legacy."),
+    ],
+    "tomcat": [
+        ("9.0",   "9.0.31", "HIGH",     ["CVE-2020-1938"],  "Ghostcat — AJP file inclusion + potential RCE."),
+        ("8.5",   "8.5.51", "HIGH",     ["CVE-2020-1938"],  "Ghostcat — AJP file inclusion + potential RCE."),
+        ("7.0",   "7.0.100","HIGH",     ["CVE-2020-1938"],  "Ghostcat — AJP file inclusion + potential RCE."),
+    ],
+    "iis": [
+        ("7.5",   "10.0",   "MEDIUM",   [], "IIS 7.5 and older — generally EOL; upgrade."),
+    ],
+}
+
+
+def _check_component_vuln(plugin_name: str, version: str) -> dict | None:
+    """Return None when component+version is not known-vulnerable.
+    Otherwise return a dict with risk/description/cves/fixed_in/match.
+
+    Uses semantic-version comparison: a record matches when the observed
+    version starts with version_prefix AND is strictly less than fixed_in.
+    """
+    if not plugin_name or not version:
+        return None
+    pn = plugin_name.lower().strip()
+    records = _FRACTURE_VULN_MAP.get(pn)
+    if not records:
+        return None
+
+    def _vt(v: str):
+        parts = []
+        for p in v.split("."):
+            try: parts.append(int(re.match(r"\d+", p).group(0)))
+            except (AttributeError, ValueError): parts.append(0)
+        return tuple(parts)
+
+    try:
+        ver_t = _vt(version)
+    except Exception:
+        return None
+
+    for prefix, fixed_in, risk, cves, desc in records:
+        try:
+            if not version.startswith(prefix):
+                continue
+            if _vt(version) >= _vt(fixed_in):
+                continue  # patched
+        except Exception:
+            continue
+        return {
+            "risk":        risk,
+            "description": desc + f" Observed: {plugin_name} {version}, "
+                                   f"first patched in {fixed_in}.",
+            "cves":        cves,
+            "fixed_in":    fixed_in,
+            "match":       f"{prefix}.x < {fixed_in}",
+        }
+    return None
+
+
 _SECURITY_HEADERS = [
-    ("Strict-Transport-Security", "MEDIUM",  "Missing HSTS Header",
+    # Risk lowered MEDIUM→LOW per 2026-06-11 review. Missing security
+    # headers are defensive-depth concerns; they don't enable an attack on
+    # their own. CVSS for "missing HSTS" or "missing CSP" sits at LOW under
+    # most calibration models.
+    ("Strict-Transport-Security", "LOW",  "Missing HSTS Header",
      "Without HSTS, browsers may connect over plain HTTP enabling SSL-stripping downgrade attacks (RFC 6797). CWE-523, CWE-319.",
      "SC-8", "Add: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload"),
-    ("Content-Security-Policy",   "MEDIUM", "Missing Content-Security-Policy Header",
+    ("Content-Security-Policy",   "LOW", "Missing Content-Security-Policy Header",
      "Without CSP, the application is susceptible to XSS attacks.",
      "SI-10", "Implement a Content-Security-Policy to restrict resource loading."),
     ("X-Frame-Options",           "LOW",    "Missing X-Frame-Options Header (Clickjacking)",
@@ -14026,6 +14159,65 @@ _SHCHECK_ALLOWED_HEADERS = {
     "X-Frame-Options", "X-Content-Type-Options",
     "Referrer-Policy", "Cache-Control",
 }
+
+
+# ── 2026-06-11 review round 5: consolidation helpers ─────────────────────────
+# These helpers consolidate logic previously duplicated across multiple
+# scan-phase functions.  Existing call sites can migrate incrementally
+# without changing the token-stream / session-share behaviour they rely
+# on, because the helpers preserve the same external semantics.
+
+def _iter_missing_security_headers(target: dict, present_headers) -> "list":
+    """Return [(name, risk, desc, nist, remediation), …] for each security
+    header listed in `_SECURITY_HEADERS` that is missing from
+    `present_headers`, with the standard HSTS-on-HTTP suppression.
+    `present_headers` may be a dict, a `requests.structures.CaseInsensitiveDict`,
+    or any iterable that supports membership tests on header names.
+
+    Previously this iterate-and-filter pattern was inlined 3+ times across
+    `_phase_recon`, the whatweb consumer, and the endpoint-tools pass."""
+    out: list = []
+    for hdr_name, hdr_risk, _unused, hdr_desc, hdr_nist, hdr_remed in _SECURITY_HEADERS:
+        if hdr_name == "Strict-Transport-Security" and not target.get("is_https"):
+            continue
+        if hdr_name not in present_headers:
+            out.append((hdr_name, hdr_risk, hdr_desc, hdr_nist, hdr_remed))
+    return out
+
+
+def _build_gobuster_dir_cmd(gobuster_bin: str, url: str, wordlist: str,
+                              threads: str, out_f, sess) -> list:
+    """Canonical gobuster directory-brute command.
+
+    Used by `_phase_recon` and `_run_buster_only` (and any future
+    per-role scan).  Both paths constructed an identical 12-element cmd
+    list; this helper is the single source of truth for the flag set.
+    Sess-derived auth flags are appended via `_buster_auth_flags()`."""
+    cmd = [gobuster_bin, "dir", "-u", url, "-w", wordlist, "-t", str(threads),
+            "-q", "-k", "-o", str(out_f)]
+    cmd += _buster_auth_flags(sess)
+    return cmd
+
+
+def _build_feroxbuster_dir_cmd(feroxbuster_bin: str, url: str, wordlist: str,
+                                 threads: str, status_codes: str, out_f,
+                                 sess, cdn: str = "") -> list:
+    """Canonical feroxbuster directory-brute command.
+
+    Used by `_phase_recon` and `_run_buster_only`.  When a CDN is in front
+    of the target the rate-limit flag is appended automatically.  Sess-derived
+    auth flags appended via `_buster_auth_flags()`."""
+    cmd = [
+        feroxbuster_bin, "--url", url, "--wordlist", wordlist,
+        "--depth", "2", "--threads", str(threads), "--quiet",
+        "--status-codes", status_codes,
+        "--output", str(out_f), "--insecure",
+        "--auto-tune", "--time-limit", "4m",
+    ]
+    if cdn:
+        cmd += ["--rate-limit", "25"]
+    cmd += _buster_auth_flags(sess)
+    return cmd
 
 
 def _platform_remed(base: str, server: str = "", powered_by: str = "") -> str:
@@ -16964,7 +17156,80 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
     elif not jwt_tool_bin:
         vc.log("[jwt] jwt_tool not found — install jwt_tool for deeper testing", "WARNING")
 
-    vc.status(phase, "JWT", "complete", "Done", 3, 3)
+    # ── Test 3: HS256 weak-secret brute-force (2026-06-11 review) ────────
+    # Tries a small embedded wordlist of common HS256 secrets against any
+    # JWT we captured. Embedded list is intentionally short (top-20 OWASP
+    # JWT secrets); large dictionaries belong outside Fracture in dedicated
+    # cracking infrastructure.
+    vc.status(phase, "JWT", "running", "HS256 weak-secret check", 3, 4)
+    _WEAK_JWT_SECRETS = [
+        "secret","Secret","SECRET","password","Password","PASSWORD",
+        "123456","123456789","admin","root","key","jwt","jwtsecret",
+        "your-256-bit-secret","your_jwt_secret","mysecret","supersecret",
+        "secretkey","my-secret","my_super_secret","changeme","letmein",
+        "test","demo","dev",
+    ]
+    if found_tokens:
+        try:
+            import hmac as _hmac, hashlib as _hashlib
+            import base64 as _b64
+            def _b64url_decode(s: str) -> bytes:
+                s = s + "=" * (-len(s) % 4)
+                return _b64.urlsafe_b64decode(s.encode("ascii"))
+            for token in list(found_tokens)[:3]:   # cap at 3 tokens
+                parts = token.split(".")
+                if len(parts) != 3: continue
+                try:
+                    header = json.loads(_b64url_decode(parts[0]))
+                except Exception:
+                    continue
+                alg = (header.get("alg") or "").upper()
+                if alg not in ("HS256","HS384","HS512"):
+                    continue
+                digestmod = {"HS256": _hashlib.sha256,
+                              "HS384": _hashlib.sha384,
+                              "HS512": _hashlib.sha512}[alg]
+                signing_input = (parts[0] + "." + parts[1]).encode("ascii")
+                try:
+                    expected_sig = _b64url_decode(parts[2])
+                except Exception:
+                    continue
+                cracked = None
+                for secret in _WEAK_JWT_SECRETS:
+                    sig = _hmac.new(secret.encode("utf-8"), signing_input,
+                                     digestmod).digest()
+                    if _hmac.compare_digest(sig, expected_sig):
+                        cracked = secret
+                        break
+                if cracked:
+                    out.add_finding(
+                        title=f"JWT Signing Secret Brute-Force Recovered ({alg})",
+                        url=url, port=port, risk="CRITICAL",
+                        description=(
+                            f"Fracture brute-forced the {alg} signing secret for a JWT "
+                            f"observed at {url}. The recovered secret was a "
+                            f"top-20 default ({cracked!r}). With the secret in hand, "
+                            f"an attacker can forge tokens for any user, bypassing "
+                            f"authentication entirely."),
+                        output=f"Token (truncated): {token[:60]}...\n"
+                               f"Algorithm: {alg}\n"
+                               f"Recovered secret: {cracked}",
+                        sources="fracture-jwt-hs256-brute",
+                        service=target["scheme"],
+                        cves="",
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="IA-5", remediation=(
+                            "Rotate the JWT signing secret to a 256-bit-or-larger "
+                            "value generated with a CSPRNG. Reject HS256 tokens at "
+                            "API gateways when a high-entropy random value is not "
+                            "in use; consider switching to RS256/ES256 with key "
+                            "management via KMS/HSM."),
+                    )
+                    break   # one finding per phase is enough
+        except Exception as exc:
+            vc.log(f"[jwt] HS256 brute pass error: {exc}", "WARNING")
+
+    vc.status(phase, "JWT", "complete", "Done", 4, 4)
     vc.log("[jwt] Phase complete", "SUCCESS")
 
 
@@ -17541,25 +17806,54 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     params  = crawl_data.get("params", [])
     vc.status(phase, "Injection Testing", "running", "SQLi heuristic", 0, 7)
 
-    # 1. URL param error-based SQLi
+    # 1. URL param error-based SQLi — two-probe gated per 2026-06-11 review.
+    # The prior code fired CRITICAL on a single ' injection if any SQL-error
+    # regex matched the response, which produces false positives on pages
+    # that happen to contain documentation about SQLi or framework error
+    # text. The confirmation requires:
+    #   (a) baseline GET without the payload does NOT match _SQL_ERROR_RE
+    #   (b) single-' injection matches _SQL_ERROR_RE
+    #   (c) double-'' injection (escaped form) does NOT match _SQL_ERROR_RE
+    #       — i.e. the error went away when the quote was syntactically valid
+    # When (c) confirms, risk = CRITICAL (true positive). When (c) does not
+    # confirm (the error persists), risk = HIGH and title is marked
+    # "Suspected" — still worth investigating but not auto-CRITICAL.
     for entry in params:
         purl = entry["url"]
         for param in entry["params"]:
+            try: rb = _qs_inject(purl, param, "test", sess, timeout)
+            except Exception: rb = None
+            if rb and _SQL_ERROR_RE.search(rb.text):
+                # Baseline already contains SQL-error text — this page
+                # legitimately discusses errors. Skip; emit no finding.
+                continue
             r = _qs_inject(purl, param, "test'", sess, timeout)
             if r and _SQL_ERROR_RE.search(r.text):
+                try: r2 = _qs_inject(purl, param, "test''", sess, timeout)
+                except Exception: r2 = None
+                _confirmed = r2 is not None and not _SQL_ERROR_RE.search(r2.text)
+                _risk      = "CRITICAL" if _confirmed else "HIGH"
+                _title     = ("SQL Injection (Error-Based) — Confirmed" if _confirmed
+                              else "SQL Injection (Error-Based) — Suspected, unconfirmed")
                 _rq, _rp = _save_http_evidence(out, phase, f"sqli_error_{param}", r, endpoint_url=purl, method="GET")
                 out.add_finding(
-                    title="SQL Injection (Error-Based)",
-                    url=purl, port=target["port"], risk="CRITICAL",
-                    description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
+                    title=_title,
+                    url=purl, port=target["port"], risk=_risk,
+                    description=("User-controlled input is incorporated into SQL queries "
+                                  "without parameterisation, allowing an attacker to read, "
+                                  "modify, or delete database contents. "
+                                  + ("Two-probe confirmation: '' (escaped) suppresses the "
+                                     "error, indicating quote-context injection." if _confirmed
+                                     else "NOTE: '' (escaped) probe ALSO triggers the error — "
+                                     "may be page-content noise. Manual confirmation advised.")),
                     output=f"Parameter: {param}\nURL: {purl}",
                     output_file=f"{_rq},{_rp}",
-                    sources="fracture-injection", service=target["scheme"],
+                    sources="fracture-injection (two-probe gated)", service=target["scheme"],
                     affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                     remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                     http_code=r.status_code,
                 )
-                vc.log(f"[injection] SQLi: {purl} param={param}", "SUCCESS")
+                vc.log(f"[injection] SQLi: {purl} param={param} confirmed={_confirmed}", "SUCCESS")
 
     vc.status(phase, "Injection Testing", "running", "Form SQLi", 1, 7)
     # 2. Form-based SQLi
@@ -17574,17 +17868,38 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             data = {i["name"]: "test" for i in inputs if i.get("name")}
             data[pname] = "test'"
             try:
+                # Two-probe gated per 2026-06-11 review (see URL-param path).
+                data_b = dict(data); data_b[pname] = "test"
+                rb = sess.post(action, data=data_b, timeout=timeout) if method == "POST" \
+                    else sess.get(action, params=data_b, timeout=timeout)
+                if rb and _SQL_ERROR_RE.search(rb.text):
+                    # Baseline already triggers — skip.
+                    continue
                 r = sess.post(action, data=data, timeout=timeout) if method == "POST" \
                     else sess.get(action, params=data, timeout=timeout)
                 if _SQL_ERROR_RE.search(r.text):
+                    data2 = dict(data); data2[pname] = "test''"
+                    try:
+                        r2 = sess.post(action, data=data2, timeout=timeout) if method == "POST" \
+                            else sess.get(action, params=data2, timeout=timeout)
+                    except Exception: r2 = None
+                    _confirmed = r2 is not None and not _SQL_ERROR_RE.search(r2.text)
+                    _risk      = "CRITICAL" if _confirmed else "HIGH"
+                    _title     = ("SQL Injection (Error-Based) — Confirmed" if _confirmed
+                                  else "SQL Injection (Error-Based) — Suspected, unconfirmed")
                     _rq, _rp = _save_http_evidence(out, phase, f"sqli_form_{pname}", r, endpoint_url=action, method=method)
                     out.add_finding(
-                        title="SQL Injection (Error-Based)",
-                        url=action, port=target["port"], risk="CRITICAL",
-                        description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
-                        output=f"Form: {action}\nField: {pname}",
+                        title=_title,
+                        url=action, port=target["port"], risk=_risk,
+                        description=("User-controlled input is incorporated into SQL queries "
+                                      "without parameterisation, allowing an attacker to read, "
+                                      "modify, or delete database contents. "
+                                      + ("Two-probe confirmation: '' (escaped) suppresses the error."
+                                         if _confirmed else
+                                         "NOTE: '' (escaped) probe ALSO triggers error — manual confirmation advised.")),
+                        output=f"Form: {action}\nField: {pname}\nConfirmed: {_confirmed}",
                         output_file=f"{_rq},{_rp}",
-                        sources="fracture-injection", service=target["scheme"],
+                        sources="fracture-injection (two-probe gated)", service=target["scheme"],
                         affected=action, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                         http_code=r.status_code,
@@ -21172,9 +21487,12 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
         try:
             r = sess.get(eu, timeout=timeout, allow_redirects=True)
             if r and r.status_code in (500, 503) and _STACK_TRACE_RE.search(r.text):
+                # Risk lowered MEDIUM→LOW per 2026-06-11 review: stack-trace
+                # disclosure is information disclosure that aids reconnaissance
+                # but doesn't enable an attack on its own.
                 out.add_finding(
                     title="Verbose Error Messages — Stack Trace Disclosed",
-                    url=eu, port=target["port"], risk="MEDIUM",
+                    url=eu, port=target["port"], risk="LOW",
                     description=(
                         f"The server returned a verbose error at {eu} (HTTP {r.status_code}) "
                         f"containing stack trace or database error details. This leaks "
@@ -21815,6 +22133,168 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
 
 
 # =============================================================================
+# A08 Subresource Integrity check (2026-06-11 review)
+# =============================================================================
+# Parses HTML pages discovered during crawl + flags <script>/<link> tags
+# pointing at external origins WITHOUT a valid `integrity=` attribute.
+# SRI is the only way to prevent supply-chain tampering of CDN-served JS.
+
+_SRI_ORIGIN_RE = re.compile(r'(?:src|href)=["\']https?://([^/"\']+)/[^"\']*["\']',
+                              re.IGNORECASE)
+
+def _phase_sri_check(target: dict, cfg: dict, pm: ProgressManager,
+                     out: OutputManager, sess: requests.Session,
+                     crawl_data: dict) -> None:
+    """A08: detect external <script>/<link> elements served without SRI."""
+    phase = "sri_check"
+    url   = target["url"]
+    timeout = cfg.get("timeout", 10)
+    vc.status(phase, "SRI", "running", "checking SRI on external resources", 0, 1)
+    # First fetch the landing page; then sample up to 5 crawl URLs
+    pages_to_check = [url]
+    for ep in (crawl_data.get("endpoints") or [])[:5]:
+        if ep.get("url") and ep["url"] not in pages_to_check:
+            pages_to_check.append(ep["url"])
+    own_host = (urllib.parse.urlparse(url).hostname or "").lower()
+    flagged: list[dict] = []
+    for page_url in pages_to_check:
+        try:
+            r = sess.get(page_url, timeout=timeout, verify=False, allow_redirects=True)
+            if r.status_code != 200: continue
+            body = r.text
+        except Exception:
+            continue
+        # Look at <script src=...> and <link href=...> tags
+        for tag_m in re.finditer(
+                r'<\s*(script|link)\b([^>]*)>', body, re.IGNORECASE):
+            tag_name = tag_m.group(1).lower()
+            attrs    = tag_m.group(2)
+            src_m = re.search(r'(?:src|href)=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+            if not src_m: continue
+            res_url = src_m.group(1)
+            res_host = (urllib.parse.urlparse(res_url).hostname or "").lower()
+            if not res_host or res_host == own_host:
+                continue   # same-origin — SRI not required (still best practice)
+            # rel="stylesheet" or rel="modulepreload"/script types matter for link
+            if tag_name == "link":
+                rel_m = re.search(r'rel=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+                if rel_m and rel_m.group(1).lower() not in (
+                        "stylesheet", "modulepreload", "preload"):
+                    continue
+            # Check for an integrity attribute
+            if re.search(r'integrity=["\'][^"\']*["\']', attrs, re.IGNORECASE):
+                continue
+            flagged.append({"page": page_url, "tag": tag_name, "url": res_url,
+                             "host": res_host})
+    if flagged:
+        # Emit one finding per unique (host, tag) pair to keep noise down
+        seen_pairs = set()
+        for entry in flagged:
+            key = (entry["host"], entry["tag"])
+            if key in seen_pairs: continue
+            seen_pairs.add(key)
+            out.add_finding(
+                title=f"Missing Subresource Integrity — {entry['tag']} from {entry['host']}",
+                url=entry["page"], port=target["port"], risk="MEDIUM",
+                description=(
+                    f"The page {entry['page']} loads a <{entry['tag']}> from "
+                    f"the external origin {entry['host']} without an `integrity=` "
+                    f"attribute. If the third party is compromised (or the CDN "
+                    f"is MITMed), the attacker controls JavaScript executed in "
+                    f"the application's origin. Resource: {entry['url']}"),
+                output=f"Page: {entry['page']}\nTag:  <{entry['tag']}>\nURL:  {entry['url']}",
+                sources="fracture-sri",
+                service=target["scheme"], affected=entry["url"],
+                owasp="A08:2025 Software and Data Integrity Failures",
+                nist="SI-7",
+                remediation=(
+                    "Add an integrity=\"sha384-...\" attribute to every external "
+                    "<script>/<link> tag. Either pin the resource version + "
+                    "compute its hash, or self-host the asset to eliminate the "
+                    "supply-chain dependency."),
+            )
+    vc.status(phase, "SRI", "complete", f"checked {len(pages_to_check)} pages, "
+              f"{len(flagged)} unprotected externals", 1, 1)
+    vc.log(f"[sri] Phase complete — {len(flagged)} SRI-less external resources", "SUCCESS")
+
+
+# =============================================================================
+# A10 Host-header SSRF (2026-06-11 review)
+# =============================================================================
+# Replaces the Host header on a baseline GET with attacker-controlled values
+# (collaborator + localhost variants) and looks for response-body / status
+# differences that indicate the back-end honored the spoofed host.
+
+def _phase_host_header_ssrf(target: dict, cfg: dict, pm: ProgressManager,
+                             out: OutputManager, sess: requests.Session,
+                             crawl_data: dict) -> None:
+    phase = "host_header_ssrf"
+    url   = target["url"]
+    timeout = cfg.get("timeout", 10)
+    vc.status(phase, "Host-Header SSRF", "running", "baseline", 0, 1)
+    # Get a baseline body
+    try:
+        baseline = sess.get(url, timeout=timeout, verify=False, allow_redirects=False)
+    except Exception:
+        return
+    if baseline is None:
+        return
+    base_status = baseline.status_code
+    base_len    = len(baseline.text)
+    # Three host-rewrite probes:
+    spoofs = [
+        ("Host=127.0.0.1",       {"Host": "127.0.0.1"}),
+        ("Host=internal-only.local", {"Host": "internal-only.local"}),
+        ("X-Forwarded-Host",     {"X-Forwarded-Host": "attacker.fracture-internal"}),
+    ]
+    for label, hdrs in spoofs:
+        try:
+            r = sess.get(url, timeout=timeout, verify=False,
+                          allow_redirects=False, headers=hdrs)
+        except Exception:
+            continue
+        # Marker: 3xx redirect to a host derived from the spoofed Host header,
+        # OR response body contains "internal-only.local" / "attacker.fracture-internal"
+        loc = r.headers.get("Location", "") or r.headers.get("location", "")
+        body = r.text
+        spoofed_value = (list(hdrs.values())[0]).lower()
+        triggered = False
+        if 300 <= r.status_code < 400 and spoofed_value in loc.lower():
+            triggered = True; evidence = f"Location header reflects spoofed host: {loc}"
+        elif spoofed_value in body.lower():
+            triggered = True; evidence = f"Response body contains spoofed host: {spoofed_value}"
+        elif abs(len(body) - base_len) > 200 and r.status_code != base_status:
+            triggered = True; evidence = (f"Response differs significantly from baseline "
+                                            f"(status {base_status} → {r.status_code}, "
+                                            f"len {base_len} → {len(body)})")
+        if triggered:
+            out.add_finding(
+                title=f"Host-Header SSRF Surface ({label})",
+                url=url, port=target["port"], risk="MEDIUM",
+                description=(
+                    f"The server at {url} honored a spoofed {label}. {evidence}. "
+                    f"Attackers can use Host-header injection to reach internal "
+                    f"services through the application's proxy, poison password-"
+                    f"reset emails, or trigger SSRF against internal-only endpoints."),
+                output=f"Baseline: {base_status}, len={base_len}\n"
+                       f"Spoof: {label}\nResponse: {r.status_code}, len={len(body)}\n"
+                       f"Evidence: {evidence}",
+                sources="fracture-host-ssrf",
+                service=target["scheme"], affected=url,
+                owasp="A10:2025 Server-Side Request Forgery",
+                nist="SC-7",
+                remediation=(
+                    "Validate the Host header against an allow-list at the "
+                    "reverse-proxy layer (or in the application). Reject requests "
+                    "with X-Forwarded-Host / X-Forwarded-Server / X-Original-URL "
+                    "from untrusted upstreams."),
+            )
+            break   # first spoof succeeded — no need to test others
+    vc.status(phase, "Host-Header SSRF", "complete", "done", 1, 1)
+    vc.log(f"[host-ssrf] Phase complete", "SUCCESS")
+
+
+# =============================================================================
 # Phase 18: File Upload — Informational
 # =============================================================================
 
@@ -22235,9 +22715,9 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
     # ── Dirs: gobuster ─────────────────────────────────────────────────────────
     if wc_baseline is None and gobuster and Path(wordlist_dir).exists():
         out_f = out.output_path(phase, f"gobuster_{target['hostname']}{sfx}")
-        cmd = [gobuster, "dir", "-u", url, "-w", wordlist_dir, "-t", _rbo_threads,
-               "-q", "-k", "-o", str(out_f)]
-        cmd += _buster_auth_flags(sess)
+        # 2026-06-11 review round 5: use canonical cmd builder
+        cmd = _build_gobuster_dir_cmd(gobuster, url, wordlist_dir,
+                                        _rbo_threads, out_f, sess)
         vc.log(f"[recon] Running gobuster (dirs){' for ' + role_label if role_label else ''} ...", "INFO")
         _gobuster_run(cmd, out_f, "recon", out)
         if out_f.exists():
@@ -22262,16 +22742,10 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
     # ── Dirs: feroxbuster ──────────────────────────────────────────────────────
     if feroxbuster and Path(wordlist_dir).exists():
         fer_out = out.output_path(phase, f"feroxbuster_{target['hostname']}{sfx}")
-        cmd = [
-            feroxbuster, "--url", url, "--wordlist", wordlist_dir,
-            "--depth", "2", "--threads", _rbo_threads, "--quiet",
-            "--status-codes", _rbo_fer_sc,
-            "--output", str(fer_out), "--insecure",
-            "--auto-tune", "--time-limit", "4m",
-        ]
-        if _rbo_cdn:
-            cmd += ["--rate-limit", "25"]
-        cmd += _buster_auth_flags(sess)
+        # 2026-06-11 review round 5: use canonical cmd builder
+        cmd = _build_feroxbuster_dir_cmd(feroxbuster, url, wordlist_dir,
+                                          _rbo_threads, _rbo_fer_sc,
+                                          fer_out, sess, _rbo_cdn)
         vc.log(f"[recon] Running feroxbuster (dirs){' for ' + role_label if role_label else ''} ...", "INFO")
         _fer_proc = None
         try:
