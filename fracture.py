@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.25.0"
+VERSION = "2.26.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2682,6 +2682,7 @@ class VantageConsole:
     def status(self, phase: str, label: str = "", status: str = "running",
                step: str = "", progress: int = 0, total: int = 0,
                tools: "dict | None" = None) -> None:
+        _FRACTURE_PHASE[0] = phase   # §14h: current phase for per-request HTTP evidence
         with self._lock:
             if self._managed:
                 entry = {
@@ -2697,6 +2698,24 @@ class VantageConsole:
                     entry["tools"] = tools
                 sys.stdout.write(_VP_STATUS + json.dumps(entry) + "\n")
                 sys.stdout.flush()
+        # §14j: persist the phase transition to scan.log + scan.log.json with a
+        # timestamp, unconditionally (the status token above is ephemeral / live-UI).
+        try:
+            with self._log_lock:
+                with self.log_file.open("a", encoding="utf-8") as _f:
+                    _f.write(f"[{self._ts()}] EVENT phase={phase} status={status}"
+                             + (f" step={step}" if step else "") + "\n")
+                try:
+                    _arr = json.loads(self.json_log_file.read_text(encoding="utf-8") or "[]")
+                    if not isinstance(_arr, list):
+                        _arr = []
+                except Exception:
+                    _arr = []
+                _arr.append({"timestamp": self._ts(), "level": "EVENT",
+                             "phase": phase, "status": status, "step": step})
+                self.json_log_file.write_text(json.dumps(_arr, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
     def prompt(self, question: str, prompt_type: str = "text",
                options: list = None, skippable: bool = False,
@@ -2907,6 +2926,23 @@ class OutputManager:
             f"{'='*70}\n\n"
         )
         self.log_file.write_text(header, encoding="utf-8")
+        # §14k: record the tool's own version as a startup EVENT in the audit log
+        # (external tool versions are recorded per-invocation in their .log headers).
+        try:
+            with self._log_lock:
+                with self.log_file.open("a", encoding="utf-8") as _f:
+                    _f.write(f"[{self._ts()}] EVENT fracture v{VERSION} started\n")
+                try:
+                    _arr = json.loads(self.json_log_file.read_text(encoding="utf-8") or "[]")
+                    if not isinstance(_arr, list):
+                        _arr = []
+                except Exception:
+                    _arr = []
+                _arr.append({"timestamp": self._ts(), "level": "EVENT",
+                             "message": f"fracture v{VERSION} started"})
+                self.json_log_file.write_text(json.dumps(_arr, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
     def _write_error_header(self) -> None:
         header = (
@@ -2977,7 +3013,11 @@ class OutputManager:
                 f.write("\n".join(lines) + "\n")
 
         # ── Per-invocation .log (bash-prompted transcript) ─────────────────
-        if stdout is not None or stderr is not None or started is not None:
+        # §14: ALWAYS emit a .log sibling for every tool invocation (even when
+        # the caller didn't capture stdout/stderr — the transcript then records
+        # the command, timing and output-file reference). Callers that DO pass
+        # capture data get the full stdout/stderr transcript.
+        if True:
             try:
                 import sys as _s
                 if "/opt/pr0t31n/shared" not in _s.path:
@@ -3420,6 +3460,15 @@ class _ScopedSession(requests.Session):
         return super().send(request, **kwargs)
 
 
+_HTTP_EVIDENCE_DIR = None        # §14h: run dir, set once OutputManager exists
+_FRACTURE_PHASE = ["recon"]      # current phase label for per-request HTTP evidence
+
+
+def _set_http_evidence_dir(d) -> None:
+    global _HTTP_EVIDENCE_DIR
+    _HTTP_EVIDENCE_DIR = str(d) if d else None
+
+
 def _make_session(cfg: dict, scope_hostnames: "set | None" = None) -> requests.Session:
     if scope_hostnames is not None:
         sess = _ScopedSession(scope_hostnames)
@@ -3453,6 +3502,18 @@ def _make_session(cfg: dict, scope_hostnames: "set | None" = None) -> requests.S
                 time.sleep(_d)
             return _response
         sess.hooks.setdefault("response", []).append(_delay_hook)
+    # §14h: per-request evidence triplet (request/response/.log) for every
+    # in-process HTTP call made through this session, once the run dir is known.
+    if _HTTP_EVIDENCE_DIR is not None:
+        try:
+            import sys as _sys
+            if "/opt/pr0t31n/shared" not in _sys.path:
+                _sys.path.insert(0, "/opt/pr0t31n/shared")
+            import pr0t31n_http_evidence as _he
+            _he.attach_http_evidence(sess, _HTTP_EVIDENCE_DIR,
+                                     phase_getter=lambda: _FRACTURE_PHASE[0])
+        except Exception:
+            pass
     return sess
 
 
@@ -17493,7 +17554,13 @@ def _save_http_evidence(out: "OutputManager", phase: str, label: str,
     resp_lines.append(r.text[:524288])
     resp_path.write_text("\n".join(resp_lines), encoding="utf-8")
 
-    return str(req_path), str(resp_path)
+    # §13c: record evidence paths relative to the run directory root.
+    def _rel(p):
+        try:
+            return str(p.relative_to(out.root))
+        except Exception:
+            return str(p)
+    return _rel(req_path), _rel(resp_path)
 
 
 def _parse_gobuster_with_status(filepath: "Path", base_url: str) -> "list[tuple[str, int | None, str | None]]":
@@ -23540,6 +23607,7 @@ def main() -> None:
 
         out = OutputManager(str(project_dir))
         out.base_url = target["url"]
+        _set_http_evidence_dir(out.root)  # §14h: per-request HTTP evidence
         pm  = ProgressManager(project_dir / "checkpoint.json")
         eng = settings.get("engagement", {})
         _write_project_meta(
