@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.26.2"
+VERSION = "2.26.3"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():

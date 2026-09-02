@@ -584,6 +584,9 @@ def install_go():
     env = os.environ.copy()
     env["GOBIN"] = "/usr/local/bin"
     for pkg, name in GO_TOOLS:
+        if shutil.which(name):
+            info(f"{name} already installed — skipping")
+            continue
         info(f"Installing {name} via go install ...")
         run([go_bin, "install", pkg], check=False, env=env)
 
