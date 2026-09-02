@@ -8055,13 +8055,21 @@ return null;
             _login_url = ""
 
         # 2. Walk through gate/checkbox/JS-nav pages to reach the real login form
-        #    Skip when login_mode is json/merge — the URL is an API endpoint.
+        #    Skip when login_mode is json/merge (API endpoint) or when the
+        #    operator explicitly configured login_url (trust it — testConnection
+        #    already validated it works with a direct POST).
         _login_post_called = False
         _login_mode_early = auth.get("login_mode", "fields")
         if _login_url and _login_mode_early in ("json", "merge"):
             vc.log(
                 f"[auth] login_mode={_login_mode_early} — skipping form-page walk "
                 f"(API endpoint: {_login_url})",
+                "INFO",
+            )
+        elif _login_url and _configured_login_url:
+            vc.log(
+                f"[auth] Operator-configured login URL — skipping form-page walk "
+                f"(direct POST like testConnection: {_login_url})",
                 "INFO",
             )
         elif _login_url:
@@ -8110,20 +8118,31 @@ return null;
                 else:
                     _guard_p = _analyse_form_page(_guard_r.text, _guard_r.url)
                     if _guard_p.get("js_rendered_login"):
-                        # Page is a JS-rendered login shell — automated submission
-                        # is not possible; hand off to browser-auth.
-                        _ba_url_for_guard = (
-                            auth.get("login_url", "").strip() or _base_target_url)
-                        if cfg.get("browser_auth") and not no_interactive:
+                        # JS-rendered login shell detected.  When the operator
+                        # explicitly configured a login_url, attempt a direct
+                        # POST first (matches testConnection behaviour) — the
+                        # API endpoint behind the SPA front-end usually accepts
+                        # credentials regardless of how the page renders.
+                        if _configured_login_url:
+                            vc.log(
+                                f"[auth] JS-rendered login detected — operator "
+                                f"configured login URL; attempting direct POST "
+                                f"(testConnection behaviour)",
+                                "INFO",
+                            )
+                            # proceed — _login_url stays set, _login_post will fire
+                        elif cfg.get("browser_auth") and not no_interactive:
                             vc.log(
                                 f"[auth] JS-rendered login detected at guard — "
                                 "falling back to browser-assisted login",
                                 "INFO",
                             )
+                            _ba_url_for_guard = (
+                                auth.get("login_url", "").strip() or _base_target_url)
                             if not auth.get("login_url"):
                                 auth["login_url"] = _ba_url_for_guard
                             return _browser_assisted_login(_ba_url_for_guard)
-                        if no_interactive:
+                        elif no_interactive:
                             vc.log(
                                 f"[auth] JS-rendered login at guard — "
                                 "skipping (automated call site)",
@@ -8137,6 +8156,8 @@ return null;
                                 "— automated form submission is not possible",
                                 "WARNING",
                             )
+                            _ba_url_for_guard = (
+                                auth.get("login_url", "").strip() or _base_target_url)
                             _br_role_suffix_g = f" for role '{role_label}'" if role_label else ""
                             _br_choice_g = vc.prompt(
                                 f"Open a browser window to complete login manually{_br_role_suffix_g}?",
@@ -8154,12 +8175,23 @@ return null;
                             )
                             _login_url = ""
                     elif not _guard_p["login_form"]:
-                        vc.log(
-                            f"[auth] Resolved URL has no username/password form — "
-                            f"cannot submit credentials ({_login_url})",
-                            "WARNING",
-                        )
-                        _login_url = ""
+                        # No HTML form found.  When the operator explicitly
+                        # configured a login_url, proceed with a direct POST
+                        # (like testConnection does) rather than blocking.
+                        if _configured_login_url:
+                            vc.log(
+                                f"[auth] No HTML login form at {_login_url} — "
+                                f"operator configured login URL; attempting "
+                                f"direct POST (testConnection behaviour)",
+                                "WARNING",
+                            )
+                        else:
+                            vc.log(
+                                f"[auth] Resolved URL has no username/password form — "
+                                f"cannot submit credentials ({_login_url})",
+                                "WARNING",
+                            )
+                            _login_url = ""
                     elif _guard_r.url != _login_url:
                         _login_url = _guard_r.url
                         auth["login_url"] = _login_url
