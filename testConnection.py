@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "1.7.2"
+VERSION = "1.7.3"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -210,7 +210,7 @@ def build_auth_session(
     any hard failure; anything else indicates success or a warning.
     """
     sess = _make_session(verify_ssl, proxy)
-    method = (auth.get("method") or auth.get("auth_type") or "form_login").strip().lower()
+    method = (auth.get("method") or auth.get("auth_method") or auth.get("auth_type") or "form_login").strip().lower()
 
     # ── Form Login ────────────────────────────────────────────────────────────
     if method == "form_login":
