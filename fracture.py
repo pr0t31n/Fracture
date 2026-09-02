@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.26.3"
+VERSION = "2.26.4"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -8055,8 +8055,16 @@ return null;
             _login_url = ""
 
         # 2. Walk through gate/checkbox/JS-nav pages to reach the real login form
+        #    Skip when login_mode is json/merge — the URL is an API endpoint.
         _login_post_called = False
-        if _login_url:
+        _login_mode_early = auth.get("login_mode", "fields")
+        if _login_url and _login_mode_early in ("json", "merge"):
+            vc.log(
+                f"[auth] login_mode={_login_mode_early} — skipping form-page walk "
+                f"(API endpoint: {_login_url})",
+                "INFO",
+            )
+        elif _login_url:
             _stepped = _step_to_login_form(_login_url)
 
             # Sentinel: JS-driven button detected and --browser-auth is set
@@ -8076,12 +8084,21 @@ return null;
         #     affirmative button (e.g. "Login") but no credential fields.
         #
         #     Leniency rules:
+        #       – If login_mode is json/merge: skip entirely — the user
+        #         configured a JSON API endpoint, not an HTML form page.
         #       – If GET returns 4xx/5xx: skip the guard and proceed.
         #         Many server-side endpoints (.action, .do, .jsf, etc.) only
         #         serve HTML for GET; a 405/404 is NOT evidence there is no form.
         #       – If redirect occurs during GET: adopt the final URL.
         #       – Only block when GET returns 200 with NO password field.
-        if _login_url:
+        _login_mode = auth.get("login_mode", "fields")
+        if _login_url and _login_mode in ("json", "merge"):
+            vc.log(
+                f"[auth] login_mode={_login_mode} — skipping HTML form guard "
+                f"(JSON API endpoint: {_login_url})",
+                "INFO",
+            )
+        elif _login_url:
             try:
                 _guard_r = sess.get(_login_url, timeout=timeout, allow_redirects=True)
                 if _guard_r.status_code >= 400:
