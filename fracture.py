@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.3"
+VERSION = "2.33.5"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -19780,8 +19780,14 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     _ERR_REFL_MARKER_TAG = "<xss a=b>"
     _ERR_REFL_MARKER_SCR = '<script>alert("fracture_errxss")</script>'
     _err_refl_seen: set = set()
+    _err_refl_confirmed: set = set()   # actions already confirmed vulnerable
+    _err_refl_results: list = []       # collected (action, field, script_ok, ev_r, rq, rp, err_ctx)
     # Test all form fields — including hidden and *_ClientState fields,
     # which are exactly the pattern from the ASP.NET/Telerik finding.
+    # Once error-page reflection is confirmed for ONE field on a given
+    # form action, skip the remaining fields on that action — they all
+    # trigger the same error page.  Results are collected and emitted as
+    # a single merged finding at the end.
     for form in forms[:30]:
         action = form.get("action", url)
         method = form.get("method", "GET").upper()
@@ -19794,6 +19800,10 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 continue
             _ekey = (action, pname)
             if _ekey in _err_refl_seen:
+                continue
+            # Once the error page is confirmed for ANY field on this
+            # action, every other field triggers the same page — skip.
+            if action in _err_refl_confirmed:
                 continue
             data = {i["name"]: "fracture_test" for i in inputs if i.get("name")}
             data[pname] = _ERR_REFL_HTML_PROBE
@@ -19844,10 +19854,6 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
 
-                _risk = "HIGH" if _script_confirmed else "MEDIUM"
-                _title = ("Reflected XSS via Error Page — Script Injection Confirmed"
-                          if _script_confirmed
-                          else "HTML Injection via Error Page (XSS Likely)")
                 _ev_r = r2 if _script_confirmed and r2 else r
                 _rq, _rp = _save_http_evidence(
                     out, phase, f"err_refl_xss_{pname}", _ev_r,
@@ -19865,46 +19871,70 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         "A Java/Servlet framework error page reflects the "
                         "rejected input without HTML-encoding.  ")
 
-                out.add_finding(
-                    title=_title,
-                    url=action, port=target["port"], risk=_risk,
-                    description=(
-                        f"{_err_ctx}The form field '{pname}' at {action} "
-                        f"triggers a framework validation error, and the "
-                        f"error page reflects the submitted value as raw "
-                        f"HTML without entity-encoding.  "
-                        + ("The reflected <script> tag executes in the "
-                           "browser, confirming full cross-site scripting.  "
-                           if _script_confirmed else
-                           "HTML tag injection is confirmed; script execution "
-                           "is likely given the lack of output encoding.  ")
-                        + "An attacker can exploit this via an auto-submitting "
-                        f"form (POST) or crafted link (GET)."),
-                    output=(
-                        f"Form action: {action}\n"
-                        f"Field:       {pname}\n"
-                        f"Probe:       {_ERR_REFL_HTML_PROBE}\n"
-                        f"Script:      {'CONFIRMED' if _script_confirmed else 'not tested / blocked'}\n"
-                        f"HTTP:        {_ev_r.status_code}\n"
-                        f"Response excerpt:\n{_ev_r.text[:800]}"),
-                    output_file=f"{_rq},{_rp}",
-                    sources="fracture-injection", service=target["scheme"],
-                    affected=action,
-                    owasp="A03:2025 Injection", nist="SI-10",
-                    remediation=(
-                        "HTML-encode all user-supplied values before "
-                        "rendering them in error pages.  Replace "
-                        "< > \" ' & with their HTML entities.  Configure "
-                        "the framework to display generic error pages in "
-                        "production (ASP.NET: <customErrors mode=\"On\"/>)."),
-                    http_code=_ev_r.status_code,
-                )
+                _err_refl_confirmed.add(action)
+                _err_refl_results.append((action, pname, _script_confirmed,
+                                          _ev_r, _rq, _rp, _err_ctx))
                 vc.log(f"[injection] Error-page reflection XSS: "
                        f"{action} field={pname} "
                        f"(script={'confirmed' if _script_confirmed else 'html-only'})",
                        "SUCCESS")
             except Exception:
                 pass
+
+    # Emit ONE merged finding for all error-page reflection XSS instances.
+    if _err_refl_results:
+        _any_script = any(sc for _, _, sc, _, _, _, _ in _err_refl_results)
+        _merged_risk = "HIGH" if _any_script else "MEDIUM"
+        _merged_title = ("Reflected XSS via Error Page — Script Injection Confirmed"
+                         if _any_script
+                         else "HTML Injection via Error Page (XSS Likely)")
+        # Use the first result's evidence as primary; list all as output_file
+        _all_ev = []
+        _out_lines = []
+        for _ma, _mf, _msc, _mev, _mrq, _mrp, _mctx in _err_refl_results:
+            _out_lines.append(
+                f"  • {_ma}  field={_mf}  "
+                f"script={'CONFIRMED' if _msc else 'html-only'}  "
+                f"HTTP={_mev.status_code}")
+            _all_ev.extend([_mrq, _mrp])
+        _affected = "\n".join(dict.fromkeys(
+            r[0] for r in _err_refl_results))
+        # First result's context for description
+        _first_ctx = _err_refl_results[0][6] or ""
+        _first_ev = _err_refl_results[0][3]
+        out.add_finding(
+            title=_merged_title,
+            url=_err_refl_results[0][0], port=target["port"],
+            risk=_merged_risk,
+            description=(
+                f"{_first_ctx}Framework validation error pages reflect "
+                f"submitted values as raw HTML without entity-encoding.  "
+                + ("The reflected <script> tag executes in the browser, "
+                   "confirming full cross-site scripting.  "
+                   if _any_script else
+                   "HTML tag injection is confirmed; script execution "
+                   "is likely given the lack of output encoding.  ")
+                + "An attacker can exploit this via an auto-submitting "
+                f"form (POST) or crafted link (GET).  "
+                f"{len(_err_refl_results)} instance(s) across "
+                f"{len(_err_refl_confirmed)} form action(s)."),
+            output=(
+                f"Affected endpoints ({len(_err_refl_results)}):\n"
+                + "\n".join(_out_lines)
+                + f"\n\nProbe: {_ERR_REFL_HTML_PROBE}\n"
+                + f"Response excerpt (first instance):\n{_first_ev.text[:800]}"),
+            output_file=",".join(_all_ev),
+            sources="fracture-injection", service=target["scheme"],
+            affected=_affected,
+            owasp="A03:2025 Injection", nist="SI-10",
+            remediation=(
+                "HTML-encode all user-supplied values before "
+                "rendering them in error pages.  Replace "
+                "< > \" ' & with their HTML entities.  Configure "
+                "the framework to display generic error pages in "
+                "production (ASP.NET: <customErrors mode=\"On\"/>)."),
+            http_code=_first_ev.status_code,
+        )
 
     vc.status(phase, "Injection Testing", "complete", "Done", 23, 23)
     vc.log("[injection] Phase complete", "SUCCESS")
@@ -19973,7 +20003,16 @@ _BL_NUMERIC_FIELDS = re.compile(
 )
 _BL_WORKFLOW_URL = re.compile(
     r'checkout|confirm|payment|pay|order|purchase|cart|complete|'
-    r'transfer|send|submit|process|finalize|done|success|approve|step\d', re.I
+    r'transfer|submit|process|finalize|done|success|approve|step\d', re.I
+)
+# Pages that are intentionally public — never flag as workflow-step-skip.
+# Password reset, login, registration, contact, and other pre-auth pages.
+_BL_WORKFLOW_EXCLUDE = re.compile(
+    r'(?:send|forgot|reset|recover|change)[\W_]*passw|'
+    r'login|log[\W_]*in|sign[\W_]*in|sign[\W_]*up|register|'
+    r'create[\W_]*account|contact|unsubscribe|opt[\W_]*out|'
+    r'verify[\W_]*email|activate|public|anonymous',
+    re.I,
 )
 # Input types that can carry numeric business values
 _BL_NUMERIC_INPUT_TYPES = frozenset({"text", "number", "tel", ""})
@@ -20055,7 +20094,9 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
 
     # 2. Workflow step skipping — access late-stage pages without prior steps
     vc.status(phase, "Business Logic", "running", "Workflow skip detection", 1, 4)
-    workflow_links = [lnk for lnk in links if _BL_WORKFLOW_URL.search(lnk)]
+    workflow_links = [lnk for lnk in links
+                      if _BL_WORKFLOW_URL.search(lnk)
+                      and not _BL_WORKFLOW_EXCLUDE.search(lnk)]
     for lnk in workflow_links[:20]:
         try:
             bare = requests.Session()
@@ -20107,6 +20148,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                 i.get("name", "") for i in f.get("inputs", [])
             )
         )
+        and not _BL_WORKFLOW_EXCLUDE.search(f.get("action", ""))
     ]
     for form in workflow_forms[:5]:
         action = form.get("action", url)
