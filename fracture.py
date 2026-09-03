@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.15"
+VERSION = "2.30.16"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -12816,6 +12816,108 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
         return False
 
 
+def _chrome_form_login(driver, cfg: dict, login_url: str) -> bool:
+    """Perform a full form-based login in headless Chrome.
+
+    For apps that store auth state in JS (React, Angular, etc.), cookie
+    injection alone is not enough — we must fill and submit the actual login
+    form so the JS framework stores its tokens and transitions to the
+    authenticated state.
+
+    Returns True if a non-login URL was reached after form submission.
+    """
+    from selenium.webdriver.common.by import By
+
+    _auth_cfg = cfg.get("auth", {})
+    _chrome_user = _auth_cfg.get("username", "")
+    _chrome_pass = _auth_cfg.get("password", "")
+    if not _chrome_user or not _chrome_pass:
+        vc.log("[auth] No credentials in config for Chrome form login", "INFO")
+        return False
+
+    _ufield = _auth_cfg.get("username_field", "username")
+    _pfield = _auth_cfg.get("password_field", "password")
+
+    # Navigate to the login page
+    driver.delete_all_cookies()
+    try:
+        driver.get(login_url)
+    except Exception:
+        pass
+
+    # Wait for the login form to render (SPA forms are JS-rendered)
+    try:
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        WebDriverWait(driver, 12).until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, 'input[type="password"]'))
+        )
+    except Exception:
+        vc.log("[auth] Chrome login form did not render within 12s", "INFO")
+        return False
+
+    # Find username input — try configured field name, then common selectors
+    _user_el = None
+    for _sel in [
+        f'input[name="{_ufield}"]',
+        f'input[id="{_ufield}"]',
+        'input[type="email"]',
+        'input[name="username"]',
+        'input[name="email"]',
+        'input[name="user"]',
+        'input[type="text"]',
+    ]:
+        try:
+            _els = driver.find_elements(By.CSS_SELECTOR, _sel)
+            for _el in _els:
+                if _el.is_displayed():
+                    _user_el = _el
+                    break
+            if _user_el:
+                break
+        except Exception:
+            continue
+
+    try:
+        _pass_el = driver.find_element(
+            By.CSS_SELECTOR, 'input[type="password"]')
+    except Exception:
+        _pass_el = None
+
+    if not _user_el or not _pass_el:
+        vc.log("[auth] Chrome could not find login form fields", "INFO")
+        return False
+
+    # Fill and submit
+    try:
+        _user_el.clear()
+        _user_el.send_keys(_chrome_user)
+        _pass_el.clear()
+        _pass_el.send_keys(_chrome_pass)
+        from selenium.webdriver.common.keys import Keys
+        _pass_el.send_keys(Keys.RETURN)
+        vc.log("[auth] Chrome form login submitted — waiting for redirect", "INFO")
+    except Exception as _fill_e:
+        vc.log(f"[auth] Chrome form fill/submit failed: {_fill_e}", "INFO")
+        return False
+
+    # Wait for post-login redirect (apps behind load balancers can be slow)
+    import time as _t
+    _deadline = _t.time() + 12.0
+    while _t.time() < _deadline:
+        _t.sleep(0.5)
+        try:
+            _cur = driver.current_url or ""
+            if _cur and not _WAF_LOGIN_URL_RE.search(_cur):
+                vc.log(f"[auth] Chrome form login succeeded — now at {_cur}", "INFO")
+                return True
+        except Exception:
+            pass
+    vc.log("[auth] Chrome form login redirect wait expired", "INFO")
+    return False
+
+
 def _resolve_spa_landing(
     target: dict, cfg: dict,
     auth_session: "requests.Session",
@@ -12924,114 +13026,11 @@ def _resolve_spa_landing(
         )
 
         # ── Phase 2: full login in Chrome ──
-        # For apps that store auth state in JS (not just cookies),
-        # perform the actual login so React/Angular/etc. handles the
-        # response, stores tokens, and navigates to the landing page.
-        _auth_cfg = cfg.get("auth", {})
-        _chrome_user = _auth_cfg.get("username", "")
-        _chrome_pass = _auth_cfg.get("password", "")
-        if not _chrome_user or not _chrome_pass:
-            vc.log(
-                "[auth] No credentials in config for Chrome login",
-                "INFO",
-            )
+        if _chrome_form_login(driver, cfg, start_url):
             final_url = driver.current_url
-            return final_url if final_url else None
-
-        _ufield = _auth_cfg.get("username_field", "username")
-        _pfield = _auth_cfg.get("password_field", "password")
-
-        # Navigate fresh (clear cookies from phase 1)
-        driver.delete_all_cookies()
-        try:
-            driver.get(start_url)
-        except Exception:
-            pass
-
-        # Wait for the login form to render (React/SPA forms are
-        # rendered by JS — they may not be in the initial HTML).
-        from selenium.webdriver.common.by import By
-        try:
-            from selenium.webdriver.support.ui import WebDriverWait
-            from selenium.webdriver.support import expected_conditions as EC
-            WebDriverWait(driver, 12).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, 'input[type="password"]'))
-            )
-        except Exception:
-            vc.log(
-                "[auth] Chrome login form did not render within 12s",
-                "INFO",
-            )
-            final_url = driver.current_url
-            return final_url if final_url else None
-
-        # Find the username input — try configured field name first,
-        # then common selectors.
-        _user_el = None
-        for _sel in [
-            f'input[name="{_ufield}"]',
-            f'input[id="{_ufield}"]',
-            'input[type="email"]',
-            'input[name="username"]',
-            'input[name="email"]',
-            'input[name="user"]',
-            'input[type="text"]',
-        ]:
-            try:
-                _els = driver.find_elements(By.CSS_SELECTOR, _sel)
-                for _el in _els:
-                    if _el.is_displayed():
-                        _user_el = _el
-                        break
-                if _user_el:
-                    break
-            except Exception:
-                continue
-
-        try:
-            _pass_el = driver.find_element(
-                By.CSS_SELECTOR, 'input[type="password"]')
-        except Exception:
-            _pass_el = None
-
-        if not _user_el or not _pass_el:
-            vc.log(
-                "[auth] Chrome could not find login form fields",
-                "INFO",
-            )
-            final_url = driver.current_url
-            return final_url if final_url else None
-
-        # Fill and submit
-        try:
-            _user_el.clear()
-            _user_el.send_keys(_chrome_user)
-            _pass_el.clear()
-            _pass_el.send_keys(_chrome_pass)
-            from selenium.webdriver.common.keys import Keys
-            _pass_el.send_keys(Keys.RETURN)
-            vc.log(
-                "[auth] Chrome login submitted — waiting for redirect",
-                "INFO",
-            )
-        except Exception as _fill_e:
-            vc.log(
-                f"[auth] Chrome form fill/submit failed: {_fill_e}",
-                "INFO",
-            )
-            final_url = driver.current_url
-            return final_url if final_url else None
-
-        # Wait for the post-login redirect (apps behind load
-        # balancers can take several seconds).
-        _p2 = _poll_for_redirect("chrome-login", max_s=12.0)
-        if _p2:
-            # ── Transfer Chrome's cookies back to the requests session ──
-            # Chrome's full login creates a server session that can access
-            # all routes (including /Client/* pages that the API-only login
-            # cannot reach).  Copy these cookies so the requests session
-            # inherits Chrome's fully-authenticated state.
+            # Transfer Chrome's cookies back to the requests session so it
+            # inherits the fully-authenticated state (including routes the
+            # API-only login cannot reach, e.g. /Client/* pages).
             try:
                 _chrome_cks = driver.get_cookies()
                 _transferred = 0
@@ -13053,11 +13052,11 @@ def _resolve_spa_landing(
                     f"[auth] Chrome cookie transfer back failed: {_ck_e}",
                     "WARNING",
                 )
-            return _p2
+            return final_url
 
         final_url = driver.current_url
         vc.log(
-            f"[auth] Chrome login redirect wait expired — "
+            f"[auth] Chrome form login did not redirect — "
             f"final URL: {final_url}",
             "INFO",
         )
@@ -16713,19 +16712,55 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
         _spa_transfer_cookies(sess, driver, url)
 
         # Detect if initial navigation landed on a login page.
-        # This happens when the target immediately redirects to a login URL before
-        # any cookies are set — the browser follows the redirect, ends up on the
-        # login page, and cookie injection happens while on that page.
-        # The loop's first driver.get(url) should recover because the auth cookies
-        # are now set, but we log a warning so the outcome is visible.
+        # Cookie injection alone is insufficient for JS-state auth apps
+        # (React/Angular SPAs that store tokens in JS, not just cookies).
+        # Perform a full Chrome form login to authenticate the headless
+        # session — same approach as _resolve_spa_landing Phase 2.
         try:
             _setup_url = driver.current_url or ""
             if _WAF_LOGIN_URL_RE.search(_setup_url):
                 vc.log(
                     f"[crawl/spa] Setup navigation redirected to login page ({_setup_url}). "
-                    "Auth cookies injected — first loop navigation will attempt recovery.",
+                    "Attempting full Chrome form login.",
                     "WARNING",
                 )
+                # First try navigating with the injected cookies
+                try:
+                    driver.get(url)
+                except Exception:
+                    pass
+                import time as _spa_t
+                _spa_t.sleep(2.0)
+                try:
+                    _after_retry = driver.current_url or ""
+                except Exception:
+                    _after_retry = ""
+                if _WAF_LOGIN_URL_RE.search(_after_retry):
+                    # Cookies didn't work — full form login required
+                    vc.log(
+                        "[crawl/spa] Cookie injection insufficient — "
+                        "performing full Chrome form login for SPA crawl",
+                        "INFO",
+                    )
+                    _login_url = url  # navigate to the app root; it'll redirect to login
+                    if _chrome_form_login(driver, cfg, _login_url):
+                        vc.log(
+                            f"[crawl/spa] Chrome form login succeeded — "
+                            f"now at {driver.current_url}",
+                            "INFO",
+                        )
+                    else:
+                        vc.log(
+                            "[crawl/spa] Chrome form login failed — "
+                            "SPA crawl will run unauthenticated",
+                            "WARNING",
+                        )
+                else:
+                    vc.log(
+                        f"[crawl/spa] Cookie re-navigation recovered — "
+                        f"now at {_after_retry}",
+                        "INFO",
+                    )
         except Exception:
             pass
 
@@ -16767,8 +16802,12 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
                 continue
             visited.add(norm_c)
             page_count += 1
+            _cur_path = urllib.parse.urlparse(current).path or "/"
             vc.status(phase, "Crawl", "running",
-                      f"SPA page {page_count}", page_count, max_pages)
+                      f"SPA page {page_count}/{max_pages} — {_cur_path}  "
+                      f"(queue: {len(queue)}, links: {len(spa_links)}, "
+                      f"forms: {len(spa_forms)})",
+                      page_count, max_pages)
 
             # Navigate — do NOT bail on page-load timeout; Dojo/AMD apps may never
             # reach readyState 'complete' because AMD modules load asynchronously
@@ -16808,11 +16847,10 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
                         _spa_login_warned = True
                         vc.log(
                             f"[crawl/spa] Redirected to login ({_cur_after}) after "
-                            "navigating with auth cookies — session may be incompatible "
-                            "with headless browser (User-Agent mismatch or cookie binding). "
-                            "Re-injecting cookies and retrying.",
+                            "navigating with auth cookies — attempting recovery.",
                             "WARNING",
                         )
+                        # Try cookie re-injection first
                         driver.delete_all_cookies()
                         _spa_transfer_cookies(sess, driver, url)
                         try:
@@ -16827,6 +16865,28 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
                         except Exception:
                             pass
                         time.sleep(_spa_settle_time)
+                        # Check if still on login — if so, full form login
+                        try:
+                            _retry_url = driver.current_url or ""
+                        except Exception:
+                            _retry_url = ""
+                        if _WAF_LOGIN_URL_RE.search(_retry_url):
+                            vc.log(
+                                "[crawl/spa] Cookie re-injection failed — "
+                                "performing full Chrome form login",
+                                "INFO",
+                            )
+                            if _chrome_form_login(driver, cfg, url):
+                                vc.log(
+                                    f"[crawl/spa] Mid-crawl Chrome login "
+                                    f"succeeded — resuming from {current}",
+                                    "INFO",
+                                )
+                                try:
+                                    driver.get(current)
+                                except Exception:
+                                    pass
+                                time.sleep(_spa_settle_time)
                         try:
                             driver.execute_script(_SPA_INTERCEPT_JS)
                         except Exception:
@@ -17031,7 +17091,12 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             continue
         visited.add(_norm_cur)
         page_count += 1
-        vc.status(phase, "Crawl", "running", f"Page {page_count}", page_count, max_pages)
+        _cur_path = urllib.parse.urlparse(current_url).path or "/"
+        vc.status(phase, "Crawl", "running",
+                  f"Page {page_count}/{max_pages} — {_cur_path}  "
+                  f"(queue: {len(queue_urls)}, links: {len(all_links)}, "
+                  f"forms: {len(all_forms)})",
+                  page_count, max_pages)
         data = _crawl_page(current_url, sess, timeout, url)
         if data["error"]:
             continue
@@ -20439,6 +20504,12 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
             continue
         visited.add(_norm_cur)
         page_count += 1
+        _cur_path = urllib.parse.urlparse(current_url).path or "/"
+        vc.status(phase, "Auth Recon", "running",
+                  f"Auth crawl {page_count}/{max_pages} — {_cur_path}  "
+                  f"(queue: {len(queue_urls)}, links: {len(auth_links)}, "
+                  f"forms: {len(auth_forms)})",
+                  page_count, max_pages)
         data = _crawl_page(current_url, auth_sess, timeout, url)
         if data["error"]:
             continue
