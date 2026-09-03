@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.32.1"
+VERSION = "2.32.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -11684,6 +11684,23 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             ("X-Forwarded-Prefix", "/cache-probe-prefix"),
         ]
         _wcp_timeout = min(timeout, 8)
+        # Fetch a baseline response (no probe header) for diff comparison.
+        # Without a baseline we cannot distinguish "probe value caused a change"
+        # from "probe value was always present in the page".
+        _wcp_base_body = ""
+        _wcp_base_loc  = ""
+        _wcp_base_link = ""
+        try:
+            _wcp_base_bust = f"fracture-probe-baseline={int(time.time())}"
+            _wcp_base_url  = (url.rstrip("/") + "/" + f"?{_wcp_base_bust}"
+                              if "?" not in url else url + f"&{_wcp_base_bust}")
+            _wcp_base_r    = sess.get(_wcp_base_url, timeout=_wcp_timeout,
+                                      allow_redirects=False)
+            _wcp_base_body = (_wcp_base_r.text or "")[:8192]
+            _wcp_base_loc  = _wcp_base_r.headers.get("Location", "")
+            _wcp_base_link = _wcp_base_r.headers.get("Link", "")
+        except Exception:
+            pass
         for _wcp_hdr, _wcp_val in _wcp_headers:
             try:
                 # Cache-bust the probe so we hit the origin, not a stale cached copy
@@ -11701,8 +11718,42 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _wcp_body    = (_wcp_r.text or "")[:8192]
                 _wcp_loc     = _wcp_r.headers.get("Location", "")
                 _wcp_link    = _wcp_r.headers.get("Link", "")
-                _wcp_reflect = _wcp_val in _wcp_body or _wcp_val in _wcp_loc or _wcp_val in _wcp_link
-                if _wcp_reflect:
+
+                # ── Reflection detection ──────────────────────────────────
+                # For most probes: the probe value must appear in the probed
+                # response AND must NOT appear in the baseline.  This
+                # eliminates FPs where the value was already on the page.
+                #
+                # For the X-Forwarded-Scheme "http" probe: a naive
+                # substring check matches every "https://" URL on the page.
+                # Instead we look for a SCHEME DOWNGRADE: "http://<host>"
+                # appearing in the probe body where the baseline only had
+                # "https://<host>".
+                _wcp_reflected_in: list = []
+                if _wcp_hdr == "X-Forwarded-Scheme" and _wcp_val == "http":
+                    # Scheme-aware: look for http:// variant of target host
+                    _wcp_host = urllib.parse.urlparse(url).hostname or ""
+                    _downgrade_sig = f"http://{_wcp_host}"
+                    _upgrade_sig   = f"https://{_wcp_host}"
+                    if (_downgrade_sig in _wcp_body
+                            and _downgrade_sig not in _wcp_base_body):
+                        _wcp_reflected_in.append("body")
+                    if (_downgrade_sig in _wcp_loc
+                            and _downgrade_sig not in _wcp_base_loc):
+                        _wcp_reflected_in.append("Location")
+                    if (_downgrade_sig in _wcp_link
+                            and _downgrade_sig not in _wcp_base_link):
+                        _wcp_reflected_in.append("Link")
+                else:
+                    # Standard probes: exact value present AND absent from baseline
+                    if _wcp_val in _wcp_body and _wcp_val not in _wcp_base_body:
+                        _wcp_reflected_in.append("body")
+                    if _wcp_val in _wcp_loc and _wcp_val not in _wcp_base_loc:
+                        _wcp_reflected_in.append("Location")
+                    if _wcp_val in _wcp_link and _wcp_val not in _wcp_base_link:
+                        _wcp_reflected_in.append("Link")
+
+                if _wcp_reflected_in:
                     _wcp_rq, _wcp_rp = _save_http_evidence(
                         out, phase,
                         f"cache_poison_{_wcp_hdr.lower().replace('-', '_')}",
@@ -11720,10 +11771,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                         ),
                         output=(
                             f"Probe header: {_wcp_hdr}: {_wcp_val}\n"
-                            f"Reflected in: "
-                            + ("body " if _wcp_val in _wcp_body else "")
-                            + ("Location " if _wcp_val in _wcp_loc else "")
-                            + ("Link" if _wcp_val in _wcp_link else "")
+                            f"Reflected in: {', '.join(_wcp_reflected_in)}"
                         ),
                         affected=url,
                         sources="fracture-recon", service=target["scheme"],
@@ -11740,6 +11788,11 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     vc.log(
                         f"[recon] Web cache poisoning — {_wcp_hdr} reflected in response",
                         "WARNING",
+                    )
+                else:
+                    vc.log(
+                        f"[recon] Cache poisoning probe: {_wcp_hdr} — no reflection detected",
+                        "INFO",
                     )
             except Exception:
                 pass
