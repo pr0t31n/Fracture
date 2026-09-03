@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.5"
+VERSION = "2.33.6"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -20528,15 +20528,24 @@ def _run_authprobe_json(url: str, login_url: "str | None" = None,
 
 
 def _probe_login_default_creds(login_url: str, target: dict,
-                                out: "OutputManager") -> "dict | None":
-    """
-    Fingerprint a login page via AuthProbe (INFO findings for app type and auth
-    method), then test every entry in _DEFAULT_CREDS.  Returns the first
-    successful credential set as a dict, or None if none succeed.
+                                out: "OutputManager",
+                                cfg: "dict | None" = None) -> "dict | None":
+    """Test default/weak credentials using the same auth method that
+    successfully authenticated earlier in the scan.
+
+    When *cfg* is provided and contains an enabled auth config, each
+    credential pair is tested by calling ``_build_auth_session`` with the
+    configured method but swapped-in username/password.  Success is verified
+    by hitting a known auth-gated page from the structure map and checking
+    that the response is not a login redirect.
+
+    Falls back to AuthProbe-only testing when no auth config is available.
+    Returns the first successful credential set as a dict, or None.
     """
     phase = "auth_bypass"
     auth_out = out.output_path(phase, "authprobe_" + target["hostname"])
 
+    # ── AuthProbe fingerprint (INFO-level findings only) ─────────────────
     vc.log(f"[auth_bypass] AuthProbe fingerprinting: {login_url}", "INFO")
     fp = _run_authprobe_json(login_url, ap_timeout=30)
     app_name    = ""
@@ -20592,20 +20601,77 @@ def _probe_login_default_creds(login_url: str, target: dict,
                 ),
             )
 
+    # ── Default credential testing ───────────────────────────────────────
+    # Preferred path: reuse the scan's configured auth method so the test
+    # goes through the exact same login flow (hidden fields, CSRF tokens,
+    # multi-step gates, etc.) that proved working earlier.
+    _use_cfg_auth = (
+        cfg is not None
+        and cfg.get("auth", {}).get("enabled")
+        and cfg.get("auth", {}).get("method", cfg.get("auth", {}).get("auth_type", ""))
+    )
+
+    # Find an auth-gated page to verify login success.
+    _verify_url = ""
+    if _use_cfg_auth:
+        try:
+            _sm_path = out.root / "structure_map.json"
+            if _sm_path.exists():
+                _sm = json.loads(_sm_path.read_text(encoding="utf-8"))
+                _CANARY_SKIP2 = frozenset({"/", "/robots.txt", "/sitemap.xml",
+                                            "/favicon.ico", "/index.html"})
+                for _cp2 in sorted(_sm.get("paths", {}).keys()):
+                    _ci2 = _sm["paths"][_cp2]
+                    if (isinstance(_ci2, dict) and _ci2.get("status") == 200
+                            and _cp2 not in _CANARY_SKIP2
+                            and _cp2.count("/") >= 2):
+                        _verify_url = target["url"].rstrip("/") + _cp2
+                        break
+        except Exception:
+            pass
+
     for uname, pwd in _DEFAULT_CREDS:
         _pwd_disp = repr(pwd) if pwd else "'(blank)'"
         vc.log(f"[auth_bypass] Testing default creds: {uname!r}/{_pwd_disp}", "INFO")
-        result = _run_authprobe_json(login_url, login_url=effective_login,
-                                     username=uname, password=pwd, ap_timeout=10)
-        if not result:
-            continue
-        if any(v.get("success") for v in result.get("validation_results", [])):
+
+        _success = False
+        _method_used = auth_method or "unknown"
+
+        if _use_cfg_auth and _verify_url:
+            # Build a one-off auth config with the test credentials
+            _test_cfg = dict(cfg)
+            _test_auth = dict(cfg["auth"])
+            _test_auth["username"] = uname
+            _test_auth["password"] = pwd
+            _test_cfg["auth"] = _test_auth
+            try:
+                _test_sess = _build_auth_session(
+                    _test_cfg, no_interactive=True)
+                if _test_sess:
+                    # Verify: hit the auth-gated page and check for real content
+                    _vr = _test_sess.get(_verify_url, timeout=cfg.get("timeout", 10),
+                                         allow_redirects=True)
+                    if _vr and _vr.status_code == 200 and not _inj_is_login_page(_vr):
+                        _success = True
+                        _method_used = (cfg["auth"].get("method")
+                                        or cfg["auth"].get("auth_type")
+                                        or "form_login")
+            except Exception:
+                pass
+        else:
+            # Fallback: AuthProbe-only testing (no auth config available)
+            result = _run_authprobe_json(login_url, login_url=effective_login,
+                                         username=uname, password=pwd, ap_timeout=10)
+            if result and any(v.get("success") for v in result.get("validation_results", [])):
+                _success = True
+
+        if _success:
             try:
                 auth_out.write_text(
                     f"# Default Credentials Found\n"
                     f"URL: {login_url}\n"
                     f"Username: {uname}\nPassword: {pwd}\n"
-                    f"Auth method: {auth_method}\n",
+                    f"Auth method: {_method_used}\n",
                     encoding="utf-8",
                 )
             except Exception:
@@ -20616,9 +20682,9 @@ def _probe_login_default_creds(login_url: str, target: dict,
                 description="The target accepted well-known default or factory-set credentials, granting unauthorised access.",
                 output=(
                     f"Username: {uname}\nPassword: {pwd}\n"
-                    f"Auth method: {auth_method}"
+                    f"Auth method: {_method_used}"
                 ),
-                sources="authprobe", service=target["scheme"],
+                sources="fracture-auth-bypass", service=target["scheme"],
                 affected=login_url, output_file=str(auth_out),
                 owasp="A07:2025 Identification and Authentication Failures",
                 nist="IA-5",
@@ -20627,7 +20693,7 @@ def _probe_login_default_creds(login_url: str, target: dict,
             vc.log(f"[auth_bypass] Default creds accepted: {uname!r}/{pwd!r}",
                    "SUCCESS")
             return {"username": uname, "password": pwd,
-                    "auth_method": auth_method, "login_url": login_url}
+                    "auth_method": _method_used, "login_url": login_url}
 
     return None
 
@@ -20670,42 +20736,66 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
         if not user_f or not pass_f:
             continue
 
-        # 1. Default credentials via AuthProbe
+        # 1. Default credentials — reuse configured auth method when available
         _form_url = (action if action.startswith("http")
                      else url.rstrip("/") + "/" + action.lstrip("/"))
-        _dc = _probe_login_default_creds(_form_url, target, out)
+        _dc = _probe_login_default_creds(_form_url, target, out, cfg=cfg)
         if _dc:
             _discovered.append(_dc)
 
         vc.status(phase, "Auth Bypass", "running", "SQLi login bypass", 1, 4)
-        # 2. SQLi in login
+        # 2. SQLi in login — baseline-gated.
+        # Fetch the login form with invalid creds to get a baseline "failed
+        # login" response.  A real bypass changes the response materially
+        # (redirect to dashboard, different page content, etc.).
+        _sqli_bl = None
+        try:
+            _bl_data = {i["name"]: "" for i in inputs if i.get("name")}
+            _bl_data[user_f] = "fracture_invalid_user"
+            _bl_data[pass_f] = "fracture_invalid_pass"
+            _sqli_bl = sess.post(action, data=_bl_data, timeout=timeout,
+                                 allow_redirects=True)
+        except Exception:
+            pass
         for usr_pay, pwd_pay in _SQLI_BYPASS_PAYLOADS:
             data = {i["name"]: "" for i in inputs if i.get("name")}
             data[user_f] = usr_pay
             data[pass_f] = pwd_pay
             try:
                 r = sess.post(action, data=data, timeout=timeout, allow_redirects=True)
-                if r.status_code in (200, 302) and not re.search(r'login|invalid|incorrect|failed', r.text, re.I):
-                    with auth_out.open("a", encoding="utf-8") as _af:
-                        _af.write(
-                            f"## SQLi Login Bypass\n"
-                            f"URL: {action}\nPayload: {usr_pay}\n"
-                            f"Response: {r.status_code}\n{r.text[:2000]}\n\n"
-                        )
-                    out.add_finding(
-                        title="Authentication Bypass via SQL Injection",
-                        url=action, port=target["port"], risk="CRITICAL",
-                        description=f"Login form at {action} is vulnerable to SQL injection authentication bypass.",
-                        output=f"Payload: {usr_pay}\nResponse: {r.status_code}",
-                        sources="fracture-auth-bypass", service=target["scheme"],
-                        affected=action, output_file=str(auth_out),
-                        owasp="A07:2025 Identification and Authentication Failures",
-                        nist="IA-5",
-                        remediation="Use parameterised queries for login. Implement account lockout.",
-                        http_code=r.status_code,
+                if not r or r.status_code not in (200, 301, 302, 303):
+                    continue
+                # Must NOT still be a login page (ASP.NET returns 200 for everything)
+                if _inj_is_login_page(r):
+                    continue
+                # Must differ materially from the baseline failed-login response
+                if _sqli_bl:
+                    _bl_len = len(_sqli_bl.text)
+                    if abs(len(r.text) - _bl_len) < max(100, _bl_len * 0.10):
+                        continue  # Same page re-rendered — not a bypass
+                # Also reject if the response still looks like a login form
+                if re.search(r'login|invalid|incorrect|failed|sign.in|password', r.text[:3000], re.I):
+                    continue
+                with auth_out.open("a", encoding="utf-8") as _af:
+                    _af.write(
+                        f"## SQLi Login Bypass\n"
+                        f"URL: {action}\nPayload: {usr_pay}\n"
+                        f"Response: {r.status_code}\n{r.text[:2000]}\n\n"
                     )
-                    vc.log(f"[auth_bypass] Login SQLi bypass at {action}", "SUCCESS")
-                    break
+                out.add_finding(
+                    title="Authentication Bypass via SQL Injection",
+                    url=action, port=target["port"], risk="CRITICAL",
+                    description=f"Login form at {action} is vulnerable to SQL injection authentication bypass.",
+                    output=f"Payload: {usr_pay}\nResponse: {r.status_code}",
+                    sources="fracture-auth-bypass", service=target["scheme"],
+                    affected=action, output_file=str(auth_out),
+                    owasp="A07:2025 Identification and Authentication Failures",
+                    nist="IA-5",
+                    remediation="Use parameterised queries for login. Implement account lockout.",
+                    http_code=r.status_code,
+                )
+                vc.log(f"[auth_bypass] Login SQLi bypass at {action}", "SUCCESS")
+                break
             except Exception:
                 pass
 
