@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.8"
+VERSION = "2.33.9"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -25207,6 +25207,90 @@ def _reauth_session(cfg: dict, target: dict, role_label: str) -> "requests.Sessi
     return fresh
 
 
+# ── Session Keepalive ────────────────────────────────────────────────────
+# Background thread that periodically pings a known-200 path on the active
+# session to prevent server-side idle timeout.  Especially important for
+# targets with aggressive session expiry (e.g. 60 s) where long-running
+# subprocess phases (nuclei, nikto, gobuster) leave the requests.Session
+# idle for minutes.
+#
+# Usage:
+#   _ka = _SessionKeepalive(sess, target, cfg)
+#   _ka.start()
+#   ...  # long-running phase
+#   _ka.stop()
+
+class _SessionKeepalive:
+    """Periodic session heartbeat to prevent server-side idle timeout."""
+
+    _INTERVAL_DEFAULT = 30  # seconds between pings
+    _CANARY_SKIP = frozenset({"/", "/robots.txt", "/sitemap.xml",
+                              "/favicon.ico", "/index.html"})
+
+    def __init__(self, sess: "requests.Session", target: dict, cfg: dict,
+                 sm_data: "dict | None" = None, interval: int = _INTERVAL_DEFAULT):
+        self._sess     = sess
+        self._target   = target
+        self._cfg      = cfg
+        self._interval = interval
+        self._stop_evt = threading.Event()
+        self._thread   = None
+        self._url      = self._pick_canary(target, sm_data)
+
+    def _pick_canary(self, target: dict, sm_data: "dict | None") -> "str | None":
+        """Select a deep authenticated path that returned 200 during crawl."""
+        if sm_data is None:
+            return None
+        base = target["url"].rstrip("/")
+        paths_data = sm_data.get("paths", {})
+        # Prefer a deep (auth-gated) path
+        for p, info in paths_data.items():
+            if (isinstance(info, dict) and info.get("status") == 200
+                    and p not in self._CANARY_SKIP
+                    and p.count("/") >= 2):
+                return base + p
+        # Fallback: any non-root 200
+        for p, info in paths_data.items():
+            if (isinstance(info, dict) and info.get("status") == 200
+                    and p not in self._CANARY_SKIP):
+                return base + p
+        return None
+
+    def start(self) -> None:
+        if self._url is None or self._thread is not None:
+            return
+        self._stop_evt.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="fracture-keepalive")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_evt.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    def update_session(self, sess: "requests.Session") -> None:
+        """Swap to a new session object (e.g. after re-auth)."""
+        self._sess = sess
+
+    def _run(self) -> None:
+        timeout = self._cfg.get("timeout", 10)
+        verify  = self._cfg.get("verify_ssl", False)
+        while not self._stop_evt.wait(self._interval):
+            try:
+                r = self._sess.head(self._url, timeout=max(timeout, 5),
+                                    allow_redirects=False, verify=verify)
+                # Silently succeed — the point is to tickle the server's
+                # session timer, not to process the response.
+                if r.status_code in (301, 302, 303, 307, 308):
+                    vc.log("[keepalive] heartbeat got redirect — session may "
+                           "be expiring faster than keepalive interval",
+                           "WARNING")
+            except Exception:
+                pass  # network hiccup; next tick will retry
+
+
 def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
                       role_label: str, role_sess: "requests.Session | None") -> None:
     """Probe all structure_map paths that have no HTTP code for role_label yet.
@@ -27709,6 +27793,23 @@ def main() -> None:
                         "INFO",
                     )
 
+            # ── Session keepalive ─────────────────────────────────────────
+            # Start a background heartbeat so the server session doesn't
+            # expire while long-running subprocess phases (nuclei, nikto,
+            # gobuster, etc.) leave the requests session idle.
+            _keepalive = None
+            if (_ctx_auth is not None
+                    and _ctx_label != "unauthenticated"):
+                try:
+                    _ka_sm_path = out.root / "structure_map.json"
+                    _ka_sm = (json.loads(_ka_sm_path.read_text())
+                              if _ka_sm_path.exists() else None)
+                    _keepalive = _SessionKeepalive(
+                        effective_auth, target, _ctx_cfg, sm_data=_ka_sm)
+                    _keepalive.start()
+                except Exception:
+                    pass
+
             # ── Discovery phases — Role 1 only ──────────────────────────────
             # All enumeration and server-analysis runs authenticated as the most
             # privileged role to obtain the most comprehensive application surface.
@@ -28650,6 +28751,16 @@ def main() -> None:
                         vc.error(f"Phase bfla [{_ctx_label}] error: {e}")
                         pm.set_phase_status(f"bfla#{_ctx_label}", "error", detail=str(e))
 
+            # ── Stop keepalive ────────────────────────────────────────────
+            # All testing phases are done.  Stop the heartbeat before the
+            # access matrix sync / probe phase so it doesn't interfere with
+            # session expiry detection logic in _probe_role_paths.
+            if _keepalive is not None:
+                try:
+                    _keepalive.stop()
+                except Exception:
+                    pass
+
             # Consolidate all finding URLs into structure_map before access matrix sync.
             # Findings from every phase (headers, shcheck, files, etc.) may reference
             # paths that were never written to structure_map incrementally.  Scanning
@@ -28678,9 +28789,58 @@ def main() -> None:
             except Exception:
                 pass
 
-            # Probe every structure_map path with this role's session.
+            # ── Seed discovery leader from structure_map ─────────────────
+            # For the non-reduced (discovery leader) context, the structure_map
+            # already holds valid HTTP status codes recorded during this role's
+            # own crawl/recon phases.  Seed those into the access matrix so
+            # _probe_role_paths only probes paths that genuinely have no
+            # confirmed status for this role.  This eliminates hundreds of
+            # redundant probes and prevents session-expiry from corrupting
+            # already-confirmed data.
+            #
+            # NOT done for reduced (non-leader) contexts because the
+            # structure_map codes are from Role 1's session, not theirs.
+            if not _is_reduced_ctx:
+                try:
+                    _seed_sm = out.root / "structure_map.json"
+                    _seed_am = out.root / "access_matrix.json"
+                    if _seed_sm.exists() and _seed_am.exists():
+                        _seed_sm_data = json.loads(_seed_sm.read_text())
+                        _seed_am_data = json.loads(_seed_am.read_text())
+                        _seed_sm_paths = _seed_sm_data.get("paths", {})
+                        _seed_changed = False
+                        for _seed_entry in _seed_am_data.get("paths", []):
+                            _sp = _seed_entry.get("path", "")
+                            _sa = _seed_entry.get("access", {})
+                            if _sa.get(_ctx_label) is not None:
+                                continue  # already has a real code
+                            _sm_info = _seed_sm_paths.get(_sp)
+                            if isinstance(_sm_info, dict):
+                                _sm_status = _sm_info.get("status")
+                                if isinstance(_sm_status, int) and _sm_status > 0:
+                                    _sa[_ctx_label] = _sm_status
+                                    _seed_changed = True
+                        if _seed_changed:
+                            _seed_am.write_text(json.dumps(_seed_am_data, indent=2))
+                            _seeded_count = sum(
+                                1 for _se in _seed_am_data.get("paths", [])
+                                if _se.get("access", {}).get(_ctx_label) is not None
+                            )
+                            _total_count = len(_seed_am_data.get("paths", []))
+                            vc.log(
+                                f"[access-matrix] Seeded {_seeded_count}/{_total_count} "
+                                f"paths for {_ctx_label} from structure_map — "
+                                f"_probe_role_paths will only fill the remaining "
+                                f"{_total_count - _seeded_count} gaps",
+                                "INFO")
+                except Exception:
+                    pass
+
+            # Probe structure_map paths with this role's session.
             # _write_preliminary_access_matrix above guarantees all paths have an
-            # entry; _probe_role_paths fills only the None slots for this role.
+            # entry; the structure_map seeding above (for the discovery leader)
+            # pre-fills confirmed codes.  _probe_role_paths fills only the
+            # remaining None slots for this role.
             try:
                 _probe_role_paths(out, target, _ctx_cfg, _ctx_label, _ctx_auth)
             except Exception:
