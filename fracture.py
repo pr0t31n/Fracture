@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.1"
+VERSION = "2.33.3"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -18789,6 +18789,33 @@ def _write_structure_map(out: "OutputManager", target: dict,
     if "/" not in paths:
         paths["/"] = {}
 
+    # ── Case-insensitive path dedup for IIS / Windows targets ────────────
+    # IIS serves the same resource regardless of URL casing, so feroxbuster
+    # discovers /Login/Index AND /Login/index — both 200.  Merge paths that
+    # differ only by case, keeping the first-seen casing and merging data.
+    try:
+        _tp_path = out.root / "target_profile.json"
+        _tp = json.loads(_tp_path.read_text(encoding="utf-8")) if _tp_path.exists() else {}
+        _srv = (_tp.get("server") or "").lower()
+        if "iis" in _srv or "microsoft" in _srv:
+            _canon: dict = {}          # lowercase → canonical path key
+            _merged: dict = {}         # canonical key → merged entry
+            for p in sorted(paths.keys()):
+                _pl = p.lower()
+                if _pl in _canon:
+                    # Merge into existing: keep first-seen key, merge entry data
+                    _ck = _canon[_pl]
+                    _me = _merged[_ck]
+                    for k, v in paths[p].items():
+                        if k not in _me:
+                            _me[k] = v
+                else:
+                    _canon[_pl] = p
+                    _merged[p] = dict(paths[p])
+            paths = _merged
+    except Exception:
+        pass
+
     try:
         sm_path.write_text(json.dumps({
             "target":       target["url"],
@@ -19020,7 +19047,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     vc.log(f"[injection] XSS: {purl} param={param}", "SUCCESS")
                     break
 
-    # dalfox
+    # dalfox — with FP filtering for encoded/path/infrastructure payloads
     dalfox = _find_tool("dalfox")
     if dalfox and params:
         df_out = out.output_path(phase, "dalfox_" + target["hostname"])
@@ -19031,16 +19058,51 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             stdout, _ = proc.communicate(timeout=120)
             _deregister_proc(proc)
             out.log_command("dalfox", cmd, df_out)
-            if "POC" in stdout or "Reflected" in stdout:
+            # Filter dalfox POC lines to remove high-FP patterns:
+            #  - Double/triple URL-encoding (%25XX) — browsers don't multi-decode
+            #  - ASP.NET infra params (__VIEWSTATE, __EVENTVALIDATION, etc.)
+            #  - Payload injected into URL path (before ?) rather than query params
+            _ASPNET_INFRA_RE = re.compile(
+                r'__VIEWSTATE|__EVENTVALIDATION|__VIEWSTATEGENERATOR|'
+                r'__PREVIOUSPAGE|__ASYNCPOST', re.I)
+            _valid_pocs = []
+            for _dl in stdout.splitlines():
+                _dl = _dl.strip()
+                if "[POC]" not in _dl:
+                    continue
+                # Extract the URL from the POC line
+                _dm = re.search(r'(https?://\S+)', _dl)
+                if not _dm:
+                    continue
+                _durl = _dm.group(1)
+                # Reject double/triple-encoded payloads — %25 is encoded %
+                if "%25" in _durl:
+                    vc.log(f"[injection] dalfox: skipping multi-encoded POC (high FP risk)", "INFO")
+                    continue
+                # Reject ASP.NET infrastructure parameter injection
+                _dq = urllib.parse.urlparse(_durl).query
+                if _ASPNET_INFRA_RE.search(_dq):
+                    vc.log(f"[injection] dalfox: skipping ASP.NET infra param POC (__VIEWSTATE etc.)", "INFO")
+                    continue
+                # Reject path-injected payloads — payload is in the path, not a query param
+                _dp = urllib.parse.urlparse(_durl).path
+                if any(c in _dp for c in ('<', '>', '"', "'", '=')):
+                    vc.log(f"[injection] dalfox: skipping path-injection POC (malformed URL)", "INFO")
+                    continue
+                _valid_pocs.append(_dl)
+            if _valid_pocs:
                 out.add_finding(
                     title="XSS Confirmed by dalfox",
                     url=params[0]["url"], port=target["port"], risk="HIGH",
                     description="dalfox confirmed XSS.",
-                    output=stdout[:2000], sources="dalfox",
+                    output="\n".join(_valid_pocs)[:2000], sources="dalfox",
                     service=target["scheme"], output_file=str(df_out),
                     owasp="A03:2025 Injection", nist="SI-10",
                     remediation="Encode all user output. Implement CSP.",
                 )
+            elif "[POC]" in stdout:
+                vc.log("[injection] dalfox reported POCs but all were filtered as likely FPs "
+                       "(multi-encoded, infra params, or path injection)", "INFO")
         except Exception as e:
             out.log_error("dalfox", cmd, str(e))
 
@@ -19253,12 +19315,25 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     vc.log(f"[injection] NoSQL injection: {purl} param={param}", "SUCCESS")
                     break
 
-    # 12. LDAP injection
+    # 12. LDAP injection — baseline-gated (same pattern as SQLi).
+    # The LDAP error regexes include terms like "objectClass" which can
+    # appear in normal page content.  A baseline fetch without the payload
+    # must NOT match the regex for the finding to fire.
     vc.status(phase, "Injection Testing", "running", "LDAP injection", 10, 17)
     for entry in params[:10]:
         purl = entry["url"]
         for param in entry["params"]:
+            # Baseline: fetch with a harmless value
+            try:
+                _ldap_bl = _qs_inject(purl, param, "test", sess, timeout)
+            except Exception:
+                _ldap_bl = None
+            _ldap_bl_body = _strip_url_echo(_ldap_bl.text, _ldap_bl, ["test"]) if _ldap_bl else ""
             for ldap_pay, ldap_err in _LDAP_PAYLOADS:
+                # Skip if the baseline already matches the error regex
+                # (page contains LDAP-like keywords regardless of input)
+                if _ldap_bl and ldap_err.search(_ldap_bl_body):
+                    continue
                 r = _qs_inject(purl, param, ldap_pay, sess, timeout)
                 _ldap_body = _strip_url_echo(r.text, r, [ldap_pay]) if r else ""
                 _ldap_body = re.sub(
@@ -19268,21 +19343,27 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     '', _ldap_body, flags=re.I)
                 if r and _inj_is_login_page(r):
                     continue
-                if r and ldap_err.search(_ldap_body):
-                    _rq, _rp = _save_http_evidence(out, phase, f"ldap_{param}", r, endpoint_url=purl, method="GET")
-                    out.add_finding(
-                        title="LDAP Injection",
-                        url=purl, port=target["port"], risk="HIGH",
-                        description="User-supplied input is concatenated into LDAP search filters without proper escaping, allowing an attacker to manipulate query logic, bypass authentication, or enumerate directory contents.",
-                        output=f"Parameter: {param}\nPayload: {ldap_pay}\nResponse ({r.status_code}): {r.text[:300]}",
-                        output_file=f"{_rq},{_rp}",
-                        sources="fracture-injection", service=target["scheme"],
-                        affected=purl, owasp="A03:2025 Injection", nist="SI-10",
-                        remediation="Escape all user-supplied values using RFC 4515-compliant LDAP encoding before incorporating them into LDAP filter strings.",
-                        http_code=r.status_code,
-                    )
-                    vc.log(f"[injection] LDAP injection: {purl} param={param}", "SUCCESS")
-                    break
+                if not r or not ldap_err.search(_ldap_body):
+                    continue
+                # Response must differ meaningfully from baseline — if the
+                # page renders identically (same length ±5%), the server
+                # ignored the payload entirely.
+                if _ldap_bl and abs(len(r.text) - len(_ldap_bl.text)) < max(50, len(_ldap_bl.text) * 0.05):
+                    continue
+                _rq, _rp = _save_http_evidence(out, phase, f"ldap_{param}", r, endpoint_url=purl, method="GET")
+                out.add_finding(
+                    title="LDAP Injection",
+                    url=purl, port=target["port"], risk="HIGH",
+                    description="User-supplied input is concatenated into LDAP search filters without proper escaping, allowing an attacker to manipulate query logic, bypass authentication, or enumerate directory contents.",
+                    output=f"Parameter: {param}\nPayload: {ldap_pay}\nResponse ({r.status_code}): {r.text[:300]}",
+                    output_file=f"{_rq},{_rp}",
+                    sources="fracture-injection", service=target["scheme"],
+                    affected=purl, owasp="A03:2025 Injection", nist="SI-10",
+                    remediation="Escape all user-supplied values using RFC 4515-compliant LDAP encoding before incorporating them into LDAP filter strings.",
+                    http_code=r.status_code,
+                )
+                vc.log(f"[injection] LDAP injection: {purl} param={param}", "SUCCESS")
+                break
 
     # 13. XPath injection
     vc.status(phase, "Injection Testing", "running", "XPath injection", 11, 17)
@@ -27361,6 +27442,12 @@ def main() -> None:
                     _scan_waf_cdn = _tp.get("cdn", "") or ""
                     if not _scan_waf_cdn and _tp.get("edge_security"):
                         _scan_waf_cdn = _tp["edge_security"][0]
+                    # WAF field from the target profile (WAF-tier only, never
+                    # LB-only products like F5 BIG-IP / Citrix ADC).
+                    if not _scan_waf_cdn:
+                        _tp_waf = _tp.get("waf", "") or ""
+                        if _tp_waf:
+                            _scan_waf_cdn = _tp_waf
                 except Exception:
                     _scan_waf_cdn = ""
 
