@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -647,10 +647,9 @@ def build_auth_session(
 
     # ── Auto-Detect ──────────────────────────────────────────────────────────
     elif method == "auto":
-        # Try each credential method in priority order; stop at first success.
-        # When no explicit login_url is provided, use the target URL — the
-        # form_login path will GET it, look for a <form> with a password
-        # field, and POST to the form's action (or the URL itself).
+        import re as _re
+        from urllib.parse import urljoin, urlparse
+
         login_url  = auth.get("login_url", "").strip()
         has_creds  = bool(auth.get("username"))
         target_url = auth.get("_target_url", "")  # injected by test_connection()
@@ -662,60 +661,141 @@ def build_auth_session(
                 "Credential Matrix"
             )
 
-        _auto_order: list[str] = []
-        if effective_login:
-            _auto_order.extend(["form_login", "token_login"])
-        _auto_order.extend(["basic", "digest", "ntlm"])
-
         _http_methods = frozenset({"basic", "digest", "ntlm"})
+        _LOGIN_PATH_PAT = _re.compile(
+            r'/(?:login|signin|sign-in|auth|account/login|session)',
+            _re.IGNORECASE,
+        )
 
-        # ── Baseline: GET the target without auth so we can compare ──────
-        _baseline_sc      = 0
-        _baseline_len     = 0
-        _baseline_loc     = ""
+        # ── Baseline: GET the target without auth ────────────────────────
+        # Captures: status, body size, cookies, final URL (after redirects),
+        # and the HTML source for API endpoint discovery.
+        _baseline_sc:      int = 0
+        _baseline_len:     int = 0
+        _baseline_loc:     str = ""
+        _baseline_final:   str = ""
+        _baseline_html:    str = ""
         _baseline_cookies: set[str] = set()
         if target_url:
             try:
                 _bl_sess = _make_session(verify_ssl, proxy)
+                # First: no-redirect probe for status/Location
                 _bl_resp = _bl_sess.get(target_url, timeout=timeout,
                                         allow_redirects=False)
                 _baseline_sc  = _bl_resp.status_code
                 _baseline_len = len(_bl_resp.content)
                 _baseline_loc = _bl_resp.headers.get("Location", "")
                 _baseline_cookies = set(_bl_sess.cookies.keys())
+                # Second: follow redirects to capture final URL + HTML
+                _bl_resp2 = _bl_sess.get(target_url, timeout=timeout,
+                                         allow_redirects=True)
+                _baseline_final = _bl_resp2.url
+                _baseline_html  = _bl_resp2.text[:16384]
             except Exception:
                 pass
 
+        # ── Discover API login endpoints from page source ────────────────
+        _api_login_urls: list[str] = []
+        if _baseline_html:
+            _base_for_resolve = target_url
+            # JS variable patterns: ApiLoginUrl, loginUrl, authUrl, etc.
+            for _m in _re.finditer(
+                r"""(?:ApiLoginUrl|loginUrl|authUrl|login_url|auth_url"""
+                r"""|signInUrl|tokenUrl|token_url)"""
+                r"""\s*[=:]\s*["']([^"']+)["']""",
+                _baseline_html, _re.IGNORECASE,
+            ):
+                _candidate = urljoin(_base_for_resolve, _m.group(1))
+                if _candidate not in _api_login_urls:
+                    _api_login_urls.append(_candidate)
+            # Common API path patterns in links / form actions
+            for _m in _re.finditer(
+                r"""(?:href|action|src)\s*=\s*["']([^"']*"""
+                r"""(?:/api/(?:login|auth|token|signin|session)"""
+                r"""|/connect/token|/oauth/token)[^"']*)["']""",
+                _baseline_html, _re.IGNORECASE,
+            ):
+                _candidate = urljoin(_base_for_resolve, _m.group(1))
+                if _candidate not in _api_login_urls:
+                    _api_login_urls.append(_candidate)
+
+        def _is_login_redirect(final_url: str) -> bool:
+            """True if the final URL looks like a login page (redirect-to-self)."""
+            if not final_url:
+                return False
+            _fp = urlparse(final_url).path.rstrip("/")
+            if _LOGIN_PATH_PAT.search(_fp):
+                return True
+            # Compare against baseline: if unauthenticated GET also landed
+            # on this URL, we're right back where we started
+            if _baseline_final and final_url.rstrip("/") == _baseline_final.rstrip("/"):
+                return True
+            return False
+
+        def _verify_session(s: "requests.Session", method_name: str
+                            ) -> "tuple[bool, str]":
+            """GET the target URL with the supposedly-authenticated session.
+            Returns (success, detail)."""
+            if not target_url:
+                return True, "no target URL to verify against"
+            try:
+                _vr = s.get(target_url, timeout=timeout, allow_redirects=True)
+                # Redirect back to login = auth failed
+                if _is_login_redirect(_vr.url):
+                    return False, (
+                        f"redirected back to login page: {_vr.url}")
+                # Same page as unauthenticated baseline = auth had no effect
+                _new_ck = set(s.cookies.keys()) - _baseline_cookies
+                if (not _new_ck
+                        and abs(len(_vr.content) - _baseline_len) < 256
+                        and _vr.status_code == _baseline_sc):
+                    return False, (
+                        "response identical to unauthenticated baseline")
+                return True, (
+                    f"HTTP {_vr.status_code} at {_vr.url}"
+                    + (f", {len(_new_ck)} new cookie(s)" if _new_ck else ""))
+            except Exception as _e:
+                return False, str(_e)
+
+        # ── Build method order ───────────────────────────────────────────
+        _auto_order: list[str] = []
+        if effective_login:
+            _auto_order.extend(["form_login", "token_login"])
+        _auto_order.extend(["basic", "digest", "ntlm"])
+
         _errors: list[str] = []
+        _tried_api_urls: set[str] = set()
+
         for _am in _auto_order:
             _auto_auth = dict(auth)
             _auto_auth["method"] = _am
-            # Inject the effective login URL for form/token login attempts
             if _am in ("form_login", "token_login") and effective_login:
                 _auto_auth["login_url"] = effective_login
+
             _auto_sess, _auto_info = build_auth_session(
                 _auto_auth, timeout, proxy, verify_ssl)
+
             if _auto_info.startswith("ERROR:"):
                 _errors.append(f"{_am} ({effective_login}): {_auto_info}")
                 continue
-            # For form/token login, the POST result IS the test — check it
+
+            # Extract the POST URL from the info string
+            _post_url = effective_login
+            _post_m = _re.search(r'POST\s+(\S+)', _auto_info)
+            if _post_m:
+                _post_url = _post_m.group(1)
+
             if _am in ("form_login", "token_login"):
-                # Include the URL that was actually POSTed to
-                _post_url = effective_login
-                # Extract actual POST URL from info if available
-                import re as _re
-                _post_m = _re.search(r'POST\s+(\S+)', _auto_info)
-                if _post_m:
-                    _post_url = _post_m.group(1)
-                if _auto_sess.cookies or any(
-                    k.lower() in ("authorization", "x-auth-token")
-                    for k in _auto_sess.headers
-                ):
+                # Verify: GET target with session — did we actually auth?
+                _ok, _detail = _verify_session(_auto_sess, _am)
+                if _ok:
                     return _auto_sess, (
-                        f"auto-detect → {_am} ({_post_url}): {_auto_info}")
-                _errors.append(
-                    f"{_am} ({_post_url}): {_auto_info} (no auth signals)")
+                        f"auto-detect → {_am} ({_post_url}): "
+                        f"{_auto_info} — verified: {_detail}")
+                _errors.append(f"{_am} ({_post_url}): {_detail}")
+                _tried_api_urls.add((effective_login or "").rstrip("/"))
                 continue
+
             # For HTTP auth methods, compare authenticated GET against baseline
             if _am in _http_methods and target_url:
                 try:
@@ -725,13 +805,11 @@ def build_auth_session(
                     _auth_len = len(_vr.content)
                     _auth_loc = _vr.headers.get("Location", "")
 
-                    # Hard reject: server explicitly said no
                     if _auth_sc in (401, 403):
                         _errors.append(
                             f"{_am}: HTTP {_auth_sc} — rejected")
                         continue
 
-                    # Success signals: something changed vs baseline
                     _diff_reasons: list[str] = []
                     _new_cookies = (set(_auto_sess.cookies.keys())
                                     - _baseline_cookies)
@@ -760,8 +838,39 @@ def build_auth_session(
                 except Exception as _exc:
                     _errors.append(f"{_am}: {_exc}")
                 continue
-            # Fallback: assume configured correctly
             return _auto_sess, f"auto-detect → {_am}: {_auto_info}"
+
+        # ── Phase 2: try discovered API login endpoints ──────────────────
+        # If standard form/token login against the target URL failed, try
+        # any API login URLs discovered from the page source (e.g.
+        # window.OmtSite.ApiLoginUrl, /api/login, /connect/token).
+        if _api_login_urls:
+            for _api_url in _api_login_urls:
+                if _api_url.rstrip("/") in _tried_api_urls:
+                    continue
+                _tried_api_urls.add(_api_url.rstrip("/"))
+                for _api_method in ("token_login", "form_login"):
+                    _api_auth = dict(auth)
+                    _api_auth["method"] = _api_method
+                    _api_auth["login_url"] = _api_url
+                    # API endpoints typically expect JSON
+                    if _api_method == "token_login":
+                        _api_auth["login_content_type"] = "application/json"
+                    _api_sess, _api_info = build_auth_session(
+                        _api_auth, timeout, proxy, verify_ssl)
+                    if _api_info.startswith("ERROR:"):
+                        _errors.append(
+                            f"{_api_method} (discovered: {_api_url}): "
+                            f"{_api_info}")
+                        continue
+                    _ok, _detail = _verify_session(_api_sess, _api_method)
+                    if _ok:
+                        return _api_sess, (
+                            f"auto-detect → {_api_method} "
+                            f"(discovered API: {_api_url}): "
+                            f"{_api_info} — verified: {_detail}")
+                    _errors.append(
+                        f"{_api_method} (discovered: {_api_url}): {_detail}")
 
         return sess, "ERROR: auto-detect exhausted all methods — " + "; ".join(_errors)
 
