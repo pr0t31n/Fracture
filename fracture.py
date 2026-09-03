@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.4"
+VERSION = "2.30.5"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6921,8 +6921,16 @@ return null;
         return configured_uf
 
     # ── Login POST helper ─────────────────────────────────────────────────────
-    def _login_post(base_url: str) -> "tuple[requests.Response | None, str]":
-        """CSRF prefetch + POST credentials to resolved form action. Returns (resp, post_url)."""
+    def _login_post(base_url: str, *, api_endpoint: bool = False) -> "tuple[requests.Response | None, str]":
+        """CSRF prefetch + POST credentials to resolved form action. Returns (resp, post_url).
+
+        api_endpoint -- set True when the guard GET returned 4xx/5xx, indicating
+            this is an API endpoint (not an HTML form page).  When True:
+              • content-type defaults to application/json (matching testConnection)
+              • Referer/Origin headers are omitted (API endpoints don't need them;
+                setting Referer to the API URL itself is unusual and some servers
+                reject it)
+        """
         if not base_url:
             return None, ""
         login_mode = auth.get("login_mode", "fields")
@@ -7026,7 +7034,25 @@ return null;
                         and any(_pw in _shk.lower()
                                 for _pw in ("pwd", "password", "passwd"))):
                     data[_shk] = p
+        # Content-type default depends on whether this is an API endpoint.
+        # testConnection always defaults to application/json — match that
+        # behaviour when the guard GET flagged this as an API (returned 4xx).
+        # For HTML form pages keep the traditional form-urlencoded default.
+        #
+        # Crucible saves login_content_type="application/x-www-form-urlencoded"
+        # as the default for Fracture, so auth.get() returns it even when the
+        # operator never touched it.  When the guard detected an API endpoint,
+        # override that default to JSON — API endpoints that reject GET don't
+        # serve HTML forms and almost certainly expect JSON bodies.
         ct = auth.get("login_content_type", "application/x-www-form-urlencoded")
+        if api_endpoint and ct == "application/x-www-form-urlencoded":
+            ct = "application/json"
+            vc.log(
+                "[auth] API endpoint detected (guard GET returned 4xx) — "
+                "overriding content-type to application/json "
+                "(matching testConnection behaviour)",
+                "INFO",
+            )
         # ── Build same-origin Referer + Origin headers ───────────────────
         # Flask-WTF (WTF_CSRF_SSL_STRICT=True, the default) and many other
         # CSRF middlewares validate that HTTPS POSTs carry a Referer (and
@@ -7034,15 +7060,21 @@ return null;
         # them the server rejects the POST with a generic "session token
         # expired" message even though the token is fresh and the cookie
         # matches. The fix is to send the same headers the browser would.
+        #
+        # Exception: when the login URL is an API endpoint (guard returned
+        # 4xx), setting Referer to the API URL itself is unusual — the
+        # Referer should point to the SPA page, not the API.  testConnection
+        # sends no Referer/Origin at all in this scenario; match that.
         _post_headers: dict = {}
-        try:
-            from urllib.parse import urlparse as _uparse_lp
-            _lp = _uparse_lp(base_url)
-            if _lp.scheme and _lp.netloc:
-                _post_headers["Referer"] = base_url
-                _post_headers["Origin"]  = f"{_lp.scheme}://{_lp.netloc}"
-        except Exception:
-            pass
+        if not api_endpoint:
+            try:
+                from urllib.parse import urlparse as _uparse_lp
+                _lp = _uparse_lp(base_url)
+                if _lp.scheme and _lp.netloc:
+                    _post_headers["Referer"] = base_url
+                    _post_headers["Origin"]  = f"{_lp.scheme}://{_lp.netloc}"
+            except Exception:
+                pass
         # ── Diagnostic: log the POST request shape ──────────────────────
         # Field NAMES only (never values — passwords would leak), plus
         # whether each known field carries a non-empty value. Helps prove
@@ -8117,7 +8149,9 @@ return null;
         #       – If redirect occurs during GET: adopt the final URL.
         #       – Only block when GET returns 200 with NO password field.
         _login_mode = auth.get("login_mode", "fields")
+        _guard_is_api = False   # True when guard GET returned 4xx/5xx (API endpoint)
         if _login_url and _login_mode in ("json", "merge"):
+            _guard_is_api = True   # explicit JSON mode = API endpoint
             vc.log(
                 f"[auth] login_mode={_login_mode} — skipping HTML form guard "
                 f"(JSON API endpoint: {_login_url})",
@@ -8133,6 +8167,7 @@ return null;
                                       for c in sess.cookies}
                 _guard_r = sess.get(_login_url, timeout=timeout, allow_redirects=True)
                 if _guard_r.status_code >= 400:
+                    _guard_is_api = True   # 4xx/5xx on GET → API endpoint
                     # Roll back cookies added by the failed guard GET —
                     # they are infrastructure artefacts (load-balancer
                     # persistence, WAF tracking) that can interfere
@@ -8302,7 +8337,7 @@ return null;
             vc.log(f"[auth] Submitting credentials to: {_login_url}", "INFO")
             # Snapshot cookie names BEFORE credential submission for comparison
             _pre_login_cookie_names: set = {c.name for c in sess.cookies}
-            _post_resp, _ = _login_post(_login_url)
+            _post_resp, _ = _login_post(_login_url, api_endpoint=_guard_is_api)
             _login_post_called = True
             if _post_resp is not None:
                 # Diagnostic snippet so login-page-bounceback vs MFA-page
@@ -8331,6 +8366,23 @@ return null;
                     + (f", <h1>{_h1_s}</h1>" if _h1_s else ""),
                     "INFO",
                 )
+                # ── Diagnostic: log response body for small non-HTML
+                #    responses that produced no cookies.  This surfaces
+                #    API error messages (e.g. {"error":"..."}) that would
+                #    otherwise be invisible.  Skip for HTML (already parsed
+                #    for title/h1/error elements below).
+                try:
+                    if (not sess.cookies and _post_body_len <= 512
+                            and "text/html" not in
+                            (_post_resp.headers.get("Content-Type", "").lower())):
+                        _body_snip = (_post_resp.text or "").strip()
+                        if _body_snip:
+                            vc.log(
+                                f"[auth] Response body: {_body_snip[:256]}",
+                                "INFO",
+                            )
+                except Exception:
+                    pass
                 # ── Diagnostic: scan POST response for explicit errors ──
                 # If credentials were rejected, Flask-WTF / Django / Rails
                 # apps typically include a flash message or alert block.
