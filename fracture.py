@@ -8935,7 +8935,7 @@ return null;
         # verify by GETting the target URL with the auth session and comparing
         # against this baseline.  If the responses are identical, the cookies
         # are just tracking/CSRF — not real auth — and the method is rejected.
-        _auto_bl_cookies: set[str] = set()
+        _auto_bl_cookie_vals: dict[str, str] = {}   # name → value
         _auto_bl_body_len: int = 0
         _auto_bl_status:   int = 0
         _auto_bl_final:    str = ""
@@ -8944,7 +8944,9 @@ return null;
                 _auto_bl_sess = _make_session(cfg)
                 _auto_bl_r = _auto_bl_sess.get(
                     _auto_base_url, timeout=timeout, allow_redirects=True)
-                _auto_bl_cookies  = set(_auto_bl_sess.cookies.keys())
+                _auto_bl_cookie_vals = {
+                    c.name: (c.value or "")
+                    for c in _auto_bl_sess.cookies}
                 _auto_bl_body_len = len(_auto_bl_r.content)
                 _auto_bl_status   = _auto_bl_r.status_code
                 _auto_bl_final    = _auto_bl_r.url
@@ -8972,19 +8974,31 @@ return null;
                             _auto_vr = _auto_sess.get(
                                 _auto_base_url, timeout=timeout,
                                 allow_redirects=True)
-                            _auto_vr_ck = (set(_auto_sess.cookies.keys())
-                                           - _auto_bl_cookies)
                             _auto_vr_body = len(_auto_vr.content)
-                            # Check 1: are there genuinely NEW cookies beyond
-                            # what any visitor gets?
-                            # Check 2: did the response body change meaningfully?
-                            # Check 3: did we land on a different final URL?
+                            # Check 1: new cookie NAMES or changed VALUES?
+                            # A session cookie with a changed value after
+                            # login (e.g. ASP.NET_SessionId) is proof of auth
+                            # even if the cookie name existed before.
+                            _auto_vr_ck_changed = False
+                            for _ck in _auto_sess.cookies:
+                                _bl_val = _auto_bl_cookie_vals.get(
+                                    _ck.name)
+                                if _bl_val is None:
+                                    # Brand-new cookie name
+                                    _auto_vr_ck_changed = True
+                                    break
+                                if (_ck.value or "") != _bl_val:
+                                    # Same name, different value
+                                    _auto_vr_ck_changed = True
+                                    break
+                            # Check 2: did the response body change?
                             _auto_vr_body_diff = abs(
                                 _auto_vr_body - _auto_bl_body_len) > 256
+                            # Check 3: did we land on a different URL?
                             _auto_vr_url_diff = (
                                 _auto_vr.url.rstrip("/")
                                 != _auto_bl_final.rstrip("/"))
-                            if (not _auto_vr_ck
+                            if (not _auto_vr_ck_changed
                                     and not _auto_vr_body_diff
                                     and not _auto_vr_url_diff
                                     and _auto_vr.status_code == _auto_bl_status):
