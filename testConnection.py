@@ -661,31 +661,18 @@ def build_auth_session(
 
         if not _auto_order:
             return sess, (
-                "ERROR: auto-detect needs either a Login URL "
-                "(for form/token login) or credentials in the "
-                "Credential Matrix (for basic/digest/ntlm)"
+                "ERROR: auto-detect needs credentials in the "
+                "Credential Matrix (for basic/digest/ntlm) or a Login URL "
+                "(for form/token login)"
             )
 
-        # Pre-check: only try HTTP-challenge methods (basic/digest/ntlm) when
-        # the server actually issues a 401.  Without a 401, setting sess.auth
-        # looks like success but isn't.
         _http_methods = frozenset({"basic", "digest", "ntlm"})
-        _server_401 = False
-        _probe_url = target_url or login_url
-        if _probe_url and any(m in _http_methods for m in _auto_order):
-            try:
-                _probe_resp = sess.get(_probe_url, timeout=timeout,
-                                       allow_redirects=False)
-                _server_401 = (_probe_resp.status_code == 401)
-            except Exception:
-                pass
-            if not _server_401:
-                _auto_order = [m for m in _auto_order if m not in _http_methods]
 
         _errors: list[str] = []
         for _am in _auto_order:
             _auto_auth = dict(auth)
             _auto_auth["method"] = _am
+            _auto_sess = _make_session(verify_ssl, proxy)
             _auto_sess, _auto_info = build_auth_session(
                 _auto_auth, timeout, proxy, verify_ssl)
             if _auto_info.startswith("ERROR:"):
@@ -700,16 +687,17 @@ def build_auth_session(
                     return _auto_sess, f"auto-detect → {_am}: {_auto_info}"
                 _errors.append(f"{_am}: {_auto_info} (no auth signals)")
                 continue
-            # For HTTP auth methods, we configured sess.auth — verify with GET
+            # For HTTP auth methods, verify with a real GET against target URL
             if _am in _http_methods and target_url:
                 try:
                     _vr = _auto_sess.get(target_url, timeout=timeout)
                     if _vr.status_code not in (401, 403):
                         return _auto_sess, (
                             f"auto-detect → {_am}: HTTP {_vr.status_code}")
-                except Exception:
-                    pass
-                _errors.append(f"{_am}: authentication rejected")
+                    _errors.append(
+                        f"{_am}: HTTP {_vr.status_code} — rejected")
+                except Exception as _exc:
+                    _errors.append(f"{_am}: {_exc}")
                 continue
             # Fallback: assume configured correctly
             return _auto_sess, f"auto-detect → {_am}: {_auto_info}"
