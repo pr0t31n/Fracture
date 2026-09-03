@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.3"
+VERSION = "2.30.4"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -8125,8 +8125,30 @@ return null;
             )
         elif _login_url:
             try:
+                # Snapshot cookies before the guard GET so we can roll
+                # back any cookies set by a failing probe (e.g. F5 BIG-IP
+                # persistence cookies from a 405).  testConnection posts
+                # with a clean session; we must match that behaviour.
+                _pre_guard_cookies = {c.name: c.value
+                                      for c in sess.cookies}
                 _guard_r = sess.get(_login_url, timeout=timeout, allow_redirects=True)
                 if _guard_r.status_code >= 400:
+                    # Roll back cookies added by the failed guard GET —
+                    # they are infrastructure artefacts (load-balancer
+                    # persistence, WAF tracking) that can interfere
+                    # with the credential POST.
+                    for _gc in list(sess.cookies):
+                        if _gc.name not in _pre_guard_cookies:
+                            sess.cookies.clear_session_cookies()
+                            # Restore only the pre-guard cookies
+                            for _pgn, _pgv in _pre_guard_cookies.items():
+                                sess.cookies.set(_pgn, _pgv)
+                            vc.log(
+                                "[auth] Rolled back cookies from failed "
+                                "guard GET (clean session for credential POST)",
+                                "INFO",
+                            )
+                            break
                     vc.log(
                         f"[auth] Guard GET returned HTTP {_guard_r.status_code} for "
                         f"{_login_url} — proceeding without form verification",
