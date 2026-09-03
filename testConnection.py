@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "1.7.7"
+VERSION = "1.8.0"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -648,23 +648,24 @@ def build_auth_session(
     # ── Auto-Detect ──────────────────────────────────────────────────────────
     elif method == "auto":
         # Try each credential method in priority order; stop at first success.
-        # Skip methods that require config the operator didn't provide.
+        # When no explicit login_url is provided, use the target URL — the
+        # form_login path will GET it, look for a <form> with a password
+        # field, and POST to the form's action (or the URL itself).
         login_url  = auth.get("login_url", "").strip()
         has_creds  = bool(auth.get("username"))
         target_url = auth.get("_target_url", "")  # injected by test_connection()
+        effective_login = login_url or target_url
 
-        _auto_order: list[str] = []
-        if login_url:
-            _auto_order.extend(["form_login", "token_login"])
-        if has_creds:
-            _auto_order.extend(["basic", "digest", "ntlm"])
-
-        if not _auto_order:
+        if not has_creds:
             return sess, (
                 "ERROR: auto-detect needs credentials in the "
-                "Credential Matrix (for basic/digest/ntlm) or a Login URL "
-                "(for form/token login)"
+                "Credential Matrix"
             )
+
+        _auto_order: list[str] = []
+        if effective_login:
+            _auto_order.extend(["form_login", "token_login"])
+        _auto_order.extend(["basic", "digest", "ntlm"])
 
         _http_methods = frozenset({"basic", "digest", "ntlm"})
 
@@ -689,19 +690,31 @@ def build_auth_session(
         for _am in _auto_order:
             _auto_auth = dict(auth)
             _auto_auth["method"] = _am
+            # Inject the effective login URL for form/token login attempts
+            if _am in ("form_login", "token_login") and effective_login:
+                _auto_auth["login_url"] = effective_login
             _auto_sess, _auto_info = build_auth_session(
                 _auto_auth, timeout, proxy, verify_ssl)
             if _auto_info.startswith("ERROR:"):
-                _errors.append(f"{_am}: {_auto_info}")
+                _errors.append(f"{_am} ({effective_login}): {_auto_info}")
                 continue
             # For form/token login, the POST result IS the test — check it
             if _am in ("form_login", "token_login"):
+                # Include the URL that was actually POSTed to
+                _post_url = effective_login
+                # Extract actual POST URL from info if available
+                import re as _re
+                _post_m = _re.search(r'POST\s+(\S+)', _auto_info)
+                if _post_m:
+                    _post_url = _post_m.group(1)
                 if _auto_sess.cookies or any(
                     k.lower() in ("authorization", "x-auth-token")
                     for k in _auto_sess.headers
                 ):
-                    return _auto_sess, f"auto-detect → {_am}: {_auto_info}"
-                _errors.append(f"{_am}: {_auto_info} (no auth signals)")
+                    return _auto_sess, (
+                        f"auto-detect → {_am} ({_post_url}): {_auto_info}")
+                _errors.append(
+                    f"{_am} ({_post_url}): {_auto_info} (no auth signals)")
                 continue
             # For HTTP auth methods, compare authenticated GET against baseline
             if _am in _http_methods and target_url:
