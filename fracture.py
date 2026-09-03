@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.32.6"
+VERSION = "2.33.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3614,7 +3614,9 @@ def _make_session(cfg: dict, scope_hostnames: "set | None" = None) -> requests.S
 def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         scope_hostnames: "set | None" = None,
                         role_label: str = "",
-                        no_interactive: bool = False) -> "requests.Session | None":
+                        no_interactive: bool = False,
+                        session: "requests.Session | None" = None,
+                        ) -> "requests.Session | None":
     """
     Return an authenticated requests.Session for the given cfg/auth_key, or None if disabled.
     Supports all 20 auth methods from Fracture testConnection.py.
@@ -3622,13 +3624,17 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
     no_interactive: when True, suppress all vc.prompt() calls (browser-auth prompts).
     Use for automated/internal call sites (auth_bypass credential testing, access_matrix
     re-auth fallback) where user interaction is not appropriate.
+
+    session: optional pre-built Session.  When provided the auth flow authenticates
+    through this session instead of creating a new one.  Used by the session-fixation
+    test so the injected cookie survives through the login exchange.
     """
     auth = cfg.get(auth_key, {})
     if not auth.get("enabled"):
         return None
     # Auth uses an unscoped session so that login_url on a different host is reachable.
     # Cookies and auth headers are transferred to the scoped scan session at the end.
-    sess    = _make_session(cfg, None)
+    sess    = session if session is not None else _make_session(cfg, None)
     timeout = cfg.get("timeout", 10)
     method  = (auth.get("method") or auth.get("auth_type") or "form_login").strip().lower()
     _role_tag = f" [{role_label}]" if role_label else ""
@@ -16461,7 +16467,9 @@ def _crawl_page(page_url: str, sess: requests.Session,
             action = form.get("action", "")
             method = form.get("method", "GET").upper()
             inputs = [
-                {"name": i.get("name", ""), "type": i.get("type", "text")}
+                {"name": i.get("name", ""), "type": i.get("type", "text"),
+                 "tag": i.name, "value": i.get("value", ""),
+                 "id": i.get("id", "")}
                 for i in form.find_all(["input", "textarea", "select"])
                 if i.get("name")
             ]
@@ -19878,13 +19886,18 @@ def _phase_traversal(target: dict, cfg: dict, pm: ProgressManager,
 # Phase 5b: Business Logic
 # ─────────────────────────────────────────────
 _BL_NUMERIC_FIELDS = re.compile(
-    r'qty|quantity|amount|price|cost|total|count|number|num|value|'
+    r'qty|quantity|amount|price|cost|total|count|number|'
     r'discount|coupon|fee|rate|balance|credit|debit|units|items', re.I
 )
 _BL_WORKFLOW_URL = re.compile(
     r'checkout|confirm|payment|pay|order|purchase|cart|complete|'
     r'transfer|send|submit|process|finalize|done|success|approve|step\d', re.I
 )
+# Input types that can carry numeric business values
+_BL_NUMERIC_INPUT_TYPES = frozenset({"text", "number", "tel", ""})
+# ASP.NET control name prefixes indicating non-numeric controls (dropdowns,
+# checkboxes, radio buttons, list controls, buttons)
+_BL_ASPNET_CTRL_RE = re.compile(r'(?:^|\$)(drp|ddl|chk|rdo|rad|btn|lst)', re.I)
 
 
 def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
@@ -19905,8 +19918,11 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
         method = form.get("method", "GET").upper()
         inputs = form.get("inputs", [])
         num_fields = [
-            i for i in inputs if i.get("name") and
-            _BL_NUMERIC_FIELDS.search(i.get("name", "") + i.get("id", ""))
+            i for i in inputs if i.get("name")
+            and i.get("tag", "input") not in ("select",)
+            and i.get("type", "text").lower() in _BL_NUMERIC_INPUT_TYPES
+            and not _BL_ASPNET_CTRL_RE.search(i.get("name", ""))
+            and _BL_NUMERIC_FIELDS.search(i.get("name", "") + i.get("id", ""))
         ]
         if not num_fields:
             continue
@@ -19920,7 +19936,17 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                      else sess.get(action, params=data, timeout=timeout, allow_redirects=True))
                 if r and r.status_code in (200, 201, 302) and not re.search(
                         r'error|invalid|not.allowed|rejected|negative|zero', r.text, re.I):
+                    if _inj_is_login_page(r):
+                        continue
                     field_names = ", ".join(nf["name"] for nf in num_fields)
+                    _ev_files: list = []
+                    try:
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, f"neg_{test_val}_{field_names[:30]}",
+                            r, endpoint_url=action, method=method)
+                        _ev_files = [_rq, _rp]
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Business Logic — Numeric Field Accepts Negative/Zero Value",
                         url=action, port=target["port"], risk="HIGH",
@@ -19930,6 +19956,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                             f"of quantities, prices, or financial values."
                         ),
                         output=f"Field(s): {field_names}\nTest value: {test_val}\nHTTP {r.status_code}",
+                        output_file=",".join(_ev_files) if _ev_files else "",
                         sources="fracture-business-logic", service=target["scheme"],
                         affected=action,
                         owasp="A04:2025 Insecure Design", nist="AC-3",
@@ -19952,8 +19979,21 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
             bare = requests.Session()
             bare.headers.update(sess.headers)
             bare.verify = False
-            r = bare.get(lnk, timeout=timeout, allow_redirects=False)
+            r = bare.get(lnk, timeout=timeout, allow_redirects=True)
             if r and r.status_code in (200, 201):
+                # Skip if the response is actually a login page (JS redirect,
+                # inline form, or meta-refresh — common in ASP.NET WebForms)
+                if _inj_is_login_page(r):
+                    continue
+                _ev_files: list = []
+                try:
+                    _rq, _rp = _save_http_evidence(
+                        out, phase,
+                        f"workflow_skip_{hash(lnk) & 0xFFFF:04x}",
+                        r, endpoint_url=lnk, method="GET")
+                    _ev_files = [_rq, _rp]
+                except Exception:
+                    pass
                 out.add_finding(
                     title="Business Logic — Workflow Step Directly Accessible",
                     url=lnk, port=target["port"], risk="HIGH",
@@ -19963,6 +20003,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                         f"This may allow skipping payment, verification, or approval steps."
                     ),
                     output=f"URL: {lnk}\nHTTP {r.status_code} (unauthenticated fresh session)",
+                    output_file=",".join(_ev_files) if _ev_files else "",
                     sources="fracture-business-logic", service=target["scheme"],
                     affected=lnk,
                     owasp="A04:2025 Insecure Design", nist="AC-3",
@@ -20070,6 +20111,16 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                      if method == "POST"
                      else sess.get(action, params=tamper, timeout=timeout, allow_redirects=True))
                 if r and r.status_code in (200, 201, 302):
+                    if _inj_is_login_page(r):
+                        continue
+                    _ev_files: list = []
+                    try:
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, f"price_tamper_{hf['name'][:30]}",
+                            r, endpoint_url=action, method=method)
+                        _ev_files = [_rq, _rp]
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Business Logic — Hidden Price/Value Field Tampering",
                         url=action, port=target["port"], risk="HIGH",
@@ -20083,6 +20134,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                             f"Field: {hf['name']}\nOriginal: {orig_val}\n"
                             f"Tampered: 0.01\nHTTP {r.status_code}"
                         ),
+                        output_file=",".join(_ev_files) if _ev_files else "",
                         sources="fracture-business-logic", service=target["scheme"],
                         affected=action,
                         owasp="A04:2025 Insecure Design", nist="AC-3",
@@ -21449,17 +21501,15 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             )
 
     vc.status(phase, "Session Analysis", "running", "Session fixation", 1, 5)
-    # 2. Session fixation — check if a user-provided session ID persists
-    #    through authentication.  Many frameworks (ASP.NET, PHP, etc.)
-    #    accept arbitrary session IDs pre-auth by design; the vulnerability
-    #    exists only when the fixed ID is NOT regenerated upon login.
-    #
-    #    Test:
+    # 2. Session fixation — OWASP WSTG-SESS-03
+    #    Test whether the server regenerates the session ID upon login.
+    #    Methodology:
     #      a) Find the session cookie name from the authenticated session.
     #      b) Create a fresh session, inject a fixed ID, GET the login page.
-    #      c) Authenticate with valid credentials using _build_auth_session.
+    #      c) Authenticate through that SAME session via _build_auth_session(session=...).
     #      d) Check if the post-auth session cookie still holds the fixed ID.
-    #      e) Flag only if the fixed ID survived authentication.
+    #      e) If it does, verify the session is actually authenticated (not
+    #         just a stale cookie in the jar that the server ignores).
     fixed_id = "fracture_fixed_session_12345678"
     try:
         session_cookie_name = None
@@ -21469,95 +21519,33 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                 break
         if session_cookie_name and cfg.get("auth", {}).get("enabled"):
             # Step 1: pre-auth — inject the fixed session ID
-            test_sess = _make_session(cfg)
-            test_sess.cookies.set(session_cookie_name, fixed_id)
-            _pre_r = test_sess.get(url, timeout=timeout)
-            # Safe extraction — avoid CookieConflictError on dupes
+            fix_sess = _make_session(cfg)
+            fix_sess.cookies.set(session_cookie_name, fixed_id)
+            login_url = cfg.get("auth", {}).get("login_url", url)
+            _pre_r = fix_sess.get(login_url, timeout=timeout)
             _pre_val = ""
-            for _ck in test_sess.cookies:
+            for _ck in fix_sess.cookies:
                 if _ck.name == session_cookie_name:
                     _pre_val = _ck.value
                     break
 
             if _pre_val == fixed_id:
-                # Server accepted the fixed ID pre-auth.  Now authenticate.
+                # Server accepted the fixed ID pre-auth.  Now authenticate
+                # through this same session so the cookie survives the flow.
                 vc.log(f"[session] Server accepted fixed session ID pre-auth "
                        f"({session_cookie_name}={fixed_id[:20]}…) — testing "
                        f"post-auth persistence", "INFO")
 
-                # Step 2: authenticate through the fixed-ID session.
-                # Build a throwaway auth config so _build_auth_session logs
-                # in on test_sess's cookie jar.
                 import copy as _sf_copy
                 _sf_cfg = _sf_copy.deepcopy(cfg)
+                # Pass fix_sess so _build_auth_session uses it (no new
+                # session creation) — the fixed cookie rides through login.
                 _sf_sess = _build_auth_session(
                     _sf_cfg, no_interactive=True,
-                    role_label="fixation-test")
+                    role_label="fixation-test",
+                    session=fix_sess)
 
                 if _sf_sess is not None:
-                    # Inject the fixed ID into the freshly-authed session
-                    # BEFORE the auth flow ran — we need the test to use the
-                    # pre-set cookie, not a fresh one.  However
-                    # _build_auth_session creates its own session internally.
-                    # Instead: replay the login on test_sess directly.
-                    #
-                    # Simpler approach: compare the post-auth session cookie
-                    # from _sf_sess against the fixed ID.  If the auth flow
-                    # did NOT regenerate the cookie, the value would match
-                    # only if the server reused whatever was in the jar.
-                    #
-                    # Because _build_auth_session creates a NEW session, we
-                    # take its post-auth cookie value as the "regenerated"
-                    # baseline, then do a second login on test_sess (which
-                    # carries the fixed ID) and compare.
-                    # Safe extraction — avoid CookieConflictError on dupes
-                    _regen_val = ""
-                    for _ck in _sf_sess.cookies:
-                        if _ck.name == session_cookie_name:
-                            _regen_val = _ck.value
-                            break
-
-                    # Now log in via the session that carries the fixed ID.
-                    # Transfer auth headers/cookies from _sf_sess into
-                    # test_sess so the same login flow replays.
-                    _sf_cfg2 = _sf_copy.deepcopy(cfg)
-                    # Build a session that starts with the fixed-ID cookie
-                    _fix_sess = _make_session(cfg)
-                    _fix_sess.cookies.set(session_cookie_name, fixed_id)
-                    _fix_auth = _build_auth_session(
-                        _sf_cfg2, no_interactive=True,
-                        role_label="fixation-verify")
-
-                    # _build_auth_session creates its own session — we
-                    # cannot force it to reuse _fix_sess.  The cleanest
-                    # post-auth check: manually replay a GET on the login
-                    # URL with the fixed cookie set, then authenticate
-                    # via the login endpoint.
-                    #
-                    # Practical fallback: compare the session cookie the
-                    # server issued during normal auth against the fixed
-                    # value.  If the server ALWAYS returns whatever cookie
-                    # the client sends (no regeneration), then a normal
-                    # auth starting from fixed_id would keep it.
-                    # Conversely, if the server regenerates, _regen_val
-                    # will be a server-generated value ≠ fixed_id.
-                    #
-                    # Direct replay approach: inject fixed_id into the
-                    # _sf_sess (which is already authenticated), then do
-                    # one more authenticated request and see if the server
-                    # keeps the injected ID.
-                    # Clear ALL cookies with this name before injecting
-                    # the fixed value — the jar may hold duplicates across
-                    # domains (e.g. one from the server, one from us) and
-                    # cookies.get() throws CookieConflictError on dupes.
-                    for _ck in list(_sf_sess.cookies):
-                        if _ck.name == session_cookie_name:
-                            _sf_sess.cookies.clear(
-                                _ck.domain, _ck.path, _ck.name)
-                    _sf_sess.cookies.set(session_cookie_name, fixed_id)
-                    _post_r = _sf_sess.get(url, timeout=timeout)
-                    # Use a loop to safely extract the value even when
-                    # duplicates slipped through the clear above.
                     _post_val = ""
                     for _ck in _sf_sess.cookies:
                         if _ck.name == session_cookie_name:
@@ -21565,51 +21553,61 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                             break
 
                     if _post_val == fixed_id:
-                        # The server kept the attacker-controlled session ID
-                        # even after an authenticated request — it does not
-                        # regenerate on auth transitions.
-                        _ev_pairs = ""
-                        try:
-                            _sf_rq, _sf_rp = _save_http_evidence(
-                                out, phase,
-                                f"session_fixation_{hostname}", _post_r)
-                            _ev_pairs = json.dumps([{
-                                "url": f"SESSION FIXATION  "
-                                       f"GET {url} (HTTP {_post_r.status_code})",
-                                "req":  str(_sf_rq),
-                                "resp": str(_sf_rp),
-                            }])
-                        except Exception:
-                            pass
-                        out.add_finding(
-                            title="Session Fixation Vulnerability",
-                            url=url, port=target["port"], risk="HIGH",
-                            description=(
-                                f"The session cookie '{session_cookie_name}' is not "
-                                f"regenerated upon authentication.  An attacker-controlled "
-                                f"session ID ('{fixed_id}') was injected pre-auth, and the "
-                                f"server retained it through a full authentication cycle.  "
-                                f"This allows an attacker who can set the victim's cookie "
-                                f"(via XSS, sub-domain cookie, or network injection) to "
-                                f"hijack the session after the victim logs in."),
-                            output=(
-                                f"Cookie:           {session_cookie_name}\n"
-                                f"Injected (fixed): {fixed_id}\n"
-                                f"Post-auth value:  {_post_val}\n"
-                                f"Regenerated:      {'Yes' if _post_val != fixed_id else 'No — VULNERABLE'}"),
-                            output_file=_ev_pairs,
-                            sources="fracture-session", service=target["scheme"],
-                            owasp="A07:2025 Identification and Authentication Failures",
-                            nist="IA-5",
-                            remediation=(
-                                "Regenerate session IDs upon every authentication "
-                                "state change (login, logout, privilege escalation).  "
-                                "Reject externally provided session IDs or bind them "
-                                "to a server-generated token."),
-                            http_code=_post_r.status_code,
-                        )
-                        vc.log("[session] Session fixation CONFIRMED — fixed ID "
-                               "survived authentication", "SUCCESS")
+                        # Cookie still holds the fixed value.  Verify the
+                        # session is actually authenticated — a stale cookie
+                        # in the jar that the server ignores is NOT fixation.
+                        _verify_r = _sf_sess.get(url, timeout=timeout)
+                        if _verify_r and not _inj_is_login_page(_verify_r):
+                            _ev_pairs = ""
+                            try:
+                                _sf_rq, _sf_rp = _save_http_evidence(
+                                    out, phase,
+                                    f"session_fixation_{hostname}", _verify_r)
+                                _ev_pairs = json.dumps([{
+                                    "url": f"SESSION FIXATION  "
+                                           f"GET {url} (HTTP {_verify_r.status_code})",
+                                    "req":  str(_sf_rq),
+                                    "resp": str(_sf_rp),
+                                }])
+                            except Exception:
+                                pass
+                            out.add_finding(
+                                title="Session Fixation Vulnerability",
+                                url=url, port=target["port"], risk="HIGH",
+                                description=(
+                                    f"The session cookie '{session_cookie_name}' is not "
+                                    f"regenerated upon authentication.  An attacker-controlled "
+                                    f"session ID ('{fixed_id}') was injected pre-auth, and the "
+                                    f"server retained it through a full authentication cycle.  "
+                                    f"The post-auth session was verified as authenticated "
+                                    f"(not a stale/ignored cookie).  This allows an attacker "
+                                    f"who can set the victim's cookie (via XSS, sub-domain "
+                                    f"cookie, or network injection) to hijack the session "
+                                    f"after the victim logs in."),
+                                output=(
+                                    f"Cookie:           {session_cookie_name}\n"
+                                    f"Injected (fixed): {fixed_id}\n"
+                                    f"Post-auth value:  {_post_val}\n"
+                                    f"Regenerated:      No — VULNERABLE\n"
+                                    f"Auth verified:    Yes (page is not a login redirect)"),
+                                output_file=_ev_pairs,
+                                sources="fracture-session", service=target["scheme"],
+                                owasp="A07:2025 Identification and Authentication Failures",
+                                nist="IA-5",
+                                remediation=(
+                                    "Regenerate session IDs upon every authentication "
+                                    "state change (login, logout, privilege escalation).  "
+                                    "Reject externally provided session IDs or bind them "
+                                    "to a server-generated token."),
+                                http_code=_verify_r.status_code,
+                            )
+                            vc.log("[session] Session fixation CONFIRMED — fixed ID "
+                                   "survived authentication AND session is authed",
+                                   "SUCCESS")
+                        else:
+                            vc.log("[session] Fixed session ID in cookie jar but "
+                                   "server is not using it (response is a login "
+                                   "page) — not vulnerable (stale cookie)", "INFO")
                     else:
                         vc.log(f"[session] Session ID regenerated after auth "
                                f"({_post_val[:20]}… ≠ {fixed_id[:20]}…) — "
@@ -24576,6 +24574,15 @@ def _phase_file_upload_info(target: dict, cfg: dict, pm: ProgressManager,
         or "multipart" in f.get("enctype", "")
     ]
 
+    # Rejection / confirmation body markers for upload responses
+    _UPL_REJECT_RE = re.compile(
+        r'not.allowed|invalid.file|rejected|unsupported|'
+        r'extension.not|file.type|blocked|not.permitted|'
+        r'validation.failed|dangerous|disallowed', re.I)
+    _UPL_CONFIRM_RE = re.compile(
+        r'uploaded.successfully|file.saved|upload.complete|'
+        r'file.accepted|successfully.uploaded', re.I)
+
     for form in upload_forms:
         action   = form.get("action", url)
         inputs   = form.get("inputs", [])
@@ -24586,25 +24593,83 @@ def _phase_file_upload_info(target: dict, cfg: dict, pm: ProgressManager,
         accept_attr = file_inp.get("accept", "")
         pname       = file_inp.get("name", "file")
 
-        # Determine which types to probe
+        # Fetch the form page fresh to get current hidden field values
+        # (ASP.NET WebForms requires valid __VIEWSTATE / __EVENTVALIDATION).
+        _fresh_hidden: dict = {}
+        _baseline_body = ""
+        try:
+            _page_r = sess.get(action, timeout=timeout)
+            if _page_r and _page_r.status_code == 200:
+                _baseline_body = (_page_r.text or "")[:16000]
+                for _hm in re.finditer(
+                        r'<input[^>]+type=["\']?hidden["\']?[^>]*>', _page_r.text, re.I):
+                    _htag = _hm.group(0)
+                    _hn = re.search(r'name=["\']([^"\']+)["\']', _htag, re.I)
+                    _hv = re.search(r'value=["\']([^"\']*)["\']', _htag, re.I)
+                    if _hn:
+                        _fresh_hidden[_hn.group(1)] = _hv.group(1) if _hv else ""
+        except Exception:
+            pass
+
         probe_extensions = [".txt", ".html", ".php", ".jsp", ".aspx", ".svg"]
         accepted_types   = []
         dangerous_found  = []
+        _ev_files: list  = []
 
         for ext in probe_extensions:
             fname    = f"fracture_probe{ext}"
             content  = b"fracture_upload_test"
             files    = {pname: (fname, content, "text/plain")}
-            extra    = {i["name"]: "fracture_test" for i in inputs
-                        if i.get("name") and i.get("type") != "file"}
+            # Use fresh hidden fields (ViewState etc.) then fill remaining
+            extra    = dict(_fresh_hidden)
+            for i in inputs:
+                _iname = i.get("name", "")
+                if _iname and i.get("type") != "file" and _iname not in extra:
+                    extra[_iname] = i.get("value", "") or "test"
             try:
                 r = sess.post(action, files=files, data=extra, timeout=timeout)
-                if r and r.status_code in (200, 201, 302):
-                    accepted_types.append(ext)
-                    if _UPLOAD_ACCEPT_DANGEROUS.search(ext):
-                        dangerous_found.append(ext)
+                if not r:
+                    continue
+                if _inj_is_login_page(r):
+                    continue
+                if r.status_code not in (200, 201, 302):
+                    continue
+                _body = (r.text or "")[:16000]
+                _body_lower = _body.lower()
+                fname_lower = fname.lower()
+
+                # Check for explicit rejection
+                if _UPL_REJECT_RE.search(_body):
+                    continue
+                # Check for positive confirmation signals
+                _confirmed = (
+                    fname_lower in _body_lower
+                    or _UPL_CONFIRM_RE.search(_body)
+                )
+                # If no confirmation AND response is identical to baseline
+                # (same page re-rendered without processing), skip.
+                if not _confirmed and _baseline_body:
+                    # Compare body length — within 5% = same page
+                    _ratio = abs(len(_body) - len(_baseline_body)) / max(len(_baseline_body), 1)
+                    if _ratio < 0.05:
+                        continue
+
+                accepted_types.append(ext)
+                if _UPLOAD_ACCEPT_DANGEROUS.search(ext):
+                    dangerous_found.append(ext)
+                try:
+                    _rq, _rp = _save_http_evidence(
+                        out, "file_upload_info", f"upload_{ext.lstrip('.')}",
+                        r, endpoint_url=action, method="POST")
+                    _ev_files.extend([_rq, _rp])
+                except Exception:
+                    pass
             except Exception:
                 pass
+
+        if not accepted_types:
+            vc.log(f"[file_upload_info] Upload form at {action} — no extensions confirmed accepted", "INFO")
+            continue
 
         risk        = "HIGH" if dangerous_found else "INFO"
         description = (
@@ -24634,6 +24699,7 @@ def _phase_file_upload_info(target: dict, cfg: dict, pm: ProgressManager,
                     f"Accept attribute: {accept_attr or '(none)'}\n"
                     f"Probed extensions: {', '.join(probe_extensions)}\n"
                     f"Accepted: {', '.join(accepted_types) or '(none confirmed)'}"),
+            output_file=",".join(_ev_files) if _ev_files else "",
             sources="fracture-file-upload", service=target["scheme"],
             affected=action, owasp="A04:2025 Insecure Design", nist="SI-3",
             remediation=remediation,
@@ -24852,13 +24918,28 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
     # probing pass.  Detect by probing a path that the structure_map recorded
     # as HTTP 200 during crawl; if it now returns a 3xx redirect (typical
     # redirect-to-login), rebuild the session from credentials in cfg.
+    #
+    # IMPORTANT: skip public paths (/, /robots.txt, etc.) that return 200
+    # regardless of auth — they make useless canaries.
     if role_sess is not None and role_label != "unauthenticated":
         _canary_path = None
         _sm_paths_data = sm.get("paths", {})
+        _CANARY_SKIP = frozenset({"/", "/robots.txt", "/sitemap.xml",
+                                   "/favicon.ico", "/index.html"})
+        # First pass: prefer a deep (auth-gated) path with status 200
         for _cp, _ci in _sm_paths_data.items():
-            if isinstance(_ci, dict) and _ci.get("status") == 200:
+            if (isinstance(_ci, dict) and _ci.get("status") == 200
+                    and _cp not in _CANARY_SKIP
+                    and _cp.count("/") >= 2):
                 _canary_path = _cp
                 break
+        # Second pass: any non-root 200 path
+        if _canary_path is None:
+            for _cp, _ci in _sm_paths_data.items():
+                if (isinstance(_ci, dict) and _ci.get("status") == 200
+                        and _cp not in _CANARY_SKIP):
+                    _canary_path = _cp
+                    break
         if _canary_path is None and all_sm_paths:
             _canary_path = all_sm_paths[0]
         if _canary_path:
@@ -24891,19 +24972,17 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
 
     all_roles_in_am: list = am.get("roles", [])
     changed = False
+    _reauth_budget = 5   # max mid-loop re-auths (covers >5 session expirations)
+    _LOGIN_LOC_RE  = re.compile(r'/login|/signin|/sign-in|/auth|/sso', re.I)
+
     for path in all_sm_paths:
         entry = am_by_path.get(path)
         if entry is None:
-            # Path exists in structure_map but not yet in access_matrix.
-            # Create the entry now so it is probed in this pass rather than
-            # waiting for the next _write_preliminary_access_matrix call.
             entry = {"path": path, "url": base_url + path,
                      "access": {r: None for r in all_roles_in_am}}
             am_by_path[path] = entry
             am.setdefault("paths", []).append(entry)
         access = entry.setdefault("access", {})
-        # Ensure this role's key exists (may be absent if role was added after
-        # the entry was first written).
         if role_label not in access:
             access[role_label] = None
         if access[role_label] is not None:
@@ -24917,6 +24996,38 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
             r = probe_sess.get(url, timeout=timeout, allow_redirects=False,
                                headers={"Accept": "text/html,application/json"})
             _final_code = r.status_code
+
+            # ── Mid-loop session expiry detection ─────────────────────
+            # If an authenticated role gets a redirect-to-login, the
+            # session has expired.  Re-authenticate and retry.
+            if (_final_code in (301, 302, 303, 307, 308)
+                    and role_label != "unauthenticated"
+                    and _reauth_budget > 0):
+                _loc = r.headers.get("Location", "") or ""
+                if _LOGIN_LOC_RE.search(_loc):
+                    _reauth_budget -= 1
+                    vc.log(
+                        f"[access-matrix] {role_label} session expired mid-loop "
+                        f"({path} → {_final_code}) — re-authenticating "
+                        f"(budget: {_reauth_budget} left)", "WARNING")
+                    try:
+                        _fresh = _build_auth_session(
+                            cfg, no_interactive=True, role_label=role_label)
+                        if _fresh is not None:
+                            probe_sess = _fresh
+                            vc.log(
+                                f"[access-matrix] {role_label} re-authenticated OK",
+                                "INFO")
+                            # Retry this path with the fresh session
+                            r = probe_sess.get(
+                                url, timeout=timeout, allow_redirects=False,
+                                headers={"Accept": "text/html,application/json"})
+                            _final_code = r.status_code
+                    except Exception as _mle:
+                        vc.log(
+                            f"[access-matrix] {role_label} mid-loop re-auth "
+                            f"failed: {_mle}", "WARNING")
+
             try:
                 if _is_waf_block(r):
                     _waf_blocked = True
@@ -25359,15 +25470,26 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         _sm_paths_data = json.loads(sm_path.read_text()).get("paths", {}) if sm_path.exists() else {}
     except Exception:
         pass
+    _P20_CANARY_SKIP = frozenset({"/", "/robots.txt", "/sitemap.xml",
+                                    "/favicon.ico", "/index.html"})
     for _cr_role in cred_roles:
         _cr_sess = role_sessions.get(_cr_role)
         if _cr_sess is None:
             continue
         _canary_p = None
+        # Prefer a deep (auth-gated) path — skip public pages like /
         for _cp, _ci in _sm_paths_data.items():
-            if isinstance(_ci, dict) and _ci.get("status") == 200:
+            if (isinstance(_ci, dict) and _ci.get("status") == 200
+                    and _cp not in _P20_CANARY_SKIP
+                    and _cp.count("/") >= 2):
                 _canary_p = _cp
                 break
+        if _canary_p is None:
+            for _cp, _ci in _sm_paths_data.items():
+                if (isinstance(_ci, dict) and _ci.get("status") == 200
+                        and _cp not in _P20_CANARY_SKIP):
+                    _canary_p = _cp
+                    break
         if _canary_p is None and crawled_paths:
             _canary_p = crawled_paths[0]
         if _canary_p:
@@ -25402,10 +25524,11 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     _am_seen  = set(crawled_paths)    # dedup set — paths already in the list
     path_access = []
     idx = 0
+    _p20_reauth_budget: dict = {r: 5 for r in cred_roles}  # per-role mid-loop re-auth budget
+    _P20_LOGIN_LOC_RE = re.compile(r'/login|/signin|/sign-in|/auth|/sso', re.I)
     while idx < len(_am_paths):
         path = _am_paths[idx]
         idx += 1
-        # Paths from structure_map are always relative (e.g. "/admin"); normalize
         if path.startswith("http"):
             url = path
             rel = urllib.parse.urlparse(path).path or "/"
@@ -25415,9 +25538,6 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         access = {}
         _prior = _existing_by_path.get(rel, {})
         for role, r_sess in role_sessions.items():
-            # If _probe_role_paths already recorded a real HTTP code for
-            # this role+path (while the session was still active), keep it
-            # instead of re-probing with a potentially expired session.
             _prior_code = _prior.get(role)
             if isinstance(_prior_code, int) and _prior_code > 0:
                 access[role] = _prior_code
@@ -25426,8 +25546,35 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 r = r_sess.get(url, timeout=timeout, allow_redirects=False,
                                headers={"Accept": "text/html,application/json"})
                 access[role] = r.status_code
+
+                # ── Mid-loop session expiry detection ─────────────
+                if (r.status_code in (301, 302, 303, 307, 308)
+                        and role != "unauthenticated"
+                        and _p20_reauth_budget.get(role, 0) > 0):
+                    _loc20 = r.headers.get("Location", "") or ""
+                    if _P20_LOGIN_LOC_RE.search(_loc20):
+                        _p20_reauth_budget[role] = _p20_reauth_budget.get(role, 0) - 1
+                        vc.log(
+                            f"[access-matrix/p20] {role} session expired mid-loop "
+                            f"({rel} → {r.status_code}) — re-authenticating",
+                            "WARNING")
+                        try:
+                            _p20_fresh = _build_auth_session(
+                                cfg, no_interactive=True, role_label=role)
+                            if _p20_fresh is not None:
+                                role_sessions[role] = _p20_fresh
+                                r_sess = _p20_fresh
+                                vc.log(f"[access-matrix/p20] {role} re-authenticated OK", "INFO")
+                                r = r_sess.get(
+                                    url, timeout=timeout, allow_redirects=False,
+                                    headers={"Accept": "text/html,application/json"})
+                                access[role] = r.status_code
+                        except Exception as _p20e:
+                            vc.log(
+                                f"[access-matrix/p20] {role} mid-loop re-auth "
+                                f"failed: {_p20e}", "WARNING")
+
                 # Collect redirect destination so the resolved URL is also probed.
-                # Only expand paths that are on the same host (in-scope).
                 if r.status_code in (301, 302, 303, 307, 308):
                     _loc = r.headers.get("Location", "").strip()
                     if _loc:
