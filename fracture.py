@@ -16206,27 +16206,56 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
 
     # ── 2. Parameter discovery ────────────────────────────────────────────────
     vc.status(phase, "ffuf", "running", "param discovery", 1, 2)
+    _PARAM_MAX_FINDINGS   = 25   # sanity cap: more than this is a wordlist dump
+    _PARAM_BURST_THRESHOLD = 50  # if ffuf returns ≥ this many hits, treat as FP
     if Path(param_wl).exists():
-        # Baseline response for an obviously invalid parameter
-        _p_baseline_len = 0
-        try:
-            _p_bl = sess.get(url, params={"_fracture_noparam_": "1"}, timeout=timeout)
-            _p_baseline_len = len(_p_bl.content)
-        except Exception:
-            pass
+        # Take 3 baseline samples with different bogus parameter names to
+        # capture response-size variance.  SPAs and server-rendered apps
+        # frequently reflect the parameter name or add cache-bust tokens,
+        # producing slight size jitter — a single sample misses this.
+        _p_bl_sizes:  list = []
+        _p_bl_words:  list = []
+        _p_bl_lines:  list = []
+        _p_bl_bogons = [
+            "_fracture_noparam_a_",
+            "_fracture_noparam_b_",
+            "_fracture_noparam_c_",
+        ]
+        for _pbg in _p_bl_bogons:
+            try:
+                _p_bl = sess.get(url, params={_pbg: "1"}, timeout=timeout)
+                _p_bl_body = _p_bl.content
+                _p_bl_sizes.append(len(_p_bl_body))
+                _p_bl_words.append(len(_p_bl_body.split()))
+                _p_bl_lines.append(_p_bl_body.count(b"\n"))
+            except Exception:
+                pass
+
+        _p_fs = ",".join(str(s) for s in sorted(set(_p_bl_sizes))) if _p_bl_sizes else "0"
+        _p_fw = ",".join(str(w) for w in sorted(set(_p_bl_words))) if _p_bl_words else ""
+        _p_fl = ",".join(str(l) for l in sorted(set(_p_bl_lines))) if _p_bl_lines else ""
 
         param_out = ffuf_dir / f"params_{host}_{port}.json"
         cmd = [
             ffuf, "-w", param_wl,
             "-u", f"{url}?FUZZ=fractureval",
             "-mc", "200,201",
-            "-fs", str(_p_baseline_len),
+            "-fs", _p_fs,
             "-s",
             "-json", "-o", str(param_out),
             "-t", "40",
             "-timeout", str(timeout),
         ]
-        vc.log(f"[ffuf] param discovery on {url}", "INFO")
+        if _p_fw:
+            cmd += ["-fw", _p_fw]
+        if _p_fl:
+            cmd += ["-fl", _p_fl]
+
+        vc.log(
+            f"[ffuf] param discovery on {url} "
+            f"(baseline sizes={_p_fs} words={_p_fw or 'n/a'} lines={_p_fl or 'n/a'})",
+            "INFO",
+        )
         try:
             proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
             _register_proc(proc)
@@ -16236,7 +16265,28 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
             if param_out.exists():
                 try:
                     ffuf_data = json.loads(param_out.read_text(encoding="utf-8"))
-                    for result in ffuf_data.get("results", []):
+                    results = ffuf_data.get("results", [])
+
+                    # Burst check: too many hits means the baseline filter
+                    # failed to suppress the wildcard response pattern.
+                    if len(results) >= _PARAM_BURST_THRESHOLD:
+                        vc.log(
+                            f"[ffuf] {len(results)} param hits suppressed — likely "
+                            f"false positives (≥{_PARAM_BURST_THRESHOLD} results; "
+                            f"baseline filter insufficient for this target)",
+                            "WARNING",
+                        )
+                        results = []
+
+                    _param_count = 0
+                    for result in results:
+                        if _param_count >= _PARAM_MAX_FINDINGS:
+                            vc.log(
+                                f"[ffuf] param findings capped at {_PARAM_MAX_FINDINGS} "
+                                f"— remaining hits suppressed",
+                                "WARNING",
+                            )
+                            break
                         param = result.get("input", {}).get("FUZZ", "").strip()
                         status = result.get("status", 0)
                         rlen   = result.get("length", 0)
@@ -16260,6 +16310,7 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
                             ),
                         )
                         vc.log(f"[ffuf] param: {param} → {status}", "SUCCESS")
+                        _param_count += 1
                 except Exception:
                     pass
         except Exception as e:
