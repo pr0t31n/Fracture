@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "1.9.0"
+VERSION = "2.0.0"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -696,28 +696,78 @@ def build_auth_session(
 
         # ── Discover API login endpoints from page source ────────────────
         _api_login_urls: list[str] = []
+        _API_URL_PAT = _re.compile(
+            r"""(?:ApiLoginUrl|loginUrl|authUrl|login_url|auth_url"""
+            r"""|signInUrl|tokenUrl|token_url|authEndpoint|loginEndpoint)"""
+            r"""\s*[=:]\s*["']([^"']+)["']""",
+            _re.IGNORECASE,
+        )
+        _API_PATH_PAT = _re.compile(
+            r"""(?:href|action|src)\s*=\s*["']([^"']*"""
+            r"""(?:/api/(?:login|auth|token|signin|session)"""
+            r"""|/connect/token|/oauth/token)[^"']*)["']""",
+            _re.IGNORECASE,
+        )
+
+        def _scan_source_for_api_urls(text: str, base: str) -> None:
+            for _m in _API_URL_PAT.finditer(text):
+                _c = urljoin(base, _m.group(1))
+                if _c not in _api_login_urls:
+                    _api_login_urls.append(_c)
+            for _m in _API_PATH_PAT.finditer(text):
+                _c = urljoin(base, _m.group(1))
+                if _c not in _api_login_urls:
+                    _api_login_urls.append(_c)
+
+        # Search the inline HTML first
         if _baseline_html:
-            _base_for_resolve = target_url
-            # JS variable patterns: ApiLoginUrl, loginUrl, authUrl, etc.
+            _scan_source_for_api_urls(_baseline_html, target_url)
+
+            # Fetch referenced JS files — API login URLs are often in
+            # external bundles (e.g. client.bundle.js), not inline HTML.
+            _js_refs: list[str] = []
             for _m in _re.finditer(
-                r"""(?:ApiLoginUrl|loginUrl|authUrl|login_url|auth_url"""
-                r"""|signInUrl|tokenUrl|token_url)"""
-                r"""\s*[=:]\s*["']([^"']+)["']""",
+                r'<script[^>]+src=["\']([^"\']+\.js(?:\?[^"\']*)?)["\']',
                 _baseline_html, _re.IGNORECASE,
             ):
-                _candidate = urljoin(_base_for_resolve, _m.group(1))
-                if _candidate not in _api_login_urls:
-                    _api_login_urls.append(_candidate)
-            # Common API path patterns in links / form actions
-            for _m in _re.finditer(
-                r"""(?:href|action|src)\s*=\s*["']([^"']*"""
-                r"""(?:/api/(?:login|auth|token|signin|session)"""
-                r"""|/connect/token|/oauth/token)[^"']*)["']""",
-                _baseline_html, _re.IGNORECASE,
-            ):
-                _candidate = urljoin(_base_for_resolve, _m.group(1))
-                if _candidate not in _api_login_urls:
-                    _api_login_urls.append(_candidate)
+                _js_url = urljoin(target_url, _m.group(1))
+                _js_refs.append(_js_url)
+            # Fetch up to 3 JS files, max 512 KB each
+            _bl_js_sess = _make_session(verify_ssl, proxy)
+            for _js_url in _js_refs[:3]:
+                try:
+                    _js_r = _bl_js_sess.get(
+                        _js_url, timeout=timeout,
+                        headers={"Accept": "*/*"},
+                        stream=True,
+                    )
+                    _js_body = _js_r.content[:524288].decode(
+                        "utf-8", errors="replace")
+                    _scan_source_for_api_urls(_js_body, target_url)
+                except Exception:
+                    pass
+
+        # Heuristic: derive API path variants from the URL structure.
+        # e.g. /OMT/Client/Login → try /OMT/Api/Login
+        if not _api_login_urls and target_url:
+            _tp = urlparse(target_url)
+            _path_parts = [p for p in _tp.path.split("/") if p]
+            # Replace middle segment with "Api"/"api"
+            if len(_path_parts) >= 2:
+                for _api_seg in ("Api", "api"):
+                    _try_parts = list(_path_parts)
+                    _try_parts[-2] = _api_seg
+                    _try_path = "/" + "/".join(_try_parts)
+                    _c = f"{_tp.scheme}://{_tp.netloc}{_try_path}"
+                    if _c not in _api_login_urls:
+                        _api_login_urls.append(_c)
+            # Also try /api/login, /api/auth at app root
+            _app_root = "/" + _path_parts[0] + "/" if _path_parts else "/"
+            for _suffix in ("api/login", "api/auth", "api/token",
+                            "Api/Login", "Api/Auth"):
+                _c = f"{_tp.scheme}://{_tp.netloc}{_app_root}{_suffix}"
+                if _c not in _api_login_urls:
+                    _api_login_urls.append(_c)
 
         def _is_login_redirect(final_url: str) -> bool:
             """True if the final URL looks like a login page (redirect-to-self)."""
