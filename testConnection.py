@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "2.3.0"
+VERSION = "2.3.1"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -1208,9 +1208,10 @@ def test_connection(
         # fracture.py can then use the proven endpoint directly
         # instead of re-running the discovery.
         if not failed:
-            _disc_m = _re.search(
+            import re as _re2
+            _disc_m = _re2.search(
                 r'auto-detect\s*→\s*(\w+)', auth_info)
-            _disc_u = _re.search(
+            _disc_u = _re2.search(
                 r'(?:discovered API:\s*|→\s*\w+\s*\()'
                 r'(https?://\S+?)[\s):]',
                 auth_info)
