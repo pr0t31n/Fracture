@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.29.1"
+VERSION = "2.30.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -5026,7 +5026,8 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 vc.log(
                     "[auth] No display detected (DISPLAY/WAYLAND_DISPLAY not set). "
                     "Browser-assisted login requires a desktop environment. "
-                    "Run Fracture from a graphical terminal, or use a different auth method.",
+                    "If connecting via SSH, use 'ssh -X' for X11 forwarding, "
+                    "or run Fracture from a local graphical terminal.",
                     "ERROR",
                 )
                 return None
@@ -8929,6 +8930,27 @@ return null;
                 "INFO",
             )
 
+        # ── Unauthenticated baseline for verification ──
+        # After a login-based method "succeeds" (session has cookies), we
+        # verify by GETting the target URL with the auth session and comparing
+        # against this baseline.  If the responses are identical, the cookies
+        # are just tracking/CSRF — not real auth — and the method is rejected.
+        _auto_bl_cookies: set[str] = set()
+        _auto_bl_body_len: int = 0
+        _auto_bl_status:   int = 0
+        _auto_bl_final:    str = ""
+        if _auto_base_url:
+            try:
+                _auto_bl_sess = _make_session(cfg)
+                _auto_bl_r = _auto_bl_sess.get(
+                    _auto_base_url, timeout=timeout, allow_redirects=True)
+                _auto_bl_cookies  = set(_auto_bl_sess.cookies.keys())
+                _auto_bl_body_len = len(_auto_bl_r.content)
+                _auto_bl_status   = _auto_bl_r.status_code
+                _auto_bl_final    = _auto_bl_r.url
+            except Exception:
+                pass
+
         _auto_succeeded = False
         for _auto_m in _auto_methods_run:
             vc.log(f"[auth:auto] Trying method: {_auto_m}", "INFO")
@@ -8940,6 +8962,54 @@ return null;
                 _auto_sess = _build_auth_session(
                     _auto_cfg, auth_key, scope_hostnames, role_label=role_label)
                 if _auto_sess is not None and _auto_has_auth(_auto_sess):
+                    # ── Verify login-based methods against baseline ──
+                    # Cookies alone are not proof of auth — SPAs set tracking /
+                    # CSRF cookies for every visitor.  GET the target with the
+                    # session and compare against the unauthenticated baseline.
+                    if (_auto_m in ("form_login", "token_login")
+                            and _auto_base_url and _auto_bl_body_len):
+                        try:
+                            _auto_vr = _auto_sess.get(
+                                _auto_base_url, timeout=timeout,
+                                allow_redirects=True)
+                            _auto_vr_ck = (set(_auto_sess.cookies.keys())
+                                           - _auto_bl_cookies)
+                            _auto_vr_body = len(_auto_vr.content)
+                            # Check 1: are there genuinely NEW cookies beyond
+                            # what any visitor gets?
+                            # Check 2: did the response body change meaningfully?
+                            # Check 3: did we land on a different final URL?
+                            _auto_vr_body_diff = abs(
+                                _auto_vr_body - _auto_bl_body_len) > 256
+                            _auto_vr_url_diff = (
+                                _auto_vr.url.rstrip("/")
+                                != _auto_bl_final.rstrip("/"))
+                            if (not _auto_vr_ck
+                                    and not _auto_vr_body_diff
+                                    and not _auto_vr_url_diff
+                                    and _auto_vr.status_code == _auto_bl_status):
+                                vc.log(
+                                    f"[auth:auto] Method '{_auto_m}' set cookies "
+                                    "but response identical to unauthenticated "
+                                    "baseline — auth ineffective (false positive "
+                                    "from SPA/tracking cookies)", "WARNING")
+                                # Fall through to next method
+                                _auto_lp_fp = _auto_cfg.get(
+                                    "auth", {}).get("login_url", "").strip()
+                                if _auto_lp_fp and not auth.get("login_url"):
+                                    auth["login_url"] = _auto_lp_fp
+                                _auto_mfa_fp = _auto_cfg.get(
+                                    "auth", {}).get("mfa_providers", [])
+                                if _auto_mfa_fp:
+                                    _ex = auth.get("mfa_providers", [])
+                                    for _a in _auto_mfa_fp:
+                                        if _a not in _ex:
+                                            _ex.append(_a)
+                                    auth["mfa_providers"] = _ex
+                                continue
+                        except Exception:
+                            pass  # verification failed — trust _auto_has_auth
+
                     vc.log(
                         f"[auth:auto] Success with method '{_auto_m}' — "
                         "using this session", "SUCCESS")

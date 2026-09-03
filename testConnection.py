@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -696,6 +696,30 @@ def build_auth_session(
             except Exception:
                 pass
 
+        # Extract an SPA root marker from the baseline HTML.
+        # React/Vue/Angular SPAs have a distinctive root element
+        # (<div id="root">, <div id="app">, etc.) that appears in
+        # every response from the SPA catch-all router.
+        _spa_marker: str = ""
+        if _baseline_html:
+            _spa_root_m = _re.search(
+                r'<div\s+id=["\']('
+                r'root|app|__next|__nuxt|___gatsby'
+                r'|angular-app|blazor-app|main-app'
+                r')["\']',
+                _baseline_html, _re.IGNORECASE,
+            )
+            if _spa_root_m:
+                _spa_marker = _spa_root_m.group(0)
+            else:
+                # Fallback: capture the <title> tag as a fingerprint
+                _title_m = _re.search(
+                    r'<title[^>]*>([^<]{2,100})</title>',
+                    _baseline_html, _re.IGNORECASE,
+                )
+                if _title_m:
+                    _spa_marker = _title_m.group(0)
+
         # ── Discover API login endpoints from page source ────────────────
         _api_login_urls: list[str] = []
         _API_URL_PAT = _re.compile(
@@ -773,18 +797,21 @@ def build_auth_session(
             ):
                 _js_url = urljoin(target_url, _m.group(1))
                 _js_refs.append(_js_url)
-            # Fetch up to 5 JS files, max 1 MB each
+            # Fetch up to 10 JS files, max 3 MB each — webpack bundles
+            # can be large and the config/login URL is often deep inside.
             _bl_js_sess = _make_session(verify_ssl, proxy)
-            for _js_url in _js_refs[:5]:
+            _js_bodies: list[str] = []
+            for _js_url in _js_refs[:10]:
                 try:
                     _js_r = _bl_js_sess.get(
                         _js_url, timeout=timeout,
                         headers={"Accept": "*/*"},
                         stream=True,
                     )
-                    _js_body = _js_r.content[:1048576].decode(
+                    _js_body = _js_r.content[:3145728].decode(
                         "utf-8", errors="replace")
                     _scan_source_for_api_urls(_js_body, target_url)
+                    _js_bodies.append(_js_body)
                 except Exception:
                     pass
 
@@ -792,11 +819,14 @@ def build_auth_session(
             # SPAs often set window.OmtSite = {ApiUrl: "/OMT/Api", ...}
             # and construct login URLs at runtime (ApiUrl + "/Login").
             # Find base URLs and derive login endpoint candidates.
+            # Scan ALL source: inline HTML AND fetched JS bundles.
             _API_BASE_PAT = _re.compile(
                 r"""(?:ApiUrl|apiUrl|ApiBase|apiBase|apiBaseUrl"""
                 r"""|ApiBaseUrl|baseApiUrl|BaseApiUrl|serviceUrl"""
                 r"""|ServiceUrl|ServerUrl|serverUrl"""
-                r"""|baseUrl|BaseUrl)"""
+                r"""|baseUrl|BaseUrl|ClientApiUrl|clientApiUrl"""
+                r"""|apiHost|ApiHost|apiRoot|ApiRoot"""
+                r"""|REACT_APP_API_URL|VUE_APP_API_URL)"""
                 r"""\s*[=:]\s*["']([^"']+)["']""",
                 _re.IGNORECASE,
             )
@@ -804,38 +834,55 @@ def build_auth_session(
                 "/Login", "/login",
                 "/Token", "/token",
                 "/Account/Login", "/account/login",
+                "/Account/Authenticate", "/account/authenticate",
                 "/Auth/Login", "/auth/login",
                 "/Auth/Token", "/auth/token",
+                "/Auth/Authenticate", "/auth/authenticate",
                 "/Authenticate", "/authenticate",
                 "/Session", "/session",
+                "/Users/Login", "/users/login",
+                "/Identity/Token", "/identity/token",
+                "/Connect/Token", "/connect/token",
+                "/Security/Login", "/security/login",
             )
-            # Scan inline HTML for base URLs (config objects are
-            # almost always in the page, not the JS bundle)
-            _all_source = _baseline_html
+            _all_sources = [_baseline_html] + _js_bodies
             _api_bases_found: list[str] = []
-            for _bm in _API_BASE_PAT.finditer(_all_source):
-                _bval = _bm.group(1).rstrip("/")
-                if _bval and not _STATIC_EXT.search(_bval):
-                    _base_full = urljoin(target_url, _bval)
-                    if _base_full not in _api_bases_found:
-                        _api_bases_found.append(_base_full)
-            # Also look for global config objects (window.XyzSite = {...})
-            for _cfg_m in _re.finditer(
-                r"""(?:window|global)\.(\w+)\s*=\s*\{([^}]{10,2000})\}""",
-                _all_source,
-            ):
-                _cfg_body = _cfg_m.group(2)
-                for _val_m in _re.finditer(
-                    r"""["'](/[^"']+)["']""", _cfg_body,
-                ):
-                    _cval = _val_m.group(1).rstrip("/")
-                    if (not _STATIC_EXT.search(_cval)
-                            and ('api' in _cval.lower()
-                                 or 'service' in _cval.lower()
-                                 or 'auth' in _cval.lower())):
-                        _base_full = urljoin(target_url, _cval)
+            for _src_chunk in _all_sources:
+                if not _src_chunk:
+                    continue
+                for _bm in _API_BASE_PAT.finditer(_src_chunk):
+                    _bval = _bm.group(1).rstrip("/")
+                    if _bval and not _STATIC_EXT.search(_bval):
+                        _base_full = urljoin(target_url, _bval)
                         if _base_full not in _api_bases_found:
                             _api_bases_found.append(_base_full)
+                # Global config objects: window.XyzSite = {...} or
+                # global.XyzSite = {...}.  Allow up to 8KB for the
+                # object body (webpack can emit large configs).  Also
+                # match const/var/let config assignments in JS bundles:
+                # const OmtConfig = {ApiUrl: "...",...}
+                for _cfg_m in _re.finditer(
+                    r"""(?:"""
+                    r"""(?:window|global)\.(\w+)\s*=\s*\{"""
+                    r"""|(?:const|var|let)\s+(\w+)\s*=\s*\{"""
+                    r""")([^}]{10,8000})\}""",
+                    _src_chunk,
+                ):
+                    _cfg_name = _cfg_m.group(1) or _cfg_m.group(2) or ""
+                    _cfg_body = _cfg_m.group(3)
+                    # Extract URL-valued properties from the config
+                    for _val_m in _re.finditer(
+                        r"""["']((?:https?://[^"']+)|(?:/[^"']+))["']""",
+                        _cfg_body,
+                    ):
+                        _cval = _val_m.group(1).rstrip("/")
+                        if (not _STATIC_EXT.search(_cval)
+                                and ('api' in _cval.lower()
+                                     or 'service' in _cval.lower()
+                                     or 'auth' in _cval.lower())):
+                            _base_full = urljoin(target_url, _cval)
+                            if _base_full not in _api_bases_found:
+                                _api_bases_found.append(_base_full)
             # Derive login endpoints from discovered base URLs
             for _api_base in _api_bases_found:
                 for _suf in _AUTH_SUFFIXES:
@@ -1060,15 +1107,25 @@ def build_auth_session(
                     if _pr.status_code == 404:
                         _tried_api_urls.add(_pu_norm)
                         continue  # URL doesn't exist — skip
-                    # SPA catch-all detection: if the response body is
-                    # nearly identical in size to the baseline HTML page,
-                    # this URL is served by the SPA router catch-all,
-                    # not a real API endpoint.
-                    if (_baseline_body_len
-                            and abs(len(_pr.content) - _baseline_body_len)
-                                < 512):
+                    # SPA catch-all detection.  A real API endpoint
+                    # returns application/json (or similar); the SPA
+                    # catch-all returns text/html containing the same
+                    # root element/title as the baseline page.
+                    _pr_ct = _pr.headers.get(
+                        "Content-Type", "").lower()
+                    if "text/html" in _pr_ct and _spa_marker:
+                        _pr_text = _pr.text[:8192]
+                        if _spa_marker in _pr_text:
+                            _tried_api_urls.add(_pu_norm)
+                            continue  # SPA catch-all — skip
+                    # Also catch by body size when we have no marker
+                    # but the response is HTML and nearly identical.
+                    if ("text/html" in _pr_ct
+                            and _baseline_body_len
+                            and abs(len(_pr.content)
+                                    - _baseline_body_len) < 2048):
                         _tried_api_urls.add(_pu_norm)
-                        continue  # SPA catch-all — skip
+                        continue  # likely SPA catch-all — skip
                 except Exception:
                     pass
                 _live_urls.append(_pu)
