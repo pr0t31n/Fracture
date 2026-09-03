@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.10"
+VERSION = "2.30.11"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -12866,15 +12866,47 @@ def _resolve_spa_landing(
             pass
         # Transfer auth cookies from the requests session
         _spa_transfer_cookies(auth_session, driver, start_url)
-        # Reload to let the SPA JS see the auth cookies and redirect
+        # Reload to let JS see the auth cookies and redirect
         try:
             driver.get(start_url)
         except Exception:
             pass
-        # Wait briefly for JS router to settle
+        # Wait for the URL to change (JS redirect) with polling.
+        # React/.NET apps behind load balancers need time to:
+        #   1. Parse and execute the JS bundle
+        #   2. Check auth status via API call
+        #   3. Process the response and navigate
         import time as _time_spa
-        _time_spa.sleep(2)
+        _start_path = urllib.parse.urlparse(start_url).path.rstrip("/").lower()
+        _waited = 0.0
+        _max_wait = 8.0
+        _poll = 0.5
+        while _waited < _max_wait:
+            _time_spa.sleep(_poll)
+            _waited += _poll
+            try:
+                _cur = driver.current_url
+                if _cur:
+                    _cur_path = urllib.parse.urlparse(
+                        _cur).path.rstrip("/").lower()
+                    _cur_seg = _cur_path.rsplit("/", 1)[-1]
+                    if _cur_path != _start_path and _cur_seg != "login":
+                        vc.log(
+                            f"[auth] Chrome redirect detected after "
+                            f"{_waited:.1f}s → {_cur}",
+                            "INFO",
+                        )
+                        return _cur
+            except Exception:
+                pass
+        # No redirect detected within timeout — return whatever
+        # Chrome is on (may still be the login page).
         final_url = driver.current_url
+        vc.log(
+            f"[auth] Chrome wait expired ({_max_wait}s) — "
+            f"final URL: {final_url}",
+            "INFO",
+        )
         return final_url if final_url else None
     except Exception:
         return None
@@ -24862,7 +24894,7 @@ def main() -> None:
                                         vc.log(
                                             f"[auth] Post-login URL: "
                                             f"{_spa_lnd_url}",
-                                            "INFO",
+                                            "SUCCESS",
                                         )
                                         _as_landing_url  = _spa_lnd_url
                                         _as_landing_code = 200
@@ -24876,6 +24908,18 @@ def main() -> None:
                                                 _spa_body_r.text[:8192])
                                         except Exception:
                                             pass
+                                    else:
+                                        vc.log(
+                                            f"[auth] Browser stayed on "
+                                            f"login: {_spa_lnd_url}",
+                                            "INFO",
+                                        )
+                                else:
+                                    vc.log(
+                                        "[auth] Headless browser returned "
+                                        "no URL",
+                                        "INFO",
+                                    )
                             except Exception as _spa_e:
                                 vc.log(
                                     f"[auth] Landing resolution failed: "
