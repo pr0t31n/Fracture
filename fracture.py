@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.0"
+VERSION = "2.33.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -12300,18 +12300,19 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
 
     # Write target profile — server, technology stack, CMS, WAF, CDN, structure, BI
     try:
-        _tp_waf = ""
-        if server_hdr:
-            _tp_waf_m = _WAF_SERVER_RE.search(server_hdr)
-            if _tp_waf_m:
-                _tp_waf = _tp_waf_m.group(1)
-        if not _tp_waf:
-            _tp_waf_bm = _WAF_BODY_RE.search(body[:4096]) if body else None
-            if _tp_waf_bm:
-                _tp_waf = "WAF (body signature)"
         # Separate WAF-tier from LB-tier platforms in the target profile.
         _tp_edge_wafs = [s for s in _recon_edge_security if s in _WAF_TIER_PLATFORMS]
         _tp_edge_lbs  = [s for s in _recon_edge_security if s not in _WAF_TIER_PLATFORMS]
+        # Derive the waf field from WAF-tier platforms only — never from
+        # _WAF_SERVER_RE which includes LB-only products (bigip, f5,
+        # citrix-adc) for block-page detection purposes.
+        _tp_waf = ", ".join(_tp_edge_wafs) if _tp_edge_wafs else ""
+        if not _tp_waf:
+            # Fall back to body-signature detection (e.g. Cloudflare block
+            # page when Server header was absent).
+            _tp_waf_bm = _WAF_BODY_RE.search(body[:4096]) if body else None
+            if _tp_waf_bm:
+                _tp_waf = "WAF (body signature)"
         _write_target_profile(out,
             url=url,
             hostname=target["hostname"],
