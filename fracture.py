@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.11"
+VERSION = "2.33.12"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -14225,6 +14225,148 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         "(OpenSSL ≥ 1.0.1g)."
                     ),
                 )
+
+            # ── Cipher and protocol quality checks ───────────────────────
+            # These go beyond named-attack detection to flag configuration
+            # weaknesses that weaken the overall TLS posture.
+
+            # 1. TLSv1.3 not supported — parse protocol lines from raw output
+            _tls13_enabled = bool(re.search(
+                r'TLSv1\.3\s+enabled', stdout, re.I))
+            if not _tls13_enabled and _ss_ciphers:
+                # Only flag when we have cipher data (confirms sslscan ran)
+                out.add_finding(
+                    title="TLSv1.3 Not Supported",
+                    url=target["url"], port=port, risk="MEDIUM",
+                    description=(
+                        "The server does not support TLSv1.3 (RFC 8446). "
+                        "TLSv1.3 eliminates legacy cryptographic options, "
+                        "mandates AEAD-only ciphers, reduces handshake "
+                        "round-trips, and removes entire attack classes "
+                        "(BEAST, LUCKY13, ROBOT). All modern browsers and "
+                        "clients support TLSv1.3."
+                    ),
+                    sources="sslscan", service="https",
+                    output_file=str(out_f),
+                    owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                    remediation=(
+                        "Enable TLSv1.3 on the server/load balancer. "
+                        "For IIS/F5 BIG-IP: update firmware and enable "
+                        "TLSv1.3 in the SSL profile. Ensure the TLS "
+                        "library (OpenSSL 1.1.1+, SChannel on Server "
+                        "2022+) supports it."
+                    ),
+                )
+
+            # 2. Ciphers without forward secrecy (no ECDHE/DHE key exchange)
+            _no_fs_ciphers = [
+                c["cipher"] for c in _ss_ciphers
+                if not re.match(r'(?:ECDHE|DHE)-', c["cipher"])
+                and c["cipher"] not in ("TLS_AES_128_GCM_SHA256",
+                                         "TLS_AES_256_GCM_SHA384",
+                                         "TLS_CHACHA20_POLY1305_SHA256")
+            ]
+            if _no_fs_ciphers:
+                out.add_finding(
+                    title="Cipher Suites Without Forward Secrecy",
+                    url=target["url"], port=port, risk="MEDIUM",
+                    description=(
+                        f"The server accepts {len(_no_fs_ciphers)} cipher "
+                        f"suite(s) that do not use ephemeral key exchange "
+                        f"(ECDHE or DHE). Without forward secrecy, "
+                        f"compromise of the server's private key allows "
+                        f"retroactive decryption of all past sessions that "
+                        f"used these ciphers."
+                    ),
+                    output="\n".join(f"  {c}" for c in _no_fs_ciphers),
+                    sources="sslscan", service="https",
+                    output_file=str(out_f),
+                    owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                    remediation=(
+                        "Remove cipher suites that do not provide forward "
+                        "secrecy. Keep only ECDHE-* and DHE-* cipher "
+                        "suites (preferring ECDHE for performance). "
+                        "TLSv1.3 mandates forward secrecy."
+                    ),
+                )
+
+            # 3. CBC mode cipher suites (standalone finding, beyond LUCKY13)
+            if _cbc_suites:
+                out.add_finding(
+                    title="CBC Mode Cipher Suites Accepted",
+                    url=target["url"], port=port, risk="LOW",
+                    description=(
+                        f"The server accepts {len(_cbc_suites)} CBC-mode "
+                        f"cipher suite(s). CBC ciphers are susceptible to "
+                        f"padding oracle attacks and have been the basis "
+                        f"for BEAST, POODLE, and LUCKY13. AEAD ciphers "
+                        f"(AES-GCM, ChaCha20-Poly1305) should be preferred."
+                    ),
+                    output="\n".join(f"  {c}" for c in _cbc_suites),
+                    sources="sslscan", service="https",
+                    output_file=str(out_f),
+                    owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                    remediation=(
+                        "Disable CBC-mode cipher suites and offer only "
+                        "AEAD ciphers (AES-128-GCM, AES-256-GCM, "
+                        "ChaCha20-Poly1305). If CBC must remain for "
+                        "legacy compatibility, ensure it is not preferred "
+                        "and the server stack is patched."
+                    ),
+                )
+
+            # 4. SHA-1 HMAC cipher suites
+            _sha1_ciphers = [
+                c["cipher"] for c in _ss_ciphers
+                if re.search(r'-SHA$', c["cipher"])
+            ]
+            if _sha1_ciphers:
+                out.add_finding(
+                    title="SHA-1 HMAC Cipher Suites Accepted",
+                    url=target["url"], port=port, risk="LOW",
+                    description=(
+                        f"The server accepts {len(_sha1_ciphers)} cipher "
+                        f"suite(s) using SHA-1 for HMAC integrity. While "
+                        f"SHA-1 HMAC is not as directly broken as SHA-1 "
+                        f"for signatures, these are legacy suites that "
+                        f"should be replaced with SHA-256/384 variants."
+                    ),
+                    output="\n".join(f"  {c}" for c in _sha1_ciphers),
+                    sources="sslscan", service="https",
+                    output_file=str(out_f),
+                    owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                    remediation=(
+                        "Replace SHA-1 HMAC cipher suites with their "
+                        "SHA-256/384 equivalents, or move to AEAD ciphers "
+                        "which do not use separate HMAC."
+                    ),
+                )
+
+            # 5. Non-standard cipher suites (Camellia, ARIA, SEED)
+            _nonstd_ciphers = [
+                c["cipher"] for c in _ss_ciphers
+                if re.search(r'CAMELLIA|ARIA|SEED', c["cipher"], re.I)
+            ]
+            if _nonstd_ciphers:
+                out.add_finding(
+                    title="Non-Standard Cipher Suites Accepted",
+                    url=target["url"], port=port, risk="INFO",
+                    description=(
+                        f"The server accepts {len(_nonstd_ciphers)} "
+                        f"non-standard cipher suite(s) ({', '.join(set(re.search(r'CAMELLIA|ARIA|SEED', c, re.I).group() for c in _nonstd_ciphers if re.search(r'CAMELLIA|ARIA|SEED', c, re.I)))}). "
+                        f"These ciphers are rarely used, increase the "
+                        f"attack surface, and provide no benefit over AES."
+                    ),
+                    output="\n".join(f"  {c}" for c in _nonstd_ciphers),
+                    sources="sslscan", service="https",
+                    output_file=str(out_f),
+                    owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                    remediation=(
+                        "Remove non-standard cipher suites (Camellia, "
+                        "ARIA, SEED) and offer only AES-based ciphers."
+                    ),
+                )
+
         except Exception as e:
             out.log_error("sslscan", cmd, str(e))
     else:
