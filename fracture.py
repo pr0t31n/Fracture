@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.7"
+VERSION = "2.33.8"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -25185,6 +25185,28 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
         pass
 
 
+def _reauth_session(cfg: dict, target: dict, role_label: str) -> "requests.Session | None":
+    """Build a fresh authenticated session for re-auth inside access-matrix loops.
+
+    When the initial auth required Chrome/headless SPA landing resolution
+    (cfg["_auth_needs_spa_resolve"] is True), the bare API POST sets a cookie
+    but does NOT produce a fully authenticated session — the SPA client-side
+    routing step is needed.  This helper runs _resolve_spa_landing after the
+    credential POST so the Chrome-transferred cookies make the session valid.
+
+    Returns the session, or None on failure.
+    """
+    fresh = _build_auth_session(cfg, no_interactive=True, role_label=role_label)
+    if fresh is None:
+        return None
+    if cfg.get("_auth_needs_spa_resolve"):
+        try:
+            _resolve_spa_landing(target, cfg, fresh, target["url"])
+        except Exception as _sre:
+            vc.log(f"[auth] SPA re-auth landing resolution failed: {_sre}", "WARNING")
+    return fresh
+
+
 def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
                       role_label: str, role_sess: "requests.Session | None") -> None:
     """Probe all structure_map paths that have no HTTP code for role_label yet.
@@ -25252,8 +25274,7 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
                         f"(canary {_canary_path} → HTTP {_canary_r.status_code}) "
                         f"— re-authenticating", "WARNING")
                     try:
-                        _fresh = _build_auth_session(
-                            cfg, no_interactive=True, role_label=role_label)
+                        _fresh = _reauth_session(cfg, target, role_label)
                         if _fresh is not None:
                             probe_sess = _fresh
                             vc.log(f"[access-matrix] {role_label} re-authenticated OK",
@@ -25272,6 +25293,7 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
     all_roles_in_am: list = am.get("roles", [])
     changed = False
     _reauth_budget = 5   # max mid-loop re-auths (covers >5 session expirations)
+    _reauth_dead   = False  # set True when re-auth consistently produces dead sessions
     _LOGIN_LOC_RE  = re.compile(r'/login|/signin|/sign-in|/auth|/sso', re.I)
 
     for path in all_sm_paths:
@@ -25301,7 +25323,8 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
             # session has expired.  Re-authenticate and retry.
             if (_final_code in (301, 302, 303, 307, 308)
                     and role_label != "unauthenticated"
-                    and _reauth_budget > 0):
+                    and _reauth_budget > 0
+                    and not _reauth_dead):
                 _loc = r.headers.get("Location", "") or ""
                 if _LOGIN_LOC_RE.search(_loc):
                     _reauth_budget -= 1
@@ -25310,8 +25333,7 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
                         f"({path} → {_final_code}) — re-authenticating "
                         f"(budget: {_reauth_budget} left)", "WARNING")
                     try:
-                        _fresh = _build_auth_session(
-                            cfg, no_interactive=True, role_label=role_label)
+                        _fresh = _reauth_session(cfg, target, role_label)
                         if _fresh is not None:
                             probe_sess = _fresh
                             vc.log(
@@ -25322,10 +25344,39 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
                                 url, timeout=timeout, allow_redirects=False,
                                 headers={"Accept": "text/html,application/json"})
                             _final_code = r.status_code
+                            # If retry STILL redirects to login, the re-auth
+                            # flow cannot produce a valid session for this
+                            # target.  Stop wasting budget — every subsequent
+                            # probe will fail identically.
+                            if _final_code in (301, 302, 303, 307, 308):
+                                _retry_loc = r.headers.get("Location", "") or ""
+                                if _LOGIN_LOC_RE.search(_retry_loc):
+                                    _reauth_dead = True
+                                    _reauth_budget = 0
+                                    vc.log(
+                                        f"[access-matrix] {role_label} re-auth produced "
+                                        f"a dead session (retry → {_final_code}) — "
+                                        f"skipping remaining probes for this role",
+                                        "WARNING")
                     except Exception as _mle:
                         vc.log(
                             f"[access-matrix] {role_label} mid-loop re-auth "
                             f"failed: {_mle}", "WARNING")
+
+            # ── Guard: never record login-redirect as real status ──────
+            # When re-auth is exhausted or dead, a 3xx to the login page
+            # is a session-expiry artifact, not the path's real response.
+            # Leave the slot as None so Phase 20 can try with a fresh
+            # session later.
+            if (_final_code in (301, 302, 303, 307, 308)
+                    and role_label != "unauthenticated"
+                    and (_reauth_dead or _reauth_budget <= 0)):
+                try:
+                    _guard_loc = r.headers.get("Location", "") or ""
+                    if _LOGIN_LOC_RE.search(_guard_loc):
+                        _final_code = 0  # sentinel: "not tested"
+                except Exception:
+                    pass
 
             try:
                 if _is_waf_block(r):
@@ -25341,7 +25392,9 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
                 _final_code = r.status_code
             except Exception:
                 pass
-        access[role_label] = _final_code
+        # Record only real results (0 = not tested, leave as None for later retry)
+        if _final_code > 0:
+            access[role_label] = _final_code
         if _final_code in (200, 403) or _waf_blocked:
             _meta = entry.setdefault("access_meta", {})
             _meta[role_label] = {
@@ -25722,7 +25775,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             r_auth["password"] = role_cfg.get("password", r_auth.get("password", ""))
             r_cfg = _copy.deepcopy(cfg)
             r_cfg["auth"] = r_auth
-            return _build_auth_session(r_cfg, "auth", no_interactive=True)
+            return _reauth_session(r_cfg, target, role_cfg.get("role", ""))
 
         for role_cfg in auth_matrix:
             role = role_cfg.get("role") or f"role{len(role_sessions)+1}"
@@ -25802,8 +25855,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                         f"(canary {_canary_p} → HTTP {_cr_r.status_code}) "
                         f"— re-authenticating", "WARNING")
                     try:
-                        _cr_fresh = _build_auth_session(
-                            cfg, no_interactive=True, role_label=_cr_role)
+                        _cr_fresh = _reauth_session(cfg, target, _cr_role)
                         if _cr_fresh is not None:
                             role_sessions[_cr_role] = _cr_fresh
                             vc.log(f"[access-matrix/p20] {_cr_role} re-authenticated OK", "INFO")
@@ -25824,6 +25876,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     path_access = []
     idx = 0
     _p20_reauth_budget: dict = {r: 5 for r in cred_roles}  # per-role mid-loop re-auth budget
+    _p20_reauth_dead:  dict = {r: False for r in cred_roles}
     _P20_LOGIN_LOC_RE = re.compile(r'/login|/signin|/sign-in|/auth|/sso', re.I)
     while idx < len(_am_paths):
         path = _am_paths[idx]
@@ -25849,7 +25902,8 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 # ── Mid-loop session expiry detection ─────────────
                 if (r.status_code in (301, 302, 303, 307, 308)
                         and role != "unauthenticated"
-                        and _p20_reauth_budget.get(role, 0) > 0):
+                        and _p20_reauth_budget.get(role, 0) > 0
+                        and not _p20_reauth_dead.get(role)):
                     _loc20 = r.headers.get("Location", "") or ""
                     if _P20_LOGIN_LOC_RE.search(_loc20):
                         _p20_reauth_budget[role] = _p20_reauth_budget.get(role, 0) - 1
@@ -25858,8 +25912,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                             f"({rel} → {r.status_code}) — re-authenticating",
                             "WARNING")
                         try:
-                            _p20_fresh = _build_auth_session(
-                                cfg, no_interactive=True, role_label=role)
+                            _p20_fresh = _reauth_session(cfg, target, role)
                             if _p20_fresh is not None:
                                 role_sessions[role] = _p20_fresh
                                 r_sess = _p20_fresh
@@ -25868,10 +25921,31 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                                     url, timeout=timeout, allow_redirects=False,
                                     headers={"Accept": "text/html,application/json"})
                                 access[role] = r.status_code
+                                # Bail if retry still fails — re-auth cannot
+                                # produce a valid session for this target.
+                                if r.status_code in (301, 302, 303, 307, 308):
+                                    _rl20 = r.headers.get("Location", "") or ""
+                                    if _P20_LOGIN_LOC_RE.search(_rl20):
+                                        _p20_reauth_dead[role] = True
+                                        _p20_reauth_budget[role] = 0
+                                        vc.log(
+                                            f"[access-matrix/p20] {role} re-auth produced "
+                                            f"a dead session (retry → {r.status_code}) — "
+                                            f"skipping remaining probes",
+                                            "WARNING")
                         except Exception as _p20e:
                             vc.log(
                                 f"[access-matrix/p20] {role} mid-loop re-auth "
                                 f"failed: {_p20e}", "WARNING")
+
+                # Guard: don't record login-redirect as real status when
+                # re-auth is exhausted or dead.
+                if (r.status_code in (301, 302, 303, 307, 308)
+                        and role != "unauthenticated"
+                        and (_p20_reauth_dead.get(role) or _p20_reauth_budget.get(role, 0) <= 0)):
+                    _g20_loc = r.headers.get("Location", "") or ""
+                    if _P20_LOGIN_LOC_RE.search(_g20_loc):
+                        access[role] = None  # not tested — don't corrupt
 
                 # Collect redirect destination so the resolved URL is also probed.
                 if r.status_code in (301, 302, 303, 307, 308):
@@ -26647,6 +26721,7 @@ def main() -> None:
                                                 f"{_early_spa_url}",
                                                 "SUCCESS",
                                             )
+                                            cfg["_auth_needs_spa_resolve"] = True
                                             _early_landing_code = 200
                                             try:
                                                 _esp_r = auth_sess.get(
@@ -27402,6 +27477,7 @@ def main() -> None:
                                                 f"{_spa_lnd_url}",
                                                 "SUCCESS",
                                             )
+                                            cfg["_auth_needs_spa_resolve"] = True
                                             _as_landing_code = 200
                                             try:
                                                 _spa_body_r = (
