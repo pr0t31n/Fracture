@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.9"
+VERSION = "2.33.10"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -27093,10 +27093,13 @@ def main() -> None:
             # phase will merge additional fields later.
             if _waf_signals:
                 try:
+                    _pre_wafs = [s for s in _waf_signals if s in _WAF_TIER_PLATFORMS]
+                    _pre_lbs  = [s for s in _waf_signals if s not in _WAF_TIER_PLATFORMS]
                     _write_target_profile(
                         out,
-                        edge_security=_waf_signals,
-                        waf=", ".join(_waf_signals),
+                        edge_security=_pre_wafs if _pre_wafs else [],
+                        waf=", ".join(_pre_wafs) if _pre_wafs else "",
+                        load_balancers=_pre_lbs if _pre_lbs else [],
                     )
                 except Exception:
                     pass
