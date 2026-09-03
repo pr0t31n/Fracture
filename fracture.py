@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.8"
+VERSION = "2.30.9"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -24119,102 +24119,128 @@ def main() -> None:
         # auth information during the scan (not stale data from a prior run).
         # The landing page probe runs here (before phases) so it doesn't
         # depend on the scan completing.
-        for _early_label, _early_sess, _early_auth_cfg in [
-            (
-                cfg.get("auth", {}).get("role_label", "").strip()
-                or (list(cfg.get("auth", {}).get("credentials", {}).keys()) or ["Admin"])[0],
-                auth_sess,
-                cfg.get("auth", {}),
-            ),
-        ]:
-            if not _early_auth_cfg.get("enabled"):
-                continue
-            _early_status = "success" if _early_sess is not None else "failed"
-            _early_username = (_early_auth_cfg.get("username") or "").strip() or _early_label
-            _early_landing_url = ""
-            _early_landing_code = 0
-            _early_landing_body = ""
-            _early_probe_sess = _early_sess if _early_sess is not None else sess
-            try:
-                _early_r = _early_probe_sess.get(
-                    target["url"], timeout=cfg.get("timeout", 10),
-                    allow_redirects=True,
+        try:
+            _early_auth_cfg = cfg.get("auth", {})
+            if _early_auth_cfg.get("enabled") and auth_sess is not None:
+                _early_label = (
+                    _early_auth_cfg.get("role_label", "").strip()
+                    or "Admin"
                 )
-                _early_landing_url  = _early_r.url
-                _early_landing_code = _early_r.status_code
-                _early_landing_body = _early_r.text[:8192]
-            except Exception:
-                pass
-            # ── SPA landing page resolution ──
-            # For SPAs with API auth, the server returns the same HTML
-            # shell for every path (always 200, same <div id="root">).
-            # Use headless Chrome with auth cookies to find the real URL.
-            if (_early_sess is not None
-                    and _early_status == "success"
-                    and _early_landing_url):
+                _early_username = (
+                    _early_auth_cfg.get("username", "").strip()
+                    or _early_label
+                )
+                _early_landing_url = ""
+                _early_landing_code = 0
+                _early_landing_body = ""
                 try:
-                    import re as _re_early_spa
-                    _early_target_path = urllib.parse.urlparse(
-                        target["url"]).path.rstrip("/").lower()
-                    _early_landing_path = urllib.parse.urlparse(
-                        _early_landing_url).path.rstrip("/").lower()
-                    _early_is_spa = bool(_re_early_spa.search(
-                        r'<div\s+id=["\']('
-                        r'root|app|__next|__nuxt|___gatsby'
-                        r'|angular-app|blazor-app|main-app)["\']',
-                        _early_landing_body or "", _re_early_spa.IGNORECASE))
-                    _early_on_login = (
-                        _early_landing_path == _early_target_path
-                        or "login" in _early_landing_path.rsplit("/", 1)[-1:])
-                    if _early_is_spa and _early_on_login:
-                        vc.log(
-                            "[auth] SPA shell detected — resolving post-login "
-                            "URL via headless browser",
-                            "INFO",
-                        )
-                        try:
-                            _early_spa_url = _resolve_spa_landing(
-                                target, cfg, _early_sess, target["url"])
-                            if _early_spa_url:
-                                _esp = urllib.parse.urlparse(
-                                    _early_spa_url).path.rstrip("/").lower()
-                                if (_esp != _early_target_path
-                                        and "login" not in
-                                        _esp.rsplit("/", 1)[-1:]):
-                                    vc.log(
-                                        f"[auth] SPA post-login URL resolved: "
-                                        f"{_early_spa_url}",
-                                        "SUCCESS",
-                                    )
-                                    _early_landing_url  = _early_spa_url
-                                    _early_landing_code = 200
-                                    try:
-                                        _esp_r = _early_probe_sess.get(
-                                            _early_spa_url,
-                                            timeout=cfg.get("timeout", 10),
-                                            allow_redirects=True,
-                                        )
-                                        _early_landing_body = _esp_r.text[:8192]
-                                    except Exception:
-                                        pass
-                                else:
-                                    vc.log(
-                                        f"[auth] SPA browser still on login "
-                                        f"page: {_early_spa_url}",
-                                        "INFO",
-                                    )
-                        except Exception as _esp_e:
-                            vc.log(
-                                f"[auth] SPA landing resolution failed: "
-                                f"{_esp_e}",
-                                "WARNING",
-                            )
+                    _early_r = auth_sess.get(
+                        target["url"], timeout=cfg.get("timeout", 10),
+                        allow_redirects=True,
+                    )
+                    _early_landing_url  = _early_r.url
+                    _early_landing_code = _early_r.status_code
+                    _early_landing_body = _early_r.text[:8192]
                 except Exception:
                     pass
-            _write_auth_status(
-                out.root, _early_label, _early_username, _early_status,
-                _early_probe_sess, _early_landing_url,
-                _early_landing_body, _early_landing_code,
+                vc.log(
+                    f"[auth] Landing page probe: {_early_landing_url} "
+                    f"→ HTTP {_early_landing_code}",
+                    "INFO",
+                )
+                # ── SPA landing page resolution ──
+                # For SPAs with API auth, the server returns the same HTML
+                # shell for every path (always 200). Use headless Chrome
+                # with auth cookies to find the real post-login URL.
+                if _early_landing_url:
+                    try:
+                        import re as _re_early_spa
+                        _early_target_path = urllib.parse.urlparse(
+                            target["url"]).path.rstrip("/").lower()
+                        _early_landing_path = urllib.parse.urlparse(
+                            _early_landing_url).path.rstrip("/").lower()
+                        _early_is_spa = bool(_re_early_spa.search(
+                            r'<div\s+id=["\']('
+                            r'root|app|__next|__nuxt|___gatsby'
+                            r'|angular-app|blazor-app|main-app)["\']',
+                            _early_landing_body or "",
+                            _re_early_spa.IGNORECASE))
+                        _last_seg = _early_landing_path.rsplit("/", 1)[-1]
+                        _early_on_login = (
+                            _early_landing_path == _early_target_path
+                            or _last_seg == "login")
+                        if _early_is_spa and _early_on_login:
+                            vc.log(
+                                "[auth] SPA shell detected on landing page "
+                                "— resolving post-login URL via headless "
+                                "browser",
+                                "INFO",
+                            )
+                            try:
+                                _early_spa_url = _resolve_spa_landing(
+                                    target, cfg, auth_sess, target["url"])
+                                if _early_spa_url:
+                                    _esp = urllib.parse.urlparse(
+                                        _early_spa_url
+                                    ).path.rstrip("/").lower()
+                                    _esp_seg = _esp.rsplit("/", 1)[-1]
+                                    if (_esp != _early_target_path
+                                            and _esp_seg != "login"):
+                                        vc.log(
+                                            f"[auth] SPA post-login URL "
+                                            f"resolved: {_early_spa_url}",
+                                            "SUCCESS",
+                                        )
+                                        _early_landing_url = _early_spa_url
+                                        _early_landing_code = 200
+                                        try:
+                                            _esp_r = auth_sess.get(
+                                                _early_spa_url,
+                                                timeout=cfg.get(
+                                                    "timeout", 10),
+                                                allow_redirects=True,
+                                            )
+                                            _early_landing_body = (
+                                                _esp_r.text[:8192])
+                                        except Exception:
+                                            pass
+                                    else:
+                                        vc.log(
+                                            f"[auth] SPA browser stayed on "
+                                            f"login: {_early_spa_url}",
+                                            "INFO",
+                                        )
+                            except Exception as _esp_e:
+                                vc.log(
+                                    f"[auth] SPA landing resolution error: "
+                                    f"{_esp_e}",
+                                    "WARNING",
+                                )
+                        elif _early_is_spa:
+                            vc.log(
+                                "[auth] SPA detected but not on login page "
+                                "— using server-side landing URL",
+                                "INFO",
+                            )
+                    except Exception as _spa_det_e:
+                        vc.log(
+                            f"[auth] SPA detection error: {_spa_det_e}",
+                            "WARNING",
+                        )
+                _write_auth_status(
+                    out.root, _early_label, _early_username, "success",
+                    auth_sess, _early_landing_url,
+                    _early_landing_body, _early_landing_code,
+                )
+                vc.log(
+                    f"[auth] Early auth status written: {_early_label} → "
+                    f"{_early_landing_url or '(none)'}",
+                    "INFO",
+                )
+        except Exception as _early_e:
+            vc.log(
+                f"[auth] Early auth status write failed: {_early_e}",
+                "WARNING",
             )
 
         # Browser-auth fallback is handled inside _build_auth_session (form_login path)
