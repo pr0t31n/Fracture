@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.27.1"
+VERSION = "2.27.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -24606,6 +24606,24 @@ def main() -> None:
                 effective_auth = _make_session(_ctx_cfg, _scope_hostnames)
                 _attach_redirect_hook(effective_auth, _scope_hostnames, target,
                                       out, _in_scope_new)
+
+            # ── Seed _ep_base with the post-login landing URL ────────────────
+            # After successful auth the server typically redirects to the
+            # authenticated landing page (e.g. /Client/MyItems).  This URL is
+            # the entry point to the application surface and must be tested.
+            # Capture it early so it feeds into crawl, injection, and all
+            # subsequent phases.
+            if (_as_landing_url
+                    and _as_landing_code in range(200, 400)
+                    and _as_landing_url.rstrip("/") != target["url"].rstrip("/")):
+                _lnd_norm = _as_landing_url.rstrip("/")
+                if _lnd_norm not in (u.rstrip("/") for u in _ep_base):
+                    _ep_base.append(_as_landing_url)
+                    vc.log(
+                        f"[endpoint-seed] Post-login landing URL added: "
+                        f"{_as_landing_url} (HTTP {_as_landing_code})",
+                        "INFO",
+                    )
 
             # ── Discovery phases — Role 1 only ──────────────────────────────
             # All enumeration and server-analysis runs authenticated as the most
