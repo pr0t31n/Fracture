@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "2.3.1"
+VERSION = "2.3.2"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -1219,6 +1219,11 @@ def test_connection(
                 result["discovered_method"] = _disc_m.group(1)
             if _disc_u:
                 result["discovered_login_url"] = _disc_u.group(1)
+            # testConnection always defaults to application/json for
+            # login POSTs.  Surface that so the caller (Crucible Apply
+            # button) can set Fracture's content-type to match.
+            if result.get("discovered_login_url"):
+                result["discovered_content_type"] = "application/json"
         return result
 
     # ── Login-based methods: POST result is the definitive answer ─────────────
