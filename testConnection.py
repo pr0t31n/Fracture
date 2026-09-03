@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -676,6 +676,7 @@ def build_auth_session(
         _baseline_final:   str = ""
         _baseline_html:    str = ""
         _baseline_cookies: set[str] = set()
+        _baseline_body_len: int = 0  # full response body length (SPA detection)
         if target_url:
             try:
                 _bl_sess = _make_session(verify_ssl, proxy)
@@ -689,8 +690,9 @@ def build_auth_session(
                 # Second: follow redirects to capture final URL + HTML
                 _bl_resp2 = _bl_sess.get(target_url, timeout=timeout,
                                          allow_redirects=True)
-                _baseline_final = _bl_resp2.url
-                _baseline_html  = _bl_resp2.text[:16384]
+                _baseline_final    = _bl_resp2.url
+                _baseline_html     = _bl_resp2.text[:131072]  # 128 KB
+                _baseline_body_len = len(_bl_resp2.content)
             except Exception:
                 pass
 
@@ -934,20 +936,27 @@ def build_auth_session(
                 return True, "no target URL to verify against"
             try:
                 _vr = s.get(target_url, timeout=timeout, allow_redirects=True)
-                # Redirect back to login = auth failed
+                _new_ck = set(s.cookies.keys()) - _baseline_cookies
+                # New auth cookies are the strongest signal — check first.
+                # SPAs serve the same HTML from every URL, so URL-based
+                # detection ("redirected back to login") is unreliable when
+                # the SPA catch-all always returns a path containing /login.
+                if _new_ck:
+                    return True, (
+                        f"HTTP {_vr.status_code}, "
+                        f"{len(_new_ck)} new cookie(s): "
+                        + ", ".join(sorted(_new_ck)))
+                # No new cookies — check URL for redirect-to-login
                 if _is_login_redirect(_vr.url):
                     return False, (
                         f"redirected back to login page: {_vr.url}")
                 # Same page as unauthenticated baseline = auth had no effect
-                _new_ck = set(s.cookies.keys()) - _baseline_cookies
-                if (not _new_ck
-                        and abs(len(_vr.content) - _baseline_len) < 256
+                if (abs(len(_vr.content) - _baseline_len) < 256
                         and _vr.status_code == _baseline_sc):
                     return False, (
                         "response identical to unauthenticated baseline")
                 return True, (
-                    f"HTTP {_vr.status_code} at {_vr.url}"
-                    + (f", {len(_new_ck)} new cookie(s)" if _new_ck else ""))
+                    f"HTTP {_vr.status_code} at {_vr.url}")
             except Exception as _e:
                 return False, str(_e)
 
@@ -1047,10 +1056,19 @@ def build_auth_session(
                     continue
                 try:
                     _pr = _probe_sess.get(
-                        _pu, timeout=5, allow_redirects=False)
+                        _pu, timeout=5, allow_redirects=True)
                     if _pr.status_code == 404:
                         _tried_api_urls.add(_pu_norm)
                         continue  # URL doesn't exist — skip
+                    # SPA catch-all detection: if the response body is
+                    # nearly identical in size to the baseline HTML page,
+                    # this URL is served by the SPA router catch-all,
+                    # not a real API endpoint.
+                    if (_baseline_body_len
+                            and abs(len(_pr.content) - _baseline_body_len)
+                                < 512):
+                        _tried_api_urls.add(_pu_norm)
+                        continue  # SPA catch-all — skip
                 except Exception:
                     pass
                 _live_urls.append(_pu)
