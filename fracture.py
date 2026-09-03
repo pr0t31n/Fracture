@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.31.2"
+VERSION = "2.32.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -19407,7 +19407,215 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
 
-    vc.status(phase, "Injection Testing", "complete", "Done", 19, 19)
+    # 22. POST-parameter reflected XSS — test form POST fields
+    # (Tests 4/dalfox cover GET query-parameter XSS; this covers POST bodies.)
+    vc.status(phase, "Injection Testing", "running", "POST XSS", 19, 23)
+    _post_xss_seen: set = set()
+    for form in forms[:20]:
+        action = form.get("action", url)
+        method = form.get("method", "GET").upper()
+        if method != "POST":
+            continue
+        inputs = form.get("inputs", [])
+        text_inputs = [i for i in inputs if i.get("name")
+                       and i.get("type", "text") in
+                       ("text", "textarea", "search", "email", "tel", "url", "")]
+        if not text_inputs:
+            continue
+        for inp in text_inputs:
+            pname = inp["name"]
+            _fkey = (action, pname)
+            if _fkey in _post_xss_seen:
+                continue
+            for payload in _XSS_PAYLOADS[:3]:
+                data = {i["name"]: "fracture_test" for i in inputs if i.get("name")}
+                data[pname] = payload
+                try:
+                    r = sess.post(action, data=data, timeout=timeout,
+                                  allow_redirects=True)
+                    if r and _xss_confirmed(payload, r):
+                        _post_xss_seen.add(_fkey)
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, f"post_xss_{pname}", r,
+                            endpoint_url=action, method="POST")
+                        out.add_finding(
+                            title="Reflected Cross-Site Scripting (XSS) — POST Parameter",
+                            url=action, port=target["port"], risk="HIGH",
+                            description=(
+                                f"The form field '{pname}' at {action} reflects user-supplied "
+                                f"HTML/script content in the response without encoding.  An "
+                                f"attacker can exploit this via an auto-submitting form on a "
+                                f"malicious page to execute arbitrary JavaScript in the "
+                                f"victim's browser session."),
+                            output=(f"Form action: {action}\nField: {pname}\n"
+                                    f"Payload: {payload}\nHTTP {r.status_code}"),
+                            output_file=f"{_rq},{_rp}",
+                            sources="fracture-injection", service=target["scheme"],
+                            affected=action,
+                            owasp="A03:2025 Injection", nist="SI-10",
+                            remediation=(
+                                "Encode all output contextually (HTML, JS, URL, CSS), "
+                                "sanitise input server-side, and enforce a strict "
+                                "Content-Security-Policy."),
+                            http_code=r.status_code,
+                        )
+                        vc.log(f"[injection] POST XSS: {action} field={pname}",
+                               "SUCCESS")
+                        break
+                except Exception:
+                    pass
+
+    # 23. Error-page reflection XSS — ASP.NET HttpRequestValidationException
+    #     and similar framework validation-error patterns.
+    #
+    #     Many frameworks (ASP.NET, Java, PHP) have built-in request validation
+    #     that rejects HTML in form fields.  The vulnerability arises when the
+    #     error page echoes the rejected input WITHOUT encoding it:
+    #
+    #       Input:  <tag attr=val>
+    #       Error:  "A potentially dangerous Request.Form value was detected
+    #               from the client (field="<tag attr=val>")"
+    #                                         ^^^^^^^^^^^^ rendered as HTML
+    #
+    #     We inject a benign HTML probe (not <script> — we want to avoid
+    #     being blocked by WAFs).  If the probe tag appears in the response
+    #     as literal HTML (not entity-encoded), the error page is vulnerable.
+    #     Then we confirm with a <script> payload on the same field to
+    #     establish full XSS.
+    vc.status(phase, "Injection Testing", "running",
+              "Error-page reflection XSS", 20, 23)
+    _ERR_REFL_HTML_PROBE = "fracture<xss a=b>probe"
+    _ERR_REFL_SCRIPT     = '<script>alert("fracture_errxss")</script>'
+    _ERR_REFL_MARKER_TAG = "<xss a=b>"
+    _ERR_REFL_MARKER_SCR = '<script>alert("fracture_errxss")</script>'
+    _err_refl_seen: set = set()
+    # Test all form fields — including hidden and *_ClientState fields,
+    # which are exactly the pattern from the ASP.NET/Telerik finding.
+    for form in forms[:30]:
+        action = form.get("action", url)
+        method = form.get("method", "GET").upper()
+        inputs = form.get("inputs", [])
+        if not inputs:
+            continue
+        for inp in inputs:
+            pname = inp.get("name", "")
+            if not pname:
+                continue
+            _ekey = (action, pname)
+            if _ekey in _err_refl_seen:
+                continue
+            data = {i["name"]: "fracture_test" for i in inputs if i.get("name")}
+            data[pname] = _ERR_REFL_HTML_PROBE
+            try:
+                if method == "POST":
+                    r = sess.post(action, data=data, timeout=timeout,
+                                  allow_redirects=True)
+                else:
+                    r = sess.get(action, params=data, timeout=timeout,
+                                 allow_redirects=True)
+                if not r:
+                    continue
+                # Check if the benign <xss a=b> tag was reflected unencoded.
+                # The entity-encoded form (&lt;xss a=b&gt;) is safe — only
+                # the literal tag in HTML indicates the vulnerability.
+                import html as _html_ep
+                _enc_tag = _html_ep.escape(_ERR_REFL_MARKER_TAG, quote=True)
+                _body = r.text
+                if _ERR_REFL_MARKER_TAG not in _body:
+                    continue
+                # Ensure it's NOT entity-encoded everywhere.
+                if _enc_tag in _body:
+                    _stripped = _body.replace(_enc_tag, "")
+                    if _ERR_REFL_MARKER_TAG not in _stripped:
+                        continue  # All occurrences are encoded — safe
+
+                # HTML injection confirmed in error page.  Now confirm
+                # script execution by injecting a <script> tag.
+                _err_refl_seen.add(_ekey)
+                _script_confirmed = False
+                data2 = dict(data)
+                data2[pname] = _ERR_REFL_SCRIPT
+                try:
+                    if method == "POST":
+                        r2 = sess.post(action, data=data2, timeout=timeout,
+                                       allow_redirects=True)
+                    else:
+                        r2 = sess.get(action, params=data2, timeout=timeout,
+                                      allow_redirects=True)
+                    if r2 and _ERR_REFL_MARKER_SCR in r2.text:
+                        _enc_scr = _html_ep.escape(
+                            _ERR_REFL_MARKER_SCR, quote=True)
+                        if _enc_scr in r2.text:
+                            _str2 = r2.text.replace(_enc_scr, "")
+                            _script_confirmed = _ERR_REFL_MARKER_SCR in _str2
+                        else:
+                            _script_confirmed = True
+                except Exception:
+                    pass
+
+                _risk = "HIGH" if _script_confirmed else "MEDIUM"
+                _title = ("Reflected XSS via Error Page — Script Injection Confirmed"
+                          if _script_confirmed
+                          else "HTML Injection via Error Page (XSS Likely)")
+                _ev_r = r2 if _script_confirmed and r2 else r
+                _rq, _rp = _save_http_evidence(
+                    out, phase, f"err_refl_xss_{pname}", _ev_r,
+                    endpoint_url=action, method=method)
+
+                # Detect the specific framework error pattern for context.
+                _err_ctx = ""
+                if "HttpRequestValidationException" in _ev_r.text:
+                    _err_ctx = (
+                        "ASP.NET's HttpRequestValidationException error page "
+                        "reflects the rejected input without HTML-encoding.  ")
+                elif re.search(r'javax\.servlet|java\.lang\.|org\.apache\.',
+                               _ev_r.text):
+                    _err_ctx = (
+                        "A Java/Servlet framework error page reflects the "
+                        "rejected input without HTML-encoding.  ")
+
+                out.add_finding(
+                    title=_title,
+                    url=action, port=target["port"], risk=_risk,
+                    description=(
+                        f"{_err_ctx}The form field '{pname}' at {action} "
+                        f"triggers a framework validation error, and the "
+                        f"error page reflects the submitted value as raw "
+                        f"HTML without entity-encoding.  "
+                        + ("The reflected <script> tag executes in the "
+                           "browser, confirming full cross-site scripting.  "
+                           if _script_confirmed else
+                           "HTML tag injection is confirmed; script execution "
+                           "is likely given the lack of output encoding.  ")
+                        + "An attacker can exploit this via an auto-submitting "
+                        f"form (POST) or crafted link (GET)."),
+                    output=(
+                        f"Form action: {action}\n"
+                        f"Field:       {pname}\n"
+                        f"Probe:       {_ERR_REFL_HTML_PROBE}\n"
+                        f"Script:      {'CONFIRMED' if _script_confirmed else 'not tested / blocked'}\n"
+                        f"HTTP:        {_ev_r.status_code}\n"
+                        f"Response excerpt:\n{_ev_r.text[:800]}"),
+                    output_file=f"{_rq},{_rp}",
+                    sources="fracture-injection", service=target["scheme"],
+                    affected=action,
+                    owasp="A03:2025 Injection", nist="SI-10",
+                    remediation=(
+                        "HTML-encode all user-supplied values before "
+                        "rendering them in error pages.  Replace "
+                        "< > \" ' & with their HTML entities.  Configure "
+                        "the framework to display generic error pages in "
+                        "production (ASP.NET: <customErrors mode=\"On\"/>)."),
+                    http_code=_ev_r.status_code,
+                )
+                vc.log(f"[injection] Error-page reflection XSS: "
+                       f"{action} field={pname} "
+                       f"(script={'confirmed' if _script_confirmed else 'html-only'})",
+                       "SUCCESS")
+            except Exception:
+                pass
+
+    vc.status(phase, "Injection Testing", "complete", "Done", 23, 23)
     vc.log("[injection] Phase complete", "SUCCESS")
 
 
