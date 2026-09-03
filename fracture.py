@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.13"
+VERSION = "2.30.14"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -13014,6 +13014,32 @@ def _resolve_spa_landing(
         # balancers can take several seconds).
         _p2 = _poll_for_redirect("chrome-login", max_s=12.0)
         if _p2:
+            # ── Transfer Chrome's cookies back to the requests session ──
+            # Chrome's full login creates a server session that can access
+            # all routes (including /Client/* pages that the API-only login
+            # cannot reach).  Copy these cookies so the requests session
+            # inherits Chrome's fully-authenticated state.
+            try:
+                _chrome_cks = driver.get_cookies()
+                _transferred = 0
+                for ck in _chrome_cks:
+                    auth_session.cookies.set(
+                        ck["name"], ck["value"],
+                        domain=ck.get("domain", "").lstrip("."),
+                        path=ck.get("path", "/"),
+                    )
+                    _transferred += 1
+                if _transferred:
+                    vc.log(
+                        f"[auth] Transferred {_transferred} cookie(s) from "
+                        f"Chrome session back to requests session",
+                        "INFO",
+                    )
+            except Exception as _ck_e:
+                vc.log(
+                    f"[auth] Chrome cookie transfer back failed: {_ck_e}",
+                    "WARNING",
+                )
             return _p2
 
         final_url = driver.current_url
@@ -24330,10 +24356,19 @@ def main() -> None:
                                         # Verify the URL is reachable
                                         # by the requests session (not
                                         # just the Chrome session).
+                                        # Use a plain GET with copied
+                                        # cookies — NOT the hooked
+                                        # session, which would fire
+                                        # the redirect hook and create
+                                        # a spurious finding.
                                         _early_browser_only = False
                                         try:
-                                            _esp_v = auth_sess.get(
+                                            import requests as _rq_verify
+                                            _esp_v = _rq_verify.get(
                                                 _early_spa_url,
+                                                cookies=auth_sess.cookies,
+                                                verify=cfg.get(
+                                                    "verify_ssl", False),
                                                 timeout=cfg.get(
                                                     "timeout", 10),
                                                 allow_redirects=False,
