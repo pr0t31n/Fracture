@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.32.2"
+VERSION = "2.32.3"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -21351,7 +21351,12 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             test_sess = _make_session(cfg)
             test_sess.cookies.set(session_cookie_name, fixed_id)
             _pre_r = test_sess.get(url, timeout=timeout)
-            _pre_val = test_sess.cookies.get(session_cookie_name, "")
+            # Safe extraction — avoid CookieConflictError on dupes
+            _pre_val = ""
+            for _ck in test_sess.cookies:
+                if _ck.name == session_cookie_name:
+                    _pre_val = _ck.value
+                    break
 
             if _pre_val == fixed_id:
                 # Server accepted the fixed ID pre-auth.  Now authenticate.
@@ -21384,7 +21389,12 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                     # take its post-auth cookie value as the "regenerated"
                     # baseline, then do a second login on test_sess (which
                     # carries the fixed ID) and compare.
-                    _regen_val = _sf_sess.cookies.get(session_cookie_name, "")
+                    # Safe extraction — avoid CookieConflictError on dupes
+                    _regen_val = ""
+                    for _ck in _sf_sess.cookies:
+                        if _ck.name == session_cookie_name:
+                            _regen_val = _ck.value
+                            break
 
                     # Now log in via the session that carries the fixed ID.
                     # Transfer auth headers/cookies from _sf_sess into
@@ -21415,9 +21425,23 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                     # _sf_sess (which is already authenticated), then do
                     # one more authenticated request and see if the server
                     # keeps the injected ID.
+                    # Clear ALL cookies with this name before injecting
+                    # the fixed value — the jar may hold duplicates across
+                    # domains (e.g. one from the server, one from us) and
+                    # cookies.get() throws CookieConflictError on dupes.
+                    for _ck in list(_sf_sess.cookies):
+                        if _ck.name == session_cookie_name:
+                            _sf_sess.cookies.clear(
+                                _ck.domain, _ck.path, _ck.name)
                     _sf_sess.cookies.set(session_cookie_name, fixed_id)
                     _post_r = _sf_sess.get(url, timeout=timeout)
-                    _post_val = _sf_sess.cookies.get(session_cookie_name, "")
+                    # Use a loop to safely extract the value even when
+                    # duplicates slipped through the clear above.
+                    _post_val = ""
+                    for _ck in _sf_sess.cookies:
+                        if _ck.name == session_cookie_name:
+                            _post_val = _ck.value
+                            break
 
                     if _post_val == fixed_id:
                         # The server kept the attacker-controlled session ID
@@ -25187,6 +25211,69 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     print(f"  Testing {len(crawled_paths)} paths × {len(all_roles)} roles")
     vc.status(phase, "Access Matrix", "running", f"Testing {len(crawled_paths)} paths", 0, len(crawled_paths))
 
+    # ── Merge with existing per-role probed results ──────────────────────
+    # _probe_role_paths (called at the end of each role's context) already
+    # wrote correct HTTP codes while each role's session was still active.
+    # Load those results so we don't re-probe with potentially stale
+    # (expired) prebuilt sessions, overwriting good data with 302s.
+    _existing_am = {}
+    _existing_by_path: dict = {}
+    try:
+        _am_file = project_dir / "access_matrix.json"
+        if _am_file.exists():
+            _existing_am = json.loads(_am_file.read_text())
+            _existing_by_path = {
+                e["path"]: e.get("access", {})
+                for e in _existing_am.get("paths", [])
+            }
+    except Exception:
+        pass
+
+    # ── Canary + re-auth for each authenticated role ─────────────────────
+    # Targets with aggressive idle timeouts (e.g. 60 s) may have expired
+    # the prebuilt sessions.  Detect by probing a known-200 path; rebuild
+    # if it returns a redirect.
+    _sm_paths_data: dict = {}
+    try:
+        _sm_paths_data = json.loads(sm_path.read_text()).get("paths", {}) if sm_path.exists() else {}
+    except Exception:
+        pass
+    for _cr_role in cred_roles:
+        _cr_sess = role_sessions.get(_cr_role)
+        if _cr_sess is None:
+            continue
+        _canary_p = None
+        for _cp, _ci in _sm_paths_data.items():
+            if isinstance(_ci, dict) and _ci.get("status") == 200:
+                _canary_p = _cp
+                break
+        if _canary_p is None and crawled_paths:
+            _canary_p = crawled_paths[0]
+        if _canary_p:
+            try:
+                _cr_r = _cr_sess.get(
+                    base_url + _canary_p, timeout=timeout, allow_redirects=False,
+                    headers={"Accept": "text/html,application/json"})
+                if _cr_r.status_code in (301, 302, 303, 307, 308):
+                    vc.log(
+                        f"[access-matrix/p20] {_cr_role} session expired "
+                        f"(canary {_canary_p} → HTTP {_cr_r.status_code}) "
+                        f"— re-authenticating", "WARNING")
+                    try:
+                        _cr_fresh = _build_auth_session(
+                            cfg, no_interactive=True, role_label=_cr_role)
+                        if _cr_fresh is not None:
+                            role_sessions[_cr_role] = _cr_fresh
+                            vc.log(f"[access-matrix/p20] {_cr_role} re-authenticated OK", "INFO")
+                        else:
+                            vc.log(
+                                f"[access-matrix/p20] {_cr_role} re-auth returned None", "WARNING")
+                    except Exception as _cr_e:
+                        vc.log(
+                            f"[access-matrix/p20] {_cr_role} re-auth failed: {_cr_e}", "WARNING")
+            except Exception:
+                pass
+
     # Use a growable list so redirect destinations discovered during probing
     # are appended and probed in the same pass (one level of expansion only;
     # destinations that themselves redirect are recorded but not followed further).
@@ -25205,7 +25292,15 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             rel = path if path.startswith("/") else "/" + path
             url = base_url + rel
         access = {}
+        _prior = _existing_by_path.get(rel, {})
         for role, r_sess in role_sessions.items():
+            # If _probe_role_paths already recorded a real HTTP code for
+            # this role+path (while the session was still active), keep it
+            # instead of re-probing with a potentially expired session.
+            _prior_code = _prior.get(role)
+            if isinstance(_prior_code, int) and _prior_code > 0:
+                access[role] = _prior_code
+                continue
             try:
                 r = r_sess.get(url, timeout=timeout, allow_redirects=False,
                                headers={"Accept": "text/html,application/json"})
@@ -26113,6 +26208,22 @@ def main() -> None:
                     # them. The operator can override afterward by editing
                     # the engagement settings, but the default safe path is
                     # automatic.
+                    #
+                    # Two tiers:
+                    #   WAF-tier: Cloudflare, Akamai, Imperva, Sucuri,
+                    #     PythonAnywhere — these actively block scanners.
+                    #     → full stealth (disable noisy phases, single thread)
+                    #
+                    #   LB-tier: F5 BIG-IP (cookie only), AWS ELB (trace
+                    #     header only), Fastly (CDN/no WAF evidence),
+                    #     GitHub Pages — no inherent scanner blocking.
+                    #     → reduced threads only, all phases stay enabled.
+                    _WAF_TIER = {
+                        "Cloudflare", "Akamai", "Imperva/Incapsula",
+                        "Sucuri",
+                        "PythonAnywhere (aggressive WAF + Cloudflare)",
+                    }
+                    _has_waf = any(s in _WAF_TIER for s in _waf_signals)
                     _NOISY_PHASES = (
                         "ffuf", "vulnscan", "injection", "traversal",
                         "ssrf", "deserialization", "request_smuggling",
@@ -26136,39 +26247,55 @@ def main() -> None:
                     )
                     _disabled: list = []
                     _phases_map = cfg.get("phases", {}) or {}
-                    for _ph in _NOISY_PHASES:
-                        if _phases_map.get(_ph):
-                            cfg.setdefault("phases", {})[_ph] = False
-                            _disabled.append(_ph)
-                    # Force single-threaded, 1.5s per-request delay
+                    if _has_waf:
+                        # Full stealth — WAF service detected.
+                        for _ph in _NOISY_PHASES:
+                            if _phases_map.get(_ph):
+                                cfg.setdefault("phases", {})[_ph] = False
+                                _disabled.append(_ph)
+                    # Reduce concurrency regardless of tier (politeness)
                     _orig_threads = cfg.get("threads", 1)
                     cfg["threads"] = 1
                     _orig_delay = cfg.get("request_delay", 0)
-                    cfg["request_delay"] = 1.5
+                    if _has_waf:
+                        cfg["request_delay"] = 1.5
+                    else:
+                        # LB-only: mild slowdown instead of full delay
+                        cfg["request_delay"] = max(_orig_delay, 0.5)
                     # Reduce auth-time retry/backoff aggressiveness too
                     cfg["timeout"] = max(int(cfg.get("timeout", 10) or 10), 15)
 
                     vc.log("", "WARNING")
                     vc.log("=" * 70, "WARNING")
+                    _tier_label = "WAF/CDN" if _has_waf else "LOAD BALANCER"
                     vc.log(
-                        f"[pre-scan] PROTECTION DETECTED on {_waf_host}: "
+                        f"[pre-scan] {_tier_label} DETECTED on {_waf_host}: "
                         f"{', '.join(_waf_signals)}",
                         "WARNING",
                     )
-                    vc.log(
-                        "[pre-scan] These services actively detect and block "
-                        "security scanners. Fracture is automatically "
-                        "switching to stealth mode to avoid IP blacklisting.",
-                        "WARNING",
-                    )
+                    if _has_waf:
+                        vc.log(
+                            "[pre-scan] These services actively detect and block "
+                            "security scanners. Fracture is automatically "
+                            "switching to stealth mode to avoid IP blacklisting.",
+                            "WARNING",
+                        )
+                    else:
+                        vc.log(
+                            "[pre-scan] Load balancer detected (not a WAF). "
+                            "Fracture is reducing concurrency as a courtesy "
+                            "but all scan phases remain enabled.",
+                            "WARNING",
+                        )
                     vc.log(
                         f"[pre-scan] APPLIED: threads "
                         f"{_orig_threads} → 1  (concurrency disabled)",
                         "WARNING",
                     )
+                    _new_delay = cfg["request_delay"]
                     vc.log(
                         f"[pre-scan] APPLIED: request_delay "
-                        f"{_orig_delay} → 1.5s  (per-response sleep)",
+                        f"{_orig_delay} → {_new_delay}s  (per-response sleep)",
                         "WARNING",
                     )
                     if _disabled:
@@ -26178,34 +26305,37 @@ def main() -> None:
                             f"{', '.join(_disabled)}",
                             "WARNING",
                         )
-                    else:
+                    elif _has_waf:
                         vc.log(
                             "[pre-scan] APPLIED: noisy phases already off",
                             "WARNING",
                         )
-                    _still_on = [
-                        p for p in _SAFE_PHASES
-                        if cfg.get("phases", {}).get(p)
-                    ]
-                    vc.log(
-                        f"[pre-scan] KEPT: {len(_still_on)} safe phase(s) "
-                        f"still enabled: {', '.join(_still_on) or '(none)'}",
-                        "WARNING",
-                    )
-                    vc.log(
-                        "[pre-scan] To OVERRIDE (use only with written "
-                        "authorization + an allow-listed source IP): edit "
-                        "the engagement settings to re-enable the disabled "
-                        "phases AND ensure the customer has allow-listed "
-                        "your egress IP at the CDN/WAF (Cloudflare IP "
-                        "Access Rules, Akamai Site Shield, etc.).",
-                        "WARNING",
-                    )
+                    if _has_waf:
+                        _still_on = [
+                            p for p in _SAFE_PHASES
+                            if cfg.get("phases", {}).get(p)
+                        ]
+                        vc.log(
+                            f"[pre-scan] KEPT: {len(_still_on)} safe phase(s) "
+                            f"still enabled: {', '.join(_still_on) or '(none)'}",
+                            "WARNING",
+                        )
+                        vc.log(
+                            "[pre-scan] To OVERRIDE (use only with written "
+                            "authorization + an allow-listed source IP): edit "
+                            "the engagement settings to re-enable the disabled "
+                            "phases AND ensure the customer has allow-listed "
+                            "your egress IP at the CDN/WAF (Cloudflare IP "
+                            "Access Rules, Akamai Site Shield, etc.).",
+                            "WARNING",
+                        )
                     vc.log("=" * 70, "WARNING")
                     vc.log("", "WARNING")
                     # Stash the signals so downstream phases can consult cfg.
                     cfg["_waf_detected"] = _waf_signals
-                    cfg["_waf_stealth_applied"] = True
+                    # Only set full stealth for WAF-tier — LB-only gets
+                    # throttling but phases stay enabled.
+                    cfg["_waf_stealth_applied"] = _has_waf
                     # Re-apply throttle to the existing sess (response hook
                     # is wired in _make_session and reads cfg dynamically, so
                     # raising request_delay above already takes effect on the
