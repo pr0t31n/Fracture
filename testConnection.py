@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "1.7.3"
+VERSION = "1.7.4"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -645,6 +645,77 @@ def build_auth_session(
         sess.headers[hdr_name] = hdr_value
         return sess, f"Proxy auth header set: {hdr_name}: {hdr_value}"
 
+    # ── Auto-Detect ──────────────────────────────────────────────────────────
+    elif method == "auto":
+        # Try each credential method in priority order; stop at first success.
+        # Skip methods that require config the operator didn't provide.
+        login_url  = auth.get("login_url", "").strip()
+        has_creds  = bool(auth.get("username"))
+        target_url = auth.get("_target_url", "")  # injected by test_connection()
+
+        _auto_order: list[str] = []
+        if login_url:
+            _auto_order.extend(["form_login", "token_login"])
+        if has_creds:
+            _auto_order.extend(["basic", "digest", "ntlm"])
+
+        if not _auto_order:
+            return sess, (
+                "ERROR: auto-detect needs either a Login URL "
+                "(for form/token login) or credentials in the "
+                "Credential Matrix (for basic/digest/ntlm)"
+            )
+
+        # Pre-check: only try HTTP-challenge methods (basic/digest/ntlm) when
+        # the server actually issues a 401.  Without a 401, setting sess.auth
+        # looks like success but isn't.
+        _http_methods = frozenset({"basic", "digest", "ntlm"})
+        _server_401 = False
+        _probe_url = target_url or login_url
+        if _probe_url and any(m in _http_methods for m in _auto_order):
+            try:
+                _probe_resp = sess.get(_probe_url, timeout=timeout,
+                                       allow_redirects=False)
+                _server_401 = (_probe_resp.status_code == 401)
+            except Exception:
+                pass
+            if not _server_401:
+                _auto_order = [m for m in _auto_order if m not in _http_methods]
+
+        _errors: list[str] = []
+        for _am in _auto_order:
+            _auto_auth = dict(auth)
+            _auto_auth["method"] = _am
+            _auto_sess, _auto_info = build_auth_session(
+                _auto_auth, timeout, proxy, verify_ssl)
+            if _auto_info.startswith("ERROR:"):
+                _errors.append(f"{_am}: {_auto_info}")
+                continue
+            # For form/token login, the POST result IS the test — check it
+            if _am in ("form_login", "token_login"):
+                if _auto_sess.cookies or any(
+                    k.lower() in ("authorization", "x-auth-token")
+                    for k in _auto_sess.headers
+                ):
+                    return _auto_sess, f"auto-detect → {_am}: {_auto_info}"
+                _errors.append(f"{_am}: {_auto_info} (no auth signals)")
+                continue
+            # For HTTP auth methods, we configured sess.auth — verify with GET
+            if _am in _http_methods and target_url:
+                try:
+                    _vr = _auto_sess.get(target_url, timeout=timeout)
+                    if _vr.status_code not in (401, 403):
+                        return _auto_sess, (
+                            f"auto-detect → {_am}: HTTP {_vr.status_code}")
+                except Exception:
+                    pass
+                _errors.append(f"{_am}: authentication rejected")
+                continue
+            # Fallback: assume configured correctly
+            return _auto_sess, f"auto-detect → {_am}: {_auto_info}"
+
+        return sess, "ERROR: auto-detect exhausted all methods — " + "; ".join(_errors)
+
     return sess, f"WARNING: unknown auth method '{method}'"
 
 
@@ -675,8 +746,20 @@ def test_connection(
           "auth_info":   str,   # what auth was configured
         }
     """
+    # Inject target URL for auto-detect's 401 probe
+    auth["_target_url"] = url
     sess, auth_info = build_auth_session(auth, timeout, proxy, verify_ssl)
-    auth_method = (auth.get("method") or auth.get("auth_type") or "form_login").strip().lower()
+    auth_method = (auth.get("method") or auth.get("auth_method") or auth.get("auth_type") or "form_login").strip().lower()
+
+    # ── Auto-detect: build_auth_session already ran the full test loop ────────
+    if auth_method == "auto":
+        failed = auth_info.startswith("ERROR:")
+        return {
+            "success":     not failed,
+            "message":     auth_info,
+            "status_code": None,
+            "auth_info":   auth_info,
+        }
 
     # ── Login-based methods: POST result is the definitive answer ─────────────
     if auth_method in ("form_login", "token_login", "totp_mfa", "saml_assertion"):
@@ -1079,7 +1162,7 @@ def main() -> None:
                 print(f"[AuthProbe] Using suggested method: {suggested}\n")
 
     if not auth.get("method"):
-        auth["method"] = "form_login"
+        auth["method"] = auth.get("auth_method") or "form_login"
 
     # ── Run test ──────────────────────────────────────────────────────────────
     result = test_connection(url, auth, timeout, proxy, verify_ssl)
