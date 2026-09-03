@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.6"
+VERSION = "2.30.7"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -12803,6 +12803,89 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
         return False
 
 
+def _resolve_spa_landing(
+    target: dict, cfg: dict,
+    auth_session: "requests.Session",
+    start_url: str,
+) -> "str | None":
+    """Use headless Chrome with auth cookies to find the SPA post-login URL.
+
+    SPAs handle login redirects client-side (JS router push).  A plain GET
+    always returns the same HTML shell.  This function loads the target URL
+    in Chrome, transfers the auth cookies, reloads, waits for the JS router,
+    and returns the final URL — which is the real post-login landing page.
+
+    Returns the resolved URL or None on failure.
+    """
+    if not _check_selenium():
+        return None
+    from selenium import webdriver
+
+    browser = _get_spa_browser()
+    if browser is None:
+        return None
+
+    driver = None
+    try:
+        from selenium.webdriver.chrome.options import Options
+        opts = Options()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--ignore-certificate-errors")
+        opts.add_argument("--window-size=1280,800")
+        _ua_override = cfg.get(
+            "user_agent",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        )
+        opts.add_argument(f"--user-agent={_ua_override}")
+        chrome_bin = _find_chrome_binary()
+        if chrome_bin:
+            opts.binary_location = chrome_bin
+        hostname = target.get("hostname", "")
+        _ip = target.get("ip")
+        if not _ip and hostname:
+            try:
+                _ip = socket.gethostbyname(hostname)
+            except Exception:
+                _ip = None
+        if hostname and _ip and _ip != hostname:
+            opts.add_argument(f"--host-resolver-rules=MAP {hostname} {_ip}")
+        svc = _build_chrome_service()
+        driver = webdriver.Chrome(service=svc, options=opts)
+
+        driver.set_page_load_timeout(15)
+        # Navigate to the start URL first to establish the origin
+        # (Selenium requires the driver to be on the right origin
+        # before adding cookies for that domain).
+        try:
+            driver.get(start_url)
+        except Exception:
+            pass
+        # Transfer auth cookies from the requests session
+        _spa_transfer_cookies(auth_session, driver, start_url)
+        # Reload to let the SPA JS see the auth cookies and redirect
+        try:
+            driver.get(start_url)
+        except Exception:
+            pass
+        # Wait briefly for JS router to settle
+        import time as _time_spa
+        _time_spa.sleep(2)
+        final_url = driver.current_url
+        return final_url if final_url else None
+    except Exception:
+        return None
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
 def _phase_endpoint_tools(
     discovered_urls: list, target: dict, cfg: dict, pm: ProgressManager,
     out: OutputManager, sess: requests.Session,
@@ -24616,6 +24699,74 @@ def main() -> None:
                     _as_landing_body = _as_r.text[:8192]
                 except Exception:
                     pass
+                # ── SPA landing page resolution ──────────────────────────
+                # For SPAs with API auth, the server returns the same HTML
+                # shell for every path (always 200, same <div id="root">).
+                # The actual post-login page is a client-side JS redirect
+                # invisible to requests.  Use headless Chrome with the
+                # auth cookies to discover the real landing URL.
+                if (_ctx_auth is not None
+                        and _as_status == "success"
+                        and _as_landing_url):
+                    try:
+                        import re as _re_spa_lnd
+                        _target_path = urllib.parse.urlparse(
+                            target["url"]).path.rstrip("/").lower()
+                        _landing_path = urllib.parse.urlparse(
+                            _as_landing_url).path.rstrip("/").lower()
+                        # Trigger: landing URL is still the login/target
+                        # page AND body looks like an SPA shell.
+                        _is_spa_shell = bool(_re_spa_lnd.search(
+                            r'<div\s+id=["\']('
+                            r'root|app|__next|__nuxt|___gatsby'
+                            r'|angular-app|blazor-app|main-app)["\']',
+                            _as_landing_body or "", _re_spa_lnd.IGNORECASE))
+                        _still_on_login = (
+                            _landing_path == _target_path
+                            or "login" in _landing_path.split("/")[-1:])
+                        if _is_spa_shell and _still_on_login:
+                            vc.log(
+                                "[auth] SPA shell detected on landing page "
+                                "— using headless browser to resolve "
+                                "actual post-login URL",
+                                "INFO",
+                            )
+                            try:
+                                _spa_lnd_url = _resolve_spa_landing(
+                                    target, cfg, _ctx_auth, target["url"])
+                                if _spa_lnd_url:
+                                    _spa_lnd_path = urllib.parse.urlparse(
+                                        _spa_lnd_url).path.rstrip("/").lower()
+                                    if (_spa_lnd_path != _target_path
+                                            and "login" not in
+                                            _spa_lnd_path.split("/")[-1:]):
+                                        vc.log(
+                                            f"[auth] SPA post-login URL: "
+                                            f"{_spa_lnd_url}",
+                                            "INFO",
+                                        )
+                                        _as_landing_url  = _spa_lnd_url
+                                        _as_landing_code = 200
+                                        # Re-fetch body with requests
+                                        # for the preview snippet.
+                                        try:
+                                            _spa_body_r = _as_session.get(
+                                                _spa_lnd_url,
+                                                timeout=cfg.get("timeout", 10),
+                                                allow_redirects=True,
+                                            )
+                                            _as_landing_body = (
+                                                _spa_body_r.text[:8192])
+                                        except Exception:
+                                            pass
+                            except Exception as _spa_e:
+                                vc.log(
+                                    f"[auth] SPA landing resolution failed: "
+                                    f"{_spa_e}",
+                                    "WARNING",
+                                )
+                    except Exception:
+                        pass
                 _write_auth_status(
                     out.root, _ctx_label, _as_username, _as_status,
                     _as_session, _as_landing_url, _as_landing_body, _as_landing_code,
