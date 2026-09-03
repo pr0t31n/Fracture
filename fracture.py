@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.32.4"
+VERSION = "2.32.5"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -9792,6 +9792,13 @@ _EDGE_SECURITY_HDR_PATTERNS = [
     # ModSecurity (generic)
     ("x-modsecurity-id",              "ModSecurity"),
 ]
+# Platforms that actively inspect/block application-layer traffic (WAF-tier).
+# Everything else detected via _detect_edge_security is LB/CDN-tier — it can
+# route traffic but does not perform payload inspection.
+_WAF_TIER_PLATFORMS = frozenset({
+    "Cloudflare", "Akamai", "Imperva/Incapsula", "Sucuri",
+    "PythonAnywhere (aggressive WAF + Cloudflare)",
+})
 # Prefix-based edge security header patterns (header name starts with prefix)
 _EDGE_SECURITY_HDR_PREFIXES = [
     ("x-px-",         "PerimeterX / HUMAN Security"),
@@ -11621,6 +11628,10 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
 
     if _recon_edge_security:
         _waf_names = ", ".join(_recon_edge_security)
+        # Classify each detected platform as WAF or load-balancer.
+        _recon_wafs = [s for s in _recon_edge_security if s in _WAF_TIER_PLATFORMS]
+        _recon_lbs  = [s for s in _recon_edge_security if s not in _WAF_TIER_PLATFORMS]
+
         _waf_id_headers = [
             "x-sucuri-id", "x-sucuri-cache", "x-iinfo", "x-cdn-request-id",
             "x-imperva-sid", "x-fw-hash", "x-fw-protection-mode", "x-fw-type",
@@ -11635,39 +11646,80 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _waf_prefix_found.extend(f"  {k}: {v}" for k, v in _matches[:3])
         _waf_id_found = [(h, _h_lower_recon[h.lower()])
                          for h in _waf_id_headers if h.lower() in _h_lower_recon]
-        _waf_out = [f"Platform(s): {_waf_names}"]
-        if _waf_id_found:
-            _waf_out.append("Identifying headers:")
-            _waf_out.extend(f"  {h}: {v}" for h, v in _waf_id_found)
-        if _waf_prefix_found:
-            _waf_out.append("Prefix-matched headers:")
-            _waf_out.extend(_waf_prefix_found)
-        if _recon_cdn:
-            _waf_out.append(f"Co-located CDN: {_recon_cdn}")
-        if server_hdr:
-            _waf_out.append(f"Server: {server_hdr}")
-        out.add_finding(
-            title=f"WAF / Edge Security Platform Active: {_waf_names}",
-            url=url, port=target["port"], risk="INFO",
-            description=(
-                f"A WAF or edge security platform ({_waf_names}) was identified in front of the target. "
-                "Testing implications:\n"
-                "1. WAF rules may suppress or block injection probes (SQLi, XSS, traversal) "
-                "— absence of a finding does not confirm absence of the vulnerability.\n"
-                "2. Rate-limiting and IP-reputation enforcement may flag scanner traffic.\n"
-                "3. Bot-protection challenges (CAPTCHA, JS challenge) may interrupt automated probes.\n"
-                "4. WAF bypass techniques may reveal vulnerabilities masked by the WAF."
-            ),
-            output="\n".join(_waf_out),
-            sources="fracture-recon", service=target["scheme"],
-            owasp="A05:2025 Security Misconfiguration", nist="SC-7",
-            remediation=(
-                "Keep WAF rule sets up to date and covering OWASP Top 10 2025. "
-                "Do not rely solely on WAF protection — fix underlying vulnerabilities in the application. "
-                "Review WAF bypass techniques relevant to the identified platform."
-            ),
-            http_code=resp.status_code,
-        )
+
+        # Emit separate findings for WAF-tier and LB-tier platforms.
+        if _recon_wafs:
+            _waf_label = ", ".join(_recon_wafs)
+            _waf_out = [f"Platform(s): {_waf_label}"]
+            if _waf_id_found:
+                _waf_out.append("Identifying headers:")
+                _waf_out.extend(f"  {h}: {v}" for h, v in _waf_id_found)
+            if _waf_prefix_found:
+                _waf_out.append("Prefix-matched headers:")
+                _waf_out.extend(_waf_prefix_found)
+            if _recon_cdn:
+                _waf_out.append(f"Co-located CDN: {_recon_cdn}")
+            if server_hdr:
+                _waf_out.append(f"Server: {server_hdr}")
+            out.add_finding(
+                title=f"WAF / Edge Security Platform Active: {_waf_label}",
+                url=url, port=target["port"], risk="INFO",
+                description=(
+                    f"A WAF or edge security platform ({_waf_label}) was identified in front of the target. "
+                    "Testing implications:\n"
+                    "1. WAF rules may suppress or block injection probes (SQLi, XSS, traversal) "
+                    "— absence of a finding does not confirm absence of the vulnerability.\n"
+                    "2. Rate-limiting and IP-reputation enforcement may flag scanner traffic.\n"
+                    "3. Bot-protection challenges (CAPTCHA, JS challenge) may interrupt automated probes.\n"
+                    "4. WAF bypass techniques may reveal vulnerabilities masked by the WAF."
+                ),
+                output="\n".join(_waf_out),
+                sources="fracture-recon", service=target["scheme"],
+                owasp="A05:2025 Security Misconfiguration", nist="SC-7",
+                remediation=(
+                    "Keep WAF rule sets up to date and covering OWASP Top 10 2025. "
+                    "Do not rely solely on WAF protection — fix underlying vulnerabilities in the application. "
+                    "Review WAF bypass techniques relevant to the identified platform."
+                ),
+                http_code=resp.status_code,
+            )
+
+        if _recon_lbs:
+            _lb_label = ", ".join(_recon_lbs)
+            _lb_out = [f"Platform(s): {_lb_label}"]
+            if _waf_id_found:
+                _lb_out.append("Identifying headers:")
+                _lb_out.extend(f"  {h}: {v}" for h, v in _waf_id_found)
+            if _waf_prefix_found:
+                _lb_out.append("Prefix-matched headers:")
+                _lb_out.extend(_waf_prefix_found)
+            if _recon_cdn:
+                _lb_out.append(f"Co-located CDN: {_recon_cdn}")
+            if server_hdr:
+                _lb_out.append(f"Server: {server_hdr}")
+            out.add_finding(
+                title=f"Load Balancer Detected: {_lb_label}",
+                url=url, port=target["port"], risk="INFO",
+                description=(
+                    f"A load balancer ({_lb_label}) was identified in front of the target. "
+                    "Testing implications:\n"
+                    "1. Requests may be distributed across multiple backend servers — "
+                    "session affinity cookies should be noted.\n"
+                    "2. The load balancer is NOT a WAF — it does not inspect or block "
+                    "application-layer attacks.\n"
+                    "3. Backend server inconsistencies may be exposed by comparing "
+                    "responses across multiple requests."
+                ),
+                output="\n".join(_lb_out),
+                sources="fracture-recon", service=target["scheme"],
+                owasp="A05:2025 Security Misconfiguration", nist="SC-7",
+                remediation=(
+                    "Ensure load balancer cookies do not leak internal infrastructure details. "
+                    "Review session affinity configuration. Do not confuse load balancing with "
+                    "WAF protection — application-layer security must be enforced at the application."
+                ),
+                http_code=resp.status_code,
+            )
 
         # Web cache poisoning probes — test whether unkeyed request headers are
         # reflected in cached responses.  Each probe sends the header once and
@@ -12251,6 +12303,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             _tp_waf_bm = _WAF_BODY_RE.search(body[:4096]) if body else None
             if _tp_waf_bm:
                 _tp_waf = "WAF (body signature)"
+        # Separate WAF-tier from LB-tier platforms in the target profile.
+        _tp_edge_wafs = [s for s in _recon_edge_security if s in _WAF_TIER_PLATFORMS]
+        _tp_edge_lbs  = [s for s in _recon_edge_security if s not in _WAF_TIER_PLATFORMS]
         _write_target_profile(out,
             url=url,
             hostname=target["hostname"],
@@ -12262,7 +12317,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             cdn=_recon_cdn,
             web_structure=_recon_web_structure,
             bi_tools=_detected_bi,
-            edge_security=_recon_edge_security,
+            edge_security=_tp_edge_wafs,
+            load_balancers=_tp_edge_lbs,
         )
     except Exception:
         pass
@@ -18528,6 +18584,12 @@ def _write_target_profile(out: "OutputManager", **updates) -> None:
                 if _e and _e not in _es:
                     _es.append(_e)
             existing["edge_security"] = _es
+        elif key == "load_balancers":
+            _lb = existing.get("load_balancers", [])
+            for _l in (val if isinstance(val, list) else [val]):
+                if _l and _l not in _lb:
+                    _lb.append(_l)
+            existing["load_balancers"] = _lb
         elif key == "mfa_providers":
             _mfa = existing.get("mfa_providers", [])
             for _m in (val if isinstance(val, list) else [val]):
@@ -26226,12 +26288,7 @@ def main() -> None:
                     #     header only), Fastly (CDN/no WAF evidence),
                     #     GitHub Pages — no inherent scanner blocking.
                     #     → reduced threads only, all phases stay enabled.
-                    _WAF_TIER = {
-                        "Cloudflare", "Akamai", "Imperva/Incapsula",
-                        "Sucuri",
-                        "PythonAnywhere (aggressive WAF + Cloudflare)",
-                    }
-                    _has_waf = any(s in _WAF_TIER for s in _waf_signals)
+                    _has_waf = any(s in _WAF_TIER_PLATFORMS for s in _waf_signals)
                     _NOISY_PHASES = (
                         "ffuf", "vulnscan", "injection", "traversal",
                         "ssrf", "deserialization", "request_smuggling",
