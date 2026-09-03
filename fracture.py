@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.26.4"
+VERSION = "2.26.5"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6929,6 +6929,22 @@ return null;
         pf = auth.get("login_password_field", "password")
         u  = auth.get("username", "")
         p  = auth.get("password", "")
+        # Guard: field names must not equal credential values (Crucible
+        # misconfiguration — credential pasted into field-name slot).
+        if u and configured_uf == u:
+            vc.log(
+                f"[auth] login_username_field equals the username value "
+                f"({configured_uf!r}) — resetting to 'username'",
+                "WARNING",
+            )
+            configured_uf = "username"
+        if p and pf == p:
+            vc.log(
+                f"[auth] login_password_field equals the password value "
+                f"— resetting to 'password'",
+                "WARNING",
+            )
+            pf = "password"
 
         # ── Credential visibility log ────────────────────────────────────
         # Show the operator EXACTLY which credentials Fracture is about to
@@ -23609,6 +23625,32 @@ def main() -> None:
             cfg["auth"]["enabled"]  = True
             cfg["auth"]["username"] = _collected_roles[0]["username"]
             cfg["auth"]["password"] = _collected_roles[0]["password"]
+        # Guard: login_username_field / login_password_field must be HTML form
+        # field names (e.g. "username", "password"), NOT credential values.
+        # Crucible misconfiguration can swap them.  Check against ALL matrix
+        # credentials — any match means the field name IS a credential.
+        _all_cred_vals = set()
+        for _cr in _am:
+            if _cr.get("username"):
+                _all_cred_vals.add(_cr["username"])
+            if _cr.get("password"):
+                _all_cred_vals.add(_cr["password"])
+        _uf_cfg = cfg["auth"].get("login_username_field", "username")
+        _pf_cfg = cfg["auth"].get("login_password_field", "password")
+        if _uf_cfg in _all_cred_vals:
+            vc.log(
+                f"[auth] login_username_field contains a credential value "
+                f"({_uf_cfg!r}) — resetting to 'username'",
+                "WARNING",
+            )
+            cfg["auth"]["login_username_field"] = "username"
+        if _pf_cfg in _all_cred_vals:
+            vc.log(
+                "[auth] login_password_field contains a credential value "
+                "— resetting to 'password'",
+                "WARNING",
+            )
+            cfg["auth"]["login_password_field"] = "password"
         vc.log(
             f"[multi-role] {_n_roles} role(s) loaded from project settings — skipping prompt",
             "INFO",
