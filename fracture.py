@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.28.0"
+VERSION = "2.29.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -16570,7 +16570,8 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
 
 
 def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
-                 out: OutputManager, sess: requests.Session) -> dict:
+                 out: OutputManager, sess: requests.Session,
+                 extra_seeds: "list[str] | None" = None) -> dict:
     phase     = "crawl"
     url       = target["url"]
     timeout   = cfg.get("timeout", 10)
@@ -16580,6 +16581,13 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
 
     visited:               set  = set()
     queue_urls:            list = [(url, 0)]
+    # Add extra crawl roots (e.g. post-login landing page)
+    if extra_seeds:
+        for _es in extra_seeds:
+            _es_norm = _es.rstrip("/")
+            if _es_norm != url.rstrip("/"):
+                queue_urls.append((_es, 0))
+                vc.log(f"[crawl] Extra seed root: {_es}", "INFO")
     all_forms:             list = []
     all_js:                list = []
     all_links:             list = []
@@ -16708,7 +16716,10 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         _spa_browser = _get_spa_browser()
         if _spa_browser:
             vc.status(phase, "Crawl", "running", "SPA headless crawl", 0, max_pages)
-            _extra_seeds = list(_spa_roots - {url}) or None
+            _extra_seeds_set = _spa_roots - {url}
+            if extra_seeds:
+                _extra_seeds_set.update(extra_seeds)
+            _extra_seeds = list(_extra_seeds_set) or None
             try:
                 _spa = _phase_spa_crawl(
                     target, cfg, pm, out, sess, len(visited),
@@ -24749,6 +24760,61 @@ def main() -> None:
                     if _is_valid_endpoint_url(_wp_u) and _is_in_scope_url(_wp_u, _scope_hostnames):
                         _ep_base.append(_wp_u)
 
+                # ── Landing-page-as-root: gobuster the parent directory ────
+                # When the landing page is a sibling (not a child) of the
+                # target URL, standard gobuster only discovers paths under
+                # the target.  This pass discovers siblings by enumerating
+                # the landing URL's parent directory.
+                if _as_landing_url:
+                    _lnd_parsed = urllib.parse.urlparse(_as_landing_url)
+                    _lnd_parent = _lnd_parsed.path.rsplit("/", 1)[0]
+                    _tgt_parsed = urllib.parse.urlparse(target["url"])
+                    _tgt_parent = _tgt_parsed.path.rsplit("/", 1)[0]
+                    # Run when the parent directory is non-trivial (at least
+                    # 2 segments deep) — this discovers siblings of both the
+                    # target and the landing page that standard gobuster
+                    # (which enumerates children of target["url"]) would miss.
+                    if (_lnd_parent
+                            and _lnd_parent.count("/") >= 2
+                            and _as_landing_url.rstrip("/")
+                                != target["url"].rstrip("/")):
+                        _lnd_base = (f"{_lnd_parsed.scheme}://"
+                                     f"{_lnd_parsed.netloc}{_lnd_parent}/")
+                        _lnd_gob_out = out.output_path(
+                            "recon",
+                            f"gobuster_landing_{_hostname}")
+                        _lnd_gobuster = _find_tool("gobuster")
+                        if _lnd_gobuster:
+                            _lnd_wl = cfg.get("wordlist", "")
+                            if _lnd_wl and Path(_lnd_wl).exists():
+                                _lnd_cmd = [
+                                    _lnd_gobuster, "dir",
+                                    "-u", _lnd_base,
+                                    "-w", _lnd_wl,
+                                    "-t", str(cfg.get("threads", 20)),
+                                    "-q", "-k",
+                                    "-o", str(_lnd_gob_out),
+                                ] + _buster_auth_flags(effective_auth)
+                                vc.log(
+                                    f"[recon] Landing-root gobuster: {_lnd_base}",
+                                    "INFO")
+                                _gobuster_run(
+                                    _lnd_cmd, _lnd_gob_out, "recon-landing", out)
+                                if _lnd_gob_out.exists():
+                                    try:
+                                        _lnd_raw = _parse_gobuster_with_status(
+                                            _lnd_gob_out, _lnd_base)
+                                        _lnd_flt = _filter_buster_wildcards(
+                                            _lnd_raw, effective_auth, _ep_timeout)
+                                        _ep_base.extend(
+                                            u for u, _, _ in _lnd_flt)
+                                        vc.log(
+                                            f"[recon] Landing-root gobuster: "
+                                            f"{len(_lnd_flt)} endpoint(s) added",
+                                            "INFO")
+                                    except Exception:
+                                        pass
+
                 # Fingerprint Role 1's accessible endpoints for BFLA testing.
                 # Only "pages of interest" — paths that are likely to require the
                 # highest privilege level — are recorded.  Testing everything Role 1
@@ -25036,7 +25102,9 @@ def main() -> None:
             if not _skip("crawl"):
                 pm.set_phase_status(f"crawl#{_ctx_label}", "running", "Crawl")
                 try:
-                    crawl_data = _phase_crawl(target, _ctx_cfg, pm, out, effective_auth)
+                    crawl_data = _phase_crawl(
+                        target, _ctx_cfg, pm, out, effective_auth,
+                        extra_seeds=[_as_landing_url] if _as_landing_url else None)
                     pm.set_phase_status(f"crawl#{_ctx_label}", "complete", "Crawl")
                     # Persist role 1 crawl data for reduced contexts
                     if not _is_reduced_ctx:

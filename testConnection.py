@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -708,6 +708,26 @@ def build_auth_session(
             r"""|/connect/token|/oauth/token)[^"']*)["']""",
             _re.IGNORECASE,
         )
+        # Broader: any URL string literal whose path ends at an auth segment
+        _JS_AUTH_URL_PAT = _re.compile(
+            r"""["'](/(?:[^"'\s/]+/)*"""
+            r"""(?:token|login|auth(?:enticate)?"""
+            r"""|sign[_-]?in|sessions?"""
+            r"""|connect/token|oauth/token"""
+            r"""|account/login|identity/token)"""
+            r"""(?:/[^"'\s]*)?)["']""",
+            _re.IGNORECASE,
+        )
+        _STATIC_EXT = _re.compile(
+            r'\.(css|js|png|jpe?g|gif|svg|ico|woff2?|ttf|eot|map)$',
+            _re.IGNORECASE,
+        )
+        # fetch / post / get / put / request calls
+        _FETCH_URL_PAT = _re.compile(
+            r"""(?:fetch|\.post|\.get|\.put|\.request)\s*\(\s*"""
+            r"""["']([^"']+)["']""",
+            _re.IGNORECASE,
+        )
 
         def _scan_source_for_api_urls(text: str, base: str) -> None:
             for _m in _API_URL_PAT.finditer(text):
@@ -718,6 +738,25 @@ def build_auth_session(
                 _c = urljoin(base, _m.group(1))
                 if _c not in _api_login_urls:
                     _api_login_urls.append(_c)
+            # Broader: URL literals with auth-related path segments
+            for _m in _JS_AUTH_URL_PAT.finditer(text):
+                _raw = _m.group(1)
+                if _STATIC_EXT.search(_raw):
+                    continue
+                _c = urljoin(base, _raw)
+                if _c not in _api_login_urls:
+                    _api_login_urls.append(_c)
+            # fetch/post/get calls targeting auth-like paths
+            for _m in _FETCH_URL_PAT.finditer(text):
+                _raw = _m.group(1)
+                if _re.search(
+                    r'/(?:token|login|auth|signin|session'
+                    r'|account|connect|identity|oauth)',
+                    _raw, _re.IGNORECASE,
+                ) and not _STATIC_EXT.search(_raw):
+                    _c = urljoin(base, _raw)
+                    if _c not in _api_login_urls:
+                        _api_login_urls.append(_c)
 
         # Search the inline HTML first
         if _baseline_html:
@@ -732,24 +771,101 @@ def build_auth_session(
             ):
                 _js_url = urljoin(target_url, _m.group(1))
                 _js_refs.append(_js_url)
-            # Fetch up to 3 JS files, max 512 KB each
+            # Fetch up to 5 JS files, max 1 MB each
             _bl_js_sess = _make_session(verify_ssl, proxy)
-            for _js_url in _js_refs[:3]:
+            for _js_url in _js_refs[:5]:
                 try:
                     _js_r = _bl_js_sess.get(
                         _js_url, timeout=timeout,
                         headers={"Accept": "*/*"},
                         stream=True,
                     )
-                    _js_body = _js_r.content[:524288].decode(
+                    _js_body = _js_r.content[:1048576].decode(
                         "utf-8", errors="replace")
                     _scan_source_for_api_urls(_js_body, target_url)
                 except Exception:
                     pass
 
+            # ── API base URL discovery from global config objects ────
+            # SPAs often set window.OmtSite = {ApiUrl: "/OMT/Api", ...}
+            # and construct login URLs at runtime (ApiUrl + "/Login").
+            # Find base URLs and derive login endpoint candidates.
+            _API_BASE_PAT = _re.compile(
+                r"""(?:ApiUrl|apiUrl|ApiBase|apiBase|apiBaseUrl"""
+                r"""|ApiBaseUrl|baseApiUrl|BaseApiUrl|serviceUrl"""
+                r"""|ServiceUrl|ServerUrl|serverUrl"""
+                r"""|baseUrl|BaseUrl)"""
+                r"""\s*[=:]\s*["']([^"']+)["']""",
+                _re.IGNORECASE,
+            )
+            _AUTH_SUFFIXES = (
+                "/Login", "/login",
+                "/Token", "/token",
+                "/Account/Login", "/account/login",
+                "/Auth/Login", "/auth/login",
+                "/Auth/Token", "/auth/token",
+                "/Authenticate", "/authenticate",
+                "/Session", "/session",
+            )
+            # Scan inline HTML for base URLs (config objects are
+            # almost always in the page, not the JS bundle)
+            _all_source = _baseline_html
+            _api_bases_found: list[str] = []
+            for _bm in _API_BASE_PAT.finditer(_all_source):
+                _bval = _bm.group(1).rstrip("/")
+                if _bval and not _STATIC_EXT.search(_bval):
+                    _base_full = urljoin(target_url, _bval)
+                    if _base_full not in _api_bases_found:
+                        _api_bases_found.append(_base_full)
+            # Also look for global config objects (window.XyzSite = {...})
+            for _cfg_m in _re.finditer(
+                r"""(?:window|global)\.(\w+)\s*=\s*\{([^}]{10,2000})\}""",
+                _all_source,
+            ):
+                _cfg_body = _cfg_m.group(2)
+                for _val_m in _re.finditer(
+                    r"""["'](/[^"']+)["']""", _cfg_body,
+                ):
+                    _cval = _val_m.group(1).rstrip("/")
+                    if (not _STATIC_EXT.search(_cval)
+                            and ('api' in _cval.lower()
+                                 or 'service' in _cval.lower()
+                                 or 'auth' in _cval.lower())):
+                        _base_full = urljoin(target_url, _cval)
+                        if _base_full not in _api_bases_found:
+                            _api_bases_found.append(_base_full)
+            # Derive login endpoints from discovered base URLs
+            for _api_base in _api_bases_found:
+                for _suf in _AUTH_SUFFIXES:
+                    _c = _api_base + _suf
+                    if _c not in _api_login_urls:
+                        _api_login_urls.append(_c)
+
+        # ── OpenID Connect / OAuth well-known discovery ─────────────────
+        if target_url:
+            _tp = urlparse(target_url)
+            _path_parts = [p for p in _tp.path.split("/") if p]
+            _app_root = ("/" + _path_parts[0] + "/"
+                         if _path_parts else "/")
+            _wk_sess = _make_session(verify_ssl, proxy)
+            for _wk_base in (_app_root, "/"):
+                _wk_url = (f"{_tp.scheme}://{_tp.netloc}"
+                           f"{_wk_base}.well-known/openid-configuration")
+                try:
+                    _wk_r = _wk_sess.get(_wk_url, timeout=5)
+                    if _wk_r.ok:
+                        _wk = _wk_r.json()
+                        for _ek in ("token_endpoint",
+                                    "authorization_endpoint"):
+                            _ev = _wk.get(_ek, "")
+                            if _ev and _ev not in _api_login_urls:
+                                _api_login_urls.append(_ev)
+                except Exception:
+                    pass
+
         # Heuristic: derive API path variants from the URL structure.
-        # e.g. /OMT/Client/Login → try /OMT/Api/Login
-        if not _api_login_urls and target_url:
+        # Always runs (supplements JS-discovered and config-derived URLs).
+        if target_url:
             _tp = urlparse(target_url)
             _path_parts = [p for p in _tp.path.split("/") if p]
             # Replace middle segment with "Api"/"api"
@@ -761,10 +877,38 @@ def build_auth_session(
                     _c = f"{_tp.scheme}://{_tp.netloc}{_try_path}"
                     if _c not in _api_login_urls:
                         _api_login_urls.append(_c)
-            # Also try /api/login, /api/auth at app root
-            _app_root = "/" + _path_parts[0] + "/" if _path_parts else "/"
+                # Insert "api"/"Api" before the last segment
+                for _api_insert in ("api", "Api"):
+                    _try_parts = list(_path_parts)
+                    _try_parts.insert(-1, _api_insert)
+                    _try_path = "/" + "/".join(_try_parts)
+                    _c = f"{_tp.scheme}://{_tp.netloc}{_try_path}"
+                    if _c not in _api_login_urls:
+                        _api_login_urls.append(_c)
+                # Replace last segment with auth alternatives
+                for _last in ("Token", "token", "Authenticate",
+                              "authenticate", "Session"):
+                    _try_parts = list(_path_parts)
+                    _try_parts[-1] = _last
+                    _try_path = "/" + "/".join(_try_parts)
+                    _c = f"{_tp.scheme}://{_tp.netloc}{_try_path}"
+                    if _c not in _api_login_urls:
+                        _api_login_urls.append(_c)
+            # Common paths at app root
+            _app_root = ("/" + _path_parts[0] + "/"
+                         if _path_parts else "/")
             for _suffix in ("api/login", "api/auth", "api/token",
-                            "Api/Login", "Api/Auth"):
+                            "Api/Login", "Api/Auth",
+                            "Token", "token",
+                            "Account/Login", "account/login",
+                            "Auth/Token", "auth/token",
+                            "Auth/Login", "auth/login",
+                            "Connect/Token", "connect/token",
+                            "Identity/Token", "identity/token",
+                            "api/authenticate", "api/Account/Login",
+                            "Api/Account/Login", "Api/Auth/Login",
+                            "Api/Auth/Token", "Api/Token",
+                            "Api/Session", "Api/Users/Login"):
                 _c = f"{_tp.scheme}://{_tp.netloc}{_app_root}{_suffix}"
                 if _c not in _api_login_urls:
                     _api_login_urls.append(_c)
@@ -891,11 +1035,27 @@ def build_auth_session(
             return _auto_sess, f"auto-detect → {_am}: {_auto_info}"
 
         # ── Phase 2: try discovered API login endpoints ──────────────────
-        # If standard form/token login against the target URL failed, try
-        # any API login URLs discovered from the page source (e.g.
-        # window.OmtSite.ApiLoginUrl, /api/login, /connect/token).
+        # Try API login URLs from JS source, config objects, OIDC
+        # well-known, and path heuristics.  Pre-filter with a quick
+        # GET probe to skip 404s and avoid slow auth attempts.
         if _api_login_urls:
-            for _api_url in _api_login_urls:
+            _probe_sess = _make_session(verify_ssl, proxy)
+            _live_urls: list[str] = []
+            for _pu in _api_login_urls:
+                _pu_norm = _pu.rstrip("/")
+                if _pu_norm in _tried_api_urls:
+                    continue
+                try:
+                    _pr = _probe_sess.get(
+                        _pu, timeout=5, allow_redirects=False)
+                    if _pr.status_code == 404:
+                        _tried_api_urls.add(_pu_norm)
+                        continue  # URL doesn't exist — skip
+                except Exception:
+                    pass
+                _live_urls.append(_pu)
+
+            for _api_url in _live_urls:
                 if _api_url.rstrip("/") in _tried_api_urls:
                     continue
                 _tried_api_urls.add(_api_url.rstrip("/"))
