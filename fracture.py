@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.32.0"
+VERSION = "2.32.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -9810,6 +9810,25 @@ _EDGE_SECURITY_BODY_PATTERNS = [
     (re.compile(r'arkose\.com|arkoselabs\.com', re.I),                   "Arkose Labs"),
     (re.compile(r'reblaze\.com', re.I),                                  "Reblaze"),
 ]
+# Cookie-name patterns for edge security / WAF detection.
+# Format: (prefix_lowercase, platform_name).  Matched against cookie names
+# using .startswith() on the lowered cookie name.
+_EDGE_SECURITY_COOKIE_PREFIXES = [
+    ("bigipserver",     "F5 BIG-IP"),
+    ("ts01",            "F5 BIG-IP"),          # F5 persistence cookie
+    ("incap_ses_",      "Imperva"),
+    ("visid_incap_",    "Imperva"),
+    ("nlbi_",           "Imperva"),
+    ("citrix_ns_id",    "Citrix NetScaler"),
+    ("nsci",            "Citrix NetScaler"),    # NetScaler cookie-insert
+    ("__cfduid",        "Cloudflare"),
+    ("cf_clearance",    "Cloudflare"),
+    ("_bm_",            "Akamai Bot Manager"),
+    ("ak_bmsc",         "Akamai Bot Manager"),
+    ("bm_sv",           "Akamai Bot Manager"),
+    ("__utmvc",         "Sucuri WAF"),
+    ("reblaze_",        "Reblaze"),
+]
 # Headers whose presence identifies a specific technology/service/framework.
 # When WhatWeb reports one of these as "UncommonHeaders", emit a targeted
 # "HTTP Header Fingerprint" finding instead of "Unknown Header Identified".
@@ -11191,9 +11210,10 @@ def _detect_cdn(headers: "dict", body: str) -> str:
     return ""
 
 
-def _detect_edge_security(headers: "dict", body: str) -> "list[str]":
+def _detect_edge_security(headers: "dict", body: str,
+                          cookies: "dict | None" = None) -> "list[str]":
     """Identify edge security platforms (WAF, bot-protection, cloud security) from
-    response headers and body.  Returns a deduplicated list of platform names."""
+    response headers, body, and cookies.  Returns a deduplicated list of platform names."""
     _found: list = []
     _h_lower = {k.lower(): v for k, v in headers.items()}
     for _hdr, _platform in _EDGE_SECURITY_HDR_PATTERNS:
@@ -11206,6 +11226,12 @@ def _detect_edge_security(headers: "dict", body: str) -> "list[str]":
     for _pat, _platform in _EDGE_SECURITY_BODY_PATTERNS:
         if _pat.search(_body_sample) and _platform not in _found:
             _found.append(_platform)
+    # Cookie-name patterns (e.g. BIGipServer* → F5, incap_ses_* → Imperva)
+    if cookies:
+        _ck_lower = [k.lower() for k in cookies]
+        for _prefix, _platform in _EDGE_SECURITY_COOKIE_PREFIXES:
+            if any(c.startswith(_prefix) for c in _ck_lower) and _platform not in _found:
+                _found.append(_platform)
     return _found
 
 
@@ -11486,7 +11512,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         bi_tools=_detected_bi or None,
         cms=detected_cms or None,
     )
-    _recon_edge_security = _detect_edge_security(headers, body)
+    _recon_edge_security = _detect_edge_security(headers, body,
+                                                    cookies=sess.cookies.get_dict())
     if _recon_cdn:
         vc.log(f"[recon] CDN detected: {_recon_cdn}", "INFO")
     if _recon_edge_security:
@@ -26157,6 +26184,18 @@ def main() -> None:
                                 "response", []).append(_delay_hook)
             except Exception:
                 pass
+            # Persist WAF/CDN detection to target_profile.json so the
+            # Crucible Summary tab displays it immediately — the recon
+            # phase will merge additional fields later.
+            if _waf_signals:
+                try:
+                    _write_target_profile(
+                        out,
+                        edge_security=_waf_signals,
+                        waf=", ".join(_waf_signals),
+                    )
+                except Exception:
+                    pass
 
         # Redirect tracking — accumulates in-scope redirect destinations found during this scan
         _in_scope_new: list = []
