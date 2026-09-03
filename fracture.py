@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.18"
+VERSION = "2.30.19"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -20979,9 +20979,10 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
 # ─────────────────────────────────────────────
 def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                    out: OutputManager, auth_sess: requests.Session) -> None:
-    phase   = "session"
-    url     = target["url"]
-    timeout = cfg.get("timeout", 10)
+    phase    = "session"
+    url      = target["url"]
+    hostname = target["hostname"]
+    timeout  = cfg.get("timeout", 10)
     vc.status(phase, "Session Analysis", "running", "Token entropy", 0, 5)
     _SESS_LOGIN_RE = re.compile(
         r'login|sign.?in|auth(?:enticate)?|session.?expired|timed.?out|'
@@ -21061,12 +21062,31 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         "/api/active-sessions", "/api/v1/sessions",
     )
     _sess_mgmt_found = None
+    # Baseline content for SPA / catch-all detection: if every sub-path
+    # serves the same shell HTML (React SPA, generic error page, etc.),
+    # a 200 does not mean a real session-management interface exists.
+    _sm_baseline_body = ""
+    _sm_baseline_len  = 0
+    try:
+        _bl = auth_sess.get(url.rstrip("/"), timeout=timeout, allow_redirects=True)
+        if _bl.status_code == 200:
+            _sm_baseline_body = _bl.text[:2000]
+            _sm_baseline_len  = len(_bl.text)
+    except Exception:
+        pass
     for _smp in _SESS_MGMT_PATHS:
         try:
             _r_sm = auth_sess.get(url.rstrip("/") + _smp, timeout=timeout,
                                   allow_redirects=True)
             if (_r_sm.status_code == 200
                     and not _SESS_LOGIN_RE.search(_r_sm.text[:600])):
+                # SPA / catch-all detection: if the response body closely
+                # matches the base URL, this is a single-page app serving
+                # the same shell for any path — not a real endpoint.
+                if (_sm_baseline_len > 0
+                        and abs(len(_r_sm.text) - _sm_baseline_len) < max(100, int(_sm_baseline_len * 0.05))
+                        and _r_sm.text[:500] == _sm_baseline_body[:500]):
+                    continue
                 _sess_mgmt_found = url.rstrip("/") + _smp
                 break
         except Exception:
@@ -21350,9 +21370,10 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
     are never touched so that access_matrix (which runs after) still has
     valid sessions for its probes.
     """
-    phase   = "logout"
-    url     = target["url"]
-    timeout = cfg.get("timeout", 10)
+    phase    = "logout"
+    url      = target["url"]
+    hostname = target["hostname"]
+    timeout  = cfg.get("timeout", 10)
 
     # Pick the first authenticated role's session
     _logout_role_label = None
@@ -22272,11 +22293,47 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
         "/admin/logs", "/logs", "/log", "/error-log",
         "/server-status", "/server-info",
     ]
+    # Baseline for catch-all / SPA / soft-404 detection: fetch the base URL
+    # and a known-bad path.  If probe responses match either, the server is
+    # returning a generic page (error handler, SPA shell) for any path.
+    _lm_baseline_body = ""
+    _lm_baseline_len  = 0
+    _lm_bad_body      = ""
+    _lm_bad_len       = 0
+    try:
+        _bl = sess.get(url.rstrip("/"), timeout=timeout, allow_redirects=False)
+        if _bl.status_code == 200:
+            _lm_baseline_body = _bl.text[:2000]
+            _lm_baseline_len  = len(_bl.text)
+    except Exception:
+        pass
+    try:
+        _bad = sess.get(url.rstrip("/") + "/_fracture_nonexistent_probe_",
+                        timeout=timeout, allow_redirects=False)
+        if _bad.status_code == 200:
+            _lm_bad_body = _bad.text[:2000]
+            _lm_bad_len  = len(_bad.text)
+    except Exception:
+        pass
     for path in probe_paths:
         probe_url = url.rstrip("/") + path
         try:
             r = sess.get(probe_url, timeout=timeout, allow_redirects=False)
             if r and r.status_code == 200:
+                # Catch-all / SPA / soft-404 detection: skip if the response
+                # body matches the base URL or the known-bad path.
+                _r_body = r.text[:2000]
+                _r_len  = len(r.text)
+                _is_catchall = False
+                for _ref_body, _ref_len in ((_lm_baseline_body, _lm_baseline_len),
+                                             (_lm_bad_body, _lm_bad_len)):
+                    if (_ref_len > 0
+                            and abs(_r_len - _ref_len) < max(100, int(_ref_len * 0.05))
+                            and _r_body[:500] == _ref_body[:500]):
+                        _is_catchall = True
+                        break
+                if _is_catchall:
+                    continue
                 out.add_finding(
                     title=f"Exposed Admin/Debug Endpoint: {path}",
                     url=probe_url, port=target["port"], risk="HIGH",
@@ -23558,6 +23615,50 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
     probe_sess = role_sess if role_sess is not None else requests.Session()
     if role_sess is None:
         probe_sess.verify = verify_ssl
+
+    # ── Session expiry detection ──────────────────────────────────────────
+    # Targets with aggressive server-side idle timeouts (e.g. 60 s) may have
+    # invalidated the session between the last phase's HTTP request and this
+    # probing pass.  Detect by probing a path that the structure_map recorded
+    # as HTTP 200 during crawl; if it now returns a 3xx redirect (typical
+    # redirect-to-login), rebuild the session from credentials in cfg.
+    if role_sess is not None and role_label != "unauthenticated":
+        _canary_path = None
+        _sm_paths_data = sm.get("paths", {})
+        for _cp, _ci in _sm_paths_data.items():
+            if isinstance(_ci, dict) and _ci.get("status") == 200:
+                _canary_path = _cp
+                break
+        if _canary_path is None and all_sm_paths:
+            _canary_path = all_sm_paths[0]
+        if _canary_path:
+            try:
+                _canary_r = probe_sess.get(
+                    base_url + _canary_path, timeout=timeout, allow_redirects=False,
+                    headers={"Accept": "text/html,application/json"})
+                if _canary_r.status_code in (301, 302, 303, 307, 308):
+                    vc.log(
+                        f"[access-matrix] {role_label} session expired "
+                        f"(canary {_canary_path} → HTTP {_canary_r.status_code}) "
+                        f"— re-authenticating", "WARNING")
+                    try:
+                        _fresh = _build_auth_session(
+                            cfg, no_interactive=True, role_label=role_label)
+                        if _fresh is not None:
+                            probe_sess = _fresh
+                            vc.log(f"[access-matrix] {role_label} re-authenticated OK",
+                                   "INFO")
+                        else:
+                            vc.log(
+                                f"[access-matrix] {role_label} re-auth returned None "
+                                f"— probing with expired session", "WARNING")
+                    except Exception as _rae:
+                        vc.log(
+                            f"[access-matrix] {role_label} re-auth failed: {_rae}",
+                            "WARNING")
+            except Exception:
+                pass
+
     all_roles_in_am: list = am.get("roles", [])
     changed = False
     for path in all_sm_paths:
