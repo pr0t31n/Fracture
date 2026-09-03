@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "1.7.6"
+VERSION = "1.7.7"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -669,9 +669,10 @@ def build_auth_session(
         _http_methods = frozenset({"basic", "digest", "ntlm"})
 
         # ── Baseline: GET the target without auth so we can compare ──────
-        _baseline_sc   = 0
-        _baseline_len  = 0
-        _baseline_loc  = ""
+        _baseline_sc      = 0
+        _baseline_len     = 0
+        _baseline_loc     = ""
+        _baseline_cookies: set[str] = set()
         if target_url:
             try:
                 _bl_sess = _make_session(verify_ssl, proxy)
@@ -680,6 +681,7 @@ def build_auth_session(
                 _baseline_sc  = _bl_resp.status_code
                 _baseline_len = len(_bl_resp.content)
                 _baseline_loc = _bl_resp.headers.get("Location", "")
+                _baseline_cookies = set(_bl_sess.cookies.keys())
             except Exception:
                 pass
 
@@ -718,9 +720,12 @@ def build_auth_session(
 
                     # Success signals: something changed vs baseline
                     _diff_reasons: list[str] = []
-                    if _auto_sess.cookies:
+                    _new_cookies = (set(_auto_sess.cookies.keys())
+                                    - _baseline_cookies)
+                    if _new_cookies:
                         _diff_reasons.append(
-                            f"{len(_auto_sess.cookies)} cookie(s)")
+                            f"{len(_new_cookies)} new cookie(s): "
+                            + ", ".join(sorted(_new_cookies)))
                     if _auth_sc != _baseline_sc:
                         _diff_reasons.append(
                             f"status {_baseline_sc}→{_auth_sc}")
