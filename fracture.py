@@ -1496,6 +1496,12 @@ def _is_placeholder_secret(value: str, key_name: str = "") -> bool:
         return True
     if re.match(r'^[A-Za-z_$][\w$]*(?:\.\w+)+$', v):
         return True
+    # Numeric / hex / bitmask constants — never real credentials.
+    # Matches: 0x2000, 0xFF, 42, 3.14, 1e5, etc. (with optional trailing comma).
+    _v_clean = v.rstrip(",;")
+    if re.match(r'^(?:0[xX][0-9a-fA-F]+|0[oO][0-7]+|0[bB][01]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)$',
+                _v_clean):
+        return True
     # JavaScript/Python falsy / null literals that are never real secrets.
     if v.lower() in ("null", "undefined", "true", "false", "none", "nil",
                      "nan", "infinity", "unknown", "n/a"):
