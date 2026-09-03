@@ -2767,13 +2767,18 @@ class VantageConsole:
 
     def prompt(self, question: str, prompt_type: str = "text",
                options: list = None, skippable: bool = False,
-               role: str = "", username: str = "") -> str:
+               role: str = "", username: str = "",
+               timeout: "int | None" = None) -> str:
         """Request user input. Blocks until an answer is received.
 
         role/username are surfaced in Crucible's prompt modal so operators
         responding to an MFA / OTP / consent prompt can immediately see
         which login the prompt belongs to (matters when a project uses
         multiple roles or multi-role engagements).
+
+        timeout (seconds): if set and no input is received within this
+        window, return "" automatically.  Prevents blocking when Fracture
+        runs unattended (e.g. scheduled Crucible scans).
         """
         if self._managed:
             payload = {
@@ -2787,14 +2792,38 @@ class VantageConsole:
                 payload["role"] = role
             if username:
                 payload["username"] = username
+            if timeout:
+                payload["timeout"] = timeout
             with self._lock:
                 sys.stdout.write(_VP_PROMPT + json.dumps(payload) + "\n")
                 sys.stdout.flush()
             try:
+                if timeout:
+                    import select as _sel
+                    ready, _, _ = _sel.select([sys.stdin], [], [], timeout)
+                    if not ready:
+                        self.log(
+                            f"[prompt] No response within {timeout}s — "
+                            "auto-skipping (unattended mode)",
+                            "WARNING",
+                        )
+                        return ""
                 return sys.stdin.readline().rstrip("\n")
             except Exception:
                 return ""
         else:
+            if timeout:
+                import select as _sel
+                _tprint(f"\n  [?] {question}")
+                _tprint(f"      (auto-skip in {timeout}s if no input)")
+                try:
+                    ready, _, _ = _sel.select([sys.stdin], [], [], timeout)
+                    if not ready:
+                        _tprint(f"  [!] No input after {timeout}s — skipping")
+                        return ""
+                    return sys.stdin.readline().rstrip("\n").strip()
+                except Exception:
+                    return ""
             if prompt_type == "password":
                 return getpass.getpass(f"  {question}: ")
             elif options:
@@ -17667,15 +17696,21 @@ def _phase_manual_crawl(out: "OutputManager", target: dict, cfg: dict,
     vc.status("manual_crawl", "Manual Crawl", "running",
               f"Proxy: 127.0.0.1:{_proxy_port} — browse the target then confirm done")
 
+    # Default 5-minute timeout so unattended / Crucible-scheduled scans
+    # don't block indefinitely waiting for manual input.
+    _mc_timeout = cfg.get("manual_crawl_timeout", 180)
     try:
         vc.prompt(
             f"Manual crawl is active (proxy: 127.0.0.1:{_proxy_port}). "
             f"{_cookie_note} "
             "Navigate through the target application. "
             "Type 'done' and press Enter when finished to continue testing."
-            + _setup_hint,
+            + _setup_hint
+            + (f"\n\n(Auto-skip in {_mc_timeout}s if no input received)"
+               if _mc_timeout else ""),
             prompt_type="text",
             skippable=True,
+            timeout=_mc_timeout,
         )
     except Exception:
         pass
