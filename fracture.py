@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.9"
+VERSION = "2.30.10"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -24148,32 +24148,26 @@ def main() -> None:
                     f"→ HTTP {_early_landing_code}",
                     "INFO",
                 )
-                # ── SPA landing page resolution ──
-                # For SPAs with API auth, the server returns the same HTML
-                # shell for every path (always 200). Use headless Chrome
-                # with auth cookies to find the real post-login URL.
+                # ── Post-login landing page resolution ──
+                # When auth succeeded but the landing URL is still on the
+                # login page, the real post-login destination is likely a
+                # client-side JS redirect (SPA, React bundle, etc.).
+                # Use headless Chrome with the auth cookies to observe it.
                 if _early_landing_url:
                     try:
-                        import re as _re_early_spa
                         _early_target_path = urllib.parse.urlparse(
                             target["url"]).path.rstrip("/").lower()
                         _early_landing_path = urllib.parse.urlparse(
                             _early_landing_url).path.rstrip("/").lower()
-                        _early_is_spa = bool(_re_early_spa.search(
-                            r'<div\s+id=["\']('
-                            r'root|app|__next|__nuxt|___gatsby'
-                            r'|angular-app|blazor-app|main-app)["\']',
-                            _early_landing_body or "",
-                            _re_early_spa.IGNORECASE))
                         _last_seg = _early_landing_path.rsplit("/", 1)[-1]
                         _early_on_login = (
                             _early_landing_path == _early_target_path
                             or _last_seg == "login")
-                        if _early_is_spa and _early_on_login:
+                        if _early_on_login:
                             vc.log(
-                                "[auth] SPA shell detected on landing page "
+                                "[auth] Landing page is still the login URL "
                                 "— resolving post-login URL via headless "
-                                "browser",
+                                "browser (client-side redirect detection)",
                                 "INFO",
                             )
                             try:
@@ -24187,7 +24181,7 @@ def main() -> None:
                                     if (_esp != _early_target_path
                                             and _esp_seg != "login"):
                                         vc.log(
-                                            f"[auth] SPA post-login URL "
+                                            f"[auth] Post-login URL "
                                             f"resolved: {_early_spa_url}",
                                             "SUCCESS",
                                         )
@@ -24206,25 +24200,27 @@ def main() -> None:
                                             pass
                                     else:
                                         vc.log(
-                                            f"[auth] SPA browser stayed on "
+                                            f"[auth] Browser stayed on "
                                             f"login: {_early_spa_url}",
                                             "INFO",
                                         )
+                                else:
+                                    vc.log(
+                                        "[auth] Headless browser returned "
+                                        "no URL — using server-side "
+                                        "landing URL",
+                                        "INFO",
+                                    )
                             except Exception as _esp_e:
                                 vc.log(
-                                    f"[auth] SPA landing resolution error: "
+                                    f"[auth] Landing resolution error: "
                                     f"{_esp_e}",
                                     "WARNING",
                                 )
-                        elif _early_is_spa:
-                            vc.log(
-                                "[auth] SPA detected but not on login page "
-                                "— using server-side landing URL",
-                                "INFO",
-                            )
                     except Exception as _spa_det_e:
                         vc.log(
-                            f"[auth] SPA detection error: {_spa_det_e}",
+                            f"[auth] Landing detection error: "
+                            f"{_spa_det_e}",
                             "WARNING",
                         )
                 _write_auth_status(
@@ -24838,24 +24834,17 @@ def main() -> None:
                         and _as_status == "success"
                         and _as_landing_url):
                     try:
-                        import re as _re_spa_lnd
                         _target_path = urllib.parse.urlparse(
                             target["url"]).path.rstrip("/").lower()
                         _landing_path = urllib.parse.urlparse(
                             _as_landing_url).path.rstrip("/").lower()
-                        # Trigger: landing URL is still the login/target
-                        # page AND body looks like an SPA shell.
-                        _is_spa_shell = bool(_re_spa_lnd.search(
-                            r'<div\s+id=["\']('
-                            r'root|app|__next|__nuxt|___gatsby'
-                            r'|angular-app|blazor-app|main-app)["\']',
-                            _as_landing_body or "", _re_spa_lnd.IGNORECASE))
+                        _last_seg = _landing_path.rsplit("/", 1)[-1]
                         _still_on_login = (
                             _landing_path == _target_path
-                            or "login" in _landing_path.split("/")[-1:])
-                        if _is_spa_shell and _still_on_login:
+                            or _last_seg == "login")
+                        if _still_on_login:
                             vc.log(
-                                "[auth] SPA shell detected on landing page "
+                                "[auth] Landing page is still the login URL "
                                 "— using headless browser to resolve "
                                 "actual post-login URL",
                                 "INFO",
@@ -24866,18 +24855,17 @@ def main() -> None:
                                 if _spa_lnd_url:
                                     _spa_lnd_path = urllib.parse.urlparse(
                                         _spa_lnd_url).path.rstrip("/").lower()
+                                    _spa_seg = _spa_lnd_path.rsplit(
+                                        "/", 1)[-1]
                                     if (_spa_lnd_path != _target_path
-                                            and "login" not in
-                                            _spa_lnd_path.split("/")[-1:]):
+                                            and _spa_seg != "login"):
                                         vc.log(
-                                            f"[auth] SPA post-login URL: "
+                                            f"[auth] Post-login URL: "
                                             f"{_spa_lnd_url}",
                                             "INFO",
                                         )
                                         _as_landing_url  = _spa_lnd_url
                                         _as_landing_code = 200
-                                        # Re-fetch body with requests
-                                        # for the preview snippet.
                                         try:
                                             _spa_body_r = _as_session.get(
                                                 _spa_lnd_url,
@@ -24890,7 +24878,7 @@ def main() -> None:
                                             pass
                             except Exception as _spa_e:
                                 vc.log(
-                                    f"[auth] SPA landing resolution failed: "
+                                    f"[auth] Landing resolution failed: "
                                     f"{_spa_e}",
                                     "WARNING",
                                 )
