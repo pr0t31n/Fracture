@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.10"
+VERSION = "2.33.11"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -21171,20 +21171,74 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
     if nuclei and not fast:
         nuc_out = out.output_path(phase, "nuclei_" + target["hostname"])
         _nuc_templates_dir = "/opt/nuclei-templates"
+
+        # Build a target list from the structure_map so nuclei scans every
+        # discovered endpoint, not just the base URL.  A React SPA that
+        # serves a JS shell at "/" gives nuclei almost nothing to work with
+        # when only the base URL is supplied.
+        _nuc_targets: list = [url]
+        try:
+            _nuc_sm_path = out.root / "structure_map.json"
+            if _nuc_sm_path.exists():
+                _nuc_sm = json.loads(_nuc_sm_path.read_text())
+                _nuc_base = url.rstrip("/")
+                for _np in sorted(_nuc_sm.get("paths", {}).keys()):
+                    _nuc_full = _nuc_base + _np
+                    if _nuc_full not in _nuc_targets:
+                        _nuc_targets.append(_nuc_full)
+        except Exception:
+            pass
+
+        # Write targets to a temp file for nuclei -l
+        _nuc_list_file = out.root / phase / "nuclei_targets.txt"
+        _nuc_list_file.parent.mkdir(parents=True, exist_ok=True)
+        _nuc_list_file.write_text("\n".join(_nuc_targets), encoding="utf-8")
+        vc.log(
+            f"[vulnscan] nuclei target list: {len(_nuc_targets)} URLs "
+            f"(base + {len(_nuc_targets) - 1} structure_map paths)",
+            "INFO",
+        )
+
         # Use -jsonl (JSONL output to stdout); capture stdout directly so the
         # output file is always written even when nuclei finds nothing.
         # stderr is captured and logged so flag errors are visible.
         # -jsonl replaced -json in nuclei v3.x.
-        cmd = [nuclei, "-u", url, "-s", "critical,high,medium",
-               "-silent", "-jsonl", "-no-interactsh"]
+        cmd = [nuclei, "-l", str(_nuc_list_file),
+               "-s", "critical,high,medium",
+               "-silent", "-jsonl", "-no-interactsh",
+               "-stats"]
         if Path(_nuc_templates_dir).is_dir():
             cmd += ["-t", _nuc_templates_dir]
-        vc.log("[vulnscan] Running nuclei ...", "INFO")
+        # Use nuclei's own --max-time to enforce wall-clock limit so it
+        # shuts down cleanly and flushes all output before exiting,
+        # instead of relying on Python's communicate(timeout=) which
+        # kills the process and loses buffered stdout.
+        _nuc_max_time = f"{max(timeout // 60, 1)}m"
+        cmd += ["-max-time", _nuc_max_time]
+        vc.log(f"[vulnscan] Running nuclei (max-time {_nuc_max_time}) ...", "INFO")
         try:
             _nuc_started = datetime.now().astimezone()
             proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             _register_proc(proc)
-            nuc_stdout, nuc_stderr = proc.communicate(timeout=timeout)
+            nuc_stdout = ""
+            nuc_stderr = ""
+            _nuc_timed_out = False
+            try:
+                # Give Python timeout a generous buffer above nuclei's own
+                # --max-time so nuclei can shut itself down cleanly first.
+                nuc_stdout, nuc_stderr = proc.communicate(timeout=timeout + 120)
+            except subprocess.TimeoutExpired:
+                _nuc_timed_out = True
+                vc.log(
+                    f"[vulnscan] nuclei exceeded Python timeout ({timeout + 120}s) "
+                    f"— killing process and collecting partial output",
+                    "WARNING",
+                )
+                proc.kill()
+                try:
+                    nuc_stdout, nuc_stderr = proc.communicate(timeout=10)
+                except Exception:
+                    pass
             _deregister_proc(proc)
             _nuc_ended = datetime.now().astimezone()
             if nuc_stderr:
@@ -21205,8 +21259,20 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
                 )
                 if _nuc_warn:
                     vc.log(f"[vulnscan] nuclei stderr: {_nuc_warn[:500]}", "WARNING")
-            # Always write the output file (may be empty if no findings)
-            nuc_out.write_text(nuc_stdout, encoding="utf-8")
+            # Log nuclei execution summary — this is the key visibility
+            # line that confirms nuclei actually ran and how many findings
+            # it produced (or that it produced zero).
+            _nuc_lines = (nuc_stdout or "").strip().splitlines()
+            _nuc_dur = int((_nuc_ended - _nuc_started).total_seconds())
+            vc.log(
+                f"[vulnscan] nuclei completed: {len(_nuc_lines)} finding(s), "
+                f"{_nuc_dur}s elapsed, exit code {proc.returncode}"
+                + (" (TIMED OUT)" if _nuc_timed_out else ""),
+                "INFO" if _nuc_lines else "WARNING",
+            )
+            # Always write the output file — even on timeout (partial
+            # results) or when nuclei found nothing (empty file).
+            nuc_out.write_text(nuc_stdout or "", encoding="utf-8")
             out.log_command(
                 "nuclei", cmd, nuc_out,
                 tool_path=nuclei,
@@ -21214,7 +21280,14 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
                 started=_nuc_started, ended=_nuc_ended,
                 exit_code=proc.returncode,
             )
-            for line in nuc_stdout.splitlines():
+            if _nuc_timed_out:
+                vc.log(
+                    f"[vulnscan] nuclei timed out — "
+                    f"partial output ({len((nuc_stdout or '').splitlines())} lines) "
+                    f"written to {nuc_out}",
+                    "WARNING",
+                )
+            for line in (nuc_stdout or "").splitlines():
                 try:
                     item    = json.loads(line)
                     sev     = _NUCLEI_SEVERITY_MAP.get(item.get("info", {}).get("severity", "info"), "INFO")
