@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.6"
+VERSION = "2.33.7"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -23560,6 +23560,7 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                         "inputs": [{"name": "username"}, {"name": "password", "type": "password"}]}]
 
     vc.status(phase, "Account Lockout", "running", "Brute-force simulation", 1, 3)
+    _lockout_results: list = []   # collected results for merged finding
     for form in login_forms[:3]:
         action = form.get("action", url)
         method = form.get("method", "POST").upper()
@@ -23577,15 +23578,20 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
 
         status_codes: list = []
         probe_responses: list = []  # requests.Response objects for evidence
+        probe_times: list = []      # response times in seconds
         _last_r = None
         for attempt in range(10):
             data = {user_field: "fracture_test_user", pass_field: f"wrong_pass_{attempt}"}
             try:
+                import time as _time_lockout
+                _t0 = _time_lockout.monotonic()
                 _last_r = (sess.post(action, data=data, timeout=timeout, allow_redirects=True)
                            if method == "POST"
                            else sess.get(action, params=data, timeout=timeout))
+                _elapsed = _time_lockout.monotonic() - _t0
                 status_codes.append(_last_r.status_code)
                 probe_responses.append(_last_r)
+                probe_times.append(round(_elapsed, 2))
                 # Check for lockout/captcha indicators
                 if re.search(r'locked|captcha|too many|rate.limit|try.again.later|'
                              r'account.*disabled|temporarily.*unavail', _last_r.text, re.I):
@@ -23728,7 +23734,37 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                     "INFO",
                 )
                 continue
-            # All 10 requests processed by auth endpoint without lockout — evidence
+            # Check for progressive delays — if later attempts are significantly
+            # slower, the server may be implementing rate limiting via delay.
+            _has_progressive_delay = False
+            if len(probe_times) >= 6:
+                _early_avg = sum(probe_times[:3]) / 3
+                _late_avg = sum(probe_times[-3:]) / 3
+                if _late_avg > _early_avg * 2.0 and _late_avg > 2.0:
+                    _has_progressive_delay = True
+                    vc.log(
+                        f"[account_lockout] Progressive delay detected at {action}: "
+                        f"early avg {_early_avg:.1f}s → late avg {_late_avg:.1f}s",
+                        "INFO",
+                    )
+                    continue  # Server IS rate limiting via delay — skip finding
+
+            # Also check for body-size variation — if later responses grow
+            # (e.g. CAPTCHA inserted), the server IS protecting.
+            _sizes = [len(r.content) for r in probe_responses]
+            if len(_sizes) >= 6:
+                _early_sz = sum(_sizes[:3]) / 3
+                _late_sz = sum(_sizes[-3:]) / 3
+                if abs(_late_sz - _early_sz) > max(200, _early_sz * 0.10):
+                    vc.log(
+                        f"[account_lockout] Response size changed at {action}: "
+                        f"early avg {_early_sz:.0f}B → late avg {_late_sz:.0f}B "
+                        "(possible CAPTCHA/lockout insertion) — skipping",
+                        "INFO",
+                    )
+                    continue
+
+            # All 10 requests processed identically — collect for merged finding
             evidence_files: list = []
             for _ai, _ar in enumerate(probe_responses):
                 try:
@@ -23738,26 +23774,75 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                     evidence_files.extend([_rq, _rp])
                 except Exception:
                     pass
-            out.add_finding(
-                title="Missing Rate Limiting / Brute-Force Protection",
-                url=action, port=target["port"], risk="HIGH",
-                description="Authentication and sensitive API endpoints do not enforce request rate limits, account lockout, or CAPTCHA, allowing unlimited brute-force or credential-stuffing attempts.",
-                output=(
-                    f"Form: {action}\nAttempts: {len(status_codes)}\n"
-                    f"Status codes: {status_codes}\n"
-                    + "\n".join(
-                        f"  [{i+1}] HTTP {r.status_code} ({len(r.content)} bytes)"
-                        for i, r in enumerate(probe_responses)
-                    )
-                ),
-                output_file=",".join(evidence_files),
-                sources="fracture-account-lockout", service=target["scheme"],
-                affected=action,
-                owasp="A07:2025 Identification and Authentication Failures", nist="AC-7",
-                remediation="Implement per-IP and per-account rate limiting with progressive delays or lockout on all authentication endpoints; add CAPTCHA for interactive login flows; alert on anomalous request volumes.",
-                http_code=_last_r.status_code if _last_r is not None else 0,
-            )
+            # Validation summary for the output
+            _val_signals = []
+            if _auth_processing_confirmed:
+                if any(re.search(r'<input[^>]+type=["\']?password["\']?',
+                                 r.text or "", re.I) for r in probe_responses[:3]):
+                    _val_signals.append("login form present in responses")
+                if any(_lockout_skip_phrases.search(
+                        re.sub(r'<[^>]+>', ' ', r.text[:4000] or ""))
+                       for r in probe_responses[:3]):
+                    _val_signals.append("auth-failure error text present")
+                _val_signals.append("response stayed on login URL")
+            _val_signals.append(f"no lockout phrases after {len(status_codes)} attempts")
+            _val_signals.append("no CAPTCHA insertion detected")
+            if probe_times:
+                _val_signals.append(
+                    f"no progressive delay (avg {sum(probe_times)/len(probe_times):.1f}s)")
+
+            _lockout_results.append({
+                "action": action,
+                "method": method,
+                "attempts": len(status_codes),
+                "status_codes": status_codes,
+                "probe_responses": probe_responses,
+                "probe_times": probe_times,
+                "evidence_files": evidence_files,
+                "validation": _val_signals,
+                "last_r": _last_r,
+            })
             vc.log(f"[account_lockout] No lockout: {action} ({len(status_codes)} attempts)", "SUCCESS")
+
+    # Emit ONE merged finding for all confirmed endpoints
+    if _lockout_results:
+        _all_ev: list = []
+        _out_lines: list = []
+        for _lr in _lockout_results:
+            _out_lines.append(
+                f"Endpoint: {_lr['action']}\n"
+                f"  Method: {_lr['method']}  Attempts: {_lr['attempts']}\n"
+                f"  Responses: " + ", ".join(
+                    f"HTTP {r.status_code} ({len(r.content)}B, {_lr['probe_times'][i]:.1f}s)"
+                    for i, r in enumerate(_lr['probe_responses'])
+                    if i < len(_lr['probe_times'])
+                ) + "\n"
+                f"  Validation: " + "; ".join(_lr['validation'])
+            )
+            _all_ev.extend(_lr['evidence_files'])
+        _affected = "\n".join(dict.fromkeys(r["action"] for r in _lockout_results))
+        _first = _lockout_results[0]
+        out.add_finding(
+            title="Missing Rate Limiting / Brute-Force Protection",
+            url=_first["action"], port=target["port"], risk="HIGH",
+            description=(
+                "Authentication endpoints do not enforce request rate limits, "
+                "account lockout, CAPTCHA, or progressive delays, allowing "
+                "unlimited brute-force or credential-stuffing attempts.  "
+                f"{len(_lockout_results)} endpoint(s) confirmed."
+            ),
+            output="\n\n".join(_out_lines)[:3000],
+            output_file=",".join(_all_ev),
+            sources="fracture-account-lockout", service=target["scheme"],
+            affected=_affected,
+            owasp="A07:2025 Identification and Authentication Failures", nist="AC-7",
+            remediation=(
+                "Implement per-IP and per-account rate limiting with progressive "
+                "delays or lockout on all authentication endpoints; add CAPTCHA "
+                "for interactive login flows; alert on anomalous request volumes."
+            ),
+            http_code=_first["last_r"].status_code if _first["last_r"] else 0,
+        )
 
     vc.status(phase, "Account Lockout", "complete", "Done", 3, 3)
     vc.log("[account_lockout] Phase complete", "SUCCESS")
