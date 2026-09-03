@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.31.0"
+VERSION = "2.31.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3181,10 +3181,13 @@ class OutputManager:
         ts    = self._ts()
         title = _normalize_finding_title(title)
 
-        # Header Data Leakage findings are server-level; emit only once per
-        # title+hostname across the entire scan regardless of which path or
-        # phase triggers them.
-        if title.startswith("Header Data Leakage:"):
+        # Server-level findings are emitted once per title+hostname across the
+        # entire scan regardless of which path or phase triggers them.
+        # Software version headers (Server, X-Powered-By, X-AspNet-Version) are
+        # identical on every response from the same host — recording one per
+        # endpoint floods the report with duplicates.
+        if (title.startswith("Header Data Leakage:")
+                or title.startswith("Software Version Disclosed:")):
             try:
                 _hdr_host = urllib.parse.urlparse(url).hostname or url
             except Exception:
@@ -3194,6 +3197,14 @@ class OutputManager:
                 if _hdr_key in self._hdr_disclosure_seen:
                     return
                 self._hdr_disclosure_seen.add(_hdr_key)
+            # Normalise URL/affected to server root — the header applies to
+            # the entire host, not one endpoint.
+            try:
+                _p = urllib.parse.urlparse(url)
+                url = f"{_p.scheme}://{_p.netloc}/"
+            except Exception:
+                pass
+            affected = "/"
 
         ascii_title = title.encode("ascii", errors="replace").decode("ascii")
 
