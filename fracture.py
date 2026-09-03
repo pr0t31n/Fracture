@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.16"
+VERSION = "2.30.17"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1408,6 +1408,54 @@ _TEMPLATE_SYNTAX_RE = re.compile(
     r'\$\{[^}]+\}|'                                          # ${VAR}
     r'%[A-Za-z_]+%)',                                        # %VAR%
 )
+
+
+# Bundled JS library/framework markers — when present in the surrounding
+# context of a secret match, the match is almost certainly a variable name or
+# framework property, not a real credential.
+_BUNDLED_JS_MARKERS = re.compile(
+    r'__webpack_require__|__webpack_exports__|installedModules|'
+    r'webpackJsonp|__webpack_modules__|'
+    # Common JS library module paths found as webpack chunk identifiers
+    r'node_modules/(?:@?ant[_-]?design|react|vue|angular|lodash|moment|'
+    r'axios|jquery|bootstrap|@mui|@emotion|@babel|core-js|tslib|'
+    r'rxjs|prop-types|classnames|regenerator-runtime)|'
+    # Framework-specific property patterns that collide with secret keywords
+    r'React\.createElement|createReactClass|__esModule|'
+    r'Object\.defineProperty\s*\(\s*exports|'
+    r'exports\.__esModule|module\.exports|'
+    r'\.prototype\.|\.defaultProps|\.propTypes',
+    re.IGNORECASE,
+)
+
+# Common JS framework property names that look like credentials but are not.
+# Checked against the matched key name (group 1 of _SECRET_PATTERNS).
+_FRAMEWORK_KEY_NAMES = re.compile(
+    r'(?ix)^(?:'
+    r'(?:primary|secondary|accent|success|warning|error|info|danger|link)'
+    r'(?:Color|Key|Type|Style)?|'  # UI theme property names
+    r'input[_-]?type|field[_-]?type|form[_-]?type|'  # form field type declarations
+    r'icon[_-]?(?:name|type|key)|'
+    r'secret[_-]?(?:name|type|field|label|placeholder|input|ref)|'
+    r'password[_-]?(?:type|field|label|placeholder|input|ref|icon|visibility|toggle|strength|mask)|'
+    r'api[_-]?key[_-]?(?:type|field|label|placeholder|input|name)'
+    r')$',
+)
+
+
+def _is_bundled_js_context(js_text: str, match_start: int) -> bool:
+    """Return True when the secret match is inside webpack-bundled library code.
+
+    Examines a window of text around the match position for framework/build
+    markers that indicate the surrounding code is a bundled third-party library,
+    not application-authored credential storage.
+    """
+    # Check a generous window around the match — webpack chunk boundaries
+    # are typically within a few KB of any module code.
+    window_start = max(0, match_start - 4000)
+    window_end   = min(len(js_text), match_start + 2000)
+    window       = js_text[window_start:window_end]
+    return bool(_BUNDLED_JS_MARKERS.search(window))
 
 
 def _is_placeholder_secret(value: str, key_name: str = "") -> bool:
@@ -13239,6 +13287,11 @@ def _phase_endpoint_tools(
                                    if _sp_match.lastindex and _sp_match.lastindex >= 2
                                    else "")
                         if not _is_placeholder_secret(_sp_val, _sp_key):
+                            # Skip bundled library code and framework property names
+                            if _is_bundled_js_context(_ep_src_text, _sp_match.start()):
+                                continue
+                            if _sp_key and _FRAMEWORK_KEY_NAMES.match(_sp_key):
+                                continue
                             out.add_finding(
                                 title=f"Sensitive Information in Source: {_sp_label}",
                                 url=ep_url, port=target["port"], risk="HIGH",
@@ -16058,13 +16111,45 @@ _JS_INTERNAL_URL_RE = re.compile(
 )
 
 
-def _extract_js_links(js_text: str, base_url: str) -> list:
+def _app_path_prefix(target_url: str) -> str:
+    """Derive the application path prefix from the target URL.
+
+    For ``https://host/OMT/Client/Login`` returns ``/OMT`` — the first
+    non-empty path segment.  Returns ``""`` when the target sits at root,
+    meaning no path-prefix restriction applies.
+
+    Used to scope the crawler so it doesn't chase React Router / SPA route
+    strings that are relative to the SPA base rather than the server root.
+    """
+    path = urllib.parse.urlparse(target_url).path or "/"
+    segments = [s for s in path.split("/") if s]
+    return f"/{segments[0]}" if segments else ""
+
+
+def _url_under_app_prefix(candidate_url: str, app_prefix: str) -> bool:
+    """Return True when *candidate_url*'s path starts with *app_prefix*.
+
+    When *app_prefix* is empty (target sits at root), every path is in scope.
+    """
+    if not app_prefix:
+        return True
+    p = urllib.parse.urlparse(candidate_url).path or "/"
+    return p == app_prefix or p.startswith(app_prefix + "/")
+
+
+def _extract_js_links(js_text: str, base_url: str,
+                      app_prefix: str = "") -> list:
     """Extract in-scope URL references from JavaScript source.
 
     Finds string literals that look like absolute or root-relative paths,
     filters to same-origin, deduplicates, and returns normalised URL strings.
     Only paths with a recognisable structure (/word or /word/…) are kept to
     avoid picking up regex patterns, CSS values, and other non-URL strings.
+
+    When *app_prefix* is set (e.g. ``/OMT``), candidates whose resolved path
+    falls outside that prefix are rejected — this filters out SPA framework
+    route definitions that resolve against the origin root instead of the
+    application base path.
     """
     found: list = []
     for m in _JS_INTERNAL_URL_RE.finditer(js_text):
@@ -16074,12 +16159,20 @@ def _extract_js_links(js_text: str, base_url: str) -> list:
             # Reject trivially short root paths that are likely not endpoints
             p = urllib.parse.urlparse(norm).path or "/"
             if len(p) > 1:
+                # Path-prefix scoping: reject paths outside the app root.
+                # React Router routes like "/Client/Login" resolve to
+                # https://host/Client/Login when the app actually lives
+                # at /OMT/Client/Login — the route string is relative to the
+                # SPA base, not the server root.
+                if app_prefix and not _url_under_app_prefix(norm, app_prefix):
+                    continue
                 found.append(norm)
     return found
 
 
 def _crawl_page(page_url: str, sess: requests.Session,
-                timeout: int, base_url: str) -> dict:
+                timeout: int, base_url: str,
+                app_prefix: str = "") -> dict:
     result = {"links": [], "forms": [], "js_files": [], "error": None, "response": None}
     try:
         resp = sess.get(page_url, timeout=timeout, allow_redirects=True)
@@ -16088,7 +16181,7 @@ def _crawl_page(page_url: str, sess: requests.Session,
 
         # Handle JavaScript files: extract internal URL references and return.
         if "javascript" in ctype or page_url.split("?")[0].lower().endswith(".js"):
-            result["links"] = _extract_js_links(resp.text, base_url)
+            result["links"] = _extract_js_links(resp.text, base_url, app_prefix)
             return result
 
         if "text/html" not in ctype:
@@ -17084,6 +17177,16 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     _spa_roots:            set  = set()  # sub-paths with SPA signals (micro-frontends)
     _checked_spa_prefixes: set  = set()  # path prefixes already tested to avoid redundant checks
 
+    # Path-prefix scoping: when the target URL has a non-trivial first path
+    # segment (e.g. /OMT in https://host/OMT/Client/Login), only follow links
+    # under that prefix.  Prevents the crawler from chasing SPA route strings
+    # and webpack-bundled React Router paths that resolve against the server
+    # root instead of the application base (e.g. /Client/Login → 404 instead
+    # of /OMT/Client/Login → 200).
+    _app_prefix = _app_path_prefix(url)
+    if _app_prefix:
+        vc.log(f"[crawl] App path prefix detected: {_app_prefix} — scoping crawl", "INFO")
+
     while queue_urls and page_count < max_pages:
         current_url, depth = queue_urls.pop(0)
         _norm_cur = current_url.rstrip("/")
@@ -17097,7 +17200,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                   f"(queue: {len(queue_urls)}, links: {len(all_links)}, "
                   f"forms: {len(all_forms)})",
                   page_count, max_pages)
-        data = _crawl_page(current_url, sess, timeout, url)
+        data = _crawl_page(current_url, sess, timeout, url, _app_prefix)
         if data["error"]:
             continue
         _cr = data.get("response")
@@ -17130,11 +17233,14 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                 _lp = urllib.parse.urlparse(link).path or ""
                 if (link.rstrip("/") not in visited
                         and _same_origin(url, link)
-                        and not _LOGOUT_PATH_RE.search(_lp)):
+                        and not _LOGOUT_PATH_RE.search(_lp)
+                        and _url_under_app_prefix(link, _app_prefix)):
                     queue_urls.append((link, depth + 1))
             # Enqueue JS files as crawlable pages — _crawl_page's JS branch
             # extracts internal URL references from their source so those paths
-            # are followed and added to the structure map.
+            # are followed and added to the structure map.  JS files (static
+            # assets) are exempt from app-prefix scoping — they often live
+            # under a different path (e.g. /Convey/ClientApp/build/).
             for js_url in data["js_files"]:
                 if js_url.rstrip("/") not in visited:
                     queue_urls.append((js_url, depth + 1))
@@ -17325,6 +17431,21 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                 m = pat.search(js_text)
                 if m:
                     if _is_placeholder_secret(m.group(2), m.group(1)):
+                        continue
+                    # Filter out webpack-bundled library code — the surrounding
+                    # context contains framework markers that prove the matched
+                    # word ("secret", "password", etc.) is a variable/property
+                    # name inside a third-party library, not a real credential.
+                    if _is_bundled_js_context(js_text, m.start()):
+                        vc.log(
+                            f"[crawl] JS secret skip (bundled library context): "
+                            f"{secret_type} at {js_url} (char {m.start()})",
+                            "INFO",
+                        )
+                        continue
+                    # Filter out framework property names that collide with
+                    # credential keywords (e.g. "passwordType", "secretField").
+                    if _FRAMEWORK_KEY_NAMES.match(m.group(1)):
                         continue
                     # Include surrounding context in the finding output
                     col = m.start()
@@ -22261,6 +22382,96 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                         break
                 if _protection_marker:
                     break
+            # ── JSON API body analysis ──────────────────────────────────
+            # Many APIs (especially .NET / React SPAs) return HTTP 200 for
+            # both success and failure, with the result communicated via a
+            # JSON body field (e.g. {"success": false}).  In that case the
+            # 200 status code carries no lockout information and the finding
+            # would be a false positive.  Parse JSON bodies to detect:
+            #   (a) JSON-level lockout/rate-limit fields → skip finding
+            #   (b) Consistent JSON auth-failure bodies (all identical) →
+            #       skip: can't determine lockout from uniform 200+JSON-error
+            _json_api_skip = False
+            if not _protection_marker:
+                _json_bodies: list = []
+                _is_json_api = False
+                for _sc, _r, _ in _fail_attempts:
+                    if _r is None:
+                        continue
+                    _ct = (_r.headers.get("Content-Type", "") or "").lower()
+                    if "json" in _ct:
+                        _is_json_api = True
+                        try:
+                            _jb = _r.json()
+                            _json_bodies.append(_jb)
+                        except Exception:
+                            _json_bodies.append(None)
+                if _is_json_api and _json_bodies:
+                    # Check for JSON-level lockout indicators
+                    _json_lockout_keys = (
+                        "locked", "is_locked", "isLocked", "account_locked",
+                        "accountLocked", "remaining_attempts",
+                        "remainingAttempts", "rate_limited", "rateLimited",
+                        "blocked", "isBlocked", "is_blocked", "retry_after",
+                        "retryAfter", "lockout", "cooldown",
+                    )
+                    for _jb in _json_bodies:
+                        if not isinstance(_jb, dict):
+                            continue
+                        _jb_keys_lo = {k.lower() for k in _jb}
+                        for _jlk in _json_lockout_keys:
+                            if _jlk.lower() in _jb_keys_lo:
+                                _protection_marker = f"JSON field: {_jlk}"
+                                break
+                        if _protection_marker:
+                            break
+                    # Check for consistent JSON auth-failure responses.
+                    # If every response is a JSON object indicating failure
+                    # with effectively identical content, the API uses 200 for
+                    # all results and we can't infer lockout absence from the
+                    # status code.
+                    if not _protection_marker:
+                        _json_fail_keys = (
+                            "success", "succeeded", "authenticated",
+                            "isAuthenticated", "is_authenticated",
+                            "valid", "isValid", "is_valid", "ok",
+                        )
+                        _json_err_keys = (
+                            "error", "message", "errorMessage",
+                            "error_message", "msg", "detail", "reason",
+                        )
+                        _json_fail_strs: list = []
+                        for _jb in _json_bodies:
+                            if not isinstance(_jb, dict):
+                                continue
+                            # Detect explicit failure flags
+                            for _jfk in _json_fail_keys:
+                                _jfv = _jb.get(_jfk)
+                                if _jfv is False or _jfv == 0:
+                                    _json_fail_strs.append(json.dumps(_jb, sort_keys=True))
+                                    break
+                            else:
+                                # Detect error message fields
+                                for _jek in _json_err_keys:
+                                    _jev = _jb.get(_jek)
+                                    if isinstance(_jev, str) and _jev:
+                                        _json_fail_strs.append(json.dumps(_jb, sort_keys=True))
+                                        break
+                        # If all JSON bodies indicate failure and are
+                        # identical (same error for every attempt), the API
+                        # properly rejects bad creds via JSON — the 200
+                        # status is uninformative about lockout.
+                        if (len(_json_fail_strs) == len(_json_bodies)
+                                and len(set(_json_fail_strs)) == 1):
+                            _json_api_skip = True
+                            vc.log(
+                                "[logging_monitoring] JSON API returns "
+                                "identical auth-failure bodies for all "
+                                "attempts (HTTP 200 + JSON error) — cannot "
+                                "determine lockout behaviour from status "
+                                "code alone; skipping finding.",
+                                "INFO",
+                            )
             if _protection_marker:
                 vc.log(
                     f"[logging_monitoring] Brute-force protection signal "
@@ -22268,6 +22479,8 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                     f"({_protection_marker!r}) — not emitting finding.",
                     "INFO",
                 )
+            elif _json_api_skip:
+                pass  # already logged above
             else:
                 # Save evidence: each failed attempt's req + resp as a
                 # JSON-array of HTTP-exchange dicts.
@@ -22572,6 +22785,66 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                     "away from login page — possible auth success with dummy creds; "
                     "skipping rate-limit finding to avoid false positive",
                     "WARNING",
+                )
+                continue
+            # JSON API check — APIs that use HTTP 200 for both success and
+            # failure communicate the result via a JSON body field.  When
+            # every probe returns an identical JSON auth-failure body, the
+            # 200 status code carries no lockout information.
+            _json_lockout_skip = False
+            _json_bodies_7b: list = []
+            _is_json_7b = False
+            for _pr in probe_responses:
+                _pct = (_pr.headers.get("Content-Type", "") or "").lower()
+                if "json" in _pct:
+                    _is_json_7b = True
+                    try:
+                        _json_bodies_7b.append(_pr.json())
+                    except Exception:
+                        _json_bodies_7b.append(None)
+            if _is_json_7b and _json_bodies_7b:
+                _jl_keys = (
+                    "locked", "is_locked", "isLocked", "account_locked",
+                    "accountLocked", "remaining_attempts",
+                    "remainingAttempts", "rate_limited", "rateLimited",
+                    "blocked", "isBlocked", "is_blocked", "retry_after",
+                    "retryAfter", "lockout", "cooldown",
+                )
+                for _jb7 in _json_bodies_7b:
+                    if isinstance(_jb7, dict):
+                        _jb7_lo = {k.lower() for k in _jb7}
+                        if any(_jk.lower() in _jb7_lo for _jk in _jl_keys):
+                            _json_lockout_skip = True
+                            break
+                if not _json_lockout_skip:
+                    _jf_keys = ("success", "succeeded", "authenticated",
+                                "isAuthenticated", "valid", "ok")
+                    _je_keys = ("error", "message", "errorMessage",
+                                "error_message", "msg", "detail", "reason")
+                    _jf_strs: list = []
+                    for _jb7 in _json_bodies_7b:
+                        if not isinstance(_jb7, dict):
+                            continue
+                        for _jfk in _jf_keys:
+                            _jfv = _jb7.get(_jfk)
+                            if _jfv is False or _jfv == 0:
+                                _jf_strs.append(json.dumps(_jb7, sort_keys=True))
+                                break
+                        else:
+                            for _jek in _je_keys:
+                                if isinstance(_jb7.get(_jek), str) and _jb7[_jek]:
+                                    _jf_strs.append(json.dumps(_jb7, sort_keys=True))
+                                    break
+                    if (len(_jf_strs) == len(_json_bodies_7b)
+                            and len(set(_jf_strs)) == 1):
+                        _json_lockout_skip = True
+            if _json_lockout_skip:
+                vc.log(
+                    f"[account_lockout] JSON API at {action} returns "
+                    "identical auth-failure bodies for all probes "
+                    "(HTTP 200 + JSON error) — cannot determine lockout "
+                    "from status code alone; skipping.",
+                    "INFO",
                 )
                 continue
             # All 10 requests processed by auth endpoint without lockout — evidence
