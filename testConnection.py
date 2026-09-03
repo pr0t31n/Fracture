@@ -1197,12 +1197,28 @@ def test_connection(
     # ── Auto-detect: build_auth_session already ran the full test loop ────────
     if auth_method == "auto":
         failed = auth_info.startswith("ERROR:")
-        return {
+        result = {
             "success":     not failed,
             "message":     auth_info,
             "status_code": None,
             "auth_info":   auth_info,
         }
+        # When auto-detect discovers a working endpoint, return its
+        # method and URL so the caller (Crucible) can persist them —
+        # fracture.py can then use the proven endpoint directly
+        # instead of re-running the discovery.
+        if not failed:
+            _disc_m = _re.search(
+                r'auto-detect\s*→\s*(\w+)', auth_info)
+            _disc_u = _re.search(
+                r'(?:discovered API:\s*|→\s*\w+\s*\()'
+                r'(https?://\S+?)[\s):]',
+                auth_info)
+            if _disc_m:
+                result["discovered_method"] = _disc_m.group(1)
+            if _disc_u:
+                result["discovered_login_url"] = _disc_u.group(1)
+        return result
 
     # ── Login-based methods: POST result is the definitive answer ─────────────
     if auth_method in ("form_login", "token_login", "totp_mfa", "saml_assertion"):
