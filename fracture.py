@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.32.5"
+VERSION = "2.32.6"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -18292,6 +18292,38 @@ _CMD_PAYLOADS = [
 ]
 _CRLF_PAYLOAD = "%0d%0aX-Injected-Fracture: test"
 
+# ── Injection response guards ────────────────────────────────────────────────
+# When a server-side session expires mid-scan, every probe returns the login
+# page (HTTP 200 with a password form) regardless of the injected payload.
+# Without this guard, injection-error regexes may false-positive on URL echoes
+# or incidental keywords in the login page HTML.
+_INJ_LOGIN_MARKERS = (
+    '<input type="password"', "<input type='password'",
+    'name="password"',        "name='password'",
+    "please log in",          "please sign in",
+    "session expired",        "session timeout",
+    "you must be logged in",  "you must log in",
+    "log in to continue",     "sign in to continue",
+    "login page",
+)
+_INJ_AUTH_PATH_RE = re.compile(
+    r'(/login|/signin|/sign-in|/auth/login|/oauth|/sso/|/sign-on)',
+    re.IGNORECASE,
+)
+
+def _inj_is_login_page(r) -> bool:
+    """Return True if the injection response is a login/auth redirect page."""
+    if r is None:
+        return False
+    try:
+        _url = (r.url or "").lower()
+        _body = (r.text or "")[:8000].lower()
+    except Exception:
+        return False
+    if _INJ_AUTH_PATH_RE.search(_url):
+        return True
+    return any(m in _body for m in _INJ_LOGIN_MARKERS)
+
 _NOSQL_PAYLOADS = [
     ('{"$gt": ""}',       re.compile(r'\$gt|\$ne|\$where|unexpected.*operator|cast.*failed|E11000', re.I)),
     ('{"$ne": null}',     re.compile(r'\$gt|\$ne|\$where|unexpected.*operator|E11000', re.I)),
@@ -19194,6 +19226,8 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             for nosql_pay, nosql_err in _NOSQL_PAYLOADS:
                 r = _qs_inject(purl, param, nosql_pay, sess, timeout)
                 _nosql_body = _strip_url_echo(r.text, r, [nosql_pay]) if r else ""
+                if r and _inj_is_login_page(r):
+                    continue
                 if r and nosql_err.search(_nosql_body):
                     _rq, _rp = _save_http_evidence(out, phase, f"nosql_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
@@ -19223,6 +19257,8 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     + re.escape(ldap_pay)
                     + r'[^"\']*["\']',
                     '', _ldap_body, flags=re.I)
+                if r and _inj_is_login_page(r):
+                    continue
                 if r and ldap_err.search(_ldap_body):
                     _rq, _rp = _save_http_evidence(out, phase, f"ldap_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
@@ -19524,7 +19560,11 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
 
-    # 21. Blind SQL injection — time-based
+    # 21. Blind SQL injection — time-based (baseline-gated)
+    # The probe must take >= delay seconds LONGER than a baseline request
+    # to the same URL+param with a benign value.  A bare `elapsed >= delay`
+    # check false-positives on naturally slow pages, load-balanced targets,
+    # and session-expired redirects.
     vc.status(phase, "Injection Testing", "running", "Blind SQLi (time-based)", 18, 19)
     _TIME_SQLI = [
         ("' AND SLEEP(3)--",     3.0),
@@ -19532,27 +19572,38 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         ("' AND pg_sleep(3)--",  3.0),
         ("1; SELECT SLEEP(3)--", 3.0),
     ]
+    import time as _ti
     for entry in params[:5]:
         purl = entry["url"]
         for param in entry["params"]:
+            # Measure baseline response time with a benign value
+            try:
+                _bl_t0 = _ti.monotonic()
+                _bl_r  = _qs_inject(purl, param, "1", sess, timeout)
+                _bl_elapsed = _ti.monotonic() - _bl_t0
+            except Exception:
+                _bl_elapsed = 0.0
             for tsql, delay in _TIME_SQLI:
                 try:
-                    import time as _ti
                     t0 = _ti.monotonic()
                     r  = _qs_inject(purl, param, tsql, sess, delay + 5)
                     elapsed = _ti.monotonic() - t0
-                    if r and elapsed >= delay:
+                    _delta = elapsed - _bl_elapsed
+                    if r and _inj_is_login_page(r):
+                        continue
+                    if r and elapsed >= delay and _delta >= (delay - 0.5):
                         out.add_finding(
                             title="Blind SQL Injection (Time-Based)",
                             url=purl, port=target["port"], risk="CRITICAL",
                             description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
                             output=(f"Parameter: {param}\nPayload: {tsql}\n"
-                                    f"Response time: {elapsed:.2f}s (threshold: {delay}s)"),
+                                    f"Response time: {elapsed:.2f}s (baseline: {_bl_elapsed:.2f}s, "
+                                    f"delta: {_delta:.2f}s, threshold: {delay}s)"),
                             sources="fracture-injection", service=target["scheme"],
                             affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                             remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                         )
-                        vc.log(f"[injection] Time-based blind SQLi: {purl} param={param} ({elapsed:.1f}s)", "SUCCESS")
+                        vc.log(f"[injection] Time-based blind SQLi: {purl} param={param} ({elapsed:.1f}s, baseline {_bl_elapsed:.1f}s)", "SUCCESS")
                         break
                 except Exception:
                     pass
