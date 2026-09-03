@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.12"
+VERSION = "2.30.13"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -24327,24 +24327,63 @@ def main() -> None:
                                     _esp_seg = _esp.rsplit("/", 1)[-1]
                                     if (_esp != _early_target_path
                                             and _esp_seg != "login"):
-                                        vc.log(
-                                            f"[auth] Post-login URL "
-                                            f"resolved: {_early_spa_url}",
-                                            "SUCCESS",
-                                        )
-                                        _early_landing_url = _early_spa_url
-                                        _early_landing_code = 200
+                                        # Verify the URL is reachable
+                                        # by the requests session (not
+                                        # just the Chrome session).
+                                        _early_browser_only = False
                                         try:
-                                            _esp_r = auth_sess.get(
+                                            _esp_v = auth_sess.get(
                                                 _early_spa_url,
                                                 timeout=cfg.get(
                                                     "timeout", 10),
-                                                allow_redirects=True,
+                                                allow_redirects=False,
                                             )
-                                            _early_landing_body = (
-                                                _esp_r.text[:8192])
+                                            if _esp_v.status_code in (
+                                                    301, 302, 303, 307, 308):
+                                                _redir_to = (
+                                                    _esp_v.headers
+                                                    .get("Location", ""))
+                                                _rto_seg = (
+                                                    urllib.parse.urlparse(
+                                                        _redir_to)
+                                                    .path.rsplit("/", 1)[-1]
+                                                    .lower())
+                                                if _rto_seg == "login":
+                                                    _early_browser_only = True
                                         except Exception:
                                             pass
+                                        _early_landing_url = _early_spa_url
+                                        if _early_browser_only:
+                                            vc.log(
+                                                f"[auth] Post-login URL "
+                                                f"resolved (browser-only): "
+                                                f"{_early_spa_url} — "
+                                                f"requests session gets 302 "
+                                                f"to login; displayed in "
+                                                f"Crucible but NOT used as "
+                                                f"scan seed",
+                                                "WARNING",
+                                            )
+                                            _early_landing_code = 302
+                                        else:
+                                            vc.log(
+                                                f"[auth] Post-login URL "
+                                                f"resolved: "
+                                                f"{_early_spa_url}",
+                                                "SUCCESS",
+                                            )
+                                            _early_landing_code = 200
+                                            try:
+                                                _esp_r = auth_sess.get(
+                                                    _early_spa_url,
+                                                    timeout=cfg.get(
+                                                        "timeout", 10),
+                                                    allow_redirects=True,
+                                                )
+                                                _early_landing_body = (
+                                                    _esp_r.text[:8192])
+                                            except Exception:
+                                                pass
                                     else:
                                         vc.log(
                                             f"[auth] Browser stayed on "
@@ -25006,23 +25045,58 @@ def main() -> None:
                                         "/", 1)[-1]
                                     if (_spa_lnd_path != _target_path
                                             and _spa_seg != "login"):
-                                        vc.log(
-                                            f"[auth] Post-login URL: "
-                                            f"{_spa_lnd_url}",
-                                            "SUCCESS",
-                                        )
-                                        _as_landing_url  = _spa_lnd_url
-                                        _as_landing_code = 200
+                                        _late_browser_only = False
                                         try:
-                                            _spa_body_r = _as_session.get(
+                                            _lv = _as_session.get(
                                                 _spa_lnd_url,
                                                 timeout=cfg.get("timeout", 10),
-                                                allow_redirects=True,
+                                                allow_redirects=False,
                                             )
-                                            _as_landing_body = (
-                                                _spa_body_r.text[:8192])
+                                            if _lv.status_code in (
+                                                    301, 302, 303, 307, 308):
+                                                _rto = (
+                                                    _lv.headers
+                                                    .get("Location", ""))
+                                                _rtos = (
+                                                    urllib.parse.urlparse(
+                                                        _rto)
+                                                    .path.rsplit("/", 1)[-1]
+                                                    .lower())
+                                                if _rtos == "login":
+                                                    _late_browser_only = True
                                         except Exception:
                                             pass
+                                        _as_landing_url = _spa_lnd_url
+                                        if _late_browser_only:
+                                            vc.log(
+                                                f"[auth] Post-login URL "
+                                                f"(browser-only): "
+                                                f"{_spa_lnd_url} — "
+                                                f"requests session gets 302 "
+                                                f"to login; displayed but "
+                                                f"NOT used as scan seed",
+                                                "WARNING",
+                                            )
+                                            _as_landing_code = 302
+                                        else:
+                                            vc.log(
+                                                f"[auth] Post-login URL: "
+                                                f"{_spa_lnd_url}",
+                                                "SUCCESS",
+                                            )
+                                            _as_landing_code = 200
+                                            try:
+                                                _spa_body_r = (
+                                                    _as_session.get(
+                                                        _spa_lnd_url,
+                                                        timeout=cfg.get(
+                                                            "timeout", 10),
+                                                        allow_redirects=True,
+                                                    ))
+                                                _as_landing_body = (
+                                                    _spa_body_r.text[:8192])
+                                            except Exception:
+                                                pass
                                     else:
                                         vc.log(
                                             f"[auth] Browser stayed on "
@@ -25209,8 +25283,13 @@ def main() -> None:
             # the entry point to the application surface and must be tested.
             # Capture it early so it feeds into crawl, injection, and all
             # subsequent phases.
+            # Skip browser-only landing pages (code=302): the requests session
+            # gets redirected back to login because the app uses JS-stored
+            # auth state, not just cookies.  Display in Crucible but don't
+            # feed into the scan — the 302 would generate spurious redirect
+            # findings and the crawl would see the login page, not content.
             if (_as_landing_url
-                    and _as_landing_code in range(200, 400)
+                    and _as_landing_code in range(200, 300)
                     and _as_landing_url.rstrip("/") != target["url"].rstrip("/")):
                 _lnd_norm = _as_landing_url.rstrip("/")
                 if _lnd_norm not in (u.rstrip("/") for u in _ep_base):
@@ -25350,7 +25429,7 @@ def main() -> None:
                 # target URL, standard gobuster only discovers paths under
                 # the target.  This pass discovers siblings by enumerating
                 # the landing URL's parent directory.
-                if _as_landing_url:
+                if _as_landing_url and _as_landing_code in range(200, 300):
                     _lnd_parsed = urllib.parse.urlparse(_as_landing_url)
                     _lnd_parent = _lnd_parsed.path.rsplit("/", 1)[0]
                     _tgt_parsed = urllib.parse.urlparse(target["url"])
@@ -25359,6 +25438,8 @@ def main() -> None:
                     # 2 segments deep) — this discovers siblings of both the
                     # target and the landing page that standard gobuster
                     # (which enumerates children of target["url"]) would miss.
+                    # Skip browser-only landing pages (code≠2xx) — the
+                    # requests session gets 302'd to login.
                     if (_lnd_parent
                             and _lnd_parent.count("/") >= 2
                             and _as_landing_url.rstrip("/")
@@ -25687,9 +25768,19 @@ def main() -> None:
             if not _skip("crawl"):
                 pm.set_phase_status(f"crawl#{_ctx_label}", "running", "Crawl")
                 try:
+                    # Only seed the crawl with the landing URL if the
+                    # requests session can actually reach it (2xx).
+                    # Browser-only URLs (302 to login) would poison the
+                    # crawl with login-page content.
+                    _crawl_seed = (
+                        [_as_landing_url]
+                        if _as_landing_url
+                        and _as_landing_code in range(200, 300)
+                        else None
+                    )
                     crawl_data = _phase_crawl(
                         target, _ctx_cfg, pm, out, effective_auth,
-                        extra_seeds=[_as_landing_url] if _as_landing_url else None)
+                        extra_seeds=_crawl_seed)
                     pm.set_phase_status(f"crawl#{_ctx_label}", "complete", "Crawl")
                     # Persist role 1 crawl data for reduced contexts
                     if not _is_reduced_ctx:
