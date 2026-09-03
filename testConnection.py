@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "1.7.5"
+VERSION = "1.7.6"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -668,11 +668,25 @@ def build_auth_session(
 
         _http_methods = frozenset({"basic", "digest", "ntlm"})
 
+        # ── Baseline: GET the target without auth so we can compare ──────
+        _baseline_sc   = 0
+        _baseline_len  = 0
+        _baseline_loc  = ""
+        if target_url:
+            try:
+                _bl_sess = _make_session(verify_ssl, proxy)
+                _bl_resp = _bl_sess.get(target_url, timeout=timeout,
+                                        allow_redirects=False)
+                _baseline_sc  = _bl_resp.status_code
+                _baseline_len = len(_bl_resp.content)
+                _baseline_loc = _bl_resp.headers.get("Location", "")
+            except Exception:
+                pass
+
         _errors: list[str] = []
         for _am in _auto_order:
             _auto_auth = dict(auth)
             _auto_auth["method"] = _am
-            _auto_sess = _make_session(verify_ssl, proxy)
             _auto_sess, _auto_info = build_auth_session(
                 _auto_auth, timeout, proxy, verify_ssl)
             if _auto_info.startswith("ERROR:"):
@@ -687,15 +701,44 @@ def build_auth_session(
                     return _auto_sess, f"auto-detect → {_am}: {_auto_info}"
                 _errors.append(f"{_am}: {_auto_info} (no auth signals)")
                 continue
-            # For HTTP auth methods, verify with a real GET against target URL
+            # For HTTP auth methods, compare authenticated GET against baseline
             if _am in _http_methods and target_url:
                 try:
-                    _vr = _auto_sess.get(target_url, timeout=timeout)
-                    if _vr.status_code not in (401, 403):
+                    _vr = _auto_sess.get(target_url, timeout=timeout,
+                                         allow_redirects=False)
+                    _auth_sc  = _vr.status_code
+                    _auth_len = len(_vr.content)
+                    _auth_loc = _vr.headers.get("Location", "")
+
+                    # Hard reject: server explicitly said no
+                    if _auth_sc in (401, 403):
+                        _errors.append(
+                            f"{_am}: HTTP {_auth_sc} — rejected")
+                        continue
+
+                    # Success signals: something changed vs baseline
+                    _diff_reasons: list[str] = []
+                    if _auto_sess.cookies:
+                        _diff_reasons.append(
+                            f"{len(_auto_sess.cookies)} cookie(s)")
+                    if _auth_sc != _baseline_sc:
+                        _diff_reasons.append(
+                            f"status {_baseline_sc}→{_auth_sc}")
+                    if _auth_loc != _baseline_loc and _auth_loc:
+                        _diff_reasons.append(
+                            f"redirect→{_auth_loc[:60]}")
+                    if abs(_auth_len - _baseline_len) > 256:
+                        _diff_reasons.append(
+                            f"body size {_baseline_len}→{_auth_len}")
+
+                    if _diff_reasons:
                         return _auto_sess, (
-                            f"auto-detect → {_am}: HTTP {_vr.status_code}")
+                            f"auto-detect → {_am}: HTTP {_auth_sc} — "
+                            + ", ".join(_diff_reasons))
+
                     _errors.append(
-                        f"{_am}: HTTP {_vr.status_code} — rejected")
+                        f"{_am}: HTTP {_auth_sc} — response identical "
+                        "to unauthenticated baseline")
                 except Exception as _exc:
                     _errors.append(f"{_am}: {_exc}")
                 continue
