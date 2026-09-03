@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.32.3"
+VERSION = "2.32.4"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -17557,7 +17557,15 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             for pat, secret_type in _SECRET_PATTERNS:
                 m = pat.search(js_text)
                 if m:
-                    if _is_placeholder_secret(m.group(2), m.group(1)):
+                    # In minified JS the [^\s"'] capture runs past the
+                    # actual value into subsequent object keys (no spaces
+                    # between tokens).  Truncate at the first JS structural
+                    # delimiter so filters see the real token.
+                    _raw_g2 = m.group(2)
+                    _js_val = re.split(r'[,;:(){}\[\]]', _raw_g2, maxsplit=1)[0]
+                    if len(_js_val) < 6:
+                        continue
+                    if _is_placeholder_secret(_js_val, m.group(1)):
                         continue
                     # Filter out webpack-bundled library code — the surrounding
                     # context contains framework markers that prove the matched
