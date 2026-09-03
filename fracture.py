@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.14"
+VERSION = "2.30.15"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -12710,9 +12710,13 @@ def _gobuster_run(
 
 
 def _capture_screenshot_to(ep_url: str, out_path: Path,
-                            target: dict, cfg: dict) -> bool:
+                            target: dict, cfg: dict,
+                            auth_session: "requests.Session | None" = None,
+                            ) -> bool:
     """Take a headless screenshot of ep_url and save to out_path.
-    Returns True on success.  Tries Chrome first, falls back to Firefox."""
+    Returns True on success.  Tries Chrome first, falls back to Firefox.
+    When auth_session is provided, cookies are transferred to Chrome before
+    navigating so authenticated pages can be captured."""
     if not _check_selenium():
         return False
     from selenium import webdriver
@@ -12781,6 +12785,15 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
             driver.set_page_load_timeout(15)
             if _used_browser == "firefox":
                 driver.set_window_size(1280, 800)
+            # Transfer auth cookies when an authenticated session
+            # is provided — needed for pages behind login
+            # (SPA/React apps, authenticated landing pages, etc.).
+            if auth_session is not None:
+                try:
+                    driver.get(ep_url)  # establish origin first
+                except Exception:
+                    pass
+                _spa_transfer_cookies(auth_session, driver, ep_url)
             try:
                 driver.get(ep_url)
             except Exception:
@@ -25171,13 +25184,26 @@ def main() -> None:
                 _ss_login_url = ""
 
                 # Login URL screenshot — skip if it's the same as the base URL
-                # (already captured by Phase 0b) or if auth is not in use.
+                # (already captured by Phase 0b), if auth is not in use, or
+                # if the login URL is an API endpoint (not a visual page —
+                # guard GET returns 405/4xx and screenshot would show an
+                # error page).  When the login URL is an API endpoint, the
+                # actual visual login page is the target URL, which Phase 0b
+                # already screenshots.
                 if _ctx_auth is not None and not _is_reduced_ctx:
                     _ss_login_url = (
                         _ctx_cfg.get("auth", {}).get("login_url", "").strip()
                         or ""
                     )
+                    # Detect API-only login endpoints: path contains /api/
+                    # (case-insensitive) or guard GET returned 4xx/5xx.
+                    _ss_login_is_api = False
+                    if _ss_login_url:
+                        _ss_lp_lower = urllib.parse.urlparse(
+                            _ss_login_url).path.lower()
+                        _ss_login_is_api = "/api/" in _ss_lp_lower
                     if (_ss_login_url
+                            and not _ss_login_is_api
                             and _ss_login_url.rstrip("/") != _ss_base_norm):
                         try:
                             _ss_lp = (
@@ -25223,7 +25249,9 @@ def main() -> None:
                             / f"screenshot_{_ss_safe_host}_{_ss_port}"
                               f"_landing_{_ss_role_slug}.png"
                         )
-                        if _capture_screenshot_to(_as_landing_url, _ss_lnd, target, cfg):
+                        if _capture_screenshot_to(
+                                _as_landing_url, _ss_lnd, target, cfg,
+                                auth_session=_as_session):
                             _ss_lnd_rel = urllib.parse.urlparse(_as_landing_url).path or "/"
                             _lnd_ctx = (
                                 f" (role: {_ctx_label})"
