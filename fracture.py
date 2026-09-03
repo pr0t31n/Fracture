@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.27.0"
+VERSION = "2.27.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -17010,9 +17010,34 @@ def _phase_manual_crawl(out: "OutputManager", target: dict, cfg: dict,
         if _cookie_dict
         else "No session detected — log in manually in the browser."
     )
+
+    # Detect headless / remote: no browser launched → include setup instructions
+    _is_remote = (
+        _browser_proc is None
+        or os.environ.get("CRUCIBLE_MANAGED") == "1"
+        or os.environ.get("SSH_CONNECTION")
+    )
+    _setup_hint = ""
+    if _is_remote:
+        _setup_hint = (
+            "\n\n"
+            "══ Remote / headless setup ══\n"
+            f"No local browser was launched. To browse through Fracture's proxy:\n"
+            f"1. SSH tunnel the proxy port:  ssh -L {_proxy_port}:127.0.0.1:{_proxy_port} <server>\n"
+            f"2. Set your browser's HTTP/HTTPS proxy to 127.0.0.1:{_proxy_port}\n"
+            f"3. Trust the mitmproxy CA (or accept certificate warnings)\n"
+            f"4. Browse to {target['url']}\n"
+            "5. Navigate the application, then type 'done' below\n"
+            "\n"
+            "(If using an existing SSH SOCKS proxy, switch your browser from "
+            "SOCKS to HTTP proxy for this step — they cannot be combined.)"
+        )
+
     vc.log(
         f"[manual-crawl] Proxy listening on 127.0.0.1:{_proxy_port}. "
-        f"{_cookie_note} Browse the target then signal completion.",
+        f"{_cookie_note} Browse the target then signal completion."
+        + (" (remote/headless detected — see prompt for setup instructions)"
+           if _is_remote else ""),
         "INFO",
     )
     vc.status("manual_crawl", "Manual Crawl", "running",
@@ -17023,7 +17048,8 @@ def _phase_manual_crawl(out: "OutputManager", target: dict, cfg: dict,
             f"Manual crawl is active (proxy: 127.0.0.1:{_proxy_port}). "
             f"{_cookie_note} "
             "Navigate through the target application. "
-            "Type 'done' and press Enter when finished to continue testing.",
+            "Type 'done' and press Enter when finished to continue testing."
+            + _setup_hint,
             prompt_type="text",
             skippable=True,
         )
