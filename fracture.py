@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.30.11"
+VERSION = "2.30.12"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -12856,54 +12856,169 @@ def _resolve_spa_landing(
         svc = _build_chrome_service()
         driver = webdriver.Chrome(service=svc, options=opts)
 
-        driver.set_page_load_timeout(15)
-        # Navigate to the start URL first to establish the origin
-        # (Selenium requires the driver to be on the right origin
-        # before adding cookies for that domain).
-        try:
-            driver.get(start_url)
-        except Exception:
-            pass
-        # Transfer auth cookies from the requests session
-        _spa_transfer_cookies(auth_session, driver, start_url)
-        # Reload to let JS see the auth cookies and redirect
-        try:
-            driver.get(start_url)
-        except Exception:
-            pass
-        # Wait for the URL to change (JS redirect) with polling.
-        # React/.NET apps behind load balancers need time to:
-        #   1. Parse and execute the JS bundle
-        #   2. Check auth status via API call
-        #   3. Process the response and navigate
+        driver.set_page_load_timeout(20)
         import time as _time_spa
         _start_path = urllib.parse.urlparse(start_url).path.rstrip("/").lower()
-        _waited = 0.0
-        _max_wait = 8.0
-        _poll = 0.5
-        while _waited < _max_wait:
-            _time_spa.sleep(_poll)
-            _waited += _poll
+
+        def _check_redirected():
+            """Poll current_url — return it if no longer on login."""
             try:
-                _cur = driver.current_url
-                if _cur:
-                    _cur_path = urllib.parse.urlparse(
-                        _cur).path.rstrip("/").lower()
-                    _cur_seg = _cur_path.rsplit("/", 1)[-1]
-                    if _cur_path != _start_path and _cur_seg != "login":
-                        vc.log(
-                            f"[auth] Chrome redirect detected after "
-                            f"{_waited:.1f}s → {_cur}",
-                            "INFO",
-                        )
-                        return _cur
+                _c = driver.current_url
+                if _c:
+                    _cp = urllib.parse.urlparse(
+                        _c).path.rstrip("/").lower()
+                    _cs = _cp.rsplit("/", 1)[-1]
+                    if _cp != _start_path and _cs != "login":
+                        return _c
             except Exception:
                 pass
-        # No redirect detected within timeout — return whatever
-        # Chrome is on (may still be the login page).
+            return None
+
+        def _poll_for_redirect(label, max_s=10.0, poll_s=0.5):
+            """Poll until URL changes away from login or timeout."""
+            _w = 0.0
+            while _w < max_s:
+                _time_spa.sleep(poll_s)
+                _w += poll_s
+                _redir = _check_redirected()
+                if _redir:
+                    vc.log(
+                        f"[auth] Chrome redirect ({label}) after "
+                        f"{_w:.1f}s → {_redir}",
+                        "SUCCESS",
+                    )
+                    return _redir
+            return None
+
+        # ── Phase 1: cookie transfer ──
+        # Fast path for apps that check auth via API call on page load.
+        try:
+            driver.get(start_url)
+        except Exception:
+            pass
+        _spa_transfer_cookies(auth_session, driver, start_url)
+        try:
+            driver.get(start_url)
+        except Exception:
+            pass
+        _p1 = _poll_for_redirect("cookie-transfer", max_s=5.0)
+        if _p1:
+            return _p1
+        vc.log(
+            "[auth] Cookie-transfer did not trigger redirect "
+            "— attempting full Chrome login",
+            "INFO",
+        )
+
+        # ── Phase 2: full login in Chrome ──
+        # For apps that store auth state in JS (not just cookies),
+        # perform the actual login so React/Angular/etc. handles the
+        # response, stores tokens, and navigates to the landing page.
+        _auth_cfg = cfg.get("auth", {})
+        _chrome_user = _auth_cfg.get("username", "")
+        _chrome_pass = _auth_cfg.get("password", "")
+        if not _chrome_user or not _chrome_pass:
+            vc.log(
+                "[auth] No credentials in config for Chrome login",
+                "INFO",
+            )
+            final_url = driver.current_url
+            return final_url if final_url else None
+
+        _ufield = _auth_cfg.get("username_field", "username")
+        _pfield = _auth_cfg.get("password_field", "password")
+
+        # Navigate fresh (clear cookies from phase 1)
+        driver.delete_all_cookies()
+        try:
+            driver.get(start_url)
+        except Exception:
+            pass
+
+        # Wait for the login form to render (React/SPA forms are
+        # rendered by JS — they may not be in the initial HTML).
+        from selenium.webdriver.common.by import By
+        try:
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            WebDriverWait(driver, 12).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, 'input[type="password"]'))
+            )
+        except Exception:
+            vc.log(
+                "[auth] Chrome login form did not render within 12s",
+                "INFO",
+            )
+            final_url = driver.current_url
+            return final_url if final_url else None
+
+        # Find the username input — try configured field name first,
+        # then common selectors.
+        _user_el = None
+        for _sel in [
+            f'input[name="{_ufield}"]',
+            f'input[id="{_ufield}"]',
+            'input[type="email"]',
+            'input[name="username"]',
+            'input[name="email"]',
+            'input[name="user"]',
+            'input[type="text"]',
+        ]:
+            try:
+                _els = driver.find_elements(By.CSS_SELECTOR, _sel)
+                for _el in _els:
+                    if _el.is_displayed():
+                        _user_el = _el
+                        break
+                if _user_el:
+                    break
+            except Exception:
+                continue
+
+        try:
+            _pass_el = driver.find_element(
+                By.CSS_SELECTOR, 'input[type="password"]')
+        except Exception:
+            _pass_el = None
+
+        if not _user_el or not _pass_el:
+            vc.log(
+                "[auth] Chrome could not find login form fields",
+                "INFO",
+            )
+            final_url = driver.current_url
+            return final_url if final_url else None
+
+        # Fill and submit
+        try:
+            _user_el.clear()
+            _user_el.send_keys(_chrome_user)
+            _pass_el.clear()
+            _pass_el.send_keys(_chrome_pass)
+            from selenium.webdriver.common.keys import Keys
+            _pass_el.send_keys(Keys.RETURN)
+            vc.log(
+                "[auth] Chrome login submitted — waiting for redirect",
+                "INFO",
+            )
+        except Exception as _fill_e:
+            vc.log(
+                f"[auth] Chrome form fill/submit failed: {_fill_e}",
+                "INFO",
+            )
+            final_url = driver.current_url
+            return final_url if final_url else None
+
+        # Wait for the post-login redirect (apps behind load
+        # balancers can take several seconds).
+        _p2 = _poll_for_redirect("chrome-login", max_s=12.0)
+        if _p2:
+            return _p2
+
         final_url = driver.current_url
         vc.log(
-            f"[auth] Chrome wait expired ({_max_wait}s) — "
+            f"[auth] Chrome login redirect wait expired — "
             f"final URL: {final_url}",
             "INFO",
         )
