@@ -26657,37 +26657,80 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                         and not _p20_reauth_dead.get(role)):
                     _loc20 = r.headers.get("Location", "") or ""
                     if _P20_LOGIN_LOC_RE.search(_loc20):
-                        _p20_reauth_budget[role] = _p20_reauth_budget.get(role, 0) - 1
-                        vc.log(
-                            f"[access-matrix/p20] {role} session expired mid-loop "
-                            f"({rel} → {r.status_code}) — re-authenticating",
-                            "WARNING")
-                        try:
-                            _p20_fresh = _reauth_session(cfg, target, role)
-                            if _p20_fresh is not None:
-                                role_sessions[role] = _p20_fresh
-                                r_sess = _p20_fresh
-                                vc.log(f"[access-matrix/p20] {role} re-authenticated OK", "INFO")
-                                r = r_sess.get(
-                                    url, timeout=timeout, allow_redirects=False,
+                        # ── Landing URL cross-check ────────────────────
+                        # Before burning re-auth budget, verify the session
+                        # is actually dead by probing the role's known-good
+                        # landing URL.  If it returns non-redirect, the
+                        # session is alive — the path is role-gated (e.g.
+                        # DocLib has its own /Login.aspx that redirects
+                        # users without DocLib access).
+                        _p20_role_landing = (landing_urls or {}).get(role, "")
+                        _p20_landing_alive = False
+                        if _p20_role_landing:
+                            try:
+                                _p20_lr = r_sess.get(
+                                    _p20_role_landing, timeout=timeout,
+                                    allow_redirects=False,
                                     headers={"Accept": "text/html,application/json"})
-                                access[role] = r.status_code
-                                # Bail if retry still fails — re-auth cannot
-                                # produce a valid session for this target.
-                                if r.status_code in (301, 302, 303, 307, 308):
-                                    _rl20 = r.headers.get("Location", "") or ""
-                                    if _P20_LOGIN_LOC_RE.search(_rl20):
-                                        _p20_reauth_dead[role] = True
-                                        _p20_reauth_budget[role] = 0
-                                        vc.log(
-                                            f"[access-matrix/p20] {role} re-auth produced "
-                                            f"a dead session (retry → {r.status_code}) — "
-                                            f"skipping remaining probes",
-                                            "WARNING")
-                        except Exception as _p20e:
+                                if _p20_lr.status_code not in (301, 302, 303, 307, 308):
+                                    _p20_landing_alive = True
+                                    vc.log(
+                                        f"[access-matrix/p20] {role} session alive "
+                                        f"(landing URL → {_p20_lr.status_code}), "
+                                        f"path {rel} is role-gated — not re-authenticating",
+                                        "INFO")
+                            except Exception:
+                                pass
+                        if not _p20_landing_alive:
+                            _p20_reauth_budget[role] = _p20_reauth_budget.get(role, 0) - 1
                             vc.log(
-                                f"[access-matrix/p20] {role} mid-loop re-auth "
-                                f"failed: {_p20e}", "WARNING")
+                                f"[access-matrix/p20] {role} session expired mid-loop "
+                                f"({rel} → {r.status_code}) — re-authenticating",
+                                "WARNING")
+                            try:
+                                _p20_fresh = _reauth_session(cfg, target, role)
+                                if _p20_fresh is not None:
+                                    role_sessions[role] = _p20_fresh
+                                    r_sess = _p20_fresh
+                                    vc.log(f"[access-matrix/p20] {role} re-authenticated OK", "INFO")
+                                    r = r_sess.get(
+                                        url, timeout=timeout, allow_redirects=False,
+                                        headers={"Accept": "text/html,application/json"})
+                                    access[role] = r.status_code
+                                    # Bail if retry still fails — re-auth cannot
+                                    # produce a valid session for this target.
+                                    if r.status_code in (301, 302, 303, 307, 308):
+                                        _rl20 = r.headers.get("Location", "") or ""
+                                        if _P20_LOGIN_LOC_RE.search(_rl20):
+                                            # Cross-check again before declaring dead
+                                            _p20_retry_alive = False
+                                            if _p20_role_landing:
+                                                try:
+                                                    _p20_rr = r_sess.get(
+                                                        _p20_role_landing, timeout=timeout,
+                                                        allow_redirects=False,
+                                                        headers={"Accept": "text/html,application/json"})
+                                                    if _p20_rr.status_code not in (301, 302, 303, 307, 308):
+                                                        _p20_retry_alive = True
+                                                        vc.log(
+                                                            f"[access-matrix/p20] {role} session alive "
+                                                            f"after re-auth (landing → {_p20_rr.status_code}), "
+                                                            f"path {rel} is role-gated",
+                                                            "INFO")
+                                                except Exception:
+                                                    pass
+                                            if not _p20_retry_alive:
+                                                _p20_reauth_dead[role] = True
+                                                _p20_reauth_budget[role] = 0
+                                                vc.log(
+                                                    f"[access-matrix/p20] {role} re-auth produced "
+                                                    f"a dead session (retry → {r.status_code}) — "
+                                                    f"skipping remaining probes",
+                                                    "WARNING")
+                            except Exception as _p20e:
+                                vc.log(
+                                    f"[access-matrix/p20] {role} mid-loop re-auth "
+                                    f"failed: {_p20e}", "WARNING")
 
                 # Guard: don't record login-redirect as real status when
                 # re-auth is exhausted or dead.
@@ -28145,6 +28188,8 @@ def main() -> None:
                 _as_landing_url = ""
                 _as_landing_code = 0
                 _as_landing_body = ""
+                _as_canary_url = ""   # requests-viable URL for canary cross-checks
+                _as_canary_code = 0
                 # Session to probe with: authenticated session or (for unauth) the
                 # fresh unauthenticated session that accumulated cookies during phases.
                 _as_session = _ctx_auth if _ctx_auth is not None else effective_auth
@@ -28156,6 +28201,8 @@ def main() -> None:
                     _as_landing_url  = _as_r.url
                     _as_landing_code = _as_r.status_code
                     _as_landing_body = _as_r.text[:8192]
+                    _as_canary_url   = _as_r.url
+                    _as_canary_code  = _as_r.status_code
                 except Exception:
                     pass
                 # ── SPA landing page resolution ──────────────────────────
@@ -28476,7 +28523,9 @@ def main() -> None:
                     _ka_sm = (json.loads(_ka_sm_path.read_text())
                               if _ka_sm_path.exists() else None)
                     _ka_landing = (
-                        _as_landing_url
+                        _as_canary_url
+                        if _as_canary_url and _as_canary_code == 200
+                        else _as_landing_url
                         if _as_landing_url and _as_landing_code == 200
                         else ""
                     )
@@ -29520,15 +29569,20 @@ def main() -> None:
             # remaining None slots for this role.
             try:
                 _probe_role_paths(out, target, _ctx_cfg, _ctx_label, _ctx_auth,
-                                  landing_url=_as_landing_url or "")
+                                  landing_url=_as_canary_url or _as_landing_url or "")
             except Exception:
                 pass
 
             # Store this role's session and landing URL for retroactive probing
             # by later re-discovery runs and for Phase 20 canary cross-checks.
+            # Use the requests-viable canary URL (pre-SPA resolution) — on SPA
+            # targets the Chrome-resolved URL may not work with requests sessions
+            # (browser-only: requests gets 302 to login).
             if _ctx_label != "unauthenticated":
                 _completed_role_sessions[_ctx_label] = _ctx_auth
-                if _as_landing_url and _as_landing_code == 200:
+                if _as_canary_url and _as_canary_code == 200:
+                    _role_landing_urls[_ctx_label] = _as_canary_url
+                elif _as_landing_url and _as_landing_code == 200:
                     _role_landing_urls[_ctx_label] = _as_landing_url
 
             # ── Discovery-leader check ────────────────────────────────────────
