@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.20"
+VERSION = "2.33.21"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -11439,6 +11439,12 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
     phase   = "recon"
+    # Derive origin root (scheme://host) for path-based probes.  When the
+    # target URL is a deep path like /OMT/Client/Login, admin-panel and
+    # common-paths probes must still hit the origin root (/admin, /.git/HEAD,
+    # etc.), not /OMT/Client/Login/admin.
+    _recon_parsed = urllib.parse.urlparse(url)
+    _recon_origin = f"{_recon_parsed.scheme}://{_recon_parsed.netloc}"
     vc.status(phase, "Recon", "running", "HTTP probe", 0, 10)
 
     # Wildcard detection — run before any path-based checks so brute-forcers
@@ -12531,7 +12537,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Recon", "running", "robots.txt/sitemap", 2, 10)
     for rpath in ["/robots.txt", "/sitemap.xml"]:
         try:
-            r = sess.get(url.rstrip("/") + rpath, timeout=timeout)
+            r = sess.get(_recon_origin + rpath, timeout=timeout)
             _rpath_status = r.status_code
             if r.status_code == 200 and len(r.text) > 10 \
                     and not _is_wildcard_match(r, wc_baseline):
@@ -12592,7 +12598,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         _admin_paths_iter = _ADMIN_PATHS
     for apath in _admin_paths_iter:
         try:
-            r = sess.get(url.rstrip("/") + apath, timeout=timeout, allow_redirects=False)
+            r = sess.get(_recon_origin + apath, timeout=timeout, allow_redirects=False)
             if r.status_code == 200:
                 # Wildcard baseline check: skip if response matches the catch-all pattern
                 if _is_wildcard_match(r, wc_baseline):
@@ -12604,7 +12610,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 )
                 _admin_safe = apath.lstrip("/").replace("/", "_").replace(".", "_") or "root"
                 _admin_rq, _admin_rp = _save_http_evidence(out, phase, f"admin_{_admin_safe}", r)
-                _admin_full_url = url.rstrip("/") + apath
+                _admin_full_url = _recon_origin + apath
                 out.add_finding(
                     title=f"Admin Panel Exposed: {apath}",
                     url=_admin_full_url, port=target["port"], risk=_admin_risk,
@@ -12621,10 +12627,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     _admin_redir = None
                     if r.status_code in (301, 302, 307, 308):
                         _admin_redir = r.headers.get("Location", "")
-                    _admin_full_path = _base_path.rstrip("/") + apath
                     _write_structure_map(out, target,
-                                         path_statuses={_admin_full_path: r.status_code},
-                                         path_redirects={_admin_full_path: _admin_redir} if _admin_redir else None,
+                                         path_statuses={apath: r.status_code},
+                                         path_redirects={apath: _admin_redir} if _admin_redir else None,
                                          source="recon")
                 except Exception:
                     pass
@@ -12646,12 +12651,12 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         _common_paths_iter = _COMMON_PATHS
     for cpath in _common_paths_iter:
         try:
-            r = sess.get(url.rstrip("/") + cpath, timeout=timeout, allow_redirects=False)
+            r = sess.get(_recon_origin + cpath, timeout=timeout, allow_redirects=False)
             if r.status_code == 200 and cpath in ("/.git/HEAD", "/.env") \
                     and not _is_wildcard_match(r, wc_baseline):
                 _cp_safe = cpath.lstrip("/").replace("/", "_").replace(".", "_")
                 _cp_rq, _cp_rp = _save_http_evidence(out, phase, f"sensitive_path_{_cp_safe}", r)
-                _cp_full_url = url.rstrip("/") + cpath
+                _cp_full_url = _recon_origin + cpath
                 out.add_finding(
                     title=f"Sensitive Path Accessible: {cpath}",
                     url=_cp_full_url, port=target["port"], risk="CRITICAL",
@@ -12712,7 +12717,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             "INFO",
         )
     elif gobuster and Path(wordlist).exists():
-        cmd = [gobuster, "dir", "-u", url, "-w", wordlist, "-t", _buster_threads,
+        cmd = [gobuster, "dir", "-u", _recon_origin, "-w", wordlist, "-t", _buster_threads,
                "-q", "-k", "-o", str(out_f)]
         cmd += _buster_auth_flags(sess)
         vc.log("[recon] Running gobuster ...", "INFO")
@@ -12725,7 +12730,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         found = []
         for mpath in _TOP_200_PATHS:
             try:
-                r = sess.get(url.rstrip("/") + mpath, timeout=timeout, allow_redirects=False)
+                r = sess.get(_recon_origin + mpath, timeout=timeout, allow_redirects=False)
                 if r.status_code in (200, 301, 302, 403):
                     if not _is_wildcard_match(r, wc_baseline):
                         found.append(f"{mpath} [{r.status_code}]")
@@ -12781,7 +12786,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         # false-positive directories, generating massive output file noise.
         _fer_sc = "200,204,301,302,307" if _recon_cdn else "200,204,301,302,307,401,403"
         cmd = [
-            feroxbuster, "--url", url, "--wordlist", wordlist,
+            feroxbuster, "--url", _recon_origin, "--wordlist", wordlist,
             "--depth", "2", "--threads", _fer_threads, "--quiet",
             "--status-codes", _fer_sc,
             "--output", str(fer_out), "--insecure",
@@ -12842,7 +12847,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             vc.log("[recon] Skipping file brute-force (wildcard detected)", "INFO")
         elif gobuster:
             gob_files_out = out.output_path(phase, "gobuster_files_" + target["hostname"])
-            cmd = [gobuster, "dir", "-u", url, "-w", wordlist_files, "-t", "30",
+            cmd = [gobuster, "dir", "-u", _recon_origin, "-w", wordlist_files, "-t", "30",
                    "-q", "-k", "-o", str(gob_files_out)]
             cmd += _buster_auth_flags(sess)
             vc.log("[recon] Running gobuster (files) ...", "INFO")
