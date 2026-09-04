@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.22"
+VERSION = "2.34.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -12765,11 +12765,45 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             "INFO",
         )
     elif gobuster and Path(wordlist).exists():
-        cmd = [gobuster, "dir", "-u", _recon_origin, "-w", wordlist, "-t", _buster_threads,
-               "-q", "-k", "-o", str(out_f)]
-        cmd += _buster_auth_flags(sess)
-        vc.log("[recon] Running gobuster ...", "INFO")
-        _gobuster_run(cmd, out_f, "recon", out)
+        # Run gobuster against each app-base parent for broad coverage.
+        # For a target at /OMT/Client/Login, this scans /, /OMT/, /OMT/Client/,
+        # /OMT/Client/Login/ — discovering paths at every level of the app tree.
+        _gob_auth = _buster_auth_flags(sess)
+        for _gob_idx, _gob_base in enumerate(_recon_bases):
+            _gob_label = urllib.parse.urlparse(_gob_base).path or "/"
+            _gob_slug = _gob_label.strip("/").replace("/", "_") or "root"
+            _gob_out = out.output_path(phase, f"gobuster_{_gob_slug}_{target['hostname']}")
+            cmd = [gobuster, "dir", "-u", _gob_base, "-w", wordlist, "-t", _buster_threads,
+                   "-q", "-k", "-o", str(_gob_out)]
+            cmd += _gob_auth
+            vc.log(
+                f"[recon] Running gobuster ({_gob_idx + 1}/{len(_recon_bases)}) "
+                f"against {_gob_base} ...",
+                "INFO",
+            )
+            _gobuster_run(cmd, _gob_out, "recon", out)
+            # Merge results into structure map immediately
+            if _gob_out.exists():
+                try:
+                    _sm_ps, _sm_rd = {}, {}
+                    _gob_res = _filter_buster_wildcards(
+                        _parse_gobuster_with_status(_gob_out, _gob_base), sess, timeout)
+                    for _gu, _gs, _gr in _gob_res:
+                        _sp = urllib.parse.urlparse(_gu).path or "/"
+                        _sm_ps[_sp] = _gs
+                        if _gr:
+                            _sm_rd[_sp] = _gr
+                    if _sm_ps:
+                        _write_structure_map(out, target, path_statuses=_sm_ps,
+                                             path_redirects=_sm_rd or None,
+                                             evidence_files=[str(_gob_out)],
+                                             source="gobuster")
+                except Exception:
+                    pass
+        # Keep out_f pointing at the root scan for backward compat
+        out_f = out.output_path(phase, f"gobuster_root_{target['hostname']}")
+        if not out_f.exists():
+            out_f = out.output_path(phase, "gobuster_" + target["hostname"])
     else:
         if gobuster:
             vc.log(f"[recon] gobuster found but wordlist missing: {wordlist}", "WARNING")
