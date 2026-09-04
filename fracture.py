@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.13"
+VERSION = "2.33.15"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -19277,9 +19277,14 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 if _ASPNET_INFRA_RE.search(_dq):
                     vc.log(f"[injection] dalfox: skipping ASP.NET infra param POC (__VIEWSTATE etc.)", "INFO")
                     continue
-                # Reject path-injected payloads — payload is in the path, not a query param
-                _dp = urllib.parse.urlparse(_durl).path
-                if any(c in _dp for c in ('<', '>', '"', "'", '=')):
+                # Reject path-injected payloads — payload is in the path, not a query param.
+                # Check both raw and URL-decoded path — dalfox percent-encodes
+                # special chars (%22 = ", %3E = >, %3C = <, %27 = ') so the
+                # raw path won't contain the literal char.
+                _dp_raw = urllib.parse.urlparse(_durl).path
+                _dp_dec = urllib.parse.unquote(_dp_raw)
+                if (any(c in _dp_raw for c in ('<', '>', '"', "'", '='))
+                        or any(c in _dp_dec for c in ('<', '>', '"', "'", '='))):
                     vc.log(f"[injection] dalfox: skipping path-injection POC (malformed URL)", "INFO")
                     continue
                 _valid_pocs.append(_dl)
@@ -23589,32 +23594,55 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                     # all results and we can't infer lockout absence from the
                     # status code.
                     if not _protection_marker:
-                        _json_fail_keys = (
+                        # Case-insensitive key matching — ASP.NET APIs use
+                        # PascalCase ("Success"), Node uses camelCase
+                        # ("success"), Python uses snake_case ("is_valid").
+                        _json_fail_keys = {
                             "success", "succeeded", "authenticated",
-                            "isAuthenticated", "is_authenticated",
-                            "valid", "isValid", "is_valid", "ok",
-                        )
-                        _json_err_keys = (
-                            "error", "message", "errorMessage",
+                            "isauthenticated", "is_authenticated",
+                            "valid", "isvalid", "is_valid", "ok",
+                            "result", "status", "loginsuccess",
+                            "login_success", "auth_result",
+                        }
+                        _json_err_keys = {
+                            "error", "message", "errormessage",
                             "error_message", "msg", "detail", "reason",
-                        )
+                            "description", "errors", "fault",
+                            "exceptionmessage", "exception_message",
+                        }
                         _json_fail_strs: list = []
                         for _jb in _json_bodies:
                             if not isinstance(_jb, dict):
                                 continue
-                            # Detect explicit failure flags
+                            # Build case-insensitive key lookup
+                            _jb_ci = {k.lower(): v for k, v in _jb.items()}
+                            _found_fail = False
+                            # Detect explicit failure flags (false/0/"false"/"fail"/"error")
                             for _jfk in _json_fail_keys:
-                                _jfv = _jb.get(_jfk)
-                                if _jfv is False or _jfv == 0:
+                                _jfv = _jb_ci.get(_jfk)
+                                if (_jfv is False or _jfv == 0
+                                        or (isinstance(_jfv, str)
+                                            and _jfv.lower() in (
+                                                "false", "fail", "failed",
+                                                "error", "invalid",
+                                                "unauthorized", "denied",
+                                            ))):
                                     _json_fail_strs.append(json.dumps(_jb, sort_keys=True))
+                                    _found_fail = True
                                     break
-                            else:
+                            if not _found_fail:
                                 # Detect error message fields
                                 for _jek in _json_err_keys:
-                                    _jev = _jb.get(_jek)
+                                    _jev = _jb_ci.get(_jek)
                                     if isinstance(_jev, str) and _jev:
                                         _json_fail_strs.append(json.dumps(_jb, sort_keys=True))
+                                        _found_fail = True
                                         break
+                            if not _found_fail:
+                                # Last resort: if the JSON body is small
+                                # (< 500 chars) and all responses are
+                                # identical, it's likely a uniform error.
+                                _json_fail_strs.append(json.dumps(_jb, sort_keys=True))
                         # If all JSON bodies indicate failure and are
                         # identical (same error for every attempt), the API
                         # properly rejects bad creds via JSON — the 200
@@ -23853,12 +23881,43 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
              _LOCKOUT_PASSWORD_FIELDS.search(i.get("name", ""))), "password"
         )
 
+        # ── Harvest hidden form fields ──
+        # ASP.NET WebForms (ViewState, EventValidation), CSRF tokens,
+        # and other stateful login pages require hidden fields to
+        # process a postback.  Without them the server silently re-
+        # renders the blank page — the login is never attempted.
+        _hidden_fields: dict = {}
+        _baseline_size = 0
+        if method == "POST":
+            try:
+                _form_page = sess.get(action, timeout=timeout)
+                if _form_page.status_code == 200:
+                    _baseline_size = len(_form_page.content)
+                    for _hm in re.finditer(
+                        r'<input[^>]+type=["\']?hidden["\']?[^>]*>',
+                        _form_page.text, re.I,
+                    ):
+                        _htag = _hm.group(0)
+                        _hn = re.search(r'name=["\']([^"\']+)["\']', _htag)
+                        _hv = re.search(r'value=["\']([^"\']*)["\']', _htag)
+                        if _hn:
+                            _hidden_fields[_hn.group(1)] = _hv.group(1) if _hv else ""
+                    if _hidden_fields:
+                        vc.log(
+                            f"[account_lockout] Harvested {len(_hidden_fields)} hidden "
+                            f"field(s) from {action} (baseline {_baseline_size}B)",
+                            "INFO",
+                        )
+            except Exception:
+                pass
+
         status_codes: list = []
         probe_responses: list = []  # requests.Response objects for evidence
         probe_times: list = []      # response times in seconds
         _last_r = None
         for attempt in range(10):
-            data = {user_field: "fracture_test_user", pass_field: f"wrong_pass_{attempt}"}
+            data = {**_hidden_fields, user_field: "fracture_test_user",
+                    pass_field: f"wrong_pass_{attempt}"}
             try:
                 import time as _time_lockout
                 _t0 = _time_lockout.monotonic()
@@ -23869,6 +23928,21 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                 status_codes.append(_last_r.status_code)
                 probe_responses.append(_last_r)
                 probe_times.append(round(_elapsed, 2))
+                # Re-parse hidden fields from this response for the next
+                # attempt (ASP.NET rotates ViewState on every postback).
+                if method == "POST" and _hidden_fields and _last_r.text:
+                    _new_hf: dict = {}
+                    for _hm2 in re.finditer(
+                        r'<input[^>]+type=["\']?hidden["\']?[^>]*>',
+                        _last_r.text, re.I,
+                    ):
+                        _htag2 = _hm2.group(0)
+                        _hn2 = re.search(r'name=["\']([^"\']+)["\']', _htag2)
+                        _hv2 = re.search(r'value=["\']([^"\']*)["\']', _htag2)
+                        if _hn2:
+                            _new_hf[_hn2.group(1)] = _hv2.group(1) if _hv2 else ""
+                    if _new_hf:
+                        _hidden_fields = _new_hf
                 # Check for lockout/captcha indicators
                 if re.search(r'locked|captcha|too many|rate.limit|try.again.later|'
                              r'account.*disabled|temporarily.*unavail', _last_r.text, re.I):
@@ -24037,6 +24111,30 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                         f"[account_lockout] Response size changed at {action}: "
                         f"early avg {_early_sz:.0f}B → late avg {_late_sz:.0f}B "
                         "(possible CAPTCHA/lockout insertion) — skipping",
+                        "INFO",
+                    )
+                    continue
+
+            # Baseline size match — if ALL probe responses are the same
+            # size as the initial GET (±50 bytes) AND none contain an
+            # auth-error phrase, the server likely did not process the
+            # login (e.g. ASP.NET ignored POSTs with stale ViewState).
+            if _baseline_size > 0:
+                _all_match_baseline = all(
+                    abs(len(r.content) - _baseline_size) < 50
+                    for r in probe_responses
+                )
+                _no_err_text = not any(
+                    _lockout_skip_phrases.search(
+                        re.sub(r'<[^>]+>', ' ', (r.text or "")[:4000]))
+                    for r in probe_responses
+                )
+                if _all_match_baseline and _no_err_text:
+                    vc.log(
+                        f"[account_lockout] All probe responses match baseline "
+                        f"GET size ({_baseline_size}B ±50B) with no auth-error "
+                        f"text — server did not process login attempts; "
+                        "skipping finding to avoid false positive.",
                         "INFO",
                     )
                     continue
