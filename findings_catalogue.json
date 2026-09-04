@@ -1,8 +1,8 @@
 {
-  "version": "1.6.0",
+  "version": "1.7.0",
   "tool": "fracture",
   "generated": "(complete: upgraded existing + scaffolded missing)",
-  "total": 404,
+  "total": 424,
   "from_existing": 340,
   "newly_scaffolded": 64,
   "findings": [
@@ -18276,6 +18276,932 @@
       "impact": "",
       "_scaffold_from": "fracture.py:12459",
       "_template": false
+    },
+    {
+      "id": "FR-405",
+      "title": "BFLA: Role '{low_role}' Can Access Admin Path",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "cwe": [
+        "CWE-285"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A01:2025 Broken Access Control",
+      "owasp_api": "API5:2023 Broken Function Level Authorization",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "AC-3",
+        "AC-6"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "7.2.2"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1078",
+          "tactic": "Initial Access",
+          "name": "Valid Accounts"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Implement server-side role-based access control checks on all administrative endpoints. Deny access for roles below the required privilege level and return 403 Forbidden.",
+      "remediation_component": "Application",
+      "remediation_category": "Access Control",
+      "remediation_effort": "Moderate",
+      "validation_tools": [],
+      "description": "A lower-privileged role can access an administrative endpoint that should be restricted to higher-privilege roles, indicating a Broken Function Level Authorization (BFLA) vulnerability.",
+      "impact": "An attacker with a low-privilege account can access administrative functionality, potentially managing users, configurations, or sensitive data beyond their intended authorization level."
+    },
+    {
+      "id": "FR-406",
+      "title": "CBC Mode Cipher Suites Accepted",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "cwe": [
+        "CWE-327"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SC-8",
+        "SC-13"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Disable CBC-mode cipher suites on the server. Prefer AEAD ciphers such as AES-GCM or ChaCha20-Poly1305.",
+      "remediation_component": "Network",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "testssl",
+        "sslscan",
+        "nmap"
+      ],
+      "description": "The server accepts TLS cipher suites using Cipher Block Chaining (CBC) mode, which are vulnerable to padding oracle attacks such as BEAST and LUCKY13.",
+      "impact": "An attacker may exploit CBC padding oracle vulnerabilities to decrypt TLS traffic or recover plaintext data from encrypted sessions."
+    },
+    {
+      "id": "FR-407",
+      "title": "Cipher Suites Without Forward Secrecy",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "cwe": [
+        "CWE-326"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SC-8",
+        "SC-12"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Configure the server to only accept cipher suites with forward secrecy (ECDHE or DHE key exchange). Disable static RSA key exchange.",
+      "remediation_component": "Network",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "testssl",
+        "sslscan"
+      ],
+      "description": "The server accepts cipher suites that do not provide forward secrecy (e.g., RSA key exchange without ECDHE or DHE), meaning past sessions can be decrypted if the server's private key is compromised.",
+      "impact": "If the server's private key is later compromised, all previously recorded TLS sessions using these cipher suites can be retroactively decrypted, exposing all historical encrypted communications."
+    },
+    {
+      "id": "FR-408",
+      "title": "HTTP Request Smuggling \u2014 CL.0 Client-Side Desync",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "cwe": [
+        "CWE-444"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SI-10",
+        "SC-7"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1557",
+          "tactic": "Credential Access",
+          "name": "Adversary-in-the-Middle"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Ensure all server components and reverse proxies consistently handle Content-Length headers. Disable HTTP/1.1 connection reuse where not required, or upgrade to HTTP/2 end-to-end.",
+      "remediation_component": "Network",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Significant",
+      "validation_tools": [],
+      "description": "The server is vulnerable to CL.0 client-side desync, a variant of HTTP request smuggling where the server ignores a Content-Length header on requests to specific endpoints, causing the connection to desynchronize.",
+      "impact": "An attacker can poison the connection between a victim's browser and the server, hijacking subsequent requests to steal credentials, bypass access controls, or deliver malicious responses to other users."
+    },
+    {
+      "id": "FR-409",
+      "title": "HTTP Request Smuggling \u2014 CL.TE Desync",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "cwe": [
+        "CWE-444"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SI-10",
+        "SC-7"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Ensure all servers in the chain use the same method to determine request boundaries. Configure the front-end to normalize ambiguous requests and reject those with both CL and TE headers.",
+      "remediation_component": "Network",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Significant",
+      "validation_tools": [],
+      "description": "The front-end server uses Content-Length while the back-end uses Transfer-Encoding, allowing an attacker to smuggle a second request within the body of the first.",
+      "impact": "An attacker can bypass security controls, poison web caches, hijack other users' requests, or escalate privileges by injecting malicious requests that bypass the front-end proxy."
+    },
+    {
+      "id": "FR-410",
+      "title": "HTTP Request Smuggling \u2014 TE Obfuscation Desync",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "cwe": [
+        "CWE-444"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SI-10",
+        "SC-7"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Reject requests with obfuscated Transfer-Encoding headers. Ensure all proxies and servers normalize and validate TE headers identically.",
+      "remediation_component": "Network",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Significant",
+      "validation_tools": [],
+      "description": "The server is vulnerable to Transfer-Encoding obfuscation, where variations of the TE header (e.g., extra whitespace, line folding, chunked1) cause front-end and back-end to disagree on request boundaries.",
+      "impact": "An attacker can exploit TE header parsing differences to smuggle requests past the front-end, enabling cache poisoning, request hijacking, and access control bypass."
+    },
+    {
+      "id": "FR-411",
+      "title": "HTTP Request Smuggling \u2014 TE.CL Desync",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "cwe": [
+        "CWE-444"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SI-10",
+        "SC-7"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Ensure all servers in the chain agree on request boundary determination. Configure back-end servers to prefer Transfer-Encoding over Content-Length, or reject ambiguous requests.",
+      "remediation_component": "Network",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Significant",
+      "validation_tools": [],
+      "description": "The front-end server uses Transfer-Encoding while the back-end uses Content-Length, allowing an attacker to smuggle a second request by manipulating chunked encoding boundaries.",
+      "impact": "An attacker can bypass security controls, poison web caches, hijack other users' requests, or escalate privileges by injecting malicious requests past the front-end proxy."
+    },
+    {
+      "id": "FR-412",
+      "title": "Host-Header SSRF Surface ({label})",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "cwe": [
+        "CWE-918",
+        "CWE-644"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A10:2025 Server-Side Request Forgery",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SI-10",
+        "AC-4"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1090",
+          "tactic": "Command and Control",
+          "name": "Proxy"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Validate the Host header against an allowlist of expected hostnames. Do not use the Host header value in server-side URL construction or redirect logic.",
+      "remediation_component": "Application",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Moderate",
+      "validation_tools": [],
+      "description": "The application reflects or acts upon the Host header value in server-side operations, creating a potential Server-Side Request Forgery (SSRF) attack surface via host header injection.",
+      "impact": "An attacker can manipulate the Host header to redirect internal server requests to attacker-controlled infrastructure, potentially accessing internal services, exfiltrating data, or bypassing authentication mechanisms."
+    },
+    {
+      "id": "FR-413",
+      "title": "JWT Signing Secret Brute-Force Recovered ({alg})",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "cwe": [
+        "CWE-347",
+        "CWE-521"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "IA-5",
+        "SC-12"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "8.3.6"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1110",
+          "tactic": "Credential Access",
+          "name": "Brute Force"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Use a cryptographically strong random secret (256+ bits of entropy) for HMAC-based JWT signing. Consider switching to asymmetric signing (RS256/ES256) where the private key never leaves the server.",
+      "remediation_component": "Application",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Easy",
+      "validation_tools": [],
+      "description": "The JWT signing secret was recovered through brute-force or dictionary attack, allowing an attacker to forge valid tokens with arbitrary claims.",
+      "impact": "An attacker can create forged JWT tokens with elevated privileges, impersonate any user, bypass authentication entirely, and gain unauthorized access to all application functionality."
+    },
+    {
+      "id": "FR-414",
+      "title": "Load Balancer Detected: {_lb_label}",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "INFO",
+      "cwe": [],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SI-11"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Suppress load balancer identification headers (e.g., Via, X-Served-By, X-Cache) in client-facing responses. This is informational and does not require immediate remediation.",
+      "remediation_component": "Network",
+      "remediation_category": "Configuration",
+      "remediation_effort": "Easy",
+      "validation_tools": [],
+      "description": "A load balancer, CDN, or reverse proxy was detected in front of the target application based on response headers, cookies, or behavioral fingerprints.",
+      "impact": "Knowledge of the load balancing infrastructure helps an attacker understand the network topology and may reveal vendor-specific vulnerabilities or bypass techniques for WAF/IDS systems."
+    },
+    {
+      "id": "FR-415",
+      "title": "Missing Subresource Integrity \u2014 {entry['tag']} from {entry['host']}",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "LOW",
+      "cwe": [
+        "CWE-353"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A08:2025 Software and Data Integrity Failures",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SI-7"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Add integrity and crossorigin attributes to all <script> and <link> tags loading external resources. Generate SRI hashes using sha384 or sha512.",
+      "remediation_component": "Application",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Easy",
+      "validation_tools": [],
+      "description": "An HTML page loads a script or stylesheet from an external CDN or third-party host without a Subresource Integrity (SRI) hash attribute, allowing a compromised CDN to inject malicious code.",
+      "impact": "If the external CDN is compromised, an attacker can inject arbitrary JavaScript or CSS into pages that include the resource, enabling cross-site scripting, credential theft, or session hijacking for all users."
+    },
+    {
+      "id": "FR-416",
+      "title": "Nikto: {_nik_title}",
+      "aliases": [],
+      "source_tools": [
+        "fracture",
+        "nikto"
+      ],
+      "risk": "MEDIUM",
+      "cwe": [],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A06:2025 Vulnerable and Outdated Components",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SI-2"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Review the specific Nikto finding details and apply the recommended remediation for the identified vulnerability or misconfiguration.",
+      "remediation_component": "Application",
+      "remediation_category": "Configuration",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "nikto"
+      ],
+      "description": "A web server vulnerability or misconfiguration was identified by the Nikto scanner that does not map to a known Fracture finding category. The specific details are in the finding title.",
+      "impact": "The specific impact depends on the vulnerability identified. Nikto findings typically indicate server misconfigurations, information disclosure, or known software vulnerabilities that could be exploited for unauthorized access or data exposure."
+    },
+    {
+      "id": "FR-417",
+      "title": "Non-Standard Cipher Suites Accepted",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "cwe": [
+        "CWE-327"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SC-8",
+        "SC-13"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Configure the server to accept only well-known, IANA-registered cipher suites. Remove any experimental, vendor-specific, or non-standard cipher suites from the configuration.",
+      "remediation_component": "Network",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "testssl",
+        "sslscan"
+      ],
+      "description": "The server accepts non-standard or experimental TLS cipher suites that may not have undergone the same level of cryptographic review as standard IANA-registered suites.",
+      "impact": "Non-standard cipher suites may contain implementation flaws or use untested cryptographic constructions, potentially allowing an attacker to exploit weaknesses for traffic decryption or session compromise."
+    },
+    {
+      "id": "FR-418",
+      "title": "Reflected Cross-Site Scripting (XSS) \u2014 POST Parameter",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "cwe": [
+        "CWE-79"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A03:2025 Injection",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SI-10"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "6.2.4"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1059.007",
+          "tactic": "Execution",
+          "name": "JavaScript"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Implement context-aware output encoding for all user-supplied data reflected in HTML responses. Use Content-Security-Policy to mitigate residual XSS risks.",
+      "remediation_component": "Application",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "nuclei",
+        "nikto",
+        "burp"
+      ],
+      "description": "A POST request parameter is reflected in the server's response without proper output encoding, allowing injection of malicious JavaScript that executes in the victim's browser context.",
+      "impact": "An attacker can craft a malicious form submission that, when submitted by a victim, executes arbitrary JavaScript in their browser. This enables session hijacking, credential theft, account takeover, and delivery of malicious content."
+    },
+    {
+      "id": "FR-419",
+      "title": "SHA-1 HMAC Cipher Suites Accepted",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "cwe": [
+        "CWE-328"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SC-13"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Configure the server to prefer cipher suites using SHA-256 or SHA-384 for HMAC. Disable all SHA-1-based cipher suites.",
+      "remediation_component": "Network",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "testssl",
+        "sslscan"
+      ],
+      "description": "The server accepts TLS cipher suites using SHA-1 for HMAC authentication. SHA-1 is considered cryptographically weak due to demonstrated collision attacks.",
+      "impact": "While practical exploitation of SHA-1 HMAC in TLS is currently difficult, the use of SHA-1 does not meet modern cryptographic standards. Future attacks may make exploitation feasible, and compliance frameworks increasingly prohibit SHA-1."
+    },
+    {
+      "id": "FR-420",
+      "title": "SSL/TLS Forward Secrecy: {_tsf_id}",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "cwe": [
+        "CWE-326"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SC-8",
+        "SC-12"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Enable forward secrecy by configuring the server to use ECDHE or DHE key exchange exclusively. Disable static RSA key exchange and any cipher suites that do not provide forward secrecy.",
+      "remediation_component": "Network",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "testssl"
+      ],
+      "description": "A specific forward secrecy configuration issue was identified by testssl. The finding ID provides details on the exact cipher suite or key exchange mechanism lacking forward secrecy.",
+      "impact": "Without forward secrecy, if the server's long-term private key is compromised at any point in the future, all previously recorded encrypted sessions using affected cipher suites can be retroactively decrypted."
+    },
+    {
+      "id": "FR-421",
+      "title": "SSL/TLS Vulnerability (Potential): LUCKY13",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "LOW",
+      "cwe": [
+        "CWE-208"
+      ],
+      "cve_examples": [
+        "CVE-2013-0169"
+      ],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SC-8",
+        "SC-13"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Disable CBC-mode cipher suites and prefer AEAD ciphers (AES-GCM, ChaCha20-Poly1305). If CBC must be supported, ensure the TLS implementation includes constant-time MAC verification.",
+      "remediation_component": "Network",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "testssl"
+      ],
+      "description": "The server may be vulnerable to the LUCKY13 timing attack, a padding oracle attack against TLS CBC-mode cipher suites that exploits timing differences in MAC verification.",
+      "impact": "A sophisticated attacker on the network path could potentially recover plaintext from TLS-encrypted sessions by measuring timing variations in the server's response to crafted ciphertext. The attack is theoretically possible but practically difficult to exploit."
+    },
+    {
+      "id": "FR-422",
+      "title": "TLSv1.3 Not Supported",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "cwe": [
+        "CWE-326"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SC-8"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Enable TLS 1.3 support on the server. Most modern web servers and load balancers support TLS 1.3 with a configuration change.",
+      "remediation_component": "Network",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "testssl",
+        "sslscan",
+        "nmap"
+      ],
+      "description": "The server does not support TLS 1.3, the latest version of the Transport Layer Security protocol, which provides improved security and performance over TLS 1.2.",
+      "impact": "Without TLS 1.3, the server lacks protections including mandatory forward secrecy, removal of legacy cipher suites, encrypted handshake, and 0-RTT resumption. Clients connecting with TLS 1.2 may use weaker cipher suites."
+    },
+    {
+      "id": "FR-423",
+      "title": "Vulnerable Component: {pname} {version}",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "cwe": [
+        "CWE-1104"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A06:2025 Vulnerable and Outdated Components",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SI-2",
+        "RA-5"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "6.3.1"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Update the identified component to the latest patched version. If an update is not available, evaluate compensating controls or consider replacing the component with a maintained alternative.",
+      "remediation_component": "Application",
+      "remediation_category": "Patch Management",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "nuclei",
+        "retire.js"
+      ],
+      "description": "A third-party software component with known vulnerabilities was identified in the application's technology stack. The specific component name and version are in the finding title.",
+      "impact": "Known vulnerabilities in third-party components can be exploited by attackers using publicly available exploit code. Impact ranges from information disclosure to remote code execution depending on the specific vulnerability."
+    },
+    {
+      "id": "FR-424",
+      "title": "{proto} Enabled",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "cwe": [
+        "CWE-327"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SC-8"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Disable the deprecated protocol on the server and enforce TLS 1.2 as the minimum supported version, with TLS 1.3 preferred.",
+      "remediation_component": "Network",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "testssl",
+        "sslscan",
+        "nmap"
+      ],
+      "description": "A deprecated or insecure protocol version is enabled on the server. The specific protocol (e.g., SSLv3, TLSv1.0, TLSv1.1) is identified in the finding title.",
+      "impact": "Deprecated protocols contain known vulnerabilities (POODLE for SSLv3, BEAST for TLSv1.0) that allow attackers to decrypt encrypted traffic. Compliance frameworks universally prohibit these protocols."
     }
   ]
 }

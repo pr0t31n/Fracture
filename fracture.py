@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.21"
+VERSION = "2.33.22"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3279,6 +3279,22 @@ class OutputManager:
                 "broken object level authorization (idor / bola)",
                 "web files downloaded",
                 "web screenshot captured",
+                # Nikto/nuclei normalised titles that overlap with Fracture
+                # native findings — merge globally so the same header/cookie/
+                # method finding from shcheck + nikto + nuclei produces one
+                # entry with combined affected paths + merged sources.
+                "session cookie missing",
+                "directory listing enabled",
+                "http trace method enabled",
+                "http methods",
+                "sensitive paths disclosed in robots.txt",
+                "verbose error messages",
+                "cors misconfiguration",
+                "cross-site request forgery (csrf)",
+                "admin panel exposed",
+                "sensitive file exposed",
+                "sensitive path accessible:",
+                "deprecated protocol enabled:",
             )
             _is_global = any(_title_lower.startswith(_p) for _p in _GLOBAL_MERGE_PREFIXES)
             _norm_key  = (_title_lower, "" if _is_global else url.strip(),
@@ -15889,6 +15905,97 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         _write_target_profile(out, cookies=_hdr_cookie_names)
     except Exception:
         pass
+
+    # ── Per-endpoint header deviation sweep ──────────────────────────────
+    # Test security headers on ALL reachable structure_map paths using the
+    # authenticated session.  Report deviations from the baseline (missing
+    # headers that were present on the base URL).  This catches pages served
+    # by different backend components with different configurations.
+    _SH_USEFUL_CODES = {200, 201, 202, 204, 401, 403}
+    _SH_MAX_PATHS = 50   # cap to avoid unbounded scan time
+    try:
+        _sh_sm_path = out.root / "structure_map.json"
+        if _sh_sm_path.exists():
+            _sh_sm = json.loads(_sh_sm_path.read_text())
+            _sh_base_url = url.rstrip("/")
+            _sh_parsed = urllib.parse.urlparse(url)
+            _sh_origin = f"{_sh_parsed.scheme}://{_sh_parsed.netloc}"
+            _sh_paths = _sh_sm.get("paths", {})
+            _sh_checked = 0
+            _sh_deviated = 0
+            for _shp in sorted(_sh_paths.keys()):
+                if _sh_checked >= _SH_MAX_PATHS:
+                    break
+                # Filter to useful status codes
+                _shp_info = _sh_paths[_shp]
+                _shp_code = None
+                if isinstance(_shp_info, dict):
+                    _shp_code = _shp_info.get("status")
+                    if _shp_code is None:
+                        for _shv in _shp_info.values():
+                            if isinstance(_shv, int) and _shv in _SH_USEFUL_CODES:
+                                _shp_code = _shv
+                                break
+                if isinstance(_shp_code, int) and _shp_code not in _SH_USEFUL_CODES:
+                    continue
+                _sh_full = _sh_origin + _shp
+                if _sh_full == url:
+                    continue  # already tested as baseline
+                try:
+                    _shr = sess.get(_sh_full, timeout=timeout, allow_redirects=True)
+                    if _shr.status_code not in _SH_USEFUL_CODES:
+                        continue
+                    _sh_checked += 1
+                    _sh_ep_hdrs = _shr.headers
+                    # Check each security header that was present on the base
+                    for _sh_hname in _base_sec_hdrs_present:
+                        if _sh_hname not in _sh_ep_hdrs:
+                            _sh_deviated += 1
+                            out.add_finding(
+                                title=f"Missing Security Header: {_sh_hname}",
+                                url=_sh_full, port=target["port"],
+                                risk="MEDIUM",
+                                description=(
+                                    f"The security header {_sh_hname} is present on the base URL "
+                                    f"({url}) but missing from {_shp}. This indicates inconsistent "
+                                    "security header configuration across the application, likely "
+                                    "because this endpoint is served by a different backend component."
+                                ),
+                                output=f"Missing: {_sh_hname}\nEndpoint: {_shp}",
+                                sources="fracture-headers",
+                                service=target["scheme"],
+                                affected=_shp,
+                                owasp="A05:2025 Security Misconfiguration",
+                                nist="CM-7",
+                                remediation=(
+                                    f"Ensure {_sh_hname} is set consistently across all "
+                                    "application endpoints, including API routes and "
+                                    "server-side-rendered pages."
+                                ),
+                                command=f"curl -skI {_sh_full}",
+                                http_code=_shr.status_code,
+                            )
+                    # Also check for headers missing from baseline that are present here
+                    for _sh_hname in _base_sec_hdrs_absent:
+                        if _sh_hname in _sh_ep_hdrs:
+                            # Header present here but missing from base — still a
+                            # finding against the base URL (already reported), but
+                            # worth noting the inconsistency in the log.
+                            vc.log(
+                                f"[headers] {_sh_hname} present on {_shp} but missing from base",
+                                "INFO",
+                            )
+                except Exception:
+                    pass
+            if _sh_checked:
+                vc.log(
+                    f"[headers] Endpoint header sweep: {_sh_checked} paths checked, "
+                    f"{_sh_deviated} deviation(s) found",
+                    "SUCCESS" if not _sh_deviated else "WARNING",
+                )
+    except Exception as _shsw_err:
+        vc.log(f"[headers] Endpoint sweep error: {_shsw_err}", "WARNING")
+
     vc.status(phase, "Security Headers", "complete", "Done", 5, 5)
     vc.log("[headers] Phase complete", "SUCCESS")
 
@@ -21501,10 +21608,734 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
 
 
 # ─────────────────────────────────────────────
-# Phase 9: Vulnerability Scan
+# Phase 9: Vulnerability Scan — finding normalization
 # ─────────────────────────────────────────────
 _NUCLEI_SEVERITY_MAP = {"critical": "CRITICAL", "high": "HIGH",
                         "medium": "MEDIUM", "low": "LOW", "info": "INFO"}
+
+
+
+
+# ── Nikto finding normalisation ──────────────────────────────────────────────
+# Maps nikto msg patterns to existing Fracture finding titles so they merge.
+# Each entry: (regex_on_msg, fracture_title, risk, owasp, nist, remediation)
+# Checked in order — first match wins.  Fallback: "Nikto: {first_sentence}".
+_NIKTO_NORM: "list[tuple]" = [
+    # ── Security headers ──
+    (r"X-Frame-Options header",
+     "Missing Security Header: X-Frame-Options", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Add 'X-Frame-Options: DENY' or 'SAMEORIGIN' response header."),
+    (r"X-Content-Type-Options header",
+     "Missing Security Header: X-Content-Type-Options", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Add 'X-Content-Type-Options: nosniff' response header."),
+    (r"Strict-Transport-Security|HSTS",
+     "Missing Security Header: Strict-Transport-Security", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Add 'Strict-Transport-Security' header with appropriate max-age."),
+    (r"Content-Security-Policy|CSP header",
+     "Missing Security Header: Content-Security-Policy", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Implement a Content-Security-Policy header."),
+    (r"X-XSS-Protection header",
+     "Missing Security Header: X-XSS-Protection", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Add 'X-XSS-Protection: 0' header (CSP supersedes this)."),
+    (r"Permissions-Policy|Feature-Policy",
+     "Missing Security Header: Permissions-Policy", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Implement a Permissions-Policy header."),
+    (r"Referrer-Policy",
+     "Missing Security Header: Referrer-Policy", "LOW",
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Add a Referrer-Policy header."),
+    # ── Server / technology disclosure ──
+    (r"[Rr]etrieved\s+server\s+header|server.*header.*version|retrieved.*server.*banner|(?:Apache|nginx|IIS|Microsoft).*server header",
+     "Header Data Leakage: Server", "LOW",
+     "A05:2025 Security Misconfiguration", "SI-11",
+     "Suppress or generalise the Server header."),
+    (r"X-Powered-By",
+     "Header Data Leakage: X-Powered-By", "LOW",
+     "A05:2025 Security Misconfiguration", "SI-11",
+     "Remove the X-Powered-By header."),
+    (r"X-AspNet-Version",
+     "Header Data Leakage: X-AspNet-Version", "LOW",
+     "A05:2025 Security Misconfiguration", "SI-11",
+     "Remove the X-AspNet-Version header via web.config."),
+    # ── SSL/TLS ──
+    (r"SSL cert.*expir|certificate.*expir",
+     "SSL/TLS Certificate: Expired", "HIGH",
+     "A02:2025 Cryptographic Failures", "SC-17",
+     "Renew the SSL/TLS certificate before expiration."),
+    (r"self.signed cert|self-signed",
+     "SSL/TLS Certificate: Self-Signed", "MEDIUM",
+     "A02:2025 Cryptographic Failures", "SC-17",
+     "Replace self-signed certificate with one from a trusted CA."),
+    (r"SSLv[23]|TLSv1\.0|TLSv1\.1|deprecated.*(?:SSL|TLS)",
+     "SSL/TLS Vulnerability: Deprecated Protocol Version", "MEDIUM",
+     "A02:2025 Cryptographic Failures", "SC-8",
+     "Disable deprecated TLS/SSL protocols; require TLS 1.2+."),
+    # ── Cookies ──
+    (r"cookie.*httponly|httponly.*flag.*not set",
+     "Missing Secure Cookie Attribute: HttpOnly", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SC-23",
+     "Set the HttpOnly flag on session cookies."),
+    (r"cookie.*secure.*flag|secure.*flag.*not set",
+     "Missing Secure Cookie Attribute: Secure", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SC-23",
+     "Set the Secure flag on session cookies."),
+    (r"cookie.*samesite|samesite.*not\s+set",
+     "Missing Secure Cookie Attribute: SameSite", "LOW",
+     "A05:2025 Security Misconfiguration", "SC-23",
+     "Set SameSite=Strict or SameSite=Lax on session cookies."),
+    # ── Directory listing ──
+    (r"directory\s*(?:listing|indexing|browsing)\s*(?:enabled|found|is\s+enabled)|index\s+of\s+/",
+     "Directory Listing Enabled", "MEDIUM",
+     "A01:2025 Broken Access Control", "CM-7",
+     "Disable directory listing on the web server."),
+    # ── HTTP methods ──
+    (r"(?:OPTIONS|TRACE|PUT|DELETE).*method.*(?:enabled|allowed|active)",
+     "HTTP Methods — Dangerous Methods Enabled (PUT/DELETE/TRACE)", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Disable unnecessary HTTP methods (TRACE, PUT, DELETE, OPTIONS)."),
+    (r"TRACE.*method|cross.site.tracing|XST",
+     "HTTP TRACE Method Enabled (Cross-Site Tracing)", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Disable the TRACE method on the web server."),
+    # ── Exposed files / paths ──
+    (r"phpinfo\(\)|\/phpinfo\.php|\/info\.php",
+     "Sensitive File Exposed: phpinfo()", "HIGH",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Remove phpinfo() files from production servers."),
+    (r"\/\.env\b",
+     "Sensitive Path Accessible: /.env", "CRITICAL",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Block public access to .env files."),
+    (r"\/\.git\b",
+     "Sensitive Path Accessible: /.git", "CRITICAL",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Block public access to .git directories."),
+    (r"\/\.svn\b|\/\.cvs\b",
+     "Sensitive Path Accessible: .svn/.cvs", "HIGH",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Block public access to version control directories."),
+    (r"(?:backup|\.bak|\.old|\.orig|\.save|\.swp|~).*(?:file|found)",
+     "Sensitive File Exposed", "HIGH",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Remove backup files from production web roots."),
+    (r"(?:admin|administrator|manager|console|dashboard).*(?:found|accessible|interface|panel)",
+     "Admin Panel Exposed", "HIGH",
+     "A05:2025 Security Misconfiguration", "AC-3",
+     "Restrict admin interfaces by IP allowlist or VPN."),
+    (r"default.*(?:page|file|install|welcome|content)|(?:IIS|Apache).*(?:default|welcome)",
+     "Sensitive File Exposed", "LOW",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Remove default installation pages from production servers."),
+    # ── Clickjacking ──
+    (r"clickjack",
+     "Missing Security Header: X-Frame-Options", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Add X-Frame-Options or CSP frame-ancestors to prevent clickjacking."),
+    # ── CORS ──
+    (r"CORS.*(?:allow|config|misconfigur|wildcard|\*)",
+     "CORS Misconfiguration Allowing Credential Leakage", "HIGH",
+     "A01:2025 Broken Access Control", "AC-4",
+     "Review CORS configuration; do not reflect arbitrary origins with credentials."),
+    # ── Anti-CSRF ──
+    (r"CSRF|cross.site request forgery",
+     "Cross-Site Request Forgery (CSRF) — Missing Token", "MEDIUM",
+     "A01:2025 Broken Access Control", "SC-23",
+     "Implement anti-CSRF tokens on state-changing forms."),
+    # ── Error messages ──
+    (r"error.*(?:messag|page|disclos)|stack.*trace|debug.*(?:info|enabled|mode)",
+     "Verbose Error Messages — Stack Trace Disclosed", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SI-11",
+     "Implement custom error pages; disable verbose errors in production."),
+    # ── robots.txt ──
+    (r"robots\.txt.*(?:contains|entry|found|entries|file)",
+     "Sensitive Paths Disclosed in robots.txt", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Review robots.txt for sensitive path disclosure."),
+    # ── SSL/TLS — wildcard cert ──
+    (r"wildcard certificate",
+     "SSL/TLS Certificate Information", "INFO",
+     "A02:2025 Cryptographic Failures", "SC-17",
+     "Ensure wildcard certificates are appropriate for the environment."),
+    # ── SSL/TLS — BREACH ──
+    (r"BREACH",
+     "SSL/TLS Vulnerability (Potential): BREACH", "MEDIUM",
+     "A02:2025 Cryptographic Failures", "SC-8",
+     "Disable HTTP compression on pages serving sensitive data."),
+    # ── CDN / WAF detection ──
+    (r"(?:Cloudflare|Incapsula|Akamai|AWS\s*CloudFront).*(?:detected|found)",
+     "CDN / WAF Detected", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "CDN/WAF presence noted — informational."),
+    # ── ETag inode leakage ──
+    (r"(?:ETag|etag).*(?:inode|leak)|leak.*inode",
+     "Header Data Leakage: ETag", "LOW",
+     "A05:2025 Security Misconfiguration", "SI-11",
+     "Configure the web server to suppress inode information from ETag headers."),
+    # ── HTTP/3 alt-svc ──
+    (r"alt-svc.*HTTP/3",
+     "HTTP/3 (Alt-Svc) Advertised", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "HTTP/3 advertisement noted — verify configuration is secure."),
+    # ── Shellshock ──
+    (r"[Ss]hellshock|CVE-2014-6271",
+     "Remote Code Execution: Shellshock (CVE-2014-6271)", "CRITICAL",
+     "A06:2025 Vulnerable and Outdated Components", "SI-2",
+     "Patch bash to a version not vulnerable to Shellshock."),
+    # ── MS10-070 padding oracle ──
+    (r"MS10-070|padding oracle|ScriptResource\.axd",
+     "Cryptographic Padding Oracle (MS10-070)", "HIGH",
+     "A02:2025 Cryptographic Failures", "SC-8",
+     "Apply the MS10-070 security patch to the ASP.NET installation."),
+]
+_NIKTO_NORM_COMPILED = [(re.compile(p, re.IGNORECASE), t, r, o, n, rm)
+                         for p, t, r, o, n, rm in _NIKTO_NORM]
+
+
+_NIKTO_DYN_HEADER = re.compile(
+    r"[Ss]uggested security header (?:is )?missing:\s*([A-Za-z0-9_-]+)", re.IGNORECASE)
+_NIKTO_DYN_UNCOMMON = re.compile(
+    r"[Uu]ncommon header\(?s?\)?\s+['\"]?([A-Za-z0-9_-]+)['\"]?\s+found", re.IGNORECASE)
+
+
+def _normalize_nikto(vuln: dict) -> dict:
+    """Map a nikto vulnerability dict to a Fracture-convention finding dict."""
+    msg = vuln.get("msg", "").strip()
+    _nik_id = vuln.get("id", "")
+
+    # Dynamic extractions checked first — these build the title from
+    # captured groups so the table can't handle them statically.
+    _m = _NIKTO_DYN_HEADER.search(msg)
+    if _m:
+        # Title-Case the header name: "strict-transport-security" →
+        # "Strict-Transport-Security" so it matches shcheck / Fracture native.
+        _hdr = "-".join(w.capitalize() for w in _m.group(1).strip().split("-"))
+        return {"title": f"Missing Security Header: {_hdr}", "risk": "LOW",
+                "owasp": "A05:2025 Security Misconfiguration", "nist": "SC-8",
+                "remediation": f"Configure the {_hdr} response header."}
+    _m = _NIKTO_DYN_UNCOMMON.search(msg)
+    if _m:
+        _hdr = _m.group(1).strip()
+        return {"title": f"Unknown Header Identified: {_hdr}", "risk": "INFO",
+                "owasp": "A05:2025 Security Misconfiguration", "nist": "SI-11",
+                "remediation": f"Review the {_hdr} header for information disclosure."}
+
+    # Table-driven normalisation — first match wins.
+    for _rx, _title, _risk, _owasp, _nist, _remed in _NIKTO_NORM_COMPILED:
+        if _rx.search(msg):
+            return {"title": _title, "risk": _risk, "owasp": _owasp,
+                    "nist": _nist, "remediation": _remed}
+
+    # Fallback: use first sentence of msg as title (no "Nikto:" prefix so
+    # identical findings from different tools still merge by title).
+    _fb_title = msg.split(".")[0].strip() if msg else f"Nikto ID {_nik_id}"
+    if len(_fb_title) > 120:
+        _fb_title = _fb_title[:117] + "..."
+    return {"title": _fb_title, "risk": "MEDIUM",
+            "owasp": "A05:2025 Security Misconfiguration", "nist": "SI-2",
+            "remediation": "Review and remediate the identified web server issue."}
+
+
+# ── Nuclei finding normalisation ─────────────────────────────────────────────
+# Maps nuclei template-id patterns to existing Fracture finding titles.
+# Each entry: (regex_on_template_id, fracture_title_or_callable, risk_override)
+# risk_override=None means use nuclei's own severity. Checked in order.
+_NUCLEI_NORM: "list[tuple]" = [
+    # ── Security headers ──
+    (r"^missing-x-frame-options$|x-frame-options",
+     "Missing Security Header: X-Frame-Options", None,
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Add 'X-Frame-Options: DENY' or 'SAMEORIGIN' response header."),
+    (r"^missing-csp$|content-security-policy|csp-missing",
+     "Missing Security Header: Content-Security-Policy", None,
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Implement a Content-Security-Policy header."),
+    (r"^missing-hsts$|strict-transport-security|hsts-missing",
+     "Missing Security Header: Strict-Transport-Security", None,
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Add Strict-Transport-Security header with appropriate max-age."),
+    (r"^missing-x-content-type-options$|x-content-type-options",
+     "Missing Security Header: X-Content-Type-Options", None,
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Add 'X-Content-Type-Options: nosniff' response header."),
+    (r"^permissions-policy$|^missing-permissions-policy$|feature-policy",
+     "Missing Security Header: Permissions-Policy", None,
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Implement a Permissions-Policy header."),
+    (r"^referrer-policy$|^missing-referrer-policy$",
+     "Missing Security Header: Referrer-Policy", None,
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Add a Referrer-Policy header."),
+    # ── SSL/TLS ──
+    (r"expired-ssl|ssl-cert-expired",
+     "SSL/TLS Certificate: Expired", "HIGH",
+     "A02:2025 Cryptographic Failures", "SC-17",
+     "Renew the SSL/TLS certificate."),
+    (r"self-signed-ssl|self-signed-cert",
+     "SSL/TLS Certificate: Self-Signed", "MEDIUM",
+     "A02:2025 Cryptographic Failures", "SC-17",
+     "Replace self-signed certificate with one from a trusted CA."),
+    (r"mismatched-ssl|ssl-hostname-mismatch|ssl-cert-mismatch",
+     "SSL/TLS Certificate: Hostname Mismatch", "HIGH",
+     "A02:2025 Cryptographic Failures", "SC-17",
+     "Ensure the certificate CN/SAN matches the hostname."),
+    (r"tls-version|deprecated-tls|ssl-deprecated|sslv[23]|tlsv1[.-]0|tlsv1[.-]1",
+     "SSL/TLS Vulnerability: Deprecated Protocol Version", None,
+     "A02:2025 Cryptographic Failures", "SC-8",
+     "Disable deprecated TLS/SSL protocols; require TLS 1.2+."),
+    (r"weak-cipher|obsolete-cipher|sweet32|rc4|des-cbc|null-cipher",
+     "SSL/TLS Ciphers: Weak Cipher Suite", None,
+     "A02:2025 Cryptographic Failures", "SC-8",
+     "Disable weak cipher suites; use modern TLS configurations."),
+    (r"insecure-cipher-suite",
+     "SSL/TLS Ciphers: Insecure Cipher Suite", "HIGH",
+     "A02:2025 Cryptographic Failures", "SC-13",
+     "Remove insecure cipher suites and enforce modern TLS configurations."),
+    (r"revoked-ssl",
+     "SSL/TLS Certificate: Revoked", "HIGH",
+     "A02:2025 Cryptographic Failures", "SC-17",
+     "Replace the revoked certificate with a new one from a trusted CA."),
+    (r"wildcard-tls",
+     "SSL/TLS Certificate: Wildcard", "INFO",
+     "A02:2025 Cryptographic Failures", "SC-17",
+     "Consider using per-subdomain certificates to limit exposure."),
+    (r"heartbleed",
+     "Heartbleed (CVE-2014-0160) Vulnerability Detected", "CRITICAL",
+     "A06:2025 Vulnerable and Outdated Components", "SI-2",
+     "Patch OpenSSL to a version not affected by Heartbleed."),
+    # ── Server / technology ──
+    (r"^tech-detect$|^wappalyzer-",
+     "Technology Identified", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Review exposed technology stack for known vulnerabilities."),
+    (r"^waf-detect$|^waf-",
+     "WAF / Edge Security Platform Active", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "WAF/CDN detected — informational."),
+    (r"server-header|apache-version|nginx-version|iis-version",
+     "Header Data Leakage: Server", "LOW",
+     "A05:2025 Security Misconfiguration", "SI-11",
+     "Suppress or generalise the Server header."),
+    (r"x-powered-by",
+     "Header Data Leakage: X-Powered-By", "LOW",
+     "A05:2025 Security Misconfiguration", "SI-11",
+     "Remove the X-Powered-By header."),
+    (r"aspnet-version",
+     "Header Data Leakage: X-AspNet-Version", "LOW",
+     "A05:2025 Security Misconfiguration", "SI-11",
+     "Remove the X-AspNet-Version header via web.config."),
+    # ── Exposed panels / admin ──
+    (r"^exposed-panels?/|admin-panel|phpmyadmin|adminer|grafana-default|jenkins",
+     "Admin Panel Exposed", "HIGH",
+     "A05:2025 Security Misconfiguration", "AC-3",
+     "Restrict admin interfaces by IP allowlist or VPN."),
+    # ── Sensitive files ──
+    (r"git-config|git-head|\.git",
+     "Sensitive Path Accessible: /.git", "CRITICAL",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Block public access to .git directories."),
+    (r"env-file|\.env\b|dotenv",
+     "Sensitive Path Accessible: /.env", "CRITICAL",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Block public access to .env files."),
+    (r"phpinfo",
+     "Sensitive File Exposed: phpinfo()", "HIGH",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Remove phpinfo() files from production servers."),
+    (r"robots\.txt",
+     "Sensitive Paths Disclosed in robots.txt", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Review robots.txt for sensitive path disclosure."),
+    (r"backup-file|\.bak|\.old|\.orig",
+     "Sensitive File Exposed", "HIGH",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Remove backup files from production web roots."),
+    (r"swagger|openapi|api-doc",
+     "Sensitive Path Accessible: /swagger", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Restrict API documentation endpoints to internal networks."),
+    # ── Directory listing ──
+    (r"directory-listing|dir-listing|apache-dir",
+     "Directory Listing Enabled", "MEDIUM",
+     "A01:2025 Broken Access Control", "CM-7",
+     "Disable directory listing on the web server."),
+    # ── HTTP methods ──
+    (r"options-method|trace-method|put-method|delete-method|http-method",
+     "HTTP Methods — Dangerous Methods Enabled (PUT/DELETE/TRACE)", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Disable unnecessary HTTP methods."),
+    # ── Cookies ──
+    (r"cookies-without-httponly|cookie-httponly|httponly-cookie",
+     "Missing Secure Cookie Attribute: HttpOnly", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SC-23",
+     "Set the HttpOnly flag on all session and sensitive cookies."),
+    (r"cookies-without-secure|cookie-secure|secure-cookie|cookie-without-secure",
+     "Missing Secure Cookie Attribute: Secure", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SC-23",
+     "Set the Secure flag on all cookies transmitted over HTTPS."),
+    (r"missing-cookie-samesite|samesite|cookie-samesite",
+     "Missing Secure Cookie Attribute: SameSite", "LOW",
+     "A05:2025 Security Misconfiguration", "SC-23",
+     "Set the SameSite attribute on session cookies."),
+    # ── Weak/permissive security headers ──
+    (r"weak-hsts-detect",
+     "Permissive Security Header: Strict-Transport-Security", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Set Strict-Transport-Security with max-age of at least 31536000."),
+    (r"weak-csp-detect",
+     "Permissive Security Header: Content-Security-Policy", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SI-10",
+     "Tighten the Content-Security-Policy: remove unsafe-inline/unsafe-eval."),
+    (r"xss-deprecated-header",
+     "Permissive Security Header: X-XSS-Protection", "LOW",
+     "A05:2025 Security Misconfiguration", "SI-10",
+     "Remove the deprecated X-XSS-Protection header; use CSP instead."),
+    # ── CORS ──
+    (r"cors-misconfig|cors-check",
+     "CORS Misconfiguration Allowing Credential Leakage", "HIGH",
+     "A01:2025 Broken Access Control", "AC-4",
+     "Review CORS configuration; do not reflect arbitrary origins with credentials."),
+    # ── HTTP methods ──
+    (r"^http-trace$|cross-site-tracing-xss",
+     "HTTP TRACE Method Enabled (Cross-Site Tracing)", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Disable the HTTP TRACE method on the web server."),
+    # ── Debug mode ──
+    (r"aspx-debug-mode|werkzeug-debugger|django-debug|laravel-debug",
+     "Debug Mode Enabled / Developer Console Exposed", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Disable debug/developer mode in production environments."),
+    # ── Trace/info files ──
+    (r"trace-axd-detect",
+     "Sensitive Path Accessible: /trace.axd", "HIGH",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Disable trace.axd in production via web.config."),
+    # ── XSS / injection ──
+    (r"reflected-xss|xss-reflected|cross-site-scripting",
+     "Reflected Cross-Site Scripting (XSS)", "HIGH",
+     "A03:2025 Injection", "SI-10",
+     "Implement input validation and output encoding."),
+    (r"stored-xss",
+     "Stored Cross-Site Scripting (XSS)", "HIGH",
+     "A03:2025 Injection", "SI-10",
+     "Implement input validation and output encoding."),
+    (r"dom-xss|dom-based",
+     "DOM-Based Cross-Site Scripting (XSS)", "MEDIUM",
+     "A03:2025 Injection", "SI-10",
+     "Implement input validation and output encoding."),
+    (r"sqli|sql-injection",
+     "SQL Injection (Error-Based)", "HIGH",
+     "A03:2025 Injection", "SI-10",
+     "Use parameterised queries; never concatenate user input into SQL."),
+    (r"ssti|template-injection",
+     "Server-Side Template Injection (SSTI)", "CRITICAL",
+     "A03:2025 Injection", "SI-10",
+     "Do not pass user input to template engines without sanitisation."),
+    (r"command-injection|os-command|rce\b",
+     "OS Command Injection", "CRITICAL",
+     "A03:2025 Injection", "SI-10",
+     "Do not pass user input to OS commands; use safe APIs."),
+    (r"lfi|local-file-inclusion|path-traversal|file-inclusion",
+     "Path Traversal / Local File Inclusion", "HIGH",
+     "A01:2025 Broken Access Control", "AC-3",
+     "Validate and sanitise file path parameters."),
+    (r"ssrf|server-side-request",
+     "Server-Side Request Forgery (SSRF)", "HIGH",
+     "A10:2025 Server-Side Request Forgery", "AC-4",
+     "Validate and restrict outbound requests from the application."),
+    (r"open-redirect",
+     "Open Redirect", "MEDIUM",
+     "A01:2025 Broken Access Control", "CM-7",
+     "Validate redirect destinations against an allowlist."),
+    (r"crlf-injection|crlf",
+     "CRLF Injection", "MEDIUM",
+     "A03:2025 Injection", "SI-10",
+     "Sanitise user input in HTTP headers; reject CRLF characters."),
+    (r"xxe|xml-external|xml-entity",
+     "XML External Entity (XXE) Injection", "HIGH",
+     "A03:2025 Injection", "SI-10",
+     "Disable external entity processing in XML parsers."),
+    # ── CSRF ──
+    (r"csrf",
+     "Cross-Site Request Forgery (CSRF) — Missing Token", "MEDIUM",
+     "A01:2025 Broken Access Control", "SC-23",
+     "Implement anti-CSRF tokens on state-changing forms."),
+    # ── Error / debug ──
+    (r"stacktrace|stack-trace|debug|verbose-error|error-page",
+     "Verbose Error Messages — Stack Trace Disclosed", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "SI-11",
+     "Implement custom error pages; disable verbose errors in production."),
+    # ── WordPress ──
+    (r"wordpress-detect|wp-detect",
+     "CMS Detected: WordPress", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Ensure WordPress core, themes, and plugins are kept up to date."),
+    (r"wordpress-xmlrpc|xmlrpc",
+     "WordPress XML-RPC Multicall Brute-Force Vector", "HIGH",
+     "A07:2025 Identification and Authentication Failures", "AC-7",
+     "Disable or restrict XML-RPC access."),
+    (r"wp-config|wordpress-config",
+     "WordPress wp-config.php Source Code Exposed", "CRITICAL",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Block public access to wp-config.php."),
+    (r"wordpress-user|wp-user-enum",
+     "WordPress Users Exposed via REST API", "MEDIUM",
+     "A01:2025 Broken Access Control", "AC-3",
+     "Disable the WordPress REST API users endpoint or restrict access."),
+    (r"wp-cron",
+     "WordPress wp-cron.php Publicly Accessible", "LOW",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Restrict access to wp-cron.php."),
+    (r"wp-debug-log",
+     "WordPress Debug Log Exposed", "HIGH",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Disable WP_DEBUG_LOG in production."),
+    # ── Default credentials ──
+    (r"default-login|default-cred|default-password",
+     "Weak or Default Credentials Accepted", "CRITICAL",
+     "A07:2025 Identification and Authentication Failures", "IA-5",
+     "Change default credentials immediately."),
+    # ── Subdomain takeover ──
+    (r"subdomain-takeover|cname-takeover",
+     "Subdomain Takeover — Dangling CNAME", "CRITICAL",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Remove dangling DNS records or reclaim the underlying service."),
+    # ── GraphQL ──
+    (r"graphql-introspection",
+     "GraphQL Introspection Enabled", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Disable GraphQL introspection in production."),
+    (r"graphql-field-suggestion",
+     "GraphQL Field Suggestions Enabled", "LOW",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Disable GraphQL field suggestions in production."),
+    # ── Catch-all CVE pattern ──
+    (r"^CVE-\d{4}-\d+",
+     None, None, None, None, None),  # handled specially below
+]
+_NUCLEI_NORM_COMPILED = [(re.compile(p, re.IGNORECASE), t, r, o, n, rm)
+                          for p, t, r, o, n, rm in _NUCLEI_NORM]
+
+
+# Nuclei template-ids that produce a dynamic title embedding the tech/panel
+# name from nuclei's info.name field.
+_NUCLEI_DYN_TECH  = re.compile(r"^tech-detect$|^wappalyzer-", re.IGNORECASE)
+_NUCLEI_DYN_WAF   = re.compile(r"^waf-detect$|^waf-", re.IGNORECASE)
+_NUCLEI_DYN_PANEL = re.compile(
+    r"admin-panel|phpmyadmin|adminer|grafana-default|jenkins"
+    r"|-panel-detect$|-login-detect$|-panel$",
+    re.IGNORECASE)
+
+
+# Nuclei http-missing-security-headers uses named matchers — one JSONL
+# line per missing header, all sharing the same template-id.  The
+# matcher-name field identifies which header is missing.
+_NUCLEI_HDR_MATCHER: dict = {
+    "strict-transport-security":        ("Strict-Transport-Security", "MEDIUM"),
+    "content-security-policy":          ("Content-Security-Policy", "MEDIUM"),
+    "permissions-policy":               ("Permissions-Policy", "LOW"),
+    "x-frame-options":                  ("X-Frame-Options", "MEDIUM"),
+    "x-content-type-options":           ("X-Content-Type-Options", "MEDIUM"),
+    "x-permitted-cross-domain-policies": ("X-Permitted-Cross-Domain-Policies", "LOW"),
+    "referrer-policy":                  ("Referrer-Policy", "LOW"),
+    "clear-site-data":                  ("Clear-Site-Data", "LOW"),
+    "cross-origin-embedder-policy":     ("Cross-Origin-Embedder-Policy", "LOW"),
+    "cross-origin-opener-policy":       ("Cross-Origin-Opener-Policy", "LOW"),
+    "cross-origin-resource-policy":     ("Cross-Origin-Resource-Policy", "LOW"),
+    "missing-content-type":             ("Content-Type", "LOW"),
+    "content-type-charset-specification": ("Content-Type Charset", "LOW"),
+}
+
+
+def _normalize_nuclei(item: dict) -> dict:
+    """Map a nuclei JSONL item to a Fracture-convention finding dict."""
+    _info = item.get("info", {})
+    _tid = item.get("template-id", "")
+    _matcher = item.get("matcher-name", "")
+    _name = _info.get("name", "Nuclei Finding")
+    _sev = _NUCLEI_SEVERITY_MAP.get(_info.get("severity", "info"), "INFO")
+    _desc = _info.get("description", "")
+    _cves = ",".join(_info.get("classification", {}).get("cve-id", []) or [])
+    _matched = item.get("matched-at", "")
+    _output = item.get("extracted-results", item.get("matched-line", ""))
+    if isinstance(_output, list):
+        _output = "\n".join(_output)
+
+    # ── Priority 1: http-missing-security-headers with named matchers ──
+    # Each JSONL line for this template carries a matcher-name like
+    # "strict-transport-security".  Without this check the template-id
+    # regex table cannot distinguish which header is missing.
+    if _tid == "http-missing-security-headers" and _matcher:
+        _hdr = _NUCLEI_HDR_MATCHER.get(_matcher)
+        if _hdr:
+            _hdr_display, _hdr_risk = _hdr
+            return {
+                "title": f"Missing Security Header: {_hdr_display}",
+                "risk": _hdr_risk,
+                "description": _desc or f"The {_hdr_display} HTTP security header is not present.",
+                "output": str(_output)[:2000] if _output else f"Template: {_tid}:{_matcher}",
+                "owasp": "A05:2025 Security Misconfiguration", "nist": "SI-11",
+                "remediation": f"Add the {_hdr_display} header to all HTTP responses.",
+                "cves": _cves,
+            }
+
+    # ── Priority 2: Dynamic titles from template category ──
+    # Embed the technology/panel name from nuclei's info.name so findings
+    # merge with Fracture's native "Technology Identified: X" etc.
+    if _NUCLEI_DYN_TECH.search(_tid):
+        return {
+            "title": f"Technology Identified: {_name}", "risk": "INFO",
+            "description": _desc or f"{_name} detected by nuclei ({_tid}).",
+            "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+            "owasp": "A05:2025 Security Misconfiguration", "nist": "CM-7",
+            "remediation": "Review exposed technology stack for known vulnerabilities.",
+            "cves": _cves,
+        }
+    if _NUCLEI_DYN_WAF.search(_tid):
+        return {
+            "title": f"WAF / Edge Security Platform Active: {_name}", "risk": "INFO",
+            "description": _desc or f"{_name} detected by nuclei ({_tid}).",
+            "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+            "owasp": "A05:2025 Security Misconfiguration", "nist": "CM-7",
+            "remediation": "WAF/CDN detected — informational.",
+            "cves": _cves,
+        }
+    if _NUCLEI_DYN_PANEL.search(_tid):
+        _panel_path = ""
+        try:
+            _panel_path = urllib.parse.urlparse(_matched).path or ""
+        except Exception:
+            pass
+        _panel_title = f"Admin Panel Exposed: {_panel_path}" if _panel_path else f"Admin Panel Exposed: {_name}"
+        return {
+            "title": _panel_title, "risk": "HIGH",
+            "description": _desc or f"{_name} detected by nuclei ({_tid}).",
+            "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+            "owasp": "A05:2025 Security Misconfiguration", "nist": "AC-3",
+            "remediation": "Restrict admin interfaces by IP allowlist or VPN.",
+            "cves": _cves,
+        }
+
+    # ── Priority 3: Table-driven regex on template-id / matcher-name / name ──
+    # Search template-id, then matcher-name, then info.name — first match wins.
+    _nuc_search_fields = [_tid]
+    if _matcher:
+        _nuc_search_fields.append(_matcher)
+    _nuc_search_fields.append(_name)
+    for _rx, _title, _risk, _owasp, _nist, _remed in _NUCLEI_NORM_COMPILED:
+        if any(_rx.search(f) for f in _nuc_search_fields):
+            if _title is None:
+                # CVE catch-all: use nuclei's own name
+                break
+            return {
+                "title": _title, "risk": _risk or _sev,
+                "description": _desc or f"{_name} ({_tid})",
+                "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+                "owasp": _owasp, "nist": _nist,
+                "remediation": _remed, "cves": _cves,
+            }
+
+    # ── Priority 4: Template-path directory category ──
+    # Use the template path directory to assign category-based titles for
+    # templates not matched by the table (e.g. new exposed-panels, new
+    # technology detections added after our table was written).
+    _tpath = item.get("template-path", "")
+    if _tpath:
+        _tp_parts = _tpath.replace("\\", "/").split("/")
+        if "exposed-panels" in _tp_parts:
+            _ep_path = ""
+            try:
+                _ep_path = urllib.parse.urlparse(_matched).path or ""
+            except Exception:
+                pass
+            _clean = _name
+            for _sfx in (" - Detect", " - Detection", " - Exposure",
+                         " Panel - Detect", " Login Panel - Detect",
+                         " Login - Detect", " Panel Detect"):
+                if _clean.endswith(_sfx):
+                    _clean = _clean[:-len(_sfx)].strip()
+                    break
+            _ep_title = f"Admin Panel Exposed: {_ep_path}" if _ep_path else f"Admin Panel Exposed: {_clean}"
+            return {
+                "title": _ep_title, "risk": _sev or "MEDIUM",
+                "description": _desc or f"{_name} ({_tid})",
+                "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+                "owasp": "A01:2025 Broken Access Control", "nist": "CM-7",
+                "remediation": "Restrict access to administrative panels.",
+                "cves": _cves,
+            }
+        if "technologies" in _tp_parts:
+            _clean = _name
+            for _sfx in (" - Detect", " - Detection", " - Tech Detect",
+                         " - Discovery"):
+                if _clean.endswith(_sfx):
+                    _clean = _clean[:-len(_sfx)].strip()
+                    break
+            return {
+                "title": f"Technology Identified: {_clean}", "risk": _sev or "INFO",
+                "description": _desc or f"{_name} ({_tid})",
+                "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+                "owasp": "A06:2025 Vulnerable and Outdated Components", "nist": "SI-2",
+                "remediation": "Keep identified components up to date.",
+                "cves": _cves,
+            }
+        if "default-logins" in _tp_parts:
+            return {
+                "title": f"Default Credentials: {_name}", "risk": _sev or "HIGH",
+                "description": _desc or f"{_name} ({_tid})",
+                "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+                "owasp": "A07:2025 Identification and Authentication Failures", "nist": "IA-5",
+                "remediation": "Change default credentials immediately.",
+                "cves": _cves,
+            }
+        if "exposures" in _tp_parts:
+            _ep_path = ""
+            try:
+                _ep_path = urllib.parse.urlparse(_matched).path or ""
+            except Exception:
+                pass
+            return {
+                "title": f"Sensitive Path Accessible: {_ep_path}" if _ep_path else f"Sensitive Path Accessible: {_name}",
+                "risk": _sev or "MEDIUM",
+                "description": _desc or f"{_name} ({_tid})",
+                "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+                "owasp": "A01:2025 Broken Access Control", "nist": "AC-3",
+                "remediation": "Restrict access to the exposed resource.",
+                "cves": _cves,
+            }
+        if "cves" in _tp_parts or "vulnerabilities" in _tp_parts:
+            return {
+                "title": f"Vulnerable Component: {_name}", "risk": _sev,
+                "description": _desc or f"{_name} ({_tid})",
+                "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+                "owasp": "A06:2025 Vulnerable and Outdated Components", "nist": "SI-2",
+                "remediation": "Apply vendor patches and update affected components.",
+                "cves": _cves,
+            }
+        if "misconfiguration" in _tp_parts:
+            return {
+                "title": f"Server Misconfiguration: {_name}", "risk": _sev,
+                "description": _desc or f"{_name} ({_tid})",
+                "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+                "owasp": "A05:2025 Security Misconfiguration", "nist": "CM-6",
+                "remediation": "Review and correct the identified misconfiguration.",
+                "cves": _cves,
+            }
+
+    # Fallback: no prefix, so identical findings from different tools merge.
+    return {
+        "title": _name, "risk": _sev,
+        "description": _desc or f"Nuclei template {_tid} matched.",
+        "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+        "owasp": "A06:2025 Vulnerable and Outdated Components", "nist": "SI-2",
+        "remediation": "Apply vendor patches and update affected components.",
+        "cves": _cves,
+    }
 
 
 def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
@@ -21513,6 +22344,26 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
     phase   = "vulnscan"
     url     = target["url"]
     timeout = cfg.get("nuclei_timeout", 1800)
+    # Derive origin root + app parents for broad scanning (same logic as recon)
+    _vs_parsed = urllib.parse.urlparse(url)
+    _vs_origin = f"{_vs_parsed.scheme}://{_vs_parsed.netloc}"
+    _vs_parents: list[str] = [_vs_origin]
+    _vs_path = _vs_parsed.path.rstrip("/")
+    if _vs_path:
+        _vs_parts = _vs_path.split("/")
+        for _vi in range(2, len(_vs_parts) + 1):
+            _vp = "/".join(_vs_parts[:_vi])
+            _vp_url = _vs_origin + _vp
+            if _vp_url not in _vs_parents:
+                _vs_parents.append(_vp_url)
+    # Extract session cookies for subprocess tools (nikto, nuclei)
+    _vs_cookie_str = ""
+    try:
+        _vs_cookies = sess.cookies.get_dict()
+        if _vs_cookies:
+            _vs_cookie_str = "; ".join(f"{k}={v}" for k, v in _vs_cookies.items())
+    except Exception:
+        pass
     vc.status(phase, "Vuln Scan", "running", "nuclei", 0, 2)
 
     # 1. nuclei
@@ -21581,9 +22432,13 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
         # stderr is captured and logged so flag errors are visible.
         # -jsonl replaced -json in nuclei v3.x.
         cmd = [nuclei, "-l", str(_nuc_list_file),
-               "-s", "critical,high,medium",
+               "-s", "critical,high,medium,low,info",
                "-silent", "-jsonl", "-no-interactsh",
                "-stats"]
+        # Pass session cookies so nuclei scans the authenticated surface
+        if _vs_cookie_str:
+            cmd += ["-H", f"Cookie: {_vs_cookie_str}"]
+            vc.log("[vulnscan] nuclei: passing session cookies for authenticated scanning", "INFO")
         if Path(_nuc_templates_dir).is_dir():
             cmd += ["-t", _nuc_templates_dir]
         # Use nuclei's own --max-time to enforce wall-clock limit so it
@@ -21664,71 +22519,124 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
                     f"written to {nuc_out}",
                     "WARNING",
                 )
+            _nuc_count = 0
             for line in (nuc_stdout or "").splitlines():
                 try:
                     item    = json.loads(line)
-                    sev     = _NUCLEI_SEVERITY_MAP.get(item.get("info", {}).get("severity", "info"), "INFO")
-                    ntitle  = item.get("info", {}).get("name", "Nuclei Finding")
                     matched = item.get("matched-at", url)
-                    desc    = item.get("info", {}).get("description", "")
-                    cves    = ",".join(item.get("info", {}).get("classification", {}).get("cve-id", []))
+                    _norm   = _normalize_nuclei(item)
                     out.add_finding(
-                        title=f"Nuclei: {ntitle}",
-                        url=matched, port=target["port"], risk=sev,
-                        description=desc, sources="nuclei",
-                        service=target["scheme"], output_file=str(nuc_out),
-                        cves=cves, affected=matched,
-                        owasp="A06:2025 Vulnerable and Outdated Components",
-                        nist="SI-2",
-                        remediation="Apply vendor patches and update affected components.",
+                        title=_norm["title"],
+                        url=matched, port=target["port"],
+                        risk=_norm["risk"],
+                        description=_norm["description"],
+                        output=_norm["output"],
+                        sources="nuclei", service=target["scheme"],
+                        output_file=str(nuc_out),
+                        cves=_norm.get("cves", ""),
+                        affected=matched,
+                        owasp=_norm["owasp"],
+                        nist=_norm["nist"],
+                        remediation=_norm["remediation"],
                     )
-                except Exception:
-                    pass
+                    _nuc_count += 1
+                except (ValueError, KeyError):
+                    pass  # non-JSON lines (stats output)
+                except Exception as _nuc_line_err:
+                    vc.error(f"[vulnscan] nuclei line parse error: {_nuc_line_err}")
+            if _nuc_count:
+                vc.log(f"[vulnscan] nuclei: {_nuc_count} finding(s) parsed", "SUCCESS")
         except Exception as e:
             out.log_error("nuclei", cmd, str(e))
     else:
         vc.log("[vulnscan] nuclei not found or fast mode — skipping", "WARNING")
 
     vc.status(phase, "Vuln Scan", "running", "nikto", 1, 2)
-    # 2. nikto
+    # 2. nikto — scan each app-base parent path for broader coverage.
+    #    Nikto accepts one -h per invocation, so we run it against each
+    #    derived parent path (origin root, first app-level parent, etc.)
+    #    and merge results.  For /OMT/Client/Login → scans /, /OMT/,
+    #    /OMT/Client/, /OMT/Client/Login/.
     nikto = _find_tool("nikto")
     if nikto:
-        nik_out = out.output_path(phase, "nikto_" + target["hostname"])
-        cmd     = [nikto, "-h", url, "-Format", "json",
-                   "-output", str(nik_out), "-nointeractive"]
-        vc.log("[vulnscan] Running nikto ...", "INFO")
-        try:
-            _nik_started = datetime.now().astimezone()
-            proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            _register_proc(proc)
-            _nik_stdout, _nik_stderr = proc.communicate(timeout=600)
-            _deregister_proc(proc)
-            _nik_ended = datetime.now().astimezone()
-            out.log_command(
-                "nikto", cmd, nik_out,
-                tool_path=nikto,
-                stdout=_nik_stdout, stderr=_nik_stderr,
-                started=_nik_started, ended=_nik_ended,
-                exit_code=proc.returncode,
+        _nik_total = 0
+        for _nik_idx, _nik_base in enumerate(_vs_parents):
+            _nik_label = urllib.parse.urlparse(_nik_base).path or "/"
+            nik_out = out.output_path(
+                phase,
+                f"nikto_{target['hostname']}_{_nik_label.strip('/').replace('/', '_') or 'root'}",
             )
-            if nik_out.exists():
-                try:
-                    ndata = json.loads(nik_out.read_text(encoding="utf-8"))
-                    for vuln in ndata.get("vulnerabilities", []):
-                        out.add_finding(
-                            title=f"Nikto: {vuln.get('id','Unknown')}",
-                            url=url, port=target["port"], risk="MEDIUM",
-                            description=vuln.get("msg", ""),
-                            sources="nikto", service=target["scheme"],
-                            output_file=str(nik_out),
-                            owasp="A06:2025 Vulnerable and Outdated Components",
-                            nist="SI-2",
-                            remediation="Review and remediate the identified web server issue.",
-                        )
-                except Exception:
-                    pass
-        except Exception as e:
-            out.log_error("nikto", cmd, str(e))
+            cmd = [nikto, "-h", _nik_base, "-Format", "json",
+                   "-output", str(nik_out), "-nointeractive"]
+            # Pass session cookies so nikto scans the authenticated surface
+            if _vs_cookie_str:
+                cmd += ["-Cookie", _vs_cookie_str]
+            vc.log(
+                f"[vulnscan] Running nikto ({_nik_idx + 1}/{len(_vs_parents)}) "
+                f"against {_nik_base}"
+                + (" (authenticated)" if _vs_cookie_str else "") + " ...",
+                "INFO",
+            )
+            try:
+                _nik_started = datetime.now().astimezone()
+                proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                _register_proc(proc)
+                _nik_stdout, _nik_stderr = proc.communicate(timeout=600)
+                _deregister_proc(proc)
+                _nik_ended = datetime.now().astimezone()
+                out.log_command(
+                    "nikto", cmd, nik_out,
+                    tool_path=nikto,
+                    stdout=_nik_stdout, stderr=_nik_stderr,
+                    started=_nik_started, ended=_nik_ended,
+                    exit_code=proc.returncode,
+                )
+                if nik_out.exists():
+                    try:
+                        ndata = json.loads(nik_out.read_text(encoding="utf-8"))
+                        _nik_hosts = ndata if isinstance(ndata, list) else [ndata]
+                        _nik_count = 0
+                        for _nik_host in _nik_hosts:
+                            if not isinstance(_nik_host, dict):
+                                continue
+                            for vuln in _nik_host.get("vulnerabilities", []):
+                                _nik_msg = vuln.get("msg", "").strip()
+                                _nik_method = vuln.get("method", "GET")
+                                _nik_url_path = vuln.get("url", "")
+                                _nik_id = vuln.get("id", "")
+                                _nik_osvdb = vuln.get("OSVDB", vuln.get("osvdb", ""))
+                                _nik_full_url = _nik_base.rstrip("/") + _nik_url_path if _nik_url_path else _nik_base
+                                _nik_output = f"{_nik_method} {_nik_url_path}" if _nik_url_path else ""
+                                if _nik_osvdb:
+                                    _nik_output += f"\nOSVDB-{_nik_osvdb}"
+                                _norm = _normalize_nikto(vuln)
+                                out.add_finding(
+                                    title=_norm["title"],
+                                    url=_nik_full_url, port=target["port"],
+                                    risk=_norm["risk"],
+                                    description=_nik_msg or f"Nikto finding {_nik_id}",
+                                    output=_nik_output,
+                                    sources="nikto", service=target["scheme"],
+                                    output_file=str(nik_out),
+                                    affected=_nik_full_url,
+                                    owasp=_norm["owasp"],
+                                    nist=_norm["nist"],
+                                    remediation=_norm["remediation"],
+                                )
+                                _nik_count += 1
+                        if _nik_count:
+                            vc.log(
+                                f"[vulnscan] nikto ({_nik_label}): "
+                                f"{_nik_count} finding(s) parsed",
+                                "SUCCESS",
+                            )
+                        _nik_total += _nik_count
+                    except Exception as _nik_parse_err:
+                        vc.error(f"[vulnscan] nikto JSON parse error: {_nik_parse_err}")
+            except Exception as e:
+                out.log_error("nikto", cmd, str(e))
+        if _nik_total:
+            vc.log(f"[vulnscan] nikto total: {_nik_total} finding(s) across {len(_vs_parents)} base(s)", "SUCCESS")
     else:
         vc.log("[vulnscan] nikto not found", "WARNING")
 
