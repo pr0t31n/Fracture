@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.34.2"
+VERSION = "2.34.3"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -22377,7 +22377,7 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
                     fast: bool = False) -> None:
     phase   = "vulnscan"
     url     = target["url"]
-    timeout = cfg.get("nuclei_timeout", 1800)
+    timeout = max(cfg.get("nuclei_timeout", 1800), 1800)
     # Derive origin root + app parents for broad scanning (same logic as recon)
     _vs_parsed = urllib.parse.urlparse(url)
     _vs_origin = f"{_vs_parsed.scheme}://{_vs_parsed.netloc}"
