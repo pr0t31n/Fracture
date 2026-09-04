@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.12"
+VERSION = "2.33.13"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -20195,8 +20195,9 @@ _BL_NUMERIC_FIELDS = re.compile(
     r'discount|coupon|fee|rate|balance|credit|debit|units|items', re.I
 )
 _BL_WORKFLOW_URL = re.compile(
-    r'checkout|confirm|payment|pay|order|purchase|cart|complete|'
-    r'transfer|submit|process|finalize|done|success|approve|step\d', re.I
+    r'(?<![a-zA-Z])(?:checkout|confirm|payment|pay|order|purchase|cart|'
+    r'complete|transfer|submit|process|finalize|done|success|approve|'
+    r'step\d)(?![a-zA-Z])', re.I
 )
 # Pages that are intentionally public — never flag as workflow-step-skip.
 # Password reset, login, registration, contact, and other pre-auth pages.
@@ -20300,6 +20301,16 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                 # Skip if the response is actually a login page (JS redirect,
                 # inline form, or meta-refresh — common in ASP.NET WebForms)
                 if _inj_is_login_page(r):
+                    continue
+                # Skip API endpoints that return JSON — a 200 with an empty
+                # dataset or error object is not a workflow bypass.  SPAs
+                # commonly return 200 with {"error":"unauthorized"} or [].
+                _ct = (r.headers.get("Content-Type") or "").lower()
+                if "application/json" in _ct or "text/json" in _ct:
+                    continue
+                # Skip if the response body is trivially small (< 500 bytes)
+                # — likely an empty/error response, not a real page.
+                if len(r.content) < 500:
                     continue
                 _ev_files: list = []
                 try:
