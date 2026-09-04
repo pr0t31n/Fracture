@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.18"
+VERSION = "2.33.19"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -8595,6 +8595,7 @@ return null;
                     _je = _j_early.loads(_post_resp.text or "")
                     if isinstance(_je, dict):
                         _je_ci = {k.lower(): v for k, v in _je.items()}
+                        _je_has_auth_success = False
                         for _jk in ("authenticated", "success",
                                     "isauthenticated", "is_authenticated",
                                     "loggedin", "logged_in"):
@@ -8603,7 +8604,24 @@ return null;
                                 if _jv in ("false", "0", "no", "fail",
                                            "failed", "error", ""):
                                     _json_api_rejected = True
+                                elif _jv in ("true", "1", "yes", "ok",
+                                             "success", "succeeded"):
+                                    _je_has_auth_success = True
                                 break
+                        # Error-only responses: JSON has an error/message
+                        # field with non-empty content but no positive
+                        # auth-status key.  Covers lockout, rate-limit,
+                        # and generic API error responses that omit the
+                        # auth-status key entirely.
+                        if not _json_api_rejected and not _je_has_auth_success:
+                            for _ek in ("error", "errormessage",
+                                        "error_message", "message",
+                                        "errmsg", "err"):
+                                if _ek in _je_ci:
+                                    _ev = str(_je_ci[_ek]).strip()
+                                    if _ev:
+                                        _json_api_rejected = True
+                                        break
                 except (ValueError, TypeError, KeyError):
                     pass
                 if _json_api_rejected:
@@ -8657,7 +8675,7 @@ return null;
                     r'(?:login|sign.?in|authentication)\s+(?:failed|unsuccessful|error|invalid)|'
                     r'(?:password|credentials?)\s+(?:is\s+)?(?:wrong|incorrect|invalid)|'
                     r'too\s+many\s+(?:failed\s+)?(?:attempts?|tries)|'
-                    r'account\s+(?:locked|suspended|disabled|blocked))\b',
+                    r'account\s+(?:(?:has\s+been|is|was)\s+)?(?:locked|suspended|disabled|blocked))\b',
                     _av_vis[:5000], _re_av.IGNORECASE,
                 )
                 if _av_err_m:
