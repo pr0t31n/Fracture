@@ -9764,7 +9764,7 @@ DEFAULT_SETTINGS: dict = {
         },
         "auth_matrix": [],   # list of {role, username, password} for access matrix
         "sqlmap_timeout":   300,
-        "nuclei_timeout":   600,
+        "nuclei_timeout":   1800,
         "crawl_depth":      10,
         "crawl_max_pages":  500,
         "gobuster_wordlist": "/usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt",
@@ -21512,7 +21512,7 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
                     fast: bool = False) -> None:
     phase   = "vulnscan"
     url     = target["url"]
-    timeout = cfg.get("nuclei_timeout", 600)
+    timeout = cfg.get("nuclei_timeout", 1800)
     vc.status(phase, "Vuln Scan", "running", "nuclei", 0, 2)
 
     # 1. nuclei
@@ -21525,18 +21525,46 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
         # discovered endpoint, not just the base URL.  A React SPA that
         # serves a JS shell at "/" gives nuclei almost nothing to work with
         # when only the base URL is supplied.
+        #
+        # Filter: only include paths that returned 200, 401, or 403.
+        # Redirects (301/302/307/308) are excluded — nuclei follows them
+        # and scans the destination, so when 12 paths all redirect to the
+        # same ErrorPage.aspx, nuclei wastes budget scanning it 12 times.
+        _NUC_USEFUL_CODES = {200, 201, 202, 204, 401, 403}
         _nuc_targets: list = [url]
+        _nuc_skipped = 0
         try:
             _nuc_sm_path = out.root / "structure_map.json"
             if _nuc_sm_path.exists():
                 _nuc_sm = json.loads(_nuc_sm_path.read_text())
                 _nuc_base = url.rstrip("/")
-                for _np in sorted(_nuc_sm.get("paths", {}).keys()):
+                _nuc_paths = _nuc_sm.get("paths", {})
+                for _np in sorted(_nuc_paths.keys()):
+                    _np_info = _nuc_paths[_np]
+                    # Get the most-privileged status code for this path
+                    _np_code = None
+                    if isinstance(_np_info, dict):
+                        _np_code = _np_info.get("status")
+                        # Also check per-role statuses
+                        if _np_code is None:
+                            for _nv in _np_info.values():
+                                if isinstance(_nv, int) and _nv in _NUC_USEFUL_CODES:
+                                    _np_code = _nv
+                                    break
+                    if isinstance(_np_code, int) and _np_code not in _NUC_USEFUL_CODES:
+                        _nuc_skipped += 1
+                        continue
                     _nuc_full = _nuc_base + _np
                     if _nuc_full not in _nuc_targets:
                         _nuc_targets.append(_nuc_full)
         except Exception:
             pass
+        if _nuc_skipped:
+            vc.log(
+                f"[vulnscan] nuclei: filtered {_nuc_skipped} redirect/error "
+                f"paths from target list (only 200/401/403 included)",
+                "INFO",
+            )
 
         # Write targets to a temp file for nuclei -l
         _nuc_list_file = out.root / phase / "nuclei_targets.txt"
