@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.19"
+VERSION = "2.33.20"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -26629,6 +26629,87 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     _p20_reauth_budget: dict = {r: 5 for r in cred_roles}  # per-role mid-loop re-auth budget
     _p20_reauth_dead:  dict = {r: False for r in cred_roles}
     _P20_LOGIN_LOC_RE = re.compile(r'/login|/signin|/sign-in|/auth|/sso', re.I)
+
+    # ── Response body classification ──────────────────────────────────────
+    # Bare status codes are unreliable on SPAs and apps that return 200 for
+    # everything.  Capture a baseline body hash (unauthenticated GET to root)
+    # and classify every 200 response:
+    #   unique       — body hash differs from baseline AND no error indicators
+    #   spa_shell    — body hash matches unauth baseline (same HTML for everyone)
+    #   catchall     — body hash matches baseline AND path is NOT the root
+    #   soft_404     — body contains "not found" / "page not found" / "404"
+    #   error_page   — body contains "error" / "exception" / "server error"
+    #   access_denied— body contains "denied" / "forbidden" / "unauthorized"
+    #   login_form   — body contains a password input field
+    #   empty        — body length < 50 bytes
+    import hashlib as _p20_hl
+    _P20_BODY_ERR_RE = re.compile(
+        r'\b(?:'
+        r'(?:page|resource|file)\s+(?:not\s+found|does\s+not\s+exist)'
+        r'|(?:404|not\s+found)\s*[-—:]'
+        r'|error\s+404'
+        r'|the\s+resource\s+(?:you\s+requested\s+)?(?:could\s+not\s+be|cannot\s+be|was\s+not)\s+found'
+        r')\b', re.I)
+    _P20_BODY_ERR_GENERIC_RE = re.compile(
+        r'\b(?:'
+        r'(?:server|internal|application|unexpected|unhandled)\s+error'
+        r'|something\s+went\s+wrong'
+        r'|an?\s+error\s+(?:has\s+)?occurred'
+        r'|exception\s+(?:of\s+type|details|message|was\s+thrown)'
+        r'|error\s+500'
+        r')\b', re.I)
+    _P20_BODY_DENIED_RE = re.compile(
+        r'\b(?:'
+        r'access\s+denied|(?:not|un)\s*authorized|forbidden'
+        r'|you\s+do\s+not\s+have\s+(?:access|permission)'
+        r'|insufficient\s+(?:permissions?|privileges?|access)'
+        r'|error\s+403'
+        r')\b', re.I)
+    _P20_LOGIN_FORM_RE = re.compile(
+        r'<input[^>]+type=["\']?password["\']?', re.I)
+    # Capture baselines: unauth body hash + per-role body hash for root path
+    _p20_baseline_hashes: set = set()
+    try:
+        _bl_r = unauth_sess.get(
+            base_url + "/", timeout=timeout, allow_redirects=True,
+            headers={"Accept": "text/html,application/json"})
+        if _bl_r.status_code == 200:
+            _bl_body = (_bl_r.text or "").strip()
+            _p20_baseline_hashes.add(_p20_hl.md5(_bl_body.encode("utf-8", "replace")).hexdigest())
+    except Exception:
+        pass
+    # Also hash well-known SPA shell paths to catch catchall routers
+    for _bl_probe in ("/nonexistent-path-" + str(int(time.time())),):
+        try:
+            _bl_r2 = unauth_sess.get(
+                base_url + _bl_probe, timeout=timeout, allow_redirects=True,
+                headers={"Accept": "text/html,application/json"})
+            if _bl_r2.status_code == 200:
+                _bl_body2 = (_bl_r2.text or "").strip()
+                _p20_baseline_hashes.add(_p20_hl.md5(_bl_body2.encode("utf-8", "replace")).hexdigest())
+        except Exception:
+            pass
+
+    def _classify_response(resp, rel_path: str) -> str:
+        """Classify a 200 response body beyond the bare status code."""
+        body = (resp.text or "").strip()
+        if len(body) < 50:
+            return "empty"
+        body_hash = _p20_hl.md5(body.encode("utf-8", "replace")).hexdigest()
+        # Strip tags for text matching
+        visible = re.sub(r'<[^>]+>', ' ', body[:8000])
+        if _P20_LOGIN_FORM_RE.search(body[:8000]):
+            return "login_form"
+        if _P20_BODY_DENIED_RE.search(visible):
+            return "access_denied"
+        if _P20_BODY_ERR_RE.search(visible):
+            return "soft_404"
+        if _P20_BODY_ERR_GENERIC_RE.search(visible):
+            return "error_page"
+        if body_hash in _p20_baseline_hashes:
+            return "catchall" if rel_path not in ("/", "") else "unique"
+        return "unique"
+
     while idx < len(_am_paths):
         path = _am_paths[idx]
         idx += 1
@@ -26639,6 +26720,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             rel = path if path.startswith("/") else "/" + path
             url = base_url + rel
         access = {}
+        body_class = {}
         _prior = _existing_by_path.get(rel, {})
         for role, r_sess in role_sessions.items():
             _prior_code = _prior.get(role)
@@ -26649,6 +26731,8 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 r = r_sess.get(url, timeout=timeout, allow_redirects=False,
                                headers={"Accept": "text/html,application/json"})
                 access[role] = r.status_code
+                if r.status_code == 200:
+                    body_class[role] = _classify_response(r, rel)
 
                 # ── Mid-loop session expiry detection ─────────────
                 if (r.status_code in (301, 302, 303, 307, 308)
@@ -26761,14 +26845,31 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                     access[role] = r.status_code
                 except Exception:
                     access[role] = 0
-        path_access.append({"path": rel, "url": url, "access": access})
+        _pa_entry = {"path": rel, "url": url, "access": access}
+        if body_class:
+            _pa_entry["body_class"] = body_class
+        path_access.append(_pa_entry)
         vc.status(phase, "Access Matrix", "running", f"Path {idx}/{len(_am_paths)}", idx, len(_am_paths))
 
-    def _ok(status):
-        return isinstance(status, int) and status in (200, 201, 202, 204)
+    # Body classes that do NOT represent genuine access — status 200 is
+    # misleading; the page is a SPA shell, catchall, error, or login form.
+    _NOT_REAL_ACCESS = frozenset({
+        "catchall", "spa_shell", "soft_404", "error_page",
+        "access_denied", "login_form", "empty",
+    })
+
+    def _ok(status, role=None, ep=None):
+        """True when status is 2xx AND body classification confirms real access."""
+        if not (isinstance(status, int) and status in (200, 201, 202, 204)):
+            return False
+        if ep is not None and role is not None:
+            bc = ep.get("body_class", {}).get(role, "unique")
+            if bc in _NOT_REAL_ACCESS:
+                return False
+        return True
 
     privilege_counts = {
-        role: sum(1 for ep in path_access if _ok(ep["access"].get(role)))
+        role: sum(1 for ep in path_access if _ok(ep["access"].get(role), role, ep))
         for role in all_roles
     }
     most_privileged = (
@@ -26779,9 +26880,9 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     for ep in path_access:
         ep_access   = ep["access"]
         unauth_st   = ep_access.get("unauthenticated")
-        any_authed  = any(_ok(ep_access.get(r)) for r in cred_roles)
+        any_authed  = any(_ok(ep_access.get(r), r, ep) for r in cred_roles)
 
-        if _ok(unauth_st) and any_authed:
+        if _ok(unauth_st, "unauthenticated", ep) and any_authed:
             out.add_finding(
                 title="Unauthenticated Access to Protected Path",
                 url=ep["url"], port=port, risk="MEDIUM",
@@ -26798,12 +26899,12 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             )
 
         if most_privileged and len(cred_roles) > 1:
-            high_ok = _ok(ep_access.get(most_privileged))
+            high_ok = _ok(ep_access.get(most_privileged), most_privileged, ep)
             if high_ok:
                 for low_role in cred_roles:
                     if low_role == most_privileged:
                         continue
-                    if _ok(ep_access.get(low_role)):
+                    if _ok(ep_access.get(low_role), low_role, ep):
                         out.add_finding(
                             title=f"BFLA: Role '{low_role}' Can Access Admin Path",
                             url=ep["url"], port=port, risk="HIGH",
