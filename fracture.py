@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.17"
+VERSION = "2.33.18"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -9665,7 +9665,7 @@ DEFAULT_SETTINGS: dict = {
             "open_redirect": True, "deserialization": True,
             "request_smuggling": True,  # Phase 17b: CL.0/TE.CL/CL.TE smuggling
             "file_upload_info": True, "mass_assignment": True,
-            "access_matrix":   False,  # Phase 20: multi-credential access matrix
+            "access_matrix":   True,   # Phase 20: multi-credential access matrix
             "bfla":            True,   # Phase 21: broken function level authorization
         },
         "auth": {
