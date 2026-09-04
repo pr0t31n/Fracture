@@ -11435,16 +11435,35 @@ def _classify_web_structure(body: str, headers: "dict", spa_evidence: "list",
 
 
 def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
-                 out: OutputManager, sess: requests.Session) -> None:
+                 out: OutputManager, sess: requests.Session,
+                 landing_url: str = "") -> None:
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
     phase   = "recon"
-    # Derive origin root (scheme://host) for path-based probes.  When the
-    # target URL is a deep path like /OMT/Client/Login, admin-panel and
-    # common-paths probes must still hit the origin root (/admin, /.git/HEAD,
-    # etc.), not /OMT/Client/Login/admin.
+    # Build the set of base URLs for path-based probes.  When the target URL
+    # is a deep path like /OMT/Client/Login, probes need to hit:
+    #   1. the origin root  (/admin, /.git/HEAD)
+    #   2. every parent     (/OMT/admin, /OMT/Client/admin)
+    #   3. the target itself (/OMT/Client/Login/admin)
+    # Gobuster/feroxbuster still run only against the origin root.
     _recon_parsed = urllib.parse.urlparse(url)
     _recon_origin = f"{_recon_parsed.scheme}://{_recon_parsed.netloc}"
+    _recon_bases = [_recon_origin]  # always includes origin root
+    # Collect unique parent paths from: target URL, landing URL
+    _base_seed_paths = [_recon_parsed.path.rstrip("/")]
+    if landing_url:
+        _lnd_path = urllib.parse.urlparse(landing_url).path.rstrip("/")
+        if _lnd_path and _lnd_path not in _base_seed_paths:
+            _base_seed_paths.append(_lnd_path)
+    for _seed_path in _base_seed_paths:
+        if not _seed_path:
+            continue
+        _sp_parts = _seed_path.split("/")
+        for i in range(2, len(_sp_parts) + 1):
+            _parent = "/".join(_sp_parts[:i])
+            _parent_url = _recon_origin + _parent
+            if _parent_url not in _recon_bases:
+                _recon_bases.append(_parent_url)
     vc.status(phase, "Recon", "running", "HTTP probe", 0, 10)
 
     # Wildcard detection — run before any path-based checks so brute-forcers
@@ -12596,45 +12615,51 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         _admin_paths_iter = []
     else:
         _admin_paths_iter = _ADMIN_PATHS
-    for apath in _admin_paths_iter:
-        try:
-            r = sess.get(_recon_origin + apath, timeout=timeout, allow_redirects=False)
-            if r.status_code == 200:
-                # Wildcard baseline check: skip if response matches the catch-all pattern
-                if _is_wildcard_match(r, wc_baseline):
-                    continue
-                _admin_risk = "HIGH"
-                _admin_desc = (
-                    f"Administrative interface accessible without authentication at {apath} "
-                    f"(HTTP {r.status_code}). CWE-306 (Missing Authentication for Critical Function)."
-                )
-                _admin_safe = apath.lstrip("/").replace("/", "_").replace(".", "_") or "root"
-                _admin_rq, _admin_rp = _save_http_evidence(out, phase, f"admin_{_admin_safe}", r)
-                _admin_full_url = _recon_origin + apath
-                out.add_finding(
-                    title=f"Admin Panel Exposed: {apath}",
-                    url=_admin_full_url, port=target["port"], risk=_admin_risk,
-                    description=_admin_desc,
-                    output=f"GET {apath} → {r.status_code}",
-                    sources="fracture-recon", service=target["scheme"],
-                    affected=_admin_full_url, output_file=f"{_admin_rq},{_admin_rp}",
-                    owasp="A05:2025 Security Misconfiguration", nist="AC-3",
-                    remediation="Restrict admin interfaces by IP allowlist or VPN.",
-                    http_code=r.status_code,
-                )
-                vc.log(f"[recon] Admin panel: {apath} → {r.status_code}", "SUCCESS")
-                try:
-                    _admin_redir = None
-                    if r.status_code in (301, 302, 307, 308):
-                        _admin_redir = r.headers.get("Location", "")
-                    _write_structure_map(out, target,
-                                         path_statuses={apath: r.status_code},
-                                         path_redirects={apath: _admin_redir} if _admin_redir else None,
-                                         source="recon")
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    _admin_found = set()  # dedup across bases
+    for _adm_base in _recon_bases:
+        _adm_base_path = urllib.parse.urlparse(_adm_base).path.rstrip("/")
+        for apath in _admin_paths_iter:
+            _adm_full_path = (_adm_base_path + apath) if _adm_base_path else apath
+            if _adm_full_path in _admin_found:
+                continue
+            try:
+                r = sess.get(_adm_base.rstrip("/") + apath, timeout=timeout, allow_redirects=False)
+                if r.status_code == 200:
+                    if _is_wildcard_match(r, wc_baseline):
+                        continue
+                    _admin_found.add(_adm_full_path)
+                    _admin_risk = "HIGH"
+                    _admin_desc = (
+                        f"Administrative interface accessible without authentication at {_adm_full_path} "
+                        f"(HTTP {r.status_code}). CWE-306 (Missing Authentication for Critical Function)."
+                    )
+                    _admin_safe = _adm_full_path.lstrip("/").replace("/", "_").replace(".", "_") or "root"
+                    _admin_rq, _admin_rp = _save_http_evidence(out, phase, f"admin_{_admin_safe}", r)
+                    _admin_full_url = _adm_base.rstrip("/") + apath
+                    out.add_finding(
+                        title=f"Admin Panel Exposed: {_adm_full_path}",
+                        url=_admin_full_url, port=target["port"], risk=_admin_risk,
+                        description=_admin_desc,
+                        output=f"GET {_adm_full_path} → {r.status_code}",
+                        sources="fracture-recon", service=target["scheme"],
+                        affected=_admin_full_url, output_file=f"{_admin_rq},{_admin_rp}",
+                        owasp="A05:2025 Security Misconfiguration", nist="AC-3",
+                        remediation="Restrict admin interfaces by IP allowlist or VPN.",
+                        http_code=r.status_code,
+                    )
+                    vc.log(f"[recon] Admin panel: {_adm_full_path} → {r.status_code}", "SUCCESS")
+                    try:
+                        _admin_redir = None
+                        if r.status_code in (301, 302, 307, 308):
+                            _admin_redir = r.headers.get("Location", "")
+                        _write_structure_map(out, target,
+                                             path_statuses={_adm_full_path: r.status_code},
+                                             path_redirects={_adm_full_path: _admin_redir} if _admin_redir else None,
+                                             source="recon")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
     vc.status(phase, "Recon", "running", "Common paths probe", 4, 10)
     # Stealth: probes for /.well-known/security.txt, /api/, /v1/, /swagger,
@@ -12649,27 +12674,34 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         _common_paths_iter = []
     else:
         _common_paths_iter = _COMMON_PATHS
-    for cpath in _common_paths_iter:
-        try:
-            r = sess.get(_recon_origin + cpath, timeout=timeout, allow_redirects=False)
-            if r.status_code == 200 and cpath in ("/.git/HEAD", "/.env") \
-                    and not _is_wildcard_match(r, wc_baseline):
-                _cp_safe = cpath.lstrip("/").replace("/", "_").replace(".", "_")
-                _cp_rq, _cp_rp = _save_http_evidence(out, phase, f"sensitive_path_{_cp_safe}", r)
-                _cp_full_url = _recon_origin + cpath
-                out.add_finding(
-                    title=f"Sensitive Path Accessible: {cpath}",
-                    url=_cp_full_url, port=target["port"], risk="CRITICAL",
-                    description=f"The path {cpath} is publicly accessible.",
-                    output=f"GET {cpath} → {r.status_code}\n{r.text[:500]}",
-                    sources="fracture-recon", service=target["scheme"],
-                    affected=_cp_full_url, output_file=f"{_cp_rq},{_cp_rp}",
-                    owasp="A05:2025 Security Misconfiguration", nist="CM-7",
-                    remediation=f"Block public access to {cpath}.",
-                    http_code=r.status_code,
-                )
-        except Exception:
-            pass
+    _cp_found = set()
+    for _cp_base in _recon_bases:
+        _cp_base_path = urllib.parse.urlparse(_cp_base).path.rstrip("/")
+        for cpath in _common_paths_iter:
+            _cp_full_path = (_cp_base_path + cpath) if _cp_base_path else cpath
+            if _cp_full_path in _cp_found:
+                continue
+            try:
+                r = sess.get(_cp_base.rstrip("/") + cpath, timeout=timeout, allow_redirects=False)
+                if r.status_code == 200 and cpath in ("/.git/HEAD", "/.env") \
+                        and not _is_wildcard_match(r, wc_baseline):
+                    _cp_found.add(_cp_full_path)
+                    _cp_safe = _cp_full_path.lstrip("/").replace("/", "_").replace(".", "_")
+                    _cp_rq, _cp_rp = _save_http_evidence(out, phase, f"sensitive_path_{_cp_safe}", r)
+                    _cp_probe_url = _cp_base.rstrip("/") + cpath
+                    out.add_finding(
+                        title=f"Sensitive Path Accessible: {_cp_full_path}",
+                        url=_cp_probe_url, port=target["port"], risk="CRITICAL",
+                        description=f"The path {_cp_full_path} is publicly accessible.",
+                        output=f"GET {_cp_full_path} → {r.status_code}\n{r.text[:500]}",
+                        sources="fracture-recon", service=target["scheme"],
+                        affected=_cp_probe_url, output_file=f"{_cp_rq},{_cp_rp}",
+                        owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                        remediation=f"Block public access to {_cp_full_path}.",
+                        http_code=r.status_code,
+                    )
+            except Exception:
+                pass
 
     vc.status(phase, "Recon", "running", "Directory discovery", 5, 10)
     # When a CDN or WAF is in front of the target, throttle directory busting.
@@ -28654,7 +28686,8 @@ def main() -> None:
                     pm.set_phase_status(f"recon#{_ctx_label}", "running", "HTTP Recon")
                     try:
                         wc_baseline, _wp_discovered_paths = _phase_recon(
-                            target, _ctx_cfg, pm, out, effective_auth)
+                            target, _ctx_cfg, pm, out, effective_auth,
+                            landing_url=_as_canary_url or _as_landing_url or "")
                         pm.set_phase_status(f"recon#{_ctx_label}", "complete", "HTTP Recon")
                     except Exception as e:
                         vc.error(f"Phase recon [{_ctx_label}] error: {e}")
@@ -29690,6 +29723,57 @@ def main() -> None:
                     _role_landing_urls[_ctx_label] = _as_canary_url
                 elif _as_landing_url and _as_landing_code == 200:
                     _role_landing_urls[_ctx_label] = _as_landing_url
+
+            # ── Post-auth landing-page discovery probe ────────────────────────
+            # The landing page (e.g. /OMT/Client/Dashboard) marks the start of
+            # the authenticated web application.  Probe admin panel and common
+            # paths under the landing URL and its parents so structure_map
+            # captures authenticated-area paths that recon (pre-auth) cannot see.
+            _post_auth_landing = _role_landing_urls.get(_ctx_label, "")
+            if _post_auth_landing and _ctx_label != "unauthenticated":
+                _pa_parsed = urllib.parse.urlparse(_post_auth_landing)
+                _pa_origin = f"{_pa_parsed.scheme}://{_pa_parsed.netloc}"
+                _pa_bases = []
+                _pa_path = _pa_parsed.path.rstrip("/")
+                if _pa_path:
+                    _pa_parts = _pa_path.split("/")
+                    for _pi in range(2, len(_pa_parts) + 1):
+                        _pa_b = _pa_origin + "/".join(_pa_parts[:_pi])
+                        _pa_bases.append(_pa_b)
+                if _pa_bases:
+                    vc.log(
+                        f"[recon-postauth] Probing admin/common paths under "
+                        f"landing page for {_ctx_label}: {_pa_parsed.path}",
+                        "INFO",
+                    )
+                    _pa_sm_updates = {}
+                    for _pa_base in _pa_bases:
+                        _pa_bp = urllib.parse.urlparse(_pa_base).path.rstrip("/")
+                        for _pa_ap in _ADMIN_PATHS + _COMMON_PATHS:
+                            _pa_fp = (_pa_bp + _pa_ap) if _pa_bp else _pa_ap
+                            try:
+                                _pa_r = _ctx_auth.get(
+                                    _pa_base.rstrip("/") + _pa_ap,
+                                    timeout=cfg.get("timeout", 10),
+                                    allow_redirects=False,
+                                )
+                                _pa_sm_updates[_pa_fp] = _pa_r.status_code
+                                if _pa_r.status_code == 200:
+                                    vc.log(
+                                        f"[recon-postauth] {_pa_fp} → {_pa_r.status_code}",
+                                        "SUCCESS",
+                                    )
+                            except Exception:
+                                pass
+                    if _pa_sm_updates:
+                        try:
+                            _write_structure_map(
+                                out, target,
+                                path_statuses=_pa_sm_updates,
+                                source="recon-postauth",
+                            )
+                        except Exception:
+                            pass
 
             # ── Discovery-leader check ────────────────────────────────────────
             # After each authenticated non-reduced context, compare this role's
