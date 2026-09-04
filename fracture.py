@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.15"
+VERSION = "2.33.16"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -4637,15 +4637,55 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     _lp_candidate["id"], login_url, cfg, scope_hostnames
                 )
                 if _replay_sess:
+                    # Canary probe: verify the replayed session is actually
+                    # authenticated by hitting the target base URL.  Some
+                    # apps (React SPA + ASP.NET) require the full browser
+                    # flow to establish all session cookies — a bare API
+                    # POST sets ASP.NET_SessionId but not the real auth
+                    # cookies.  If the canary redirects to login the session
+                    # is incomplete and we must fall through to the browser.
+                    _replay_canary_ok = True
+                    try:
+                        _rc_base = (
+                            cfg.get("target_url", "") or
+                            (cfg.get("target_urls", [None]) or [None])[0] or ""
+                        ).rstrip("/")
+                        if _rc_base and _rc_base != login_url.rstrip("/"):
+                            _rc_r = _replay_sess.get(
+                                _rc_base, timeout=10, verify=False,
+                                allow_redirects=False)
+                            if _rc_r.status_code in (301, 302, 303, 307, 308):
+                                _rc_loc = _rc_r.headers.get("Location", "")
+                                if re.search(
+                                        r'/login|/signin|/sign-in|/auth|/sso',
+                                        _rc_loc, re.I):
+                                    _replay_canary_ok = False
+                                    vc.log(
+                                        f"[auth] Profile replay canary failed: "
+                                        f"{_rc_base} → {_rc_r.status_code} to "
+                                        f"{_rc_loc} — session not fully "
+                                        f"authenticated (cookies: "
+                                        f"{len(list(_replay_sess.cookies))})",
+                                        "WARNING",
+                                    )
+                    except Exception:
+                        pass
+                    if _replay_canary_ok:
+                        vc.log(
+                            "[auth] Profile replay successful — browser login skipped",
+                            "SUCCESS",
+                        )
+                        return _replay_sess
                     vc.log(
-                        "[auth] Profile replay successful — browser login skipped",
-                        "SUCCESS",
+                        "[auth] Profile replay produced incomplete session "
+                        "— opening browser for full login flow",
+                        "WARNING",
                     )
-                    return _replay_sess
-                vc.log(
-                    "[auth] Profile replay failed — opening browser for manual login",
-                    "WARNING",
-                )
+                else:
+                    vc.log(
+                        "[auth] Profile replay failed — opening browser for manual login",
+                        "WARNING",
+                    )
         except Exception:
             pass
 
@@ -8595,6 +8635,54 @@ return null;
                     _av_snip  = _re_av.sub(r'\s+', ' ', _av_vis[_av_ctx_s:_av_ctx_e]).strip()
                     _av_fail.append(f"Auth failure text: \"{_av_snip}\"")
 
+                # Signal 4.5: JSON response body contains explicit auth outcome
+                # JSON APIs (e.g. {"authenticated":"false"}) return HTTP 200 for
+                # both success and failure — the verdict lives in the body.  Parse
+                # the response and treat an explicit "false"/"fail"/"no" value on
+                # a known auth-status key as a HARD FAIL (same weight as Signal 4).
+                # Also detect error-message fields as a soft fail signal.
+                _av_json_auth_fail = False
+                try:
+                    import json as _json_av
+                    _av_jd = _json_av.loads(_av_html)
+                    if isinstance(_av_jd, dict):
+                        _av_jd_ci = {k.lower(): (k, v) for k, v in _av_jd.items()}
+                        _AV_AUTH_KEYS = (
+                            "authenticated", "success", "isauthenticated",
+                            "is_authenticated", "loggedin", "logged_in", "status",
+                        )
+                        for _ak in _AV_AUTH_KEYS:
+                            if _ak in _av_jd_ci:
+                                _ak_orig, _ak_val = _av_jd_ci[_ak]
+                                _ak_str = str(_ak_val).strip().lower()
+                                if _ak_str in ("false", "0", "no", "fail",
+                                                "failed", "error", ""):
+                                    _av_json_auth_fail = True
+                                    _av_fail.append(
+                                        f"JSON API auth failure: "
+                                        f"{_ak_orig}={_ak_val!r}")
+                                    break
+                                elif _ak_str in ("true", "1", "yes", "ok",
+                                                  "success", "succeeded"):
+                                    _av_ok.append(
+                                        f"JSON API auth success: "
+                                        f"{_ak_orig}={_ak_val!r}")
+                                    break
+                        # Check for error/message fields (soft fail signal)
+                        if not _av_json_auth_fail:
+                            for _ek in ("error", "errormessage",
+                                        "error_message", "message"):
+                                if _ek in _av_jd_ci:
+                                    _ek_orig, _ek_val = _av_jd_ci[_ek]
+                                    _ek_str = str(_ek_val).strip()
+                                    if _ek_str:
+                                        _av_fail.append(
+                                            f"JSON API error: "
+                                            f"{_ek_orig}={_ek_str!r}")
+                                        break
+                except (ValueError, TypeError, KeyError):
+                    pass  # not JSON — HTML-based signals handle it
+
                 # Signal 5: Logged-in content indicators (success)
                 # Stricter than before: bare 'dashboard' is too broad — many
                 # public/landing/login/MFA pages link to /dashboard in their
@@ -8657,6 +8745,8 @@ return null;
                 _av_partial = bool(_av_mfa)
 
                 if _av_err_m:
+                    _av_verified = False
+                elif _av_json_auth_fail:
                     _av_verified = False
                 elif _post_resp and _post_resp.status_code in (401, 403):
                     _av_verified = False
@@ -21924,12 +22014,42 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
 
     vc.status(phase, "Authorization Testing", "running", "HTTP method tampering", len(resource_ids), len(resource_ids))
     # Method tampering
+    # SPA FP guard: React/Angular/Vue SPAs return the same index.html shell for
+    # any HTTP method on client-side routes.  A PUT/DELETE/PATCH returning 200 is
+    # the web server serving the SPA shell — not the endpoint accepting the method.
+    # Detect by comparing the non-GET response to a baseline GET of the same URL.
+    _MT_SPA_RE = re.compile(
+        r'<div\s+id=["\'](?:root|app|__next|__nuxt)["\']|'
+        r'<script[^>]+(?:bundle|chunk|main|app)\.[a-f0-9]+\.js|'
+        r'__NEXT_DATA__|window\.__INITIAL_STATE__|'
+        r'window\.__NUXT__|ReactDOM\b|ng-app=|ng-version=',
+        re.IGNORECASE,
+    )
     auth_links = auth_recon_data.get("links", [])
     for link in auth_links[:20]:
+        # Baseline GET for SPA FP comparison (once per link)
+        _mt_base_len = -1
+        _mt_is_spa   = False
+        try:
+            _mt_base_r = auth_sess.get(link, timeout=timeout)
+            _mt_base_len = len(_mt_base_r.text or "")
+            _mt_is_spa = bool(_MT_SPA_RE.search((_mt_base_r.text or "")[:16384]))
+        except Exception:
+            pass
         for method in ("PUT", "DELETE", "PATCH"):
             try:
                 r = auth_sess.request(method, link, timeout=timeout)
                 if r.status_code not in (405, 404, 400, 401, 403, 501):
+                    # SPA FP guard: if the response is a SPA shell and its
+                    # size matches the GET baseline, the server is just
+                    # serving the SPA regardless of method.
+                    if (_mt_is_spa and _mt_base_len > 0
+                            and abs(len(r.text or "") - _mt_base_len) < 100):
+                        vc.log(
+                            f"[authorization] Skipping method tampering FP: "
+                            f"{method} {link} — SPA shell identical to GET "
+                            f"({_mt_base_len}B)", "INFO")
+                        continue
                     out.add_finding(
                         title=f"HTTP Method Tampering: {method} Accepted",
                         url=link, port=target["port"], risk="MEDIUM",
