@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.34.0"
+VERSION = "2.34.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -22422,7 +22422,7 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
             _nuc_sm_path = out.root / "structure_map.json"
             if _nuc_sm_path.exists():
                 _nuc_sm = json.loads(_nuc_sm_path.read_text())
-                _nuc_base = url.rstrip("/")
+                _nuc_base = _vs_origin
                 _nuc_paths = _nuc_sm.get("paths", {})
                 for _np in sorted(_nuc_paths.keys()):
                     _np_info = _nuc_paths[_np]
@@ -22625,6 +22625,13 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
                     started=_nik_started, ended=_nik_ended,
                     exit_code=proc.returncode,
                 )
+                if proc.returncode != 0:
+                    _nik_rc_msg = (
+                        f"[vulnscan] nikto ({_nik_label}): exit code "
+                        f"{proc.returncode}")
+                    if _nik_stderr:
+                        _nik_rc_msg += f" — {_nik_stderr.strip()[:200]}"
+                    vc.log(_nik_rc_msg, "WARNING")
                 if nik_out.exists():
                     try:
                         ndata = json.loads(nik_out.read_text(encoding="utf-8"))
@@ -22667,6 +22674,14 @@ def _phase_vulnscan(target: dict, cfg: dict, pm: ProgressManager,
                         _nik_total += _nik_count
                     except Exception as _nik_parse_err:
                         vc.error(f"[vulnscan] nikto JSON parse error: {_nik_parse_err}")
+                else:
+                    _nik_dur = int((_nik_ended - _nik_started).total_seconds())
+                    vc.log(
+                        f"[vulnscan] nikto ({_nik_label}): no output file "
+                        f"produced ({_nik_dur}s elapsed, exit code "
+                        f"{proc.returncode})",
+                        "WARNING",
+                    )
             except Exception as e:
                 out.log_error("nikto", cmd, str(e))
         if _nik_total:
@@ -29738,16 +29753,6 @@ def main() -> None:
                         vc.error(f"Phase ffuf [{_ctx_label}] error: {e}")
                         pm.set_phase_status(f"ffuf#{_ctx_label}", "error", detail=str(e))
 
-                # Phase 9: vulnscan
-                if not _skip("vulnscan"):
-                    pm.set_phase_status(f"vulnscan#{_ctx_label}", "running", "Vuln Scan")
-                    try:
-                        _phase_vulnscan(target, _ctx_cfg, pm, out, effective_auth, fast=args.fast)
-                        pm.set_phase_status(f"vulnscan#{_ctx_label}", "complete", "Vuln Scan")
-                    except Exception as e:
-                        vc.error(f"Phase vulnscan [{_ctx_label}] error: {e}")
-                        pm.set_phase_status(f"vulnscan#{_ctx_label}", "error", detail=str(e))
-
                 # Collect gobuster/feroxbuster endpoints discovered under Role 1.
                 # Use Role 1's session for wildcard filtering so false-positive paths
                 # are detected consistently with the authenticated surface.
@@ -30119,19 +30124,38 @@ def main() -> None:
             if not _skip("crawl"):
                 pm.set_phase_status(f"crawl#{_ctx_label}", "running", "Crawl")
                 try:
-                    # Only seed the crawl with the landing URL if the
-                    # requests session can actually reach it (2xx).
-                    # Browser-only URLs (302 to login) would poison the
-                    # crawl with login-page content.
-                    _crawl_seed = (
-                        [_as_landing_url]
-                        if _as_landing_url
-                        and _as_landing_code in range(200, 300)
-                        else None
-                    )
+                    # Seed the crawl with the landing URL (if reachable) plus all
+                    # endpoints discovered during recon (gobuster/feroxbuster/admin
+                    # panel/common-paths probing).  SPAs like React have no HTML
+                    # links in their shell page; without these seeds the BFS crawler
+                    # has nothing to follow.  The WebForms pages behind these seeds
+                    # (Audit/*.aspx, Dashboard/*.aspx, DocLib/*.aspx) contain
+                    # traditional <a href> links that the crawler CAN follow.
+                    _crawl_seeds: list = []
+                    if (_as_landing_url
+                            and _as_landing_code in range(200, 300)):
+                        _crawl_seeds.append(_as_landing_url)
+                    # Add all previously-discovered endpoints as crawl roots.
+                    # Dedup against target URL and landing URL to avoid double-visit.
+                    _crawl_seen = {
+                        target["url"].rstrip("/"),
+                        (_as_landing_url or "").rstrip("/"),
+                    }
+                    for _cseed in _ep_base:
+                        _cseed_norm = _cseed.rstrip("/")
+                        if (_cseed_norm not in _crawl_seen
+                                and _is_in_scope_url(_cseed, _scope_hostnames)):
+                            _crawl_seen.add(_cseed_norm)
+                            _crawl_seeds.append(_cseed)
+                    if _crawl_seeds:
+                        vc.log(
+                            f"[crawl] {len(_crawl_seeds)} extra seed(s) "
+                            f"(landing + recon-discovered endpoints)",
+                            "INFO",
+                        )
                     crawl_data = _phase_crawl(
                         target, _ctx_cfg, pm, out, effective_auth,
-                        extra_seeds=_crawl_seed)
+                        extra_seeds=_crawl_seeds or None)
                     pm.set_phase_status(f"crawl#{_ctx_label}", "complete", "Crawl")
                     # Persist role 1 crawl data for reduced contexts
                     if not _is_reduced_ctx:
@@ -30178,6 +30202,19 @@ def main() -> None:
                 _write_structure_map(out, target, crawl_data=crawl_data, source="crawl")
             except Exception:
                 pass
+
+            # ── Phase 9: vulnscan (after crawl for full structure_map) ──────────
+            # Runs after crawl so nuclei/nikto get the full target list including
+            # crawl-discovered endpoints, not just the handful from recon.
+            if not _is_reduced_ctx:
+                if not _skip("vulnscan"):
+                    pm.set_phase_status(f"vulnscan#{_ctx_label}", "running", "Vuln Scan")
+                    try:
+                        _phase_vulnscan(target, _ctx_cfg, pm, out, effective_auth, fast=args.fast)
+                        pm.set_phase_status(f"vulnscan#{_ctx_label}", "complete", "Vuln Scan")
+                    except Exception as e:
+                        vc.error(f"Phase vulnscan [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"vulnscan#{_ctx_label}", "error", detail=str(e))
 
             # ── Phase 3c: endpoint tools ──
             _ep_discovered = [
