@@ -25801,20 +25801,31 @@ class _SessionKeepalive:
                               "/favicon.ico", "/index.html"})
 
     def __init__(self, sess: "requests.Session", target: dict, cfg: dict,
-                 sm_data: "dict | None" = None, interval: int = _INTERVAL_DEFAULT):
+                 sm_data: "dict | None" = None, interval: int = _INTERVAL_DEFAULT,
+                 landing_url: str = ""):
         self._sess     = sess
         self._target   = target
         self._cfg      = cfg
         self._interval = interval
         self._stop_evt = threading.Event()
         self._thread   = None
-        self._url      = self._pick_canary(target, sm_data)
+        self._url      = self._pick_canary(target, sm_data, landing_url)
 
-    def _pick_canary(self, target: dict, sm_data: "dict | None") -> "str | None":
-        """Select a deep authenticated path that returned 200 during crawl."""
+    def _pick_canary(self, target: dict, sm_data: "dict | None",
+                     landing_url: str = "") -> "str | None":
+        """Select a path that returned 200 for THIS role's session.
+
+        Prefer the role's own landing URL (guaranteed accessible to the
+        current role) over structure_map paths (crawled by Role 1 — may
+        be admin-gated and produce misleading 302s for lower roles).
+        """
+        base = target["url"].rstrip("/")
+        if landing_url:
+            _lp = urllib.parse.urlparse(landing_url).path or "/"
+            if _lp not in self._CANARY_SKIP:
+                return landing_url
         if sm_data is None:
             return None
-        base = target["url"].rstrip("/")
         paths_data = sm_data.get("paths", {})
         # Prefer a deep (auth-gated) path
         for p, info in paths_data.items():
@@ -25865,7 +25876,8 @@ class _SessionKeepalive:
 
 
 def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
-                      role_label: str, role_sess: "requests.Session | None") -> None:
+                      role_label: str, role_sess: "requests.Session | None",
+                      landing_url: str = "") -> None:
     """Probe all structure_map paths that have no HTTP code for role_label yet.
 
     Called at the end of each credential context to guarantee role completion:
@@ -25926,23 +25938,48 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
                     base_url + _canary_path, timeout=timeout, allow_redirects=False,
                     headers={"Accept": "text/html,application/json"})
                 if _canary_r.status_code in (301, 302, 303, 307, 308):
-                    vc.log(
-                        f"[access-matrix] {role_label} session expired "
-                        f"(canary {_canary_path} → HTTP {_canary_r.status_code}) "
-                        f"— re-authenticating", "WARNING")
-                    try:
-                        _fresh = _reauth_session(cfg, target, role_label)
-                        if _fresh is not None:
-                            probe_sess = _fresh
-                            vc.log(f"[access-matrix] {role_label} re-authenticated OK",
-                                   "INFO")
-                        else:
-                            vc.log(
-                                f"[access-matrix] {role_label} re-auth returned None "
-                                f"— probing with expired session", "WARNING")
-                    except Exception as _rae:
+                    # Cross-check: the canary was picked from Role 1's crawl
+                    # and may be admin-gated.  If this role's own landing URL
+                    # still returns 200, the session is alive — the canary is
+                    # just restricted for this role.
+                    _session_dead = True
+                    if landing_url:
+                        _lp_path = urllib.parse.urlparse(landing_url).path or "/"
+                        if _lp_path != _canary_path:
+                            try:
+                                _lr = probe_sess.get(
+                                    landing_url, timeout=timeout,
+                                    allow_redirects=False,
+                                    headers={"Accept": "text/html,application/json"})
+                                if _lr.status_code in range(200, 400) and _lr.status_code not in (301, 302, 303, 307, 308):
+                                    _session_dead = False
+                                    vc.log(
+                                        f"[access-matrix] {role_label} canary "
+                                        f"{_canary_path} → {_canary_r.status_code} "
+                                        f"but landing page {_lp_path} → "
+                                        f"{_lr.status_code} — session alive, "
+                                        f"canary is role-gated", "INFO")
+                            except Exception:
+                                pass
+                    if _session_dead:
                         vc.log(
-                            f"[access-matrix] {role_label} re-auth failed: {_rae}",
+                            f"[access-matrix] {role_label} session expired "
+                            f"(canary {_canary_path} → HTTP {_canary_r.status_code}) "
+                            f"— re-authenticating", "WARNING")
+                    if _session_dead:
+                        try:
+                            _fresh = _reauth_session(cfg, target, role_label)
+                            if _fresh is not None:
+                                probe_sess = _fresh
+                                vc.log(f"[access-matrix] {role_label} re-authenticated OK",
+                                       "INFO")
+                            else:
+                                vc.log(
+                                    f"[access-matrix] {role_label} re-auth returned None "
+                                    f"— probing with expired session", "WARNING")
+                        except Exception as _rae:
+                            vc.log(
+                                f"[access-matrix] {role_label} re-auth failed: {_rae}",
                             "WARNING")
             except Exception:
                 pass
@@ -25984,41 +26021,58 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
                     and not _reauth_dead):
                 _loc = r.headers.get("Location", "") or ""
                 if _LOGIN_LOC_RE.search(_loc):
-                    _reauth_budget -= 1
-                    vc.log(
-                        f"[access-matrix] {role_label} session expired mid-loop "
-                        f"({path} → {_final_code}) — re-authenticating "
-                        f"(budget: {_reauth_budget} left)", "WARNING")
-                    try:
-                        _fresh = _reauth_session(cfg, target, role_label)
-                        if _fresh is not None:
-                            probe_sess = _fresh
-                            vc.log(
-                                f"[access-matrix] {role_label} re-authenticated OK",
-                                "INFO")
-                            # Retry this path with the fresh session
-                            r = probe_sess.get(
-                                url, timeout=timeout, allow_redirects=False,
+                    # Cross-check: if the role's landing URL still works,
+                    # this is an authorization deny (role-gated path), not
+                    # session expiry.
+                    _midloop_dead = True
+                    if landing_url:
+                        try:
+                            _ml_r = probe_sess.get(
+                                landing_url, timeout=timeout,
+                                allow_redirects=False,
                                 headers={"Accept": "text/html,application/json"})
-                            _final_code = r.status_code
-                            # If retry STILL redirects to login, the re-auth
-                            # flow cannot produce a valid session for this
-                            # target.  Stop wasting budget — every subsequent
-                            # probe will fail identically.
-                            if _final_code in (301, 302, 303, 307, 308):
-                                _retry_loc = r.headers.get("Location", "") or ""
-                                if _LOGIN_LOC_RE.search(_retry_loc):
-                                    _reauth_dead = True
-                                    _reauth_budget = 0
-                                    vc.log(
-                                        f"[access-matrix] {role_label} re-auth produced "
-                                        f"a dead session (retry → {_final_code}) — "
-                                        f"skipping remaining probes for this role",
-                                        "WARNING")
-                    except Exception as _mle:
+                            if _ml_r.status_code in range(200, 400) and _ml_r.status_code not in (301, 302, 303, 307, 308):
+                                _midloop_dead = False
+                        except Exception:
+                            pass
+                    if not _midloop_dead:
+                        pass  # session alive — path is role-gated, not expired
+                    else:
+                        _reauth_budget -= 1
                         vc.log(
-                            f"[access-matrix] {role_label} mid-loop re-auth "
-                            f"failed: {_mle}", "WARNING")
+                            f"[access-matrix] {role_label} session expired mid-loop "
+                            f"({path} → {_final_code}) — re-authenticating "
+                            f"(budget: {_reauth_budget} left)", "WARNING")
+                        try:
+                            _fresh = _reauth_session(cfg, target, role_label)
+                            if _fresh is not None:
+                                probe_sess = _fresh
+                                vc.log(
+                                    f"[access-matrix] {role_label} re-authenticated OK",
+                                    "INFO")
+                                # Retry this path with the fresh session
+                                r = probe_sess.get(
+                                    url, timeout=timeout, allow_redirects=False,
+                                    headers={"Accept": "text/html,application/json"})
+                                _final_code = r.status_code
+                                # If retry STILL redirects to login, the re-auth
+                                # flow cannot produce a valid session for this
+                                # target.  Stop wasting budget — every subsequent
+                                # probe will fail identically.
+                                if _final_code in (301, 302, 303, 307, 308):
+                                    _retry_loc = r.headers.get("Location", "") or ""
+                                    if _LOGIN_LOC_RE.search(_retry_loc):
+                                        _reauth_dead = True
+                                        _reauth_budget = 0
+                                        vc.log(
+                                            f"[access-matrix] {role_label} re-auth produced "
+                                            f"a dead session (retry → {_final_code}) — "
+                                            f"skipping remaining probes for this role",
+                                            "WARNING")
+                        except Exception as _mle:
+                            vc.log(
+                                f"[access-matrix] {role_label} mid-loop re-auth "
+                                f"failed: {_mle}", "WARNING")
 
             # ── Guard: never record login-redirect as real status ──────
             # When re-auth is exhausted or dead, a 3xx to the login page
@@ -26368,7 +26422,8 @@ def _retroactive_probe(out: "OutputManager", target: dict, cfg: dict,
 def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                           out: OutputManager, sess: requests.Session,
                           crawl_data: dict,
-                          prebuilt_sessions: "dict | None" = None) -> dict:
+                          prebuilt_sessions: "dict | None" = None,
+                          landing_urls: "dict | None" = None) -> dict:
     """
     Phase 20: Multi-credential access matrix: tests each discovered path with
     every role in cfg['auth_matrix'] plus unauthenticated.
@@ -26507,21 +26562,42 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                     base_url + _canary_p, timeout=timeout, allow_redirects=False,
                     headers={"Accept": "text/html,application/json"})
                 if _cr_r.status_code in (301, 302, 303, 307, 308):
-                    vc.log(
-                        f"[access-matrix/p20] {_cr_role} session expired "
-                        f"(canary {_canary_p} → HTTP {_cr_r.status_code}) "
-                        f"— re-authenticating", "WARNING")
-                    try:
-                        _cr_fresh = _reauth_session(cfg, target, _cr_role)
-                        if _cr_fresh is not None:
-                            role_sessions[_cr_role] = _cr_fresh
-                            vc.log(f"[access-matrix/p20] {_cr_role} re-authenticated OK", "INFO")
-                        else:
-                            vc.log(
-                                f"[access-matrix/p20] {_cr_role} re-auth returned None", "WARNING")
-                    except Exception as _cr_e:
+                    # Cross-check: canary may be role-gated (admin-only),
+                    # not actually expired.  Verify with the role's own
+                    # landing URL before burning a re-auth.
+                    _cr_actually_dead = True
+                    _cr_landing = (landing_urls or {}).get(_cr_role, "")
+                    if _cr_landing:
+                        try:
+                            _cr_lr = _cr_sess.get(
+                                _cr_landing, timeout=timeout,
+                                allow_redirects=False,
+                                headers={"Accept": "text/html,application/json"})
+                            if _cr_lr.status_code in range(200, 400) and _cr_lr.status_code not in (301, 302, 303, 307, 308):
+                                _cr_actually_dead = False
+                                vc.log(
+                                    f"[access-matrix/p20] {_cr_role} canary "
+                                    f"{_canary_p} → {_cr_r.status_code} but "
+                                    f"landing page → {_cr_lr.status_code} — "
+                                    f"session alive, canary is role-gated", "INFO")
+                        except Exception:
+                            pass
+                    if _cr_actually_dead:
                         vc.log(
-                            f"[access-matrix/p20] {_cr_role} re-auth failed: {_cr_e}", "WARNING")
+                            f"[access-matrix/p20] {_cr_role} session expired "
+                            f"(canary {_canary_p} → HTTP {_cr_r.status_code}) "
+                            f"— re-authenticating", "WARNING")
+                        try:
+                            _cr_fresh = _reauth_session(cfg, target, _cr_role)
+                            if _cr_fresh is not None:
+                                role_sessions[_cr_role] = _cr_fresh
+                                vc.log(f"[access-matrix/p20] {_cr_role} re-authenticated OK", "INFO")
+                            else:
+                                vc.log(
+                                    f"[access-matrix/p20] {_cr_role} re-auth returned None", "WARNING")
+                        except Exception as _cr_e:
+                            vc.log(
+                                f"[access-matrix/p20] {_cr_role} re-auth failed: {_cr_e}", "WARNING")
             except Exception:
                 pass
 
@@ -27028,6 +27104,7 @@ def main() -> None:
     # Sessions of all roles that have completed their context, keyed by role label.
     # Used by _retroactive_probe to populate access matrix entries for newly found URLs.
     _completed_role_sessions: dict = {}
+    _role_landing_urls: dict = {}  # {role_label: landing_url} — per-role canary targets
 
     _am = cfg.get("auth_matrix") or []
     if _VANTAGE_MANAGED and _am:
@@ -28380,8 +28457,14 @@ def main() -> None:
                     _ka_sm_path = out.root / "structure_map.json"
                     _ka_sm = (json.loads(_ka_sm_path.read_text())
                               if _ka_sm_path.exists() else None)
+                    _ka_landing = (
+                        _as_landing_url
+                        if _as_landing_url and _as_landing_code == 200
+                        else ""
+                    )
                     _keepalive = _SessionKeepalive(
-                        effective_auth, target, _ctx_cfg, sm_data=_ka_sm)
+                        effective_auth, target, _ctx_cfg, sm_data=_ka_sm,
+                        landing_url=_ka_landing)
                     _keepalive.start()
                 except Exception:
                     pass
@@ -29418,13 +29501,17 @@ def main() -> None:
             # pre-fills confirmed codes.  _probe_role_paths fills only the
             # remaining None slots for this role.
             try:
-                _probe_role_paths(out, target, _ctx_cfg, _ctx_label, _ctx_auth)
+                _probe_role_paths(out, target, _ctx_cfg, _ctx_label, _ctx_auth,
+                                  landing_url=_as_landing_url or "")
             except Exception:
                 pass
 
-            # Store this role's session for retroactive probing by later re-discovery runs.
+            # Store this role's session and landing URL for retroactive probing
+            # by later re-discovery runs and for Phase 20 canary cross-checks.
             if _ctx_label != "unauthenticated":
                 _completed_role_sessions[_ctx_label] = _ctx_auth
+                if _as_landing_url and _as_landing_code == 200:
+                    _role_landing_urls[_ctx_label] = _as_landing_url
 
             # ── Discovery-leader check ────────────────────────────────────────
             # After each authenticated non-reduced context, compare this role's
@@ -29513,7 +29600,8 @@ def main() -> None:
                                 vc.error(f"[discovery-leader] _retroactive_probe error: {_rpe}")
                             # Probe the new leader itself for the new URLs
                             try:
-                                _probe_role_paths(out, target, _ctx_cfg, _ctx_label, _ctx_auth)
+                                _probe_role_paths(out, target, _ctx_cfg, _ctx_label, _ctx_auth,
+                                                  landing_url=_as_landing_url or "")
                             except Exception:
                                 pass
                         else:
@@ -29758,7 +29846,8 @@ def main() -> None:
                     if _c["label"] != "unauthenticated" and _c["auth_sess"] is not None
                 }
                 _phase_access_matrix(target, cfg, pm, out, sess, {"links": _dedup_links},
-                                     prebuilt_sessions=_am_prebuilt or None)
+                                     prebuilt_sessions=_am_prebuilt or None,
+                                     landing_urls=_role_landing_urls)
                 pm.set_phase_status("access_matrix", "complete", "Access Matrix")
             except Exception as e:
                 vc.error(f"Phase access_matrix error: {e}")
