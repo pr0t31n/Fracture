@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.34.1"
+VERSION = "2.34.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -29633,6 +29633,20 @@ def main() -> None:
                         f"{_as_landing_url} (HTTP {_as_landing_code})",
                         "INFO",
                     )
+                    # Write the landing URL to structure_map immediately so
+                    # it appears in the Crucible Status tab and preliminary
+                    # access_matrix without waiting for the bulk sync after
+                    # gobuster.
+                    try:
+                        _lnd_path = urllib.parse.urlparse(
+                            _as_landing_url).path or "/"
+                        _write_structure_map(
+                            out, target,
+                            path_statuses={_lnd_path: _as_landing_code},
+                            source="auth-landing",
+                        )
+                    except Exception:
+                        pass
 
             # ── Session keepalive ─────────────────────────────────────────
             # Start a background heartbeat so the server session doesn't
