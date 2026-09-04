@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.33.16"
+VERSION = "2.33.17"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -8583,6 +8583,37 @@ return null;
                             )
                 except Exception:
                     pass
+                # ── JSON API early-exit ──────────────────────────────────
+                # If the POST response is valid JSON with a known auth
+                # status key that explicitly reports failure, skip MFA
+                # probes and post-login analysis entirely.  Saves ~4
+                # requests per failed credential on JSON-authenticated
+                # APIs (e.g. {"authenticated":"false"}).
+                _json_api_rejected = False
+                try:
+                    import json as _j_early
+                    _je = _j_early.loads(_post_resp.text or "")
+                    if isinstance(_je, dict):
+                        _je_ci = {k.lower(): v for k, v in _je.items()}
+                        for _jk in ("authenticated", "success",
+                                    "isauthenticated", "is_authenticated",
+                                    "loggedin", "logged_in"):
+                            if _jk in _je_ci:
+                                _jv = str(_je_ci[_jk]).strip().lower()
+                                if _jv in ("false", "0", "no", "fail",
+                                           "failed", "error", ""):
+                                    _json_api_rejected = True
+                                break
+                except (ValueError, TypeError, KeyError):
+                    pass
+                if _json_api_rejected:
+                    auth["auth_verified"] = False
+                    vc.log(
+                        "[auth] JSON API explicitly rejected credentials "
+                        "— skipping MFA probes / post-login analysis",
+                        "WARNING",
+                    )
+                    return None
                 _handle_post_login_page(_post_resp)
 
             # ── Multi-signal authentication success verification ───────────────
@@ -14014,7 +14045,7 @@ _TESTSSL_PROTO_IDS = {
 # testssl JSON ids that produce no useful pentest finding — skip entirely
 _TS_SKIP_IDS = frozenset({
     "overall_grade", "cert_revocation", "cert_trust",
-    "security_headers", "FS_TLS12_sig_algs",
+    "security_headers",
     "TLS1_2", "TLS1_3",
 })
 
@@ -14481,8 +14512,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             # Filter out (OK) lines, noise lines, and embedded HTTP content
             # that can cause false-positive pattern matches.
             _TESTSSL_NOISE = re.compile(
-                r'Testing robust forward secrecy'
-                r'|User-agent:'
+                r'User-agent:'
                 r'|Disallow:'
                 r'|not offered'    # cipher/protocol absent → never a finding
                 r'|make sure you don.t use this certificate',  # DROWN advisory continuation line
@@ -14642,6 +14672,22 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                                 _tsf_cve = ",".join(sorted(_all))
                             if _tsf_id in _TS_SKIP_IDS or _tsf_id.startswith("cipher-"):
                                 continue
+                            # Forward-secrecy IDs — merge with sslscan's
+                            # "Cipher Suites Without Forward Secrecy" finding
+                            # so both tools show as source pills.
+                            elif _tsf_id.startswith("FS"):
+                                # FS / FS_ciphers: same concept as the sslscan
+                                # cipher-level finding — merge title.
+                                # FS_ECDHE_curves / FS_DH_groups /
+                                # FS_TLS12_sig_algs: parameter-quality sub-findings
+                                # that stand on their own.
+                                if "offered" in _tsf_finding_lo and "not" not in _tsf_finding_lo:
+                                    continue  # FS offered and OK — not a finding
+                                if _tsf_id in ("FS", "FS_offered", "FS_ciphers"):
+                                    _tsf_title = "Cipher Suites Without Forward Secrecy"
+                                    _tsf_risk  = "MEDIUM"
+                                else:
+                                    _tsf_title = f"SSL/TLS Forward Secrecy: {_tsf_id}"
                             elif "self-signed" in _tsf_finding_lo or "self signed" in _tsf_finding_lo:
                                 _tsf_title = "SSL/TLS Certificate: Self-Signed"
                                 _tsf_risk  = "MEDIUM"
@@ -22367,6 +22413,34 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             # the attribute and fall back to SameSite=Lax — a misconfiguration.
             _bad_samesite_none.append(_ck.name)
 
+    # Build evidence file with full cookie flag details for all findings
+    _ck_evidence = out.output_path(phase, "cookie_flags_" + hostname)
+    try:
+        _ck_lines = [f"# Cookie Security Flag Audit — {url}\n"]
+        for _ck in auth_sess.cookies:
+            _ho = False
+            try:
+                _ho = _ck.has_nonstandard_attr("HttpOnly")
+            except Exception:
+                try:
+                    _ho = "HttpOnly" in (_ck._rest or {})
+                except Exception:
+                    pass
+            _ss = ""
+            try:
+                _ss = ((_ck._rest or {}).get("SameSite") or "").strip()
+            except Exception:
+                pass
+            _ck_lines.append(
+                f"  {_ck.name:40s}  Secure={_ck.secure!s:5s}  "
+                f"HttpOnly={_ho!s:5s}  SameSite={_ss or '(absent)':10s}  "
+                f"Domain={_ck.domain}  Path={_ck.path}"
+            )
+        _ck_evidence.write_text("\n".join(_ck_lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+    _ck_ev_str = str(_ck_evidence)
+
     if _miss_secure:
         out.add_finding(
             title="Session Cookie Missing Secure Flag",
@@ -22379,6 +22453,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             ),
             output=f"Cookies without Secure: {', '.join(_miss_secure)}",
             sources="fracture-session", service=target["scheme"],
+            affected=url, output_file=_ck_ev_str,
             owasp="A02:2025 Cryptographic Failures",
             nist="SC-8",
             remediation=(
@@ -22400,6 +22475,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             ),
             output=f"Cookies without HttpOnly: {', '.join(_miss_httponly)}",
             sources="fracture-session", service=target["scheme"],
+            affected=url, output_file=_ck_ev_str,
             owasp="A07:2025 Identification and Authentication Failures",
             nist="SC-23",
             remediation=(
@@ -22424,6 +22500,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             ),
             output=f"Cookies without SameSite: {', '.join(_miss_samesite)}",
             sources="fracture-session", service=target["scheme"],
+            affected=url, output_file=_ck_ev_str,
             owasp="A04:2025 Insecure Design",
             nist="SI-10",
             remediation=(
@@ -22447,6 +22524,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             ),
             output=f"Cookies with SameSite=None but no Secure: {', '.join(_bad_samesite_none)}",
             sources="fracture-session", service=target["scheme"],
+            affected=url, output_file=_ck_ev_str,
             owasp="A02:2025 Cryptographic Failures",
             nist="SC-8",
             remediation=(
