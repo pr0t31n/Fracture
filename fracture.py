@@ -21694,15 +21694,15 @@ _NIKTO_NORM: "list[tuple]" = [
      "Directory Listing Enabled", "MEDIUM",
      "A01:2025 Broken Access Control", "CM-7",
      "Disable directory listing on the web server."),
-    # ── HTTP methods ──
-    (r"(?:OPTIONS|TRACE|PUT|DELETE).*method.*(?:enabled|allowed|active)",
-     "HTTP Methods — Dangerous Methods Enabled (PUT/DELETE/TRACE)", "MEDIUM",
-     "A05:2025 Security Misconfiguration", "CM-7",
-     "Disable unnecessary HTTP methods (TRACE, PUT, DELETE, OPTIONS)."),
+    # ── HTTP methods (TRACE-specific BEFORE the generic methods catch-all) ──
     (r"TRACE.*method|cross.site.tracing|XST",
      "HTTP TRACE Method Enabled (Cross-Site Tracing)", "MEDIUM",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Disable the TRACE method on the web server."),
+    (r"(?:OPTIONS|PUT|DELETE).*method.*(?:enabled|allowed|active)",
+     "HTTP Methods — Dangerous Methods Enabled (PUT/DELETE)", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Disable unnecessary HTTP methods (PUT, DELETE, OPTIONS)."),
     # ── Exposed files / paths ──
     (r"phpinfo\(\)|\/phpinfo\.php|\/info\.php",
      "Sensitive File Exposed: phpinfo()", "HIGH",
