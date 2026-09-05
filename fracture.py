@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.39.0"
+VERSION = "2.40.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2683,19 +2683,42 @@ class VantageConsole:
     When running in a real terminal: falls back to ANSI-coloured text.
     """
 
+    _ERROR_LEVELS = frozenset({"ERROR", "WARNING"})
+
     def __init__(self) -> None:
         self._managed = _VANTAGE_MANAGED
         self._lock    = threading.Lock()
+        self._error_log_path: "pathlib.Path | None" = None
+
+    def set_error_log(self, path: "pathlib.Path") -> None:
+        """Set the on-disk errors.log path for persistent error logging."""
+        self._error_log_path = path
 
     @property
     def managed(self) -> bool:
         return self._managed
 
+    def _persist_error(self, ts: str, level: str, message: str,
+                        source: str = "fracture", detail: str = "") -> None:
+        """Append an error-level entry to the on-disk errors.log (best-effort)."""
+        if self._error_log_path is None:
+            return
+        try:
+            line = f"[{ts}] {level}  SOURCE={source}\n  Message : {message}\n"
+            if detail:
+                line += f"  Detail  : {detail}\n"
+            line += "\n"
+            with open(self._error_log_path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+        except Exception:
+            pass
+
     def log(self, message: str, level: str = "INFO") -> None:
+        ts = datetime.now().isoformat()
         with self._lock:
             if self._managed:
                 entry = {
-                    "ts":      datetime.now().isoformat(),
+                    "ts":      ts,
                     "level":   level,
                     "message": message,
                 }
@@ -2716,13 +2739,16 @@ class VantageConsole:
                 c   = _colours.get(level, "")
                 tag = _tags.get(level, "[*]")
                 _tprint(f"{c}{tag}{Style.RESET_ALL} {message}")
+        if level.upper() in self._ERROR_LEVELS:
+            self._persist_error(ts, level, message)
 
     def error(self, message: str, source: str = "fracture",
               detail: str = "", category: str = "") -> None:
+        ts = datetime.now().isoformat()
         with self._lock:
             if self._managed:
                 entry = {
-                    "ts":       datetime.now().isoformat(),
+                    "ts":       ts,
                     "source":   source,
                     "message":  message,
                     "detail":   detail,
@@ -2732,6 +2758,7 @@ class VantageConsole:
                 sys.stderr.flush()
             else:
                 _tprint(f"{Fore.RED}[!] {message}{Style.RESET_ALL}")
+        self._persist_error(ts, "ERROR", message, source=source, detail=detail)
 
     def status(self, phase: str, label: str = "", status: str = "running",
                step: str = "", progress: int = 0, total: int = 0,
@@ -3066,6 +3093,7 @@ class OutputManager:
         # same header on different paths are silently dropped.
         self._hdr_disclosure_seen: set = set()
         self._setup_dirs()
+        vc.set_error_log(self.error_log)
 
     def _setup_dirs(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -3352,7 +3380,7 @@ class OutputManager:
                 "authenticated interesting endpoint",
                 "api endpoint identified",
                 "non-login form detected",
-                "login page detected",
+                "login page identified",
                 "missing secure cookie attribute:",
                 "misconfigured secure cookie attribute:",
                 "broken function level authorization (bfla)",
@@ -3391,6 +3419,15 @@ class OutputManager:
                 "technology identified:",
                 "permissive security header:",
                 "server misconfiguration:",
+                "load balancer detected:",
+                "password reset endpoint exposed",
+                "http method tampering:",
+                "non-standard cipher suites accepted",
+                "missing rate limiting",
+                "iis short file/directory name disclosure",
+                "outdated copyright notice detected",
+                "exposed cryptocurrency wallet address",
+                "unauthenticated access to protected path",
             )
             _is_global = any(_title_lower.startswith(_p) for _p in _GLOBAL_MERGE_PREFIXES)
             _norm_key  = (_title_lower, "" if _is_global else url.strip(),
@@ -11979,6 +12016,26 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _lb_out.append(f"Co-located CDN: {_recon_cdn}")
             if server_hdr:
                 _lb_out.append(f"Server: {server_hdr}")
+            # Decode F5 BIG-IP persistence cookie if present
+            _all_cookies = {**sess.cookies.get_dict(), **resp.cookies.get_dict()}
+            if _all_cookies:
+                for _ck_name, _ck_val in _all_cookies.items():
+                    if _ck_name.lower().startswith("bigipserver"):
+                        try:
+                            _parts = _ck_val.split(".")
+                            if len(_parts) >= 2:
+                                _enc_ip = int(_parts[0])
+                                _enc_port = int(_parts[1])
+                                _ip_bytes = _enc_ip.to_bytes(4, "little")
+                                _decoded_ip = ".".join(str(b) for b in _ip_bytes)
+                                _decoded_port = int.from_bytes(
+                                    _enc_port.to_bytes(2, "big"), "little")
+                                _lb_out.append(
+                                    f"F5 BIG-IP Cookie Decoded: {_ck_name}={_ck_val}")
+                                _lb_out.append(
+                                    f"  Backend Server: {_decoded_ip}:{_decoded_port}")
+                        except (ValueError, OverflowError):
+                            pass
             out.add_finding(
                 title=f"Load Balancer Detected: {_lb_label}",
                 url=url, port=target["port"], risk="INFO",
@@ -12986,6 +13043,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             _fer_proc.communicate()
             _deregister_proc(_fer_proc)
             vc.log("[recon] feroxbuster timed out after 300s — killed", "WARNING")
+            out.log_error("feroxbuster", cmd, "timed out after 300s")
         except Exception as e:
             if _fer_proc:
                 try: _fer_proc.kill(); _fer_proc.communicate()
@@ -13075,6 +13133,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _fer_files_proc.communicate()
                 _deregister_proc(_fer_files_proc)
                 vc.log("[recon] feroxbuster (files) timed out after 300s — killed", "WARNING")
+                out.log_error("feroxbuster", cmd, "timed out after 300s")
             except Exception as e:
                 if _fer_files_proc:
                     try: _fer_files_proc.kill(); _fer_files_proc.communicate()
@@ -13249,11 +13308,13 @@ def _gobuster_run(
                         )
                         return False
                     vc.log(f"[{label}] gobuster stderr: {gob_err2[:500]}", "WARNING")
+                    out.log_error("gobuster", retry_cmd, f"stderr: {gob_err2[:500]}")
             except Exception as e2:
                 out.log_error("gobuster", retry_cmd, str(e2))
                 return False
         else:
             vc.log(f"[{label}] gobuster stderr: {_gob_stderr[:500]}", "WARNING")
+            out.log_error("gobuster", cmd, f"stderr: {_gob_stderr[:500]}")
     elif _gob_stderr:
         vc.log(f"[{label}] gobuster stderr: {_gob_stderr[:500]}", "WARNING")
 
@@ -13643,7 +13704,8 @@ def _phase_endpoint_tools(
     if not discovered_urls:
         return
 
-    base_url     = target["url"].rstrip("/")
+    _pu_ept      = urllib.parse.urlparse(target["url"])
+    base_url     = f"{_pu_ept.scheme}://{_pu_ept.netloc}"
     timeout      = cfg.get("timeout", 10)
     max_ep       = cfg.get("max_endpoint_scan", 15)
     gobuster     = _find_tool("gobuster")
@@ -14119,6 +14181,7 @@ def _phase_endpoint_tools(
                 _ep_fer_proc.communicate()
                 _deregister_proc(_ep_fer_proc)
                 vc.log(f"[endpoint_tools] feroxbuster timed out after 180s — killed", "WARNING")
+                out.log_error("feroxbuster", cmd, "timed out after 180s")
             except Exception as e:
                 if _ep_fer_proc:
                     try: _ep_fer_proc.kill(); _ep_fer_proc.communicate()
@@ -15572,6 +15635,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         headers = resp.headers
     except Exception as e:
         vc.log(f"[headers] Could not fetch {url}: {e}", "ERROR")
+        out.log_error("headers", url, str(e))
         return
 
     out_f = out.output_path(phase, "headers_" + target["hostname"])
@@ -16259,6 +16323,7 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
 
         except subprocess.TimeoutExpired:
             vc.log(f"[shcheck] Timed out on {hostname}:{port}", "WARNING")
+            out.log_error("shcheck", cmd, f"timed out on {hostname}:{port}")
             # Do not store a timeout placeholder — delete the file immediately
             # so no useless artifact is left in the headers/ directory.
             try:
@@ -22171,12 +22236,9 @@ _NIKTO_NORM: "list[tuple]" = [
      "Cryptographic Padding Oracle (MS10-070)", "HIGH",
      "A02:2025 Cryptographic Failures", "SC-8",
      "Apply the MS10-070 security patch to the ASP.NET installation."),
-    # ── Telerik UI vulnerabilities ──
-    (r"Telerik\.Web\.UI\.DialogHandler|Telerik\.Web\.UI\.WebResource|Telerik.*file upload",
-     "Telerik UI File Upload / Remote Code Execution (CVE-2017-9248)", "HIGH",
-     "A06:2025 Vulnerable and Outdated Components", "SI-2",
-     "Upgrade Telerik UI to the latest patched version; restrict access to DialogHandler.aspx and WebResource.axd."),
-    (r"Telerik",
+    # ── Telerik UI ──
+    # Nikto body-match: detecting the component presence, not confirming a CVE.
+    (r"Telerik\.Web\.UI\.DialogHandler|Telerik\.Web\.UI\.WebResource|Telerik.*file upload|Telerik",
      "Telerik UI Component Detected", "MEDIUM",
      "A06:2025 Vulnerable and Outdated Components", "SI-2",
      "Review the Telerik UI version for known vulnerabilities and apply patches."),
@@ -22404,12 +22466,49 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Sensitive Path Accessible: /trace.axd", "HIGH",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Disable trace.axd in production via web.config."),
+    # ── IIS-specific ──
+    (r"iis-shortname",
+     "IIS Short File/Directory Name Disclosure (Tilde Enumeration)", "LOW",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Disable 8.3 filename generation via `fsutil behavior set disable8dot3 1` and restart IIS."),
+    # ── Crypto wallet FP filter ──
+    (r"crypto-address-detect",
+     "Exposed Cryptocurrency Wallet Address", "INFO",
+     "A09:2025 Security Logging and Monitoring Failures", "AU-6",
+     "Review detected patterns to confirm they are actual wallet addresses and not false positives from hash-like strings."),
+    # ── Copyright date ──
+    (r"old-copyright",
+     "Outdated Copyright Notice Detected", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Update copyright dates to reflect current year; outdated dates suggest unmaintained code."),
+    # ── SSL/TLS from nuclei ──
+    (r"ssl-issuer\b",
+     "SSL/TLS Certificate: Issuer Information", "INFO",
+     "A02:2025 Cryptographic Failures", "SC-17",
+     "Informational — review certificate authority trust chain."),
+    (r"ssl-dns-names\b",
+     "SSL/TLS Certificate: Subject Alternative Names", "INFO",
+     "A02:2025 Cryptographic Failures", "SC-17",
+     "Review SAN entries for unexpected hostnames or overly broad wildcard coverage."),
+    (r"wildcard-tls\b|wildcard-cert",
+     "SSL/TLS Certificate: Wildcard", "INFO",
+     "A02:2025 Cryptographic Failures", "SC-17",
+     "Limit wildcard certificates to specific services; prefer per-service certificates."),
+    (r"tls-version\b|deprecated-tls",
+     "SSL/TLS Vulnerability: Deprecated Protocol Version", "INFO",
+     "A02:2025 Cryptographic Failures", "SC-8",
+     "Disable TLS 1.0 and 1.1; enforce TLS 1.2+ with modern cipher suites."),
     # ── Telerik UI ──
-    (r"telerik-dialoghandler|telerik-fileupload|CVE-2017-9248|CVE-2019-18935|CVE-2017-11317|CVE-2017-11357",
+    # CVE templates: only match when nuclei's template ID contains the actual
+    # CVE number — these templates perform exploitation/version checks, not
+    # mere presence detection.
+    (r"CVE-2017-9248|CVE-2019-18935|CVE-2017-11317|CVE-2017-11357",
      "Telerik UI File Upload / Remote Code Execution (CVE-2017-9248)", "HIGH",
      "A06:2025 Vulnerable and Outdated Components", "SI-2",
      "Upgrade Telerik UI to the latest patched version; restrict access to DialogHandler.aspx and WebResource.axd."),
-    (r"telerik",
+    # Detection templates: handler/upload endpoint is accessible but CVE not
+    # confirmed — presence finding, not exploitation.
+    (r"telerik-dialoghandler|telerik-fileupload|telerik",
      "Telerik UI Component Detected", "MEDIUM",
      "A06:2025 Vulnerable and Outdated Components", "SI-2",
      "Review the Telerik UI version for known vulnerabilities and apply patches."),
@@ -22485,6 +22584,9 @@ _NUCLEI_NORM: "list[tuple]" = [
      "WordPress Users Exposed via REST API", "MEDIUM",
      "A01:2025 Broken Access Control", "AC-3",
      "Disable the WordPress REST API users endpoint or restrict access."),
+    # ── CMS-specific templates with known FP patterns on non-matching targets ──
+    (r"drupal-user-enum",
+     "__SUPPRESS__", None, None, None, None),  # FP: fires on non-Drupal targets (matches ?q= in ASP.NET APIs)
     (r"wp-cron",
      "WordPress wp-cron.php Publicly Accessible", "LOW",
      "A05:2025 Security Misconfiguration", "CM-7",
@@ -22595,6 +22697,30 @@ def _normalize_nuclei(item: dict) -> dict:
             "cves": _cves,
         }
     if _NUCLEI_DYN_WAF.search(_tid):
+        # Classify: if _name resolves to a known LB-only platform, emit a
+        # load-balancer finding rather than a misleading "WAF Active" title.
+        _waf_name_upper = _name.upper()
+        _is_lb = any(lb.upper() in _waf_name_upper for lb in (
+            "F5", "BIG-IP", "HAProxy", "Nginx LB", "AWS ELB", "Azure LB",
+            "Citrix NetScaler", "Envoy",
+        ))
+        if _is_lb:
+            return {
+                "title": f"Load Balancer Detected: {_name}", "risk": "INFO",
+                "description": (
+                    _desc or f"A load balancer ({_name}) was identified in front of the target. "
+                    "The load balancer distributes traffic but does NOT perform application-layer "
+                    "inspection or WAF-style blocking."
+                ),
+                "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+                "owasp": "A05:2025 Security Misconfiguration", "nist": "SC-7",
+                "remediation": (
+                    "Ensure load balancer cookies do not leak internal infrastructure details. "
+                    "Review session affinity configuration. Do not confuse load balancing with "
+                    "WAF protection."
+                ),
+                "cves": _cves,
+            }
         return {
             "title": f"WAF / Edge Security Platform Active: {_name}", "risk": "INFO",
             "description": _desc or f"{_name} detected by nuclei ({_tid}).",
@@ -22630,6 +22756,8 @@ def _normalize_nuclei(item: dict) -> dict:
             if _title is None:
                 # CVE catch-all: use nuclei's own name
                 break
+            if _title == "__SUPPRESS__":
+                return {}  # Intentionally suppressed — known FP template
             return {
                 "title": _title, "risk": _risk or _sev,
                 "description": _desc or f"{_name} ({_tid})",
@@ -22873,7 +23001,7 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
             cmd = [nikto, "-h", _nik_base, "-Format", "json",
                    "-output", str(nik_out), "-nointeractive"]
             if _vs_cookie_str:
-                cmd += ["-Cookie", _vs_cookie_str]
+                cmd += ["-Add-header", f"Cookie: {_vs_cookie_str}"]
             vc.log(
                 f"[vulnscan] Launching nikto ({_nik_idx + 1}/{len(_vs_parents)}) "
                 f"in background against {_nik_base}"
@@ -23000,10 +23128,53 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                 f"already on disk at {nuc_out}",
                 "WARNING",
             )
+            out.log_error("nuclei", nuc_cmd,
+                          f"timed out after {timeout + 120}s "
+                          f"(partial: {len(_nuc_lines)} lines)")
+        elif _nuc_proc.returncode != 0 and not _nuc_lines:
+            out.log_error("nuclei", nuc_cmd,
+                          f"exit code {_nuc_proc.returncode}, "
+                          f"0 findings produced")
+        # CMS-mismatch filter: suppress CMS-specific nuclei templates when the
+        # target's detected tech stack does not include that CMS.
+        _NUC_CMS_DIR = {
+            "drupal": {"drupal"},
+            "wordpress": {"wordpress", "wp-"},
+            "joomla": {"joomla"},
+            "magento": {"magento"},
+            "moodle": {"moodle"},
+            "shopify": {"shopify"},
+        }
+        _nuc_detected_techs = set()
+        try:
+            _tp_path = out.root / "target_profile.json"
+            if _tp_path.exists():
+                _tp_data = json.loads(_tp_path.read_text())
+                _tp_cms = (_tp_data.get("cms") or "").lower()
+                if _tp_cms:
+                    _nuc_detected_techs.add(_tp_cms)
+                for _tp_t in _tp_data.get("technologies", []):
+                    _nuc_detected_techs.add((_tp_t.get("name") or "").lower())
+        except Exception:
+            pass
+        _nuc_cms_suppressed = 0
+
         _nuc_count = 0
         for line in (nuc_stdout or "").splitlines():
             try:
                 item    = json.loads(line)
+                # CMS-mismatch suppression
+                _nuc_tpath = (item.get("template-path", "")
+                              + "/" + item.get("template-id", "")).lower()
+                _nuc_cms_hit = False
+                for _cms_key, _cms_names in _NUC_CMS_DIR.items():
+                    if _cms_key in _nuc_tpath:
+                        if not any(cn in _nuc_detected_techs for cn in _cms_names):
+                            _nuc_cms_hit = True
+                            break
+                if _nuc_cms_hit:
+                    _nuc_cms_suppressed += 1
+                    continue
                 matched = item.get("matched-at", url)
                 _norm   = _normalize_nuclei(item)
                 out.add_finding(
@@ -23025,6 +23196,10 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                 pass
             except Exception as _nuc_line_err:
                 vc.error(f"[vulnscan] nuclei line parse error: {_nuc_line_err}")
+        if _nuc_cms_suppressed:
+            vc.log(
+                f"[vulnscan] nuclei: suppressed {_nuc_cms_suppressed} "
+                f"CMS-specific finding(s) (CMS not detected on target)", "INFO")
         if _nuc_count:
             vc.log(f"[vulnscan] nuclei: {_nuc_count} finding(s) parsed", "SUCCESS")
 
@@ -23068,6 +23243,9 @@ def _collect_vulnscan_bg(handle: dict) -> None:
             if _nik_stderr:
                 _nik_rc_msg += f" — {_nik_stderr.strip()[:200]}"
             vc.log(_nik_rc_msg, "WARNING")
+            out.log_error("nikto", _nik_cmd,
+                          f"exit code {_nik_proc.returncode}: "
+                          f"{(_nik_stderr or '').strip()[:500]}")
         if _nik_out.exists():
             try:
                 ndata = json.loads(_nik_out.read_text(encoding="utf-8"))
@@ -23110,6 +23288,7 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                 _nik_total += _nik_count
             except Exception as _nik_parse_err:
                 vc.error(f"[vulnscan] nikto JSON parse error: {_nik_parse_err}")
+                out.log_error("nikto", _nik_cmd, f"JSON parse error: {_nik_parse_err}")
         else:
             _nik_dur = int((_nik_ended - _nik_start).total_seconds())
             _nik_diag = ""
@@ -23117,13 +23296,18 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                 _nik_diag += f"\n  stdout: {_nik_stdout.strip()[:500]}"
             if _nik_stderr and _nik_stderr.strip():
                 _nik_diag += f"\n  stderr: {_nik_stderr.strip()[:500]}"
+            _nik_err_detail = (
+                f"no output file produced ({_nik_dur}s elapsed, "
+                f"exit code {_nik_proc.returncode})"
+            )
+            if _nik_stderr and _nik_stderr.strip():
+                _nik_err_detail += f" stderr: {_nik_stderr.strip()[:500]}"
             vc.log(
-                f"[vulnscan] nikto ({_nik_label}): no output file "
-                f"produced ({_nik_dur}s elapsed, exit code "
-                f"{_nik_proc.returncode})"
-                + (_nik_diag if _nik_diag else " — nikto produced no output at all"),
+                f"[vulnscan] nikto ({_nik_label}): {_nik_err_detail}"
+                + (_nik_diag if _nik_diag else ""),
                 "WARNING",
             )
+            out.log_error("nikto", _nik_cmd, _nik_err_detail)
     if _nik_total:
         vc.log(f"[vulnscan] nikto total: {_nik_total} finding(s) across {len(handle.get('nikto_procs', []))} base(s)", "SUCCESS")
 
@@ -23619,43 +23803,81 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
     # the web server serving the SPA shell — not the endpoint accepting the method.
     # Detect by comparing the non-GET response to a baseline GET of the same URL.
     _MT_SPA_RE = re.compile(
-        r'<div\s+id=["\'](?:root|app|__next|__nuxt)["\']|'
-        r'<script[^>]+(?:bundle|chunk|main|app)\.[a-f0-9]+\.js|'
+        r'<div\s+id=["\'](?:root|app|__next|__nuxt|js-[a-z]+-app|main|container|application)["\']|'
+        r'<script[^>]+(?:bundle|chunk|main|app|client)\.[a-f0-9]+\.js|'
         r'__NEXT_DATA__|window\.__INITIAL_STATE__|'
         r'window\.__NUXT__|ReactDOM\b|ng-app=|ng-version=',
         re.IGNORECASE,
     )
     auth_links = auth_recon_data.get("links", [])
     for link in auth_links[:20]:
-        # Baseline GET for SPA FP comparison (once per link)
-        _mt_base_len = -1
-        _mt_is_spa   = False
+        # Baseline GET for SPA FP comparison (once per link) —
+        # use MD5 hash (not body length) to detect identical SPA shells
+        _mt_base_hash = None
+        _mt_base_len  = -1
+        _mt_is_spa    = False
         try:
             _mt_base_r = auth_sess.get(link, timeout=timeout)
-            _mt_base_len = len(_mt_base_r.text or "")
-            _mt_is_spa = bool(_MT_SPA_RE.search((_mt_base_r.text or "")[:16384]))
+            _mt_base_body = _mt_base_r.text or ""
+            _mt_base_len  = len(_mt_base_body)
+            _mt_base_hash = hashlib.md5(_mt_base_body.encode("utf-8", "replace")).hexdigest()
+            _mt_is_spa = bool(_MT_SPA_RE.search(_mt_base_body[:16384]))
         except Exception:
             pass
         for method in ("PUT", "DELETE", "PATCH"):
             try:
                 r = auth_sess.request(method, link, timeout=timeout)
-                if r.status_code not in (405, 404, 400, 401, 403, 501):
-                    # SPA FP guard: if the response is a SPA shell and its
-                    # size matches the GET baseline, the server is just
-                    # serving the SPA regardless of method.
-                    if (_mt_is_spa and _mt_base_len > 0
-                            and abs(len(r.text or "") - _mt_base_len) < 100):
+                if r.status_code not in (405, 404, 400, 401, 403, 500, 501, 502, 503):
+                    # SPA FP guard: if the response body is identical to the
+                    # GET baseline (by MD5), the server is just serving the
+                    # same page regardless of method — not actually accepting
+                    # the method. Also catches non-SPA catchall routers.
+                    _mt_resp_body = r.text or ""
+                    _mt_resp_hash = hashlib.md5(_mt_resp_body.encode("utf-8", "replace")).hexdigest()
+                    if _mt_base_hash and _mt_resp_hash == _mt_base_hash:
                         vc.log(
                             f"[authorization] Skipping method tampering FP: "
-                            f"{method} {link} — SPA shell identical to GET "
-                            f"({_mt_base_len}B)", "INFO")
+                            f"{method} {link} — response identical to GET "
+                            f"baseline (hash={_mt_base_hash[:8]}…)", "INFO")
                         continue
+                    # Secondary check: SPA regex match + size within 200B
+                    if (_mt_is_spa and _mt_base_len > 0
+                            and abs(len(_mt_resp_body) - _mt_base_len) < 200):
+                        vc.log(
+                            f"[authorization] Skipping method tampering FP: "
+                            f"{method} {link} — SPA shell ~same size as GET", "INFO")
+                        continue
+                    # Capture evidence for the accepted method
+                    _mt_ev_path = ""
+                    try:
+                        _mt_safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', link)[:80]
+                        _mt_ev_name = f"method_tamper_{method}_{_mt_safe}"
+                        _mt_ev_file = out.output_path(phase, _mt_ev_name)
+                        _mt_ev_lines = [
+                            f"HTTP Method Tampering Evidence",
+                            f"{'='*50}",
+                            f"Request:  {method} {link}",
+                            f"Response: {r.status_code} {r.reason}",
+                            f"",
+                            f"Response Headers:",
+                        ]
+                        for _hk, _hv in r.headers.items():
+                            _mt_ev_lines.append(f"  {_hk}: {_hv}")
+                        _mt_ev_lines.append("")
+                        _mt_ev_lines.append("Response Body (first 2000 chars):")
+                        _mt_ev_lines.append(_mt_resp_body[:2000])
+                        _mt_ev_file.write_text("\n".join(_mt_ev_lines), encoding="utf-8")
+                        _mt_ev_path = str(_mt_ev_file)
+                    except Exception:
+                        pass
                     out.add_finding(
                         title=f"HTTP Method Tampering: {method} Accepted",
                         url=link, port=target["port"], risk="MEDIUM",
                         description=f"The endpoint {link} accepted HTTP {method} (status {r.status_code}).",
-                        output=f"{method} {link} → {r.status_code}",
+                        output=f"{method} {link} → {r.status_code}\n\nResponse headers:\n"
+                               + "\n".join(f"  {k}: {v}" for k, v in list(r.headers.items())[:10]),
                         sources="fracture-authorization", service=target["scheme"],
+                        output_file=_mt_ev_path,
                         affected=link,
                         owasp="A01:2025 Broken Access Control", nist="AC-3",
                         remediation="Restrict HTTP methods to only those required for each endpoint.",
@@ -27301,7 +27523,8 @@ def _write_preliminary_access_matrix(out: "OutputManager", target: dict,
     except Exception:
         existing_am = {}
     existing_entries = {e["path"]: e for e in existing_am.get("paths", [])}
-    base_url = target["url"].rstrip("/")
+    _pu_wpam = urllib.parse.urlparse(target["url"])
+    base_url = f"{_pu_wpam.scheme}://{_pu_wpam.netloc}"
     sm_path_data = sm.get("paths", {})
     # Compute merged roles: start from existing file, add module-level role list
     # (_all_roles_ctx is populated as soon as _collected_roles is known, so even
@@ -27482,7 +27705,8 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
     all_sm_paths = sorted(sm.get("paths", {}).keys())
     if not all_sm_paths:
         return
-    base_url   = target["url"].rstrip("/")
+    _pu_prp    = urllib.parse.urlparse(target["url"])
+    base_url   = f"{_pu_prp.scheme}://{_pu_prp.netloc}"
     timeout    = cfg.get("timeout", 10)
     verify_ssl = cfg.get("verify_ssl", False)
     probe_sess = role_sess if role_sess is not None else requests.Session()
@@ -27875,6 +28099,7 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
         except subprocess.TimeoutExpired:
             _fer_proc.kill(); _fer_proc.communicate(); _deregister_proc(_fer_proc)
             vc.log("[recon] feroxbuster (dirs) timed out after 300s — killed", "WARNING")
+            out.log_error("feroxbuster", cmd, "timed out after 300s")
         except Exception as e:
             if _fer_proc:
                 try: _fer_proc.kill(); _fer_proc.communicate()
@@ -27951,6 +28176,7 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
         except subprocess.TimeoutExpired:
             _fer_files_proc.kill(); _fer_files_proc.communicate(); _deregister_proc(_fer_files_proc)
             vc.log("[recon] feroxbuster (files) timed out after 300s — killed", "WARNING")
+            out.log_error("feroxbuster", cmd, "timed out after 300s")
         except Exception as e:
             if _fer_files_proc:
                 try: _fer_files_proc.kill(); _fer_files_proc.communicate()
@@ -27999,9 +28225,10 @@ def _retroactive_probe(out: "OutputManager", target: dict, cfg: dict,
         sm = json.loads(sm_path.read_text()) if sm_path.exists() else {}
     except Exception:
         return
-    base_url = target["url"].rstrip("/")
-    timeout  = cfg.get("timeout", 10)
-    verify   = cfg.get("verify_ssl", False)
+    _pu_rp    = urllib.parse.urlparse(target["url"])
+    base_url  = f"{_pu_rp.scheme}://{_pu_rp.netloc}"
+    timeout   = cfg.get("timeout", 10)
+    verify    = cfg.get("verify_ssl", False)
     am_by_path = {e["path"]: e for e in am.get("paths", [])}
 
     def _get_probe_sess(rsess):
@@ -28057,6 +28284,27 @@ def _retroactive_probe(out: "OutputManager", target: dict, cfg: dict,
         pass
 
 
+# ── Phase 20 / BFLA shared regex patterns (module-level) ────────────────────
+# Shared between _phase_access_matrix and _phase_bfla so both can reference
+# them without NameError.
+_P20_BODY_DENIED_RE = re.compile(
+    r'\b(?:'
+    r'access\s+denied|(?:not|un)\s*authorized|forbidden'
+    r'|you\s+do\s+not\s+have\s+(?:access|permission)'
+    r'|insufficient\s+(?:permissions?|privileges?|access)'
+    r'|error\s+403'
+    r')\b', re.I)
+_P20_LOGIN_FORM_RE = re.compile(
+    r'<input[^>]+type=["\']?password["\']?'
+    r'|id=["\'](?:js[-_])?login[-_]?(?:app|form|container|page|root)["\']'
+    r'|id=["\'](?:signin|sign-in|auth)[-_]?(?:app|form|container|page|root)["\']'
+    r'|data-(?:login|auth|signin)[-_](?:page|app|form)\b',
+    re.I)
+_P20_LOGIN_PATH_RE = re.compile(
+    r'(?:^|/)(?:login|log[-_]in|signin|sign[-_]in|auth(?:enticate)?'
+    r'|sso|cas|adfs)/?$', re.I)
+
+
 def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                           out: OutputManager, sess: requests.Session,
                           crawl_data: dict,
@@ -28076,7 +28324,8 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
 
     phase       = "access_matrix"
     auth_matrix = cfg.get("auth_matrix", [])
-    base_url    = target["url"].rstrip("/")
+    _pu20       = urllib.parse.urlparse(target["url"])
+    base_url    = f"{_pu20.scheme}://{_pu20.netloc}"
     port        = target["port"]
     timeout     = cfg.get("timeout", 10)
     project_dir = out.root
@@ -28310,22 +28559,8 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         r'|exception\s+(?:of\s+type|details|message|was\s+thrown)'
         r'|error\s+500'
         r')\b', re.I)
-    _P20_BODY_DENIED_RE = re.compile(
-        r'\b(?:'
-        r'access\s+denied|(?:not|un)\s*authorized|forbidden'
-        r'|you\s+do\s+not\s+have\s+(?:access|permission)'
-        r'|insufficient\s+(?:permissions?|privileges?|access)'
-        r'|error\s+403'
-        r')\b', re.I)
-    _P20_LOGIN_FORM_RE = re.compile(
-        r'<input[^>]+type=["\']?password["\']?'
-        r'|id=["\'](?:js[-_])?login[-_]?(?:app|form|container|page|root)["\']'
-        r'|id=["\'](?:signin|sign-in|auth)[-_]?(?:app|form|container|page|root)["\']'
-        r'|data-(?:login|auth|signin)[-_](?:page|app|form)\b',
-        re.I)
-    _P20_LOGIN_PATH_RE = re.compile(
-        r'(?:^|/)(?:login|log[-_]in|signin|sign[-_]in|auth(?:enticate)?'
-        r'|sso|cas|adfs)/?$', re.I)
+    # _P20_*_RE patterns are module-level (defined above _phase_access_matrix)
+    # so both _phase_access_matrix and _phase_bfla can use them.
     # Capture baselines: unauth body hash + per-role body hash for root path
     _p20_baseline_hashes: set = set()
     try:
@@ -28549,6 +28784,11 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         any_authed  = any(_ok(ep_access.get(r), r, ep) for r in cred_roles)
 
         if _ok(unauth_st, "unauthenticated", ep) and any_authed:
+            # Skip login/auth pages — they are expected to be publicly
+            # accessible and are not missing access control.
+            _ep_lower = (ep.get("path") or "").lower().rstrip("/")
+            if _P20_LOGIN_PATH_RE.search(_ep_lower):
+                continue
             out.add_finding(
                 title="Unauthenticated Access to Protected Path",
                 url=ep["url"], port=port, risk="MEDIUM",
@@ -30490,6 +30730,7 @@ def main() -> None:
                         _save_checkpoint()
                     except Exception as e:
                         vc.error(f"Phase recon [{_ctx_label}] error: {e}")
+                        out.log_error("recon", "phase-level exception", str(e))
                         pm.set_phase_status(f"recon#{_ctx_label}", "error", detail=str(e))
 
                 # Read CDN/WAF from target_profile — used to modulate injection phases.
@@ -30984,6 +31225,7 @@ def main() -> None:
                     _save_checkpoint()
                 except Exception as e:
                     vc.error(f"Phase crawl [{_ctx_label}] error: {e}")
+                    out.log_error("crawl", "phase-level exception", str(e))
                     pm.set_phase_status(f"crawl#{_ctx_label}", "error", detail=str(e))
 
             # ── Scope-filter crawl data before any test phase uses it ──────────
@@ -31038,6 +31280,7 @@ def main() -> None:
                         _save_checkpoint()
                     except Exception as e:
                         vc.error(f"Phase vulnscan [{_ctx_label}] launch error: {e}")
+                        out.log_error("vulnscan", "phase-level exception", str(e))
                         pm.set_phase_status(f"vulnscan#{_ctx_label}", "error", detail=str(e))
                         _vulnscan_handle = None
 
@@ -31185,6 +31428,7 @@ def main() -> None:
                         _save_checkpoint()
                     except Exception as e:
                         vc.error(f"Phase endpoint_tools [{_ctx_label}] error: {e}")
+                        out.log_error("endpoint_tools", "phase-level exception", str(e))
                         pm.set_phase_status(_et_key, "error", detail=str(e))
                 # Update structure map with endpoint_tools-discovered URLs and their HTTP status codes
                 try:
@@ -31222,6 +31466,7 @@ def main() -> None:
                     _save_checkpoint()
                 except Exception as e:
                     vc.error(f"Phase injection [{_ctx_label}] error: {e}")
+                    out.log_error("injection", "phase-level exception", str(e))
                     pm.set_phase_status(f"injection#{_ctx_label}", "error", detail=str(e))
 
             # ── Phase 5: traversal ──
@@ -31689,6 +31934,7 @@ def main() -> None:
                             )
                         except Exception as _be:
                             vc.error(f"[discovery-leader] _run_buster_only error: {_be}")
+                            out.log_error("feroxbuster", "discovery-leader buster", str(_be))
                             _new_buster_urls = []
 
                         # Identify newly discovered URLs not seen by prior busting
@@ -32012,6 +32258,7 @@ def main() -> None:
                 _collect_vulnscan_bg(_vulnscan_handle)
             except Exception as e:
                 vc.error(f"[vulnscan] Error collecting background results: {e}")
+                out.log_error("vulnscan", "background collection", str(e))
             _vulnscan_handle = None
 
         # Final checkpoint save before summary
@@ -32062,6 +32309,49 @@ def main() -> None:
                     }.get(r, "")
                     _tprint(f"    {colour}{r:<10}{Style.RESET_ALL}: {risk_counts[r]}")
             _tprint()
+
+    # ── Post-scan merge: fold host-specific findings into root ──────────────
+    # When redirect-discovered targets produced findings in host subdirectories
+    # (e.g. app-uat.client.example.com/findings.json), merge them into the root
+    # findings.json so Crucible and Prometheus see the full set.
+    _root_proj = Path(cfg["project"]).resolve()
+    _root_fj   = _root_proj / "findings.json"
+    try:
+        _root_findings: list = json.loads(_root_fj.read_text(encoding="utf-8")) if _root_fj.exists() else []
+        _merge_count = 0
+        # Dedup key: (title_lower, affected_lower)
+        _seen = set()
+        for _rf in _root_findings:
+            _seen.add(((_rf.get("title") or "").lower(),
+                       (_rf.get("affected") or "").lower()))
+        for _sub in sorted(_root_proj.iterdir()):
+            if not _sub.is_dir():
+                continue
+            _sub_fj = _sub / "findings.json"
+            if not _sub_fj.exists() or _sub_fj == _root_fj:
+                continue
+            try:
+                _sub_findings = json.loads(_sub_fj.read_text(encoding="utf-8"))
+                for _sf in _sub_findings:
+                    _key = ((_sf.get("title") or "").lower(),
+                            (_sf.get("affected") or "").lower())
+                    if _key not in _seen:
+                        _seen.add(_key)
+                        _root_findings.append(_sf)
+                        _merge_count += 1
+            except Exception:
+                pass
+        if _merge_count:
+            _root_fj.write_text(
+                json.dumps(_root_findings, indent=2, default=str),
+                encoding="utf-8",
+            )
+            vc.log(
+                f"[merge] Merged {_merge_count} finding(s) from host "
+                f"subdirectories into root findings.json "
+                f"(total: {len(_root_findings)})", "SUCCESS")
+    except Exception as _merge_err:
+        vc.error(f"[merge] Failed to merge host findings: {_merge_err}")
 
 
 if __name__ == "__main__":
