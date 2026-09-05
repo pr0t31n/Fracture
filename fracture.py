@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.38.0"
+VERSION = "2.39.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3389,6 +3389,8 @@ class OutputManager:
                 "header data leakage:",
                 "waf / edge security platform active:",
                 "technology identified:",
+                "permissive security header:",
+                "server misconfiguration:",
             )
             _is_global = any(_title_lower.startswith(_p) for _p in _GLOBAL_MERGE_PREFIXES)
             _norm_key  = (_title_lower, "" if _is_global else url.strip(),
@@ -22375,7 +22377,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "A05:2025 Security Misconfiguration", "SC-8",
      "Set Strict-Transport-Security with max-age of at least 31536000."),
     (r"weak-csp-detect",
-     "Permissive Security Header: Content-Security-Policy", "MEDIUM",
+     "Permissive Security Header: Content-Security-Policy", "LOW",
      "A05:2025 Security Misconfiguration", "SI-10",
      "Tighten the Content-Security-Policy: remove unsafe-inline/unsafe-eval."),
     (r"xss-deprecated-header",
@@ -27641,10 +27643,18 @@ def _probe_role_paths(out: "OutputManager", target: dict, cfg: dict,
             # ── Mid-loop session expiry detection ─────────────────────
             # If an authenticated role gets a redirect-to-login, the
             # session has expired.  Re-authenticate and retry.
+            # SKIP for SPA-public targets: on SPAs, the landing URL
+            # returns the same 200 regardless of auth state, so the
+            # cross-check is useless.  Role-gated paths that redirect
+            # to /login are indistinguishable from session expiry.
+            # Record the redirect as-is — it IS the real access code
+            # for roles without permission.  The initial canary check
+            # handles pre-loop session refresh.
             if (_final_code in (301, 302, 303, 307, 308)
                     and role_label != "unauthenticated"
                     and _reauth_budget > 0
-                    and not _reauth_dead):
+                    and not _reauth_dead
+                    and not _landing_spa_public):
                 _loc = r.headers.get("Location", "") or ""
                 if _LOGIN_LOC_RE.search(_loc):
                     # Cross-check: if the role's landing URL still works,
@@ -28361,7 +28371,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         if _P20_BODY_ERR_GENERIC_RE.search(visible):
             return "error_page"
         if body_hash in _p20_baseline_hashes:
-            return "catchall" if rel_path not in ("/", "") else "unique"
+            return "spa_shell"
         return "unique"
 
     while idx < len(_am_paths):
@@ -28389,10 +28399,12 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                     body_class[role] = _classify_response(r, rel)
 
                 # ── Mid-loop session expiry detection ─────────────
+                # SKIP for SPA-public roles (see _probe_role_paths comment).
                 if (r.status_code in (301, 302, 303, 307, 308)
                         and role != "unauthenticated"
                         and _p20_reauth_budget.get(role, 0) > 0
-                        and not _p20_reauth_dead.get(role)):
+                        and not _p20_reauth_dead.get(role)
+                        and not _p20_spa_public.get(role)):
                     _loc20 = r.headers.get("Location", "") or ""
                     if _P20_LOGIN_LOC_RE.search(_loc20):
                         # ── Landing URL cross-check ────────────────────
@@ -28555,6 +28567,10 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         if most_privileged and len(cred_roles) > 1:
             high_ok = _ok(ep_access.get(most_privileged), most_privileged, ep)
             if high_ok:
+                # Skip BFLA on paths where unauthenticated also has real
+                # access — the path is public, no privilege to escalate.
+                if _ok(unauth_st, "unauthenticated", ep):
+                    continue
                 for low_role in cred_roles:
                     if low_role == most_privileged:
                         continue
@@ -28641,6 +28657,15 @@ def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
             continue
 
         if r.status_code != 200:
+            continue
+
+        # Skip SPA login shells / login pages — 200 on a login path
+        # is not privilege escalation (the page is public).
+        _bfla_rel = urllib.parse.urlparse(ep_url).path or "/"
+        if _P20_LOGIN_PATH_RE.search(_bfla_rel):
+            continue
+        _bfla_body = (r.text or "")[:8000]
+        if _P20_LOGIN_FORM_RE.search(_bfla_body):
             continue
 
         body_hash  = hash(r.text[:4096])
