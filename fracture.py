@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.44.0"
+VERSION = "2.45.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -18054,6 +18054,44 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
         except Exception as _re:
             vc.log(f"[screenshot] Root page failed: {_re}", "WARNING")
 
+    # ── Custom error page screenshot ────────────────────────────────────
+    # Capture the application's custom error page by requesting a
+    # deliberately non-existent path.  Many frameworks render a branded
+    # error page that leaks technology information or exposes debug data.
+    _err_url = f"{_parsed_target.scheme}://{_parsed_target.netloc}" \
+               f"/fracture_nonexistent_path_404_test"
+    _err_out = save_dir / f"screenshot_{safe_host}_{port}_errorpage.png"
+    vc.status(phase, "Screenshot", "running", "Error page", 2, 3)
+    try:
+        _err_code = None
+        try:
+            _err_resp = requests.get(
+                _err_url, timeout=5, verify=False, allow_redirects=True)
+            _err_code = _err_resp.status_code
+        except Exception:
+            pass
+        if _capture_screenshot_to(_err_url, _err_out, target, cfg):
+            _err_code_str = f" HTTP {_err_code}." if _err_code is not None else ""
+            out.add_finding(
+                title="Web Screenshot Captured",
+                url=_err_url, port=port, risk="INFO",
+                description=(
+                    f"A screenshot of the application's error page was "
+                    f"captured.{_err_code_str} Custom error pages may "
+                    f"reveal framework information."
+                ),
+                affected="/fracture_nonexistent_path_404_test",
+                output=f"Saved: {_err_out.name}",
+                sources="fracture-screenshot", service=target["scheme"],
+                output_file=str(_err_out),
+                http_code=_err_code,
+                owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                remediation="Review screenshot for exposed sensitive content.",
+            )
+            vc.log(f"[screenshot] Error page saved: {_err_out}", "SUCCESS")
+    except Exception as _ee:
+        vc.log(f"[screenshot] Error page failed: {_ee}", "WARNING")
+
     vc.status(phase, "Screenshot", "complete", "Done", 1, 1)
     vc.log("[screenshot] Phase complete", "SUCCESS")
 
@@ -25981,6 +26019,62 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
                 remediation="Verify this endpoint enforces proper authorisation.",
             )
 
+    # ── Screenshot login forms discovered during authenticated crawl ──
+    # Forms with password fields that are NOT the configured login URL
+    # may be secondary login portals, password-change forms, or admin
+    # panels.  Capture a screenshot of each unique page hosting such a
+    # form (capped to avoid excessive browser launches).
+    _lf_ss_done: set = set()
+    _lf_ss_max  = 5
+    _lf_configured_login = (
+        cfg.get("auth", {}).get("login_url", "").strip().rstrip("/")
+    )
+    for _lf in auth_forms:
+        _lf_has_password = any(
+            i.get("type", "").lower() == "password"
+            for i in _lf.get("inputs", [])
+        )
+        if not _lf_has_password:
+            continue
+        _lf_page_url = _lf.get("page_url") or _lf.get("action", url)
+        _lf_norm = _lf_page_url.rstrip("/")
+        # Skip the configured login URL — already screenshotted separately
+        if _lf_norm == _lf_configured_login:
+            continue
+        if _lf_norm in _lf_ss_done or len(_lf_ss_done) >= _lf_ss_max:
+            continue
+        _lf_ss_done.add(_lf_norm)
+        _lf_safe = re.sub(r'[^a-zA-Z0-9_-]', '_',
+                          _lf_page_url.replace("://", "_"))[:50]
+        _lf_ss_path = _ar_ss_dir / f"screenshot_loginform_{_lf_safe}.png"
+        try:
+            if _capture_screenshot_to(_lf_page_url, _lf_ss_path, target, cfg,
+                                      auth_session=auth_sess):
+                _lf_rel = urllib.parse.urlparse(_lf_page_url).path or "/"
+                out.add_finding(
+                    title="Web Screenshot Captured",
+                    url=_lf_page_url, port=target["port"], risk="INFO",
+                    description=(
+                        f"Screenshot of login/password form page discovered "
+                        f"during authenticated crawl: {_lf_page_url}"
+                    ),
+                    affected=_lf_rel,
+                    output=f"Saved: {_lf_ss_path.name}",
+                    sources="fracture-screenshot", service=target["scheme"],
+                    output_file=str(_lf_ss_path),
+                    owasp="A07:2025 Identification and Authentication Failures",
+                    nist="IA-8",
+                    remediation=(
+                        "Review screenshot for exposed sensitive content."
+                    ),
+                )
+                vc.log(
+                    f"[auth_recon] Login form screenshot: {_lf_ss_path.name}",
+                    "SUCCESS",
+                )
+        except Exception:
+            pass
+
     # ── API endpoint identification ────────────────────────────────────
     # When discovered endpoints contain /api/ paths or return JSON
     # responses, flag the existence of an API layer as LOW.
@@ -28068,6 +28162,10 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
         url + "?" + "fracture_test_param=<script>",
         url + "/admin",
     ]
+    _err_ss_dir = out.root / "recon"
+    _err_ss_dir.mkdir(parents=True, exist_ok=True)
+    _err_ss_count = 0
+    _err_ss_max   = 3
     for eu in error_triggers:
         try:
             r = sess.get(eu, timeout=timeout, allow_redirects=True)
@@ -28093,6 +28191,40 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                     ),
                 )
                 vc.log(f"[logging_monitoring] Stack trace: {eu}", "SUCCESS")
+                # Screenshot the verbose error page as visual evidence
+                if _err_ss_count < _err_ss_max:
+                    _err_safe = re.sub(r'[^a-zA-Z0-9_-]', '_',
+                                       eu.replace("://", "_"))[:50]
+                    _err_ss_p = _err_ss_dir / f"screenshot_error_{_err_safe}.png"
+                    try:
+                        if _capture_screenshot_to(eu, _err_ss_p, target, cfg,
+                                                  auth_session=sess):
+                            _err_ss_count += 1
+                            out.add_finding(
+                                title="Web Screenshot Captured",
+                                url=eu, port=target["port"], risk="INFO",
+                                description=(
+                                    f"Screenshot of verbose error page: {eu} "
+                                    f"(HTTP {r.status_code})"
+                                ),
+                                affected=urllib.parse.urlparse(eu).path or "/",
+                                output=f"Saved: {_err_ss_p.name}",
+                                sources="fracture-screenshot",
+                                service=target["scheme"],
+                                output_file=str(_err_ss_p),
+                                http_code=r.status_code,
+                                owasp="A09:2025 Security Logging and Monitoring Failures",
+                                nist="AU-3",
+                                remediation=(
+                                    "Review screenshot for exposed sensitive content."
+                                ),
+                            )
+                            vc.log(
+                                f"[logging_monitoring] Error screenshot: {_err_ss_p.name}",
+                                "SUCCESS",
+                            )
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -29881,6 +30013,44 @@ def _phase_file_upload_info(target: dict, cfg: dict, pm: ProgressManager,
         if any(i.get("type") == "file" for i in f.get("inputs", []))
         or "multipart" in f.get("enctype", "")
     ]
+
+    # ── Screenshot each file upload page (authenticated) ─────────────
+    _upl_ss_dir = out.root / "recon"
+    _upl_ss_dir.mkdir(parents=True, exist_ok=True)
+    _upl_ss_done: set = set()
+    _upl_ss_max  = 5
+    for _upl_form in upload_forms:
+        _upl_page_url = _upl_form.get("page_url") or _upl_form.get("action", url)
+        _upl_page_norm = _upl_page_url.rstrip("/")
+        if _upl_page_norm in _upl_ss_done or len(_upl_ss_done) >= _upl_ss_max:
+            continue
+        _upl_ss_done.add(_upl_page_norm)
+        _upl_safe = re.sub(r'[^a-zA-Z0-9_-]', '_',
+                           _upl_page_url.replace("://", "_"))[:50]
+        _upl_ss_path = _upl_ss_dir / f"screenshot_upload_{_upl_safe}.png"
+        try:
+            if _capture_screenshot_to(_upl_page_url, _upl_ss_path, target, cfg,
+                                      auth_session=sess):
+                _upl_rel = urllib.parse.urlparse(_upl_page_url).path or "/"
+                out.add_finding(
+                    title="Web Screenshot Captured",
+                    url=_upl_page_url, port=target["port"], risk="INFO",
+                    description=(
+                        f"Screenshot of file upload page: {_upl_page_url}"
+                    ),
+                    affected=_upl_rel,
+                    output=f"Saved: {_upl_ss_path.name}",
+                    sources="fracture-screenshot", service=target["scheme"],
+                    output_file=str(_upl_ss_path),
+                    owasp="A04:2025 Insecure Design", nist="SI-3",
+                    remediation="Review screenshot for exposed sensitive content.",
+                )
+                vc.log(
+                    f"[file_upload_info] Screenshot: {_upl_ss_path.name}",
+                    "SUCCESS",
+                )
+        except Exception:
+            pass
 
     # Rejection / confirmation body markers for upload responses
     _UPL_REJECT_RE = re.compile(
