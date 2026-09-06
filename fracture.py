@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.43.0"
+VERSION = "2.44.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3406,6 +3406,7 @@ class OutputManager:
         remediation: str = "",
         command: str = "",
         http_code: int = 0,
+        highlights: "list | None" = None,
         **extra_v11,
     ) -> None:
         """Record a security finding to findings.json and findings.csv. Thread-safe.
@@ -3477,6 +3478,7 @@ class OutputManager:
             "remediation":    remediation or "",
             "accounts":       list(self._current_accounts),
             "http_code":      int(http_code) if http_code else 0,
+            "highlights":     highlights or [],
         }
         # Merge v1.1 enrichment fields (cvss_score, cvss_vector, cwe, etc.)
         if extra_v11:
@@ -3710,6 +3712,15 @@ class OutputManager:
                                 _ex_accts.append(_a)
                                 _ex_roles.add(_a.get("role", ""))
                         ex["accounts"] = _ex_accts
+                    # merge highlights — combine without duplication
+                    if highlights:
+                        _ex_hl = ex.get("highlights") or []
+                        _ex_hl_set = {h.lower() for h in _ex_hl}
+                        for _h in highlights:
+                            if _h.lower() not in _ex_hl_set:
+                                _ex_hl.append(_h)
+                                _ex_hl_set.add(_h.lower())
+                        ex["highlights"] = _ex_hl
                     # escalate risk
                     _risk_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
                     if _risk_rank.get((risk or "").upper(), 0) > _risk_rank.get((ex.get("risk") or "").upper(), 0):
@@ -12926,6 +12937,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             owasp="A05:2025 Security Misconfiguration", nist="SI-2",
             remediation="Remove or genericise the Server response header in the web server configuration (e.g., ServerTokens Prod in Apache; server_tokens off in nginx).",
             http_code=resp.status_code,
+            highlights=[f"Server: {server_hdr}"],
         )
     if powered_by:
         out.add_finding(
@@ -12937,6 +12949,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             owasp="A05:2025 Security Misconfiguration", nist="SI-2",
             remediation='Remove or suppress the X-Powered-By header at the application framework or reverse-proxy level (e.g., app.disable("x-powered-by") in Express; Header unset X-Powered-By in Apache).',
             http_code=resp.status_code,
+            highlights=[f"X-Powered-By: {powered_by}"],
         )
     for cms in set(detected_cms):
         vc.log(f"[recon] CMS detected: {cms}", "SUCCESS")
@@ -13127,6 +13140,10 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _waf_out.append(f"Co-located CDN: {_recon_cdn}")
             if server_hdr:
                 _waf_out.append(f"Server: {server_hdr}")
+            # Build highlights — the identifying headers/values for the WAF
+            _waf_hl = list(_recon_wafs)
+            for _wh, _wv in _waf_id_found:
+                _waf_hl.append(f"{_wh}: {_wv}")
             out.add_finding(
                 title=f"WAF / Edge Security Platform Active: {_waf_label}",
                 url=url, port=target["port"], risk="INFO",
@@ -13142,12 +13159,14 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 output="\n".join(_waf_out),
                 sources="fracture-recon", service=target["scheme"],
                 owasp="A05:2025 Security Misconfiguration", nist="SC-7",
+                output_file=json.dumps([{"url": url, "req": str(_probe_rq), "resp": str(_probe_rp)}]),
                 remediation=(
                     "Keep WAF rule sets up to date and covering OWASP Top 10 2025. "
                     "Do not rely solely on WAF protection — fix underlying vulnerabilities in the application. "
                     "Review WAF bypass techniques relevant to the identified platform."
                 ),
                 http_code=resp.status_code,
+                highlights=_waf_hl,
             )
 
         if _recon_lbs:
@@ -13174,6 +13193,11 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                 f"F5 BIG-IP Cookie Decoded: {_ck_name}={_ck_val}")
                             _lb_out.append(
                                 f"  Backend Server: {_decoded}")
+            # Build highlights — the identifying evidence for the LB
+            _lb_hl = [_lb_label]
+            for _ck_name2 in list((sess.cookies.get_dict() or {}).keys()) + list((resp.cookies.get_dict() or {}).keys()):
+                if _ck_name2.lower().startswith("bigipserver"):
+                    _lb_hl.append(_ck_name2)
             out.add_finding(
                 title=f"Load Balancer Detected: {_lb_label}",
                 url=url, port=target["port"], risk="INFO",
@@ -13190,12 +13214,14 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 output="\n".join(_lb_out),
                 sources="fracture-recon", service=target["scheme"],
                 owasp="A05:2025 Security Misconfiguration", nist="SC-7",
+                output_file=json.dumps([{"url": url, "req": str(_probe_rq), "resp": str(_probe_rp)}]),
                 remediation=(
                     "Ensure load balancer cookies do not leak internal infrastructure details. "
                     "Review session affinity configuration. Do not confuse load balancing with "
                     "WAF protection — application-layer security must be enforced at the application."
                 ),
                 http_code=resp.status_code,
+                highlights=_lb_hl,
             )
 
         # Web cache poisoning probes — test whether unkeyed request headers are
@@ -14963,7 +14989,7 @@ def _phase_endpoint_tools(
                 _ep_screenshot_ok = (200 <= _ss_http_code < 300) or (400 <= _ss_http_code < 500)
             except Exception:
                 _ep_screenshot_ok = False
-        if _ep_screenshot_ok and _capture_screenshot_to(ep_url, ep_shot, target, cfg):
+        if _ep_screenshot_ok and _capture_screenshot_to(ep_url, ep_shot, target, cfg, auth_session=sess):
             _ep_rel = urllib.parse.urlparse(ep_url).path or "/"
             out.add_finding(
                 title="Web Screenshot Captured",
@@ -15247,12 +15273,14 @@ def _phase_endpoint_tools(
                             output=f"{_vh}: {_vhv}",
                             sources="fracture-headers", service=target["scheme"],
                             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                            output_file=_ep_page_ev,
                             remediation=(
                                 f"Configure the server to suppress the '{_vh}' response "
                                 "header or remove version numbers from its value."
                             ),
                             affected=ep_url,
                             http_code=_ep_resp.status_code,
+                            highlights=[f"{_vh}: {_vhv}"],
                         )
 
         # ── Directory brute-force ────────────────────────────────────────────
@@ -15486,6 +15514,57 @@ _TS_SKIP_IDS = frozenset({
     "TLS1_2",
 })
 
+# Mapping from testssl JSON finding IDs to evidence-text snippets that appear
+# in the human-readable testssl output file. Used to populate the `highlights`
+# field so Crucible can mark exactly the relevant section/line.
+_TESTSSL_HL_MAP: dict = {
+    "OCSP_stapling":       ["OCSP stapling"],
+    "OCSP_must_staple":    ["OCSP must staple"],
+    "cert_trust_wildcard": ["wildcard certificate"],
+    "BREACH":              ["BREACH"],
+    "LUCKY13":             ["LUCKY13"],
+    "SWEET32":             ["SWEET32"],
+    "BEAST":               ["BEAST"],
+    "CRIME":               ["CRIME"],
+    "POODLE":              ["POODLE"],
+    "DROWN":               ["DROWN"],
+    "LOGJAM":              ["LOGJAM"],
+    "FREAK":               ["FREAK"],
+    "ROBOT":               ["ROBOT"],
+    "heartbleed":          ["Heartbleed"],
+    "CCS":                 ["CCS"],
+    "ticketbleed":         ["Ticketbleed"],
+    "opossum":             ["Opossum"],
+    "secure_renego":       ["Secure Renegotiation"],
+    "secure_client_renego": ["Client-Initiated Renegotiation"],
+    "RC4":                 ["RC4"],
+    "cert_notAfter":       ["Certificate Validity"],
+    "cert_expirationStatus": ["Certificate Validity"],
+    "expiration":          ["Certificate Validity"],
+    "cert_extlifespan":    ["Certificate Validity"],
+    "cert_keySize":        ["Server key size"],
+    "cert_serialNumberLen": ["Serial"],
+    "cert_subjectAltName": ["subjectAltName"],
+    "cipherlist_OBSOLETED": ["Obsoleted CBC ciphers"],
+    "DNS_CAArecord":       ["DNS CAA RR"],
+    "TLS1_3":              ["TLS 1.3"],
+    "cipher_order":        ["cipher order"],
+    "hsts":                ["Strict Transport Security"],
+    "TLS_session_ticket":  ["Session Ticket"],
+    "FS":                  ["Forward Secrecy"],
+    "FS_offered":          ["Forward Secrecy"],
+    "FS_ciphers":          ["Forward Secrecy"],
+    "FS_ECDHE_curves":     ["Elliptic curves"],
+    "FS_DH_groups":        ["Finite field group"],
+    "FS_TLS12_sig_algs":   ["sig_algs"],
+    "winshock":            ["Winshock"],
+    "SSLv2":               ["SSLv2"],
+    "SSLv3":               ["SSLv3"],
+    "TLS1":                ["TLS 1 "],
+    "TLS1_1":              ["TLS 1.1"],
+    "cert_signatureAlgorithm": ["Signature Algorithm"],
+}
+
 
 _TLS_VULN_PATTERNS = {
     # Tuples: (pattern, risk, cve, affected_cipher)
@@ -15580,6 +15659,15 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             for ftitle, (pat, risk, cve, _affected) in _TLS_VULN_PATTERNS.items():
                 if pat.search(_sslscan_filtered):
                     _emit_title = "SSL/TLS Ciphers: Obsolete Ciphers" if _affected else ftitle
+                    # Build highlights from the title and CVE
+                    _tvp_hl = []
+                    _tvp_key = ftitle.split(":")[-1].strip().split("(")[0].strip()
+                    if _tvp_key and len(_tvp_key) >= 3:
+                        _tvp_hl.append(_tvp_key)
+                    if _affected:
+                        _tvp_hl.append(_affected)
+                    if cve:
+                        _tvp_hl.extend(c.strip() for c in cve.split(",") if c.strip())
                     out.add_finding(
                         title=_emit_title, url=target["url"], port=port,
                         risk=risk, description=f"TLS issue: {_emit_title}",
@@ -15588,6 +15676,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         affected=_affected or "",
                         owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                         remediation="Disable weak protocols/ciphers. Use TLS 1.2/1.3 with AEAD ciphers.",
+                        highlights=_tvp_hl,
                     )
             # ── Certificate extraction + cipher-based vulnerability inference ─
             _ss_cert_subject = None
@@ -15736,6 +15825,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     output_file=str(out_f),
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                     remediation="Disable 3DES cipher suites. Use AEAD ciphers (AES-GCM) only.",
+                    highlights=["3DES", "DES-CBC3", "CVE-2016-2183"] + _3des_suites[:3],
                 )
             if _tls10_on and _cbc_suites:
                 out.add_finding(
@@ -15749,6 +15839,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     output_file=str(out_f),
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                     remediation="Disable TLSv1.0 and CBC cipher suites.",
+                    highlights=["TLSv1.0", "CVE-2011-3389", "BEAST"],
                 )
             if _cbc_suites:
                 # NOTE: LUCKY13 is a *timing* attack against CBC MAC
@@ -15782,6 +15873,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         "compatibility, ensure the TLS stack is current "
                         "(OpenSSL ≥ 1.0.1g)."
                     ),
+                    highlights=["LUCKY13", "CVE-2013-0169", "CBC"],
                 )
 
             # ── Cipher and protocol quality checks ───────────────────────
@@ -15971,6 +16063,14 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             for ftitle, (pat, risk, cve, _affected) in _TLS_VULN_PATTERNS.items():
                 if pat.search(_ok_filtered):
                     _emit_title = "SSL/TLS Ciphers: Obsolete Ciphers" if _affected else ftitle
+                    _tvp_hl2 = []
+                    _tvp_key2 = ftitle.split(":")[-1].strip().split("(")[0].strip()
+                    if _tvp_key2 and len(_tvp_key2) >= 3:
+                        _tvp_hl2.append(_tvp_key2)
+                    if _affected:
+                        _tvp_hl2.append(_affected)
+                    if cve:
+                        _tvp_hl2.extend(c.strip() for c in cve.split(",") if c.strip())
                     out.add_finding(
                         title=_emit_title, url=target["url"], port=port,
                         risk=risk, description=f"TLS issue: {_emit_title}",
@@ -15979,6 +16079,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         affected=_affected or "",
                         owasp="A02", nist="SC-8",
                         remediation="Disable weak protocols. Enable TLS 1.2/1.3 only.",
+                        highlights=_tvp_hl2,
                     )
             # Detect missing security headers reported by testssl.
             # Checked against the full _SECURITY_HEADERS list; risk and format
@@ -16186,6 +16287,19 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                                 if _tsf_risk == "INFO":
                                     continue
                                 _tsf_title = f"SSL/TLS Vulnerability: {_tsf_id}"
+                        # Build highlights from the testssl ID mapping
+                        _tsf_hl = list(_TESTSSL_HL_MAP.get(_tsf_id, []))
+                        if not _tsf_hl:
+                            # Fallback: convert underscores to spaces
+                            _tsf_hl_fb = _tsf_id.replace("_", " ").strip()
+                            if len(_tsf_hl_fb) >= 3:
+                                _tsf_hl = [_tsf_hl_fb]
+                        # Add CVEs as highlight terms so they mark the evidence
+                        if _tsf_cve:
+                            for _c in _tsf_cve.split(","):
+                                _c = _c.strip()
+                                if _c:
+                                    _tsf_hl.append(_c)
                         out.add_finding(
                             title=_tsf_title,
                             url=target["url"], port=port, risk=_tsf_risk,
@@ -16196,6 +16310,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                             output_file=str(out_f),
                             owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                             remediation="Remediate the identified TLS misconfiguration.",
+                            highlights=_tsf_hl,
                         )
                     except Exception:
                         continue
@@ -16984,6 +17099,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             remediation="Remove or genericise the Server response header in the web server configuration (e.g., ServerTokens Prod in Apache; server_tokens off in nginx).",
             command=_hdr_cmd,
             http_code=resp.status_code,
+            highlights=[f"Server: {server_hdr}"],
         )
     powered_by = headers.get("X-Powered-By", "")
     if powered_by:
@@ -16998,6 +17114,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             remediation='Remove or suppress the X-Powered-By header at the application framework or reverse-proxy level (e.g., app.disable("x-powered-by") in Express; Header unset X-Powered-By in Apache).',
             command=_hdr_cmd,
             http_code=resp.status_code,
+            highlights=[f"X-Powered-By: {powered_by}"],
         )
     aspnet_ver = headers.get("X-AspNet-Version", "") or headers.get("X-AspNetMvc-Version", "")
     if aspnet_ver:
@@ -17012,6 +17129,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             remediation='Disable the header by setting enableVersionHeader="false" in the httpRuntime element of web.config.',
             command=_hdr_cmd,
             http_code=resp.status_code,
+            highlights=[f"X-AspNet-Version: {aspnet_ver}"],
         )
     via_hdr = headers.get("Via", "")
     if via_hdr:
@@ -17022,6 +17140,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             output=f"Via: {via_hdr}",
             sources="fracture-headers", service=target["scheme"],
             output_file=str(out_f),
+            highlights=[f"Via: {via_hdr}"],
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
             remediation=_platform_remed(
                 "Configure proxies and load balancers to strip or genericize the Via header before forwarding to clients.",
@@ -19556,6 +19675,21 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             + (f" (+{len(_spa_evidence) - 4} more)" if len(_spa_evidence) > 4 else ""),
             "INFO",
         )
+        _spa_ev_file = out.output_path("crawl", "spa_detection_evidence")
+        try:
+            _spa_ev_file.write_text(
+                "Single Page Application Detection Evidence\n"
+                f"Target: {url}\n"
+                "=" * 60 + "\n\n"
+                "Detection indicators:\n"
+                + "\n".join(f"  • {e}" for e in _spa_evidence)
+                + "\n\nSPA root URL(s):\n"
+                + "\n".join(f"  {r}" for r in sorted(_spa_roots)),
+                encoding="utf-8",
+            )
+            _spa_ev_path = str(_spa_ev_file.relative_to(out.root))
+        except Exception:
+            _spa_ev_path = ""
         out.add_finding(
             title="Single Page Application Detected",
             url=url, port=target["port"], risk="INFO",
@@ -19565,11 +19699,13 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             ),
             output="\n".join(_spa_evidence),
             sources="fracture-crawl", service=target["scheme"],
+            output_file=_spa_ev_path,
             owasp="A04:2025 Insecure Design", nist="CM-7",
             remediation=(
                 "Ensure SPA routes are protected server-side; "
                 "client-side routing is not a security boundary."
             ),
+            highlights=_spa_evidence[:5],
         )
         _spa_browser = _get_spa_browser()
         if _spa_browser:
@@ -19690,6 +19826,19 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                 _crawl_api_paths.append(_crawl_api_rel)
     if _crawl_api_paths:
         _crawl_api_sorted = sorted(set(_crawl_api_paths))
+        _api_ev_file = out.output_path("crawl", "api_endpoints_unauthenticated")
+        try:
+            _api_ev_file.write_text(
+                "API Endpoint Inventory (Unauthenticated Crawl)\n"
+                f"Target: {url}\n"
+                f"Count:  {len(_crawl_api_sorted)}\n"
+                "=" * 60 + "\n\n"
+                + "\n".join(_crawl_api_sorted),
+                encoding="utf-8",
+            )
+            _api_ev_path = str(_api_ev_file.relative_to(out.root))
+        except Exception:
+            _api_ev_path = ""
         out.add_finding(
             title="API Endpoint Identified",
             url=url, port=target["port"], risk="LOW",
@@ -19702,6 +19851,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             output="API paths:\n" + "\n".join(f"  {p}" for p in _crawl_api_sorted),
             sources="fracture-crawl", service=target["scheme"],
             affected="\n".join(_crawl_api_sorted),
+            output_file=_api_ev_path,
             owasp="A01:2025 Broken Access Control", nist="CM-7",
             remediation=(
                 "Ensure all API endpoints enforce authentication and "
@@ -25845,6 +25995,19 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _api_paths.append(_api_rel)
     if _api_paths:
         _api_paths_sorted = sorted(set(_api_paths))
+        _api_auth_ev_file = out.output_path("auth_recon", "api_endpoints_authenticated")
+        try:
+            _api_auth_ev_file.write_text(
+                "API Endpoint Inventory (Authenticated Crawl)\n"
+                f"Target: {url}\n"
+                f"Count:  {len(_api_paths_sorted)}\n"
+                "=" * 60 + "\n\n"
+                + "\n".join(_api_paths_sorted),
+                encoding="utf-8",
+            )
+            _api_auth_ev_path = str(_api_auth_ev_file.relative_to(out.root))
+        except Exception:
+            _api_auth_ev_path = ""
         out.add_finding(
             title="API Endpoint Identified",
             url=url, port=target["port"], risk="LOW",
@@ -25857,6 +26020,7 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
             output="API paths:\n" + "\n".join(f"  {p}" for p in _api_paths_sorted),
             sources="fracture-auth-recon", service=target["scheme"],
             affected="\n".join(_api_paths_sorted),
+            output_file=_api_auth_ev_path,
             owasp="A01:2025 Broken Access Control", nist="CM-7",
             remediation=(
                 "Ensure all API endpoints enforce authentication and "
@@ -30878,6 +31042,21 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     base_url    = f"{_pu20.scheme}://{_pu20.netloc}"
     port        = target["port"]
     timeout     = cfg.get("timeout", 10)
+
+    # Build per-role configs for re-authentication.  The global cfg contains
+    # the first role's (usually Admin) credentials — re-authing Standard or
+    # Limited with cfg authenticates them as Admin.  Each role needs its own
+    # config with its own username/password.
+    _role_cfgs: dict = {}
+    for _rc in auth_matrix:
+        _rc_role = _rc.get("role", "")
+        _rc_auth = _copy.deepcopy(cfg.get("auth", {}))
+        _rc_auth["enabled"]  = True
+        _rc_auth["username"] = _rc.get("username", _rc_auth.get("username", ""))
+        _rc_auth["password"] = _rc.get("password", _rc_auth.get("password", ""))
+        _rc_cfg = _copy.deepcopy(cfg)
+        _rc_cfg["auth"] = _rc_auth
+        _role_cfgs[_rc_role] = _rc_cfg
     project_dir = out.root
     verify_ssl  = cfg.get("verify_ssl", False)
 
@@ -31068,7 +31247,8 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                             f"(canary {_canary_p} → HTTP {_cr_r.status_code}) "
                             f"— re-authenticating", "WARNING")
                         try:
-                            _cr_fresh = _reauth_session(cfg, target, _cr_role)
+                            _cr_fresh = _reauth_session(
+                                _role_cfgs.get(_cr_role, cfg), target, _cr_role)
                             if _cr_fresh is not None:
                                 role_sessions[_cr_role] = _cr_fresh
                                 vc.log(f"[access-matrix/p20] {_cr_role} re-authenticated OK", "INFO")
@@ -31236,7 +31416,8 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                                 f"({rel} → {r.status_code}) — re-authenticating",
                                 "WARNING")
                             try:
-                                _p20_fresh = _reauth_session(cfg, target, role)
+                                _p20_fresh = _reauth_session(
+                                    _role_cfgs.get(role, cfg), target, role)
                                 if _p20_fresh is not None:
                                     role_sessions[role] = _p20_fresh
                                     r_sess = _p20_fresh
@@ -31374,32 +31555,79 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 # access — the path is public, no privilege to escalate.
                 if _ok(unauth_st, "unauthenticated", ep):
                     continue
-                for low_role in cred_roles:
-                    if low_role == most_privileged:
+                # ── Differential access check ────────────────────────
+                # BFLA is only meaningful when the endpoint shows differential
+                # access control: at least one lower-privilege role is DENIED.
+                # If ALL lower-privilege roles can access it, the endpoint is
+                # shared functionality (e.g. /api/profile), not admin-only —
+                # not a BFLA finding.
+                #
+                # Exception: paths with admin-specific keywords ARE flagged
+                # even when all roles can access them (genuinely broken RBAC).
+                _ep_path_lower = (ep.get("path") or "").lower()
+                _is_admin_path = bool(re.search(
+                    r'/admin(?![a-z])|/manage(?![a-z])|/config(?:uration)?(?![a-z])'
+                    r'|/settings(?![a-z])|/users?/(?:admin|manage|create|delete)'
+                    r'|/roles?(?![a-z])|/permissions?(?![a-z])|/audit(?![a-z])'
+                    r'|/internal(?![a-z])',
+                    _ep_path_lower))
+                _lower_roles_ok = []
+                _lower_roles_denied = []
+                for _lr in cred_roles:
+                    if _lr == most_privileged:
                         continue
-                    # Skip BFLA for roles whose auth failed — their session
-                    # is unauthenticated and the results are meaningless.
-                    if low_role in _failed_auth_roles:
+                    if _lr in _failed_auth_roles:
                         continue
-                    if _ok(ep_access.get(low_role), low_role, ep):
-                        out.add_finding(
-                            title=f"BFLA: Role '{low_role}' Can Access Admin Path",
-                            url=ep["url"], port=port, risk="HIGH",
-                            description=(
-                                f"Role '{low_role}' can access {ep['path']} which "
-                                f"is also accessible to '{most_privileged}' (most "
-                                f"privileged). No effective role-based access control."
-                            ),
-                            output=(
-                                f"URL: {ep['url']} | "
-                                f"{most_privileged}: HTTP {ep_access[most_privileged]} | "
-                                f"{low_role}: HTTP {ep_access[low_role]}"
-                            ),
-                            command=f"GET {ep['url']} (role: {low_role})",
-                            affected=ep["url"],
-                            owasp="A01:2021 Broken Access Control", nist="AC-6",
-                            remediation="Implement role-based access control (RBAC).",
-                        )
+                    if _ok(ep_access.get(_lr), _lr, ep):
+                        _lower_roles_ok.append(_lr)
+                    else:
+                        _lower_roles_denied.append(_lr)
+                # Skip when all lower roles have access and path is not admin-typed
+                if _lower_roles_ok and not _lower_roles_denied and not _is_admin_path:
+                    continue
+                for low_role in _lower_roles_ok:
+                    # Build per-role access summary as evidence output
+                    _bfla_lines = [f"URL: {ep['url']}"]
+                    for _br in all_roles:
+                        _bc = ep_access.get(_br, "N/A")
+                        _bfla_lines.append(f"  {_br}: HTTP {_bc}")
+                    if _lower_roles_denied:
+                        _bfla_lines.append(
+                            f"Denied roles: {', '.join(_lower_roles_denied)}")
+                    _bfla_output = "\n".join(_bfla_lines)
+                    # Save evidence file
+                    _bfla_ev = ""
+                    try:
+                        _bfla_safe = re.sub(r'[^a-zA-Z0-9_.-]', '_',
+                                            ep.get("path", ""))[:60]
+                        _bfla_file = out.output_path(
+                            phase, f"bfla_{low_role}_{_bfla_safe}")
+                        _bfla_file.write_text(
+                            f"BFLA Evidence\n{'='*50}\n{_bfla_output}",
+                            encoding="utf-8")
+                        _bfla_ev = str(_bfla_file)
+                    except Exception:
+                        pass
+                    _bfla_risk = "HIGH" if _lower_roles_denied or _is_admin_path else "MEDIUM"
+                    out.add_finding(
+                        title=f"BFLA: Role '{low_role}' Can Access Admin Path",
+                        url=ep["url"], port=port, risk=_bfla_risk,
+                        description=(
+                            f"Role '{low_role}' can access {ep['path']} which "
+                            f"is accessible to '{most_privileged}' (most "
+                            f"privileged)"
+                            + (f" but denied to {', '.join(_lower_roles_denied)}"
+                               if _lower_roles_denied
+                               else " and contains admin-specific functionality")
+                            + ". This indicates broken function-level authorization."
+                        ),
+                        output=_bfla_output,
+                        output_file=_bfla_ev,
+                        command=f"GET {ep['url']} (role: {low_role})",
+                        affected=ep["url"],
+                        owasp="A01:2021 Broken Access Control", nist="AC-6",
+                        remediation="Implement role-based access control (RBAC).",
+                    )
 
     # Build per-role auth status so consumers (Crucible, reviewers) can see
     # which roles actually authenticated vs which reflect unauthenticated access.
@@ -36803,12 +37031,17 @@ def main() -> None:
                     if not _ss_login_url:
                         _ss_login_url = target["url"]
                     # Detect API-only login endpoints: path contains /api/
-                    # (case-insensitive) or guard GET returned 4xx/5xx.
+                    # (case-insensitive).  API endpoints are not visual pages
+                    # — fall back to the target URL for the screenshot since
+                    # that is typically the visual login form.
                     _ss_login_is_api = False
                     if _ss_login_url:
                         _ss_lp_lower = urllib.parse.urlparse(
                             _ss_login_url).path.lower()
                         _ss_login_is_api = "/api/" in _ss_lp_lower
+                    if _ss_login_is_api:
+                        _ss_login_url = target["url"]
+                        _ss_login_is_api = False
                     if (_ss_login_url
                             and not _ss_login_is_api
                             and _ss_login_url.rstrip("/") not in _ss_login_done):
@@ -37721,6 +37954,7 @@ def main() -> None:
                             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                             remediation="Remove or genericise the Server response header in the web server configuration (e.g., ServerTokens Prod in Apache; server_tokens off in nginx).",
                             http_code=_ep_resp.status_code,
+                            highlights=[f"Server: {_ep_svr}"],
                         )
                     _ep_xpb = _ep_hdrs.get("X-Powered-By", "")
                     if _ep_xpb:
@@ -37734,6 +37968,7 @@ def main() -> None:
                             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                             remediation='Remove or suppress the X-Powered-By header at the application framework or reverse-proxy level (e.g., app.disable("x-powered-by") in Express; Header unset X-Powered-By in Apache).',
                             http_code=_ep_resp.status_code,
+                            highlights=[f"X-Powered-By: {_ep_xpb}"],
                         )
                     _ep_aspnet = (
                         _ep_hdrs.get("X-AspNet-Version", "")
@@ -37750,6 +37985,7 @@ def main() -> None:
                             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                             remediation='Disable the header by setting enableVersionHeader="false" in the httpRuntime element of web.config.',
                             http_code=_ep_resp.status_code,
+                            highlights=[f"X-AspNet-Version: {_ep_aspnet}"],
                         )
                 except Exception:
                     pass
@@ -38261,7 +38497,17 @@ def main() -> None:
                             _sm_info = _seed_sm_paths.get(_sp)
                             if isinstance(_sm_info, dict):
                                 _sm_status = _sm_info.get("status")
-                                if isinstance(_sm_status, int) and _sm_status > 0:
+                                # Only seed stable status codes — 200, 3xx,
+                                # 401, 403, 404.  Never seed 500/502/503:
+                                # discovery tools (gobuster) don't send the
+                                # same headers as _probe_role_paths (e.g. no
+                                # Accept: application/json), so API endpoints
+                                # may return 500 due to content-negotiation
+                                # failure rather than real access denial.
+                                # Letting _probe_role_paths re-verify with
+                                # proper headers produces the correct code.
+                                if (isinstance(_sm_status, int) and _sm_status > 0
+                                        and _sm_status < 500):
                                     _sa[_ctx_label] = _sm_status
                                     _seed_changed = True
                         if _seed_changed:
