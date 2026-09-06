@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.40.0"
+VERSION = "2.41.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3428,6 +3428,20 @@ class OutputManager:
                 "outdated copyright notice detected",
                 "exposed cryptocurrency wallet address",
                 "unauthenticated access to protected path",
+                "asp.net viewstate",
+                "viewstate contains",
+                "sensitive file exposed:",
+                "asp.net trace handler",
+                "asp.net error log",
+                "asp.net handler endpoints",
+                "asp.net app_data",
+                "asp.net client scripts",
+                "frontpage",
+                "f5 big-ip:",
+                "f5 big-ip cookie",
+                "backend server configuration",
+                "spa routes extracted",
+                "http method accepted but not functional:",
             )
             _is_global = any(_title_lower.startswith(_p) for _p in _GLOBAL_MERGE_PREFIXES)
             _norm_key  = (_title_lower, "" if _is_global else url.strip(),
@@ -10093,6 +10107,112 @@ _WAF_TIER_PLATFORMS = frozenset({
     "Cloudflare", "Akamai", "Imperva/Incapsula", "Sucuri",
     "PythonAnywhere (aggressive WAF + Cloudflare)",
 })
+
+# ── Soft-404 / custom error page fingerprint library ──────────────────────────
+_SOFT_404_FINGERPRINTS = [
+    # ── ASP.NET / IIS ──
+    re.compile(r'<title>\s*Error\s*Page\s*</title>', re.I),
+    re.compile(r'<title>\s*Page\s*Not\s*Found\s*</title>', re.I),
+    re.compile(r'<title>\s*404\s*[-—]?\s*(?:File|Page)?\s*Not\s*Found\s*</title>', re.I),
+    re.compile(r'Runtime\s+Error.*Server\s+Error\s+in', re.I),
+    re.compile(r'class=["\']error-?page["\']', re.I),
+    re.compile(r'The\s+resource\s+(?:cannot|could\s+not)\s+be\s+found', re.I),
+    re.compile(r'<h2>\s*\d+\s*[-—]\s*(?:File|Page)\s+Not\s+Found\s*</h2>', re.I),
+    re.compile(r'ErrorPage\.aspx', re.I),
+    re.compile(r'CustomErrors\s+mode=', re.I),
+
+    # ── Spring Boot / Java ──
+    re.compile(r'Whitelabel\s+Error\s+Page', re.I),
+    re.compile(r'"status"\s*:\s*404\s*,\s*"error"\s*:\s*"Not Found"'),
+    re.compile(r'<h1>HTTP\s+Status\s+404', re.I),
+
+    # ── Apache / Nginx ──
+    re.compile(r'<title>404\s+Not\s+Found</title>', re.I),
+    re.compile(r'The\s+requested\s+URL\s+was\s+not\s+found\s+on\s+this\s+server'),
+    re.compile(r'<center>\s*<h1>\s*404\s+Not\s+Found\s*</h1>\s*</center>', re.I),
+
+    # ── Django ──
+    re.compile(r'Page\s+not\s+found.*Django', re.I),
+    re.compile(r'Using\s+the\s+URLconf\s+defined\s+in', re.I),
+
+    # ── Ruby on Rails ──
+    re.compile(r"The\s+page\s+you\s+were\s+looking\s+for\s+doesn't\s+exist", re.I),
+    re.compile(r'<h1>\s*The\s+change\s+you\s+wanted\s+was\s+rejected', re.I),
+
+    # ── Node.js / Express ──
+    re.compile(r'Cannot\s+(?:GET|POST|PUT|DELETE)\s+/', re.I),
+    re.compile(r'<pre>\s*Cannot\s+GET\s+/', re.I),
+
+    # ── PHP / Laravel ──
+    re.compile(r'<div\s+class=["\']symfony-exception', re.I),
+    re.compile(r'NotFoundHttpException', re.I),
+
+    # ── Generic patterns ──
+    re.compile(r'<h1>\s*(?:404|Not\s*Found|Page\s*Not\s*Found|Error)\s*</h1>', re.I),
+    re.compile(
+        r'(?:does\s+not\s+exist|could\s+not\s+be\s+found|no\s+longer\s+available'
+        r'|page\s+(?:you\s+requested\s+)?(?:was|is)\s+not\s+found)', re.I),
+    re.compile(r'id=["\'](?:error-?page|not-?found|page-?404)["\']', re.I),
+
+    # ── IIS Detailed Error ──
+    re.compile(r'<title>\s*IIS\s+\d+(?:\.\d+)?\s+Detailed\s+Error', re.I),
+    re.compile(r'Module\s+IIS\s+Web\s+Core.*Notification\s+MapRequestHandler', re.I),
+]
+
+
+def _matches_error_fingerprint(body: str) -> bool:
+    """Return True if the response body matches any known error page pattern."""
+    if not body:
+        return False
+    _sample = body[:8192]
+    return any(_fp.search(_sample) for _fp in _SOFT_404_FINGERPRINTS)
+
+
+# ── F5 BIG-IP backend analysis helpers ────────────────────────────────────────
+_F5_PROBE_COUNT     = 10
+_F5_RFC1918_RANGES  = [
+    (0x0A000000, 0x0AFFFFFF),   # 10.0.0.0/8
+    (0xAC100000, 0xAC1FFFFF),   # 172.16.0.0/12
+    (0xC0A80000, 0xC0A8FFFF),   # 192.168.0.0/16
+]
+_F5_CONSISTENCY_HDRS = ["Server", "X-Powered-By", "X-AspNet-Version",
+                        "X-AspNetMvc-Version", "X-Frame-Options",
+                        "Content-Security-Policy"]
+
+
+def _decode_bigip_cookie(cookie_value: str) -> "str | None":
+    """Decode an F5 BIG-IP persistence cookie to backend IP:port.
+
+    The cookie format is ``<encoded_ip>.<encoded_port>.0000`` where
+    the IP is a little-endian 32-bit integer and the port is a big-endian
+    16-bit integer read as little-endian.
+    """
+    try:
+        parts = cookie_value.split(".")
+        if len(parts) < 2:
+            return None
+        enc_ip   = int(parts[0])
+        enc_port = int(parts[1])
+        ip_bytes = enc_ip.to_bytes(4, "little")
+        decoded_ip   = ".".join(str(b) for b in ip_bytes)
+        decoded_port = int.from_bytes(enc_port.to_bytes(2, "big"), "little")
+        return f"{decoded_ip}:{decoded_port}"
+    except (ValueError, OverflowError):
+        return None
+
+
+def _is_rfc1918(ip_str: str) -> bool:
+    """Check if an IP address string is in RFC 1918 private range."""
+    try:
+        octets = [int(o) for o in ip_str.split(":")[0].split(".")]
+        if len(octets) != 4 or not all(0 <= o <= 255 for o in octets):
+            return False
+        ip_int = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]
+        return any(lo <= ip_int <= hi for lo, hi in _F5_RFC1918_RANGES)
+    except (ValueError, IndexError):
+        return False
+
+
 # Prefix-based edge security header patterns (header name starts with prefix)
 _EDGE_SECURITY_HDR_PREFIXES = [
     ("x-px-",         "PerimeterX / HUMAN Security"),
@@ -11583,6 +11703,866 @@ def _classify_web_structure(body: str, headers: "dict", spa_evidence: "list",
     return "Unknown"
 
 
+
+
+# ── Soft-404 detection helpers ─────────────────────────────────────────────────
+_TITLE_RE_SOFT404 = re.compile(r'<title[^>]*>(.*?)</title>', re.I | re.DOTALL)
+
+
+def _detect_soft_404(target: dict, cfg: dict, out: "OutputManager",
+                     sess: "requests.Session", timeout: int = 10) -> "dict | None":
+    """Probe with random nonexistent paths to detect soft-404 behaviour.
+
+    Returns a soft-404 info dict when confirmed, or None.  Also stores the
+    result in target_profile.json and cfg["_soft_404"] for downstream use.
+    """
+    _pu = urllib.parse.urlparse(target["url"])
+    base = f"{_pu.scheme}://{_pu.netloc}"
+
+    _probe_id = secrets.token_hex(6)
+    probe_paths = [
+        f"/_fracture_probe_{_probe_id}a.aspx",
+        f"/_fracture_probe_{_probe_id}b.html",
+        f"/_fracture_probe_{_probe_id}c/",
+        f"/_fracture_probe_{_probe_id}d.php",
+        f"/_fracture_probe_{_probe_id}e.json",
+    ]
+
+    hashes: "dict[str, list]" = {}   # md5 → list of (path, status, body_len, title)
+    for path in probe_paths:
+        try:
+            r = sess.get(base + path, timeout=timeout, allow_redirects=True)
+            if r.status_code == 200:
+                body = (r.text or "").strip()
+                h = hashlib.md5(body.encode("utf-8", "replace")).hexdigest()
+                _title_m = _TITLE_RE_SOFT404.search(body[:4096])
+                _title = _title_m.group(1).strip() if _title_m else ""
+                hashes.setdefault(h, []).append((path, r.status_code, len(body), _title))
+        except Exception:
+            pass
+
+    if not hashes:
+        vc.log("[recon] Soft-404 probe: server returns non-200 for nonexistent paths — clean", "INFO")
+        return None
+
+    # Find the most common hash among the 200 responses
+    _best_hash, _best_hits = max(hashes.items(), key=lambda kv: len(kv[1]))
+
+    if len(_best_hits) < 3:
+        vc.log(
+            f"[recon] Soft-404 probe: {len(_best_hits)}/5 paths returned 200 "
+            f"with same body hash — below threshold (3), not confirmed", "INFO")
+        return None
+
+    _sample = _best_hits[0]
+    soft_404_info = {
+        "detected":      True,
+        "body_hash":     _best_hash,
+        "status_code":   _sample[1],
+        "body_length":   _sample[2],
+        "sample_title":  _sample[3],
+        "probe_count":   len(_best_hits),
+    }
+
+    vc.log(
+        f"[recon] Soft-404 CONFIRMED: {len(_best_hits)}/5 probes returned HTTP 200 "
+        f"with identical body (hash={_best_hash[:12]}…, len={_sample[2]}, "
+        f"title={_sample[3]!r}). Downstream findings will be filtered.",
+        "WARNING",
+    )
+
+    # Persist to target_profile.json and cfg
+    cfg["_soft_404"] = soft_404_info
+    try:
+        _write_target_profile(out, soft_404=soft_404_info)
+    except Exception:
+        pass
+
+    return soft_404_info
+
+
+def _is_soft_404(response_body: str, soft_404_info: "dict | None") -> bool:
+    """Check whether a response body matches the known soft-404 pattern.
+
+    Returns True if:
+    1. The MD5 hash matches the stored soft-404 hash, OR
+    2. The body length is within 5% AND the <title> text matches, OR
+    3. The body matches a known error page fingerprint (see _SOFT_404_FINGERPRINTS)
+    """
+    if soft_404_info is None or not soft_404_info.get("detected"):
+        return False
+
+    body = (response_body or "").strip()
+    body_hash = hashlib.md5(body.encode("utf-8", "replace")).hexdigest()
+
+    # Check 1: exact hash match
+    if body_hash == soft_404_info.get("body_hash"):
+        return True
+
+    # Check 2: length-within-5% + same title
+    s404_len = soft_404_info.get("body_length", 0)
+    if s404_len > 0 and abs(len(body) - s404_len) < s404_len * 0.05:
+        _title_m = _TITLE_RE_SOFT404.search(body[:4096])
+        _title = _title_m.group(1).strip() if _title_m else ""
+        if _title and _title == soft_404_info.get("sample_title", ""):
+            return True
+
+    # Check 3: fingerprint library fallback
+    if _matches_error_fingerprint(body):
+        return True
+
+    return False
+
+
+# ── F5 BIG-IP backend consistency check ───────────────────────────────────────
+def _check_f5_consistency(target: dict, cfg: dict, out: "OutputManager",
+                          sess: "requests.Session",
+                          timeout: int = 10) -> None:
+    """Probe F5 BIG-IP backend distribution and configuration consistency.
+
+    Sends _F5_PROBE_COUNT requests with Connection: close to force backend
+    re-selection, collects BIG-IP cookies, and analyses backend distribution
+    and header consistency.
+    """
+    phase   = "recon"
+    url     = target["url"]
+    verify  = cfg.get("verify_ssl", False)
+
+    vc.log("[f5-consistency] Probing backend distribution ...", "INFO")
+
+    _backends: "dict[str, int]" = {}  # decoded IP:port → count
+    _raw_cookies: list = []
+    _headers_by_backend: "dict[str, dict]" = {}  # decoded → {header: value}
+    _evidence: list = []
+
+    for _probe_idx in range(_F5_PROBE_COUNT):
+        try:
+            # Connection: close to encourage LB re-selection
+            r = sess.get(url, timeout=timeout, verify=verify,
+                         headers={"Connection": "close"},
+                         allow_redirects=True)
+            # Find BIG-IP cookie in response
+            for _ck_name in list(r.cookies.keys()) + list(sess.cookies.keys()):
+                if _ck_name.lower().startswith("bigipserver"):
+                    _ck_val = r.cookies.get(_ck_name) or sess.cookies.get(_ck_name) or ""
+                    _decoded = _decode_bigip_cookie(_ck_val)
+                    if _decoded:
+                        _backends[_decoded] = _backends.get(_decoded, 0) + 1
+                        _raw_cookies.append((_ck_name, _ck_val, _decoded))
+                        # Capture response headers for this backend
+                        if _decoded not in _headers_by_backend:
+                            _headers_by_backend[_decoded] = {
+                                h: r.headers.get(h, "(not set)")
+                                for h in _F5_CONSISTENCY_HDRS
+                            }
+                        _evidence.append(
+                            f"Probe {_probe_idx + 1}: {_ck_name}={_ck_val} "
+                            f"→ {_decoded} (HTTP {r.status_code})")
+                    break  # Only process first BIG-IP cookie per response
+        except Exception as _e:
+            _evidence.append(f"Probe {_probe_idx + 1}: error — {_e}")
+            continue
+
+    if not _backends:
+        vc.log("[f5-consistency] No BIG-IP cookies decoded across "
+               f"{_F5_PROBE_COUNT} probes", "INFO")
+        return
+
+    # Save evidence file
+    _ev_lines = [
+        "F5 BIG-IP Backend Consistency Check",
+        "=" * 50,
+        f"Target: {url}",
+        f"Probes sent: {_F5_PROBE_COUNT}",
+        f"Unique backends: {len(_backends)}",
+        "",
+        "Backend Distribution:",
+    ]
+    for _be, _cnt in sorted(_backends.items(), key=lambda x: -x[1]):
+        _ev_lines.append(f"  {_be}: {_cnt}/{_F5_PROBE_COUNT} requests "
+                         f"({_cnt * 100 // _F5_PROBE_COUNT}%)")
+    _ev_lines.append("")
+    _ev_lines.append("Per-Backend Response Headers:")
+    for _be, _hdrs in _headers_by_backend.items():
+        _ev_lines.append(f"  Backend {_be}:")
+        for _h, _v in _hdrs.items():
+            _ev_lines.append(f"    {_h}: {_v}")
+    _ev_lines.append("")
+    _ev_lines.append("Raw Probe Log:")
+    _ev_lines.extend(f"  {e}" for e in _evidence)
+
+    _ev_path = out.output_path(phase, f"f5_consistency_{target['hostname']}")
+    try:
+        _ev_path.write_text("\n".join(_ev_lines), encoding="utf-8")
+    except Exception:
+        pass
+
+    # ── Finding 1: Multiple backends detected ──
+    if len(_backends) > 1:
+        _be_list = "\n".join(
+            f"  {be}: {cnt}/{_F5_PROBE_COUNT} requests"
+            for be, cnt in sorted(_backends.items(), key=lambda x: -x[1]))
+        out.add_finding(
+            title="F5 BIG-IP: Multiple Backend Servers Detected",
+            url=url, port=target["port"], risk="INFO",
+            description=(
+                f"The F5 BIG-IP load balancer distributes traffic across "
+                f"{len(_backends)} distinct backend servers. "
+                "If session persistence is expected, this may indicate a "
+                "configuration issue. Different backends may have different "
+                "patch levels or security configurations."
+            ),
+            output=f"Backend Distribution ({_F5_PROBE_COUNT} probes):\n{_be_list}",
+            sources="fracture-recon", service=target["scheme"],
+            output_file=str(_ev_path),
+            affected=url,
+            owasp="A05:2025 Security Misconfiguration", nist="SC-7",
+            remediation=(
+                "Verify session persistence is properly configured if "
+                "required by the application. Ensure all backend servers "
+                "have identical security configurations and patch levels."
+            ),
+        )
+        vc.log(f"[f5-consistency] {len(_backends)} backends detected: "
+               + ", ".join(_backends.keys()), "SUCCESS")
+    else:
+        vc.log(f"[f5-consistency] Single backend: "
+               f"{list(_backends.keys())[0]} "
+               f"(session persistence appears correct)", "INFO")
+
+    # ── Finding 2: Header inconsistencies across backends ──
+    if len(_headers_by_backend) > 1:
+        _inconsistent = []
+        _first_be = list(_headers_by_backend.keys())[0]
+        _first_hdrs = _headers_by_backend[_first_be]
+        for _be, _hdrs in _headers_by_backend.items():
+            if _be == _first_be:
+                continue
+            for _h in _F5_CONSISTENCY_HDRS:
+                if _hdrs.get(_h) != _first_hdrs.get(_h):
+                    _inconsistent.append(
+                        f"  {_h}: {_first_be}={_first_hdrs.get(_h)!r} "
+                        f"vs {_be}={_hdrs.get(_h)!r}")
+        if _inconsistent:
+            out.add_finding(
+                title="Backend Server Configuration Inconsistency",
+                url=url, port=target["port"], risk="LOW",
+                description=(
+                    "Response headers differ between backend servers behind "
+                    "the F5 BIG-IP load balancer, suggesting inconsistent "
+                    "configuration. This may indicate unpatched servers or "
+                    "differing security policies across the pool."
+                ),
+                output="Header differences:\n" + "\n".join(_inconsistent),
+                sources="fracture-recon", service=target["scheme"],
+                output_file=str(_ev_path),
+                affected=url,
+                owasp="A05:2025 Security Misconfiguration", nist="CM-6",
+                remediation=(
+                    "Ensure all backend servers in the F5 pool share "
+                    "identical configuration, patch levels, and security "
+                    "headers. Use configuration management (Ansible, Chef, "
+                    "Puppet) to enforce consistency."
+                ),
+            )
+            vc.log(f"[f5-consistency] Header inconsistencies found across "
+                   f"{len(_headers_by_backend)} backends", "WARNING")
+
+    # ── Finding 3: Internal IP disclosure via cookie ──
+    _internal_ips = set()
+    for _be in _backends:
+        _ip_part = _be.split(":")[0]
+        if _is_rfc1918(_ip_part):
+            _internal_ips.add(_be)
+    if _internal_ips:
+        out.add_finding(
+            title="F5 BIG-IP Cookie Leaks Internal IP Address",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                "The F5 BIG-IP persistence cookie encodes the backend "
+                "server's internal (RFC 1918) IP address and port. An "
+                "attacker can decode this to map internal network topology."
+            ),
+            output="Decoded internal addresses:\n" + "\n".join(
+                f"  {ip}" for ip in sorted(_internal_ips)),
+            sources="fracture-recon", service=target["scheme"],
+            output_file=str(_ev_path),
+            affected=url,
+            owasp="A05:2025 Security Misconfiguration", nist="SC-7",
+            remediation=(
+                "Enable cookie encryption on the F5 BIG-IP virtual server "
+                "profile. Use the 'Cookie Persistence Profile' with "
+                "'Cookie Encryption' set to 'Required' to prevent "
+                "internal IP leakage."
+            ),
+        )
+        vc.log(f"[f5-consistency] Internal IP disclosure: "
+               f"{', '.join(sorted(_internal_ips))}", "SUCCESS")
+
+
+# ── IIS/ASP.NET Probe Battery ─────────────────────────────────────────────────
+# Each probe: (path, risk, title, description, body_validators, remediation)
+# body_validators is a list of (regex, required?) tuples — at least one
+# required=True validator must match for the finding to fire (prevents
+# false positives from custom error pages returning 200).
+_IIS_PROBE_TABLE = [
+    # ── Sensitive configuration files ──
+    ("/web.config", "CRITICAL",
+     "Sensitive File Exposed: web.config",
+     "The ASP.NET web.config file is directly accessible. This file typically "
+     "contains database connection strings, authentication settings, MachineKey "
+     "values, and other sensitive configuration. Exposure enables credential "
+     "theft and may lead to remote code execution via MachineKey abuse.",
+     [(re.compile(r'<configuration\b', re.I), True),
+      (re.compile(r'<connectionStrings|<appSettings|<system\.web', re.I), False)],
+     "Block direct access to web.config via IIS Request Filtering: "
+     "<security><requestFiltering><hiddenSegments><add segment='web.config'/>"
+     "</hiddenSegments></requestFiltering></security>"),
+    ("/web.config.bak", "CRITICAL",
+     "Sensitive File Exposed: web.config Backup",
+     "A backup copy of the ASP.NET configuration file is accessible. Backup "
+     "files often contain the same credentials and MachineKey values as the "
+     "live configuration.",
+     [(re.compile(r'<configuration\b|<connectionStrings|<appSettings', re.I), True)],
+     "Remove backup files from web-accessible directories. Add .bak, .old, .txt "
+     "to IIS Request Filtering denied extensions."),
+    ("/web.config.old", "CRITICAL",
+     "Sensitive File Exposed: web.config Backup",
+     "A backup copy of the ASP.NET configuration file is accessible.",
+     [(re.compile(r'<configuration\b|<connectionStrings|<appSettings', re.I), True)],
+     "Remove backup files from web-accessible directories."),
+    ("/web.config.txt", "CRITICAL",
+     "Sensitive File Exposed: web.config Backup",
+     "A text copy of the ASP.NET configuration file is accessible.",
+     [(re.compile(r'<configuration\b|<connectionStrings|<appSettings', re.I), True)],
+     "Remove backup files from web-accessible directories."),
+
+    # ── Debug/trace handlers ──
+    ("/trace.axd", "HIGH",
+     "ASP.NET Trace Handler Exposed (trace.axd)",
+     "The ASP.NET trace handler is publicly accessible. It exposes detailed "
+     "request traces including session tokens, cookies, form data, query strings, "
+     "server variables, and internal paths for every recent request. An attacker "
+     "can harvest session tokens to hijack active sessions.",
+     [(re.compile(r'Application Trace|Request Details|Trace Information|'
+                  r'Request Trace|Physical Directory', re.I), True)],
+     "Disable trace in production: set <trace enabled='false'/> in web.config. "
+     "Alternatively, restrict trace.axd via <location> authorization rules."),
+    ("/elmah.axd", "HIGH",
+     "ASP.NET Error Log Exposed (elmah.axd)",
+     "The ELMAH (Error Logging Modules and Handlers) error log is publicly "
+     "accessible. It exposes detailed exception information including stack "
+     "traces, internal file paths, database queries, and potentially sensitive "
+     "data from form submissions that triggered errors.",
+     [(re.compile(r'Error Log for|ELMAH|Error\s+Log|errorlog|'
+                  r'System\.Web\.HttpException|NullReferenceException', re.I), True)],
+     "Restrict elmah.axd access via web.config <location> authorization: "
+     "<location path='elmah.axd'><system.web><authorization>"
+     "<deny users='*'/></authorization></system.web></location>"),
+
+    # ── Legacy extensions ──
+    ("/_vti_inf.html", "LOW",
+     "FrontPage Server Extensions Detected",
+     "FrontPage Server Extensions metadata files are accessible, indicating "
+     "legacy FrontPage infrastructure may still be configured on the server. "
+     "FrontPage Extensions have known vulnerabilities and expand the attack surface.",
+     [(re.compile(r'FPVersion|FPAuthorScriptUrl|FPShtmlScriptUrl', re.I), True)],
+     "Remove FrontPage Server Extensions from IIS. Delete _vti_* directories."),
+    ("/_vti_pvt/service.pwd", "HIGH",
+     "FrontPage Password File Accessible",
+     "The FrontPage service.pwd file is accessible, potentially exposing "
+     "hashed administrator passwords for FrontPage Server Extensions.",
+     [(re.compile(r'[a-zA-Z0-9_]+:[a-zA-Z0-9$./]{10,}', re.I), True)],
+     "Delete _vti_pvt directory and all FrontPage Extensions. Change all "
+     "passwords that may have been exposed."),
+
+    # ── Directory listings ──
+    ("/aspnet_client/", "INFO",
+     "ASP.NET Client Scripts Directory Listing",
+     "The aspnet_client virtual directory is accessible. While this directory "
+     "typically contains only client-side validation scripts, directory listing "
+     "confirms the ASP.NET installation and may reveal version information.",
+     [(re.compile(r'system_web|WebUIValidation|SmartNav|<pre>|'
+                  r'Directory listing|Index of', re.I), True)],
+     "Disable directory browsing in IIS for the aspnet_client virtual directory."),
+    ("/App_Data/", "HIGH",
+     "ASP.NET App_Data Directory Accessible",
+     "The ASP.NET App_Data directory is accessible. This directory is used "
+     "to store application databases (.mdf), XML data files, and other "
+     "data files that should never be served directly.",
+     [(re.compile(r'\.mdf|\.xml|\.mdb|\.ldf|<pre>|Directory listing|Index of', re.I), True)],
+     "Block access to App_Data via IIS Request Filtering hidden segments."),
+]
+
+# Handler mapping enumeration paths
+_IIS_HANDLER_ENUM = [
+    ("handler.ashx",    "ASP.NET Generic Handler (.ashx)"),
+    ("service.asmx",    "ASP.NET Web Service (.asmx)"),
+    ("api.svc",         "WCF Service Endpoint (.svc)"),
+    ("default.asmx",    "ASP.NET Web Service (.asmx)"),
+    ("WebService.asmx", "ASP.NET Web Service (.asmx)"),
+    ("Service.svc",     "WCF Service Endpoint (.svc)"),
+    ("odata.svc",       "OData Service Endpoint (.svc)"),
+]
+
+
+# ── Main function ───────────────────────────────────────────────────────────
+
+def _probe_iis_aspnet(target: dict, cfg: dict, out: "OutputManager",
+                      sess: "requests.Session") -> None:
+    """Run IIS/ASP.NET-specific security probes.
+
+    Only runs when target_profile.json indicates IIS or ASP.NET technology.
+    Each probe validates the response body against expected content patterns
+    to avoid false positives from custom error pages returning HTTP 200.
+    """
+    phase   = "recon"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    port    = target["port"]
+    scheme  = target["scheme"]
+    _pu     = urllib.parse.urlparse(url)
+    origin  = f"{_pu.scheme}://{_pu.netloc}"
+
+    # ── Gate: only run for IIS/ASP.NET targets ────────────────────────────
+    _is_iis_aspnet = False
+    _soft404_hash  = None
+    try:
+        _tp_path = out.root / "target_profile.json"
+        if _tp_path.exists():
+            _tp = json.loads(_tp_path.read_text(encoding="utf-8"))
+            _techs = " ".join(
+                (t.get("name") or "") for t in _tp.get("technologies", [])
+            ).lower()
+            _server = (_tp.get("server") or "").lower()
+            _cms = (_tp.get("cms") or "").lower()
+            _is_iis_aspnet = (
+                "iis" in _techs or "asp.net" in _techs or "aspnet" in _techs
+                or "iis" in _server or "asp.net" in _server
+            )
+            _soft404_hash = _tp.get("soft_404_hash")
+    except Exception:
+        pass
+
+    if not _is_iis_aspnet:
+        vc.log("[iis-probes] Target is not IIS/ASP.NET — skipping", "INFO")
+        return
+
+    vc.log("[iis-probes] IIS/ASP.NET detected — running targeted probes", "INFO")
+
+    # Build base URLs for probing — origin root + application path parents
+    _bases = [origin]
+    _app_path = _pu.path.rstrip("/")
+    if _app_path:
+        _parts = _app_path.split("/")
+        for i in range(2, len(_parts) + 1):
+            _b = origin + "/".join(_parts[:i])
+            if _b not in _bases:
+                _bases.append(_b)
+
+    _finding_count = 0
+    _evidence_lines = [
+        "IIS/ASP.NET Probe Results",
+        "=" * 50,
+        f"Target: {url}",
+        f"Bases tested: {', '.join(_bases)}",
+        "",
+    ]
+
+    # ── Probe table ───────────────────────────────────────────────────────
+    _total_probes = len(_IIS_PROBE_TABLE) * len(_bases)
+    _probe_idx = 0
+
+    for _base in _bases:
+        for _path, _risk, _title, _desc, _validators, _remed in _IIS_PROBE_TABLE:
+            _probe_idx += 1
+            _probe_url = _base.rstrip("/") + _path
+            try:
+                r = sess.get(_probe_url, timeout=timeout, allow_redirects=False)
+                _evidence_lines.append(
+                    f"Probe: {_path} @ {_base}\n  Status: {r.status_code}")
+
+                if r.status_code != 200:
+                    _evidence_lines.append("  Result: Not accessible\n")
+                    continue
+
+                body = r.text or ""
+                if not body:
+                    _evidence_lines.append("  Result: Empty response\n")
+                    continue
+
+                # Soft-404 check: if response body hash matches the known
+                # custom error page, skip it
+                if _soft404_hash:
+                    _body_hash = hashlib.md5(body.encode("utf-8", "replace")).hexdigest()
+                    if _body_hash == _soft404_hash:
+                        _evidence_lines.append("  Result: Soft-404 match — skipped\n")
+                        continue
+
+                # Validate response body: at least one required validator must match
+                _required_matched = False
+                _any_matched = False
+                for _vpat, _required in _validators:
+                    if _vpat.search(body[:8000]):
+                        _any_matched = True
+                        if _required:
+                            _required_matched = True
+
+                if not _required_matched:
+                    _evidence_lines.append(
+                        "  Result: Body validation failed (no required pattern matched)\n")
+                    continue
+
+                # ── Confirmed finding ──
+                _finding_count += 1
+                _evidence_lines.append(f"  Result: CONFIRMED — {_title}\n")
+
+                # Save individual evidence file
+                _ev_path = ""
+                try:
+                    _safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', _path)[:60]
+                    _ev_file = out.output_path(phase, f"iis_probe_{_safe}")
+                    _ev_content = [
+                        f"Probe: {_probe_url}",
+                        f"Status: {r.status_code}",
+                        "",
+                        "Response Headers:",
+                    ]
+                    for _hk, _hv in r.headers.items():
+                        _ev_content.append(f"  {_hk}: {_hv}")
+                    _ev_content.append("")
+                    _ev_content.append("Response Body (first 4000 chars):")
+                    _ev_content.append(body[:4000])
+                    _ev_file.write_text("\n".join(_ev_content), encoding="utf-8")
+                    _ev_path = str(_ev_file)
+                except Exception:
+                    pass
+
+                # Extract additional details for specific probes
+                _output_lines = [f"URL: {_probe_url}", f"Status: {r.status_code}"]
+
+                if "web.config" in _path.lower() and _required_matched:
+                    # Check for specific sensitive sections
+                    if re.search(r'<connectionStrings', body, re.I):
+                        _output_lines.append("Contains: <connectionStrings> section")
+                    if re.search(r'machineKey', body, re.I):
+                        _output_lines.append("Contains: MachineKey configuration")
+                    if re.search(r'<appSettings', body, re.I):
+                        _output_lines.append("Contains: <appSettings> section")
+                    if re.search(r'password|pwd=', body, re.I):
+                        _output_lines.append("Contains: Password/credential references")
+
+                if "trace.axd" in _path.lower():
+                    # Count visible request traces
+                    _trace_count = len(re.findall(r'<tr[^>]*>.*?Request', body, re.I | re.S))
+                    if _trace_count:
+                        _output_lines.append(f"Visible request traces: ~{_trace_count}")
+
+                if "elmah.axd" in _path.lower():
+                    _error_count = len(re.findall(r'<tr[^>]*>.*?Exception', body, re.I | re.S))
+                    if _error_count:
+                        _output_lines.append(f"Visible error entries: ~{_error_count}")
+
+                out.add_finding(
+                    title=_title,
+                    url=_probe_url, port=port, risk=_risk,
+                    description=_desc,
+                    output="\n".join(_output_lines),
+                    sources="fracture-iis-probes", service=scheme,
+                    output_file=_ev_path,
+                    affected=_probe_url,
+                    owasp="A05:2025 Security Misconfiguration",
+                    nist="CM-7",
+                    remediation=_remed,
+                    http_code=r.status_code,
+                )
+                vc.log(f"[iis-probes] {_title}: {_probe_url}", "SUCCESS")
+
+            except requests.exceptions.Timeout:
+                _evidence_lines.append(f"  Result: Timeout\n")
+            except Exception as _pe:
+                vc.error(f"[iis-probes] Error probing {_probe_url}: {_pe}")
+                _evidence_lines.append(f"  Result: Error — {_pe}\n")
+
+    # ── Handler mapping enumeration ───────────────────────────────────────
+    vc.log("[iis-probes] Enumerating handler mappings", "INFO")
+    _found_handlers: list = []
+
+    for _base in _bases:
+        for _handler_file, _handler_type in _IIS_HANDLER_ENUM:
+            _handler_url = _base.rstrip("/") + "/" + _handler_file
+            try:
+                r = sess.get(_handler_url, timeout=timeout, allow_redirects=False)
+                if r.status_code == 200:
+                    body = r.text or ""
+                    # Validate: a real handler should return XML, WSDL, or
+                    # handler-specific content — not a custom error page
+                    if _soft404_hash:
+                        _bh = hashlib.md5(body.encode("utf-8", "replace")).hexdigest()
+                        if _bh == _soft404_hash:
+                            continue
+                    # Check for handler-specific markers
+                    _is_real = False
+                    if _handler_file.endswith(".asmx"):
+                        _is_real = bool(re.search(
+                            r'<\?xml|wsdl:|WebService|Service Description', body, re.I))
+                    elif _handler_file.endswith(".svc"):
+                        _is_real = bool(re.search(
+                            r'<\?xml|wsdl:|Service|metadata|singleWsdl', body, re.I))
+                    elif _handler_file.endswith(".ashx"):
+                        # ashx can return anything — check it's not an error page
+                        _is_real = (len(body) > 0 and
+                                    not re.search(r'Error|Not Found|404', body[:500], re.I))
+
+                    if _is_real:
+                        _found_handlers.append({
+                            "url": _handler_url,
+                            "type": _handler_type,
+                            "status": r.status_code,
+                        })
+            except Exception:
+                pass
+
+    if _found_handlers:
+        _handler_out = "\n".join(
+            f"  {h['url']} ({h['type']})" for h in _found_handlers)
+        _handler_affected = "\n".join(h["url"] for h in _found_handlers)
+        out.add_finding(
+            title="ASP.NET Handler Endpoints Discovered",
+            url=url, port=port, risk="LOW",
+            description=(
+                f"Discovered {len(_found_handlers)} ASP.NET handler endpoint(s) "
+                "(ASHX/ASMX/SVC). These endpoints may expose undocumented web services "
+                "or WSDL metadata that reveals internal API structure."
+            ),
+            output=_handler_out,
+            sources="fracture-iis-probes", service=scheme,
+            affected=_handler_affected,
+            owasp="A05:2025 Security Misconfiguration",
+            nist="CM-7",
+            remediation=(
+                "Review each discovered handler for authorization controls. "
+                "Disable WSDL metadata publication in production (add "
+                "<serviceMetadata httpGetEnabled='false'/> to WCF config). "
+                "Remove unused handler files."
+            ),
+        )
+        _finding_count += 1
+        vc.log(f"[iis-probes] Found {len(_found_handlers)} handler endpoint(s)", "SUCCESS")
+
+    # Save overall evidence file
+    try:
+        _summary_ev = out.output_path(phase, "iis_aspnet_probe_summary")
+        _evidence_lines.append(f"\nTotal findings: {_finding_count}")
+        if _found_handlers:
+            _evidence_lines.append(f"Handler endpoints: {len(_found_handlers)}")
+        _summary_ev.write_text("\n".join(_evidence_lines), encoding="utf-8")
+    except Exception:
+        pass
+
+    vc.log(f"[iis-probes] Complete: {_finding_count} finding(s)", "SUCCESS")
+
+
+# ── SPA Route Extraction ──────────────────────────────────────────────────────
+
+# Route definition patterns extracted from JS bundles
+_SPA_ROUTE_PATTERNS = [
+    # React Router — path:"..." or path:'...'
+    re.compile(r'path\s*:\s*["\'](/[a-zA-Z0-9/_:*-]+)["\']'),
+    # JSX <Route path="..." /> or <Route exact path="..." />
+    re.compile(r'<Route\s+(?:exact\s+)?path\s*=\s*["\'](/[a-zA-Z0-9/_:*-]+)["\']', re.I),
+    # history.push / history.replace
+    re.compile(r'history\.(?:push|replace)\s*\(\s*["\'](/[a-zA-Z0-9/_-]+)["\']'),
+    # navigate() — React Router v6
+    re.compile(r'navigate\s*\(\s*["\'](/[a-zA-Z0-9/_-]+)["\']'),
+    # Vue Router
+    re.compile(r'{\s*path\s*:\s*["\'](/[a-zA-Z0-9/_:*-]+)["\']'),
+    # Angular routerLink
+    re.compile(r'routerLink\s*=\s*["\'](/[a-zA-Z0-9/_-]+)["\']'),
+    # window.location / location.href assignment
+    re.compile(r'(?:window\.)?location\s*(?:\.\s*href)?\s*=\s*["\'](/[a-zA-Z0-9/_-]+)["\']'),
+]
+
+# API call patterns extracted from JS bundles
+_SPA_API_PATTERNS = [
+    # fetch("/api/...")
+    re.compile(r'fetch\s*\(\s*["\'](/[a-zA-Z0-9/_.-]+)["\']'),
+    # axios / http client .get/.post/.put/.delete/.patch("...")
+    re.compile(r'\.(?:get|post|put|delete|patch)\s*\(\s*["\'](/[a-zA-Z0-9/_.-]+)["\']', re.I),
+    # URL string assigned to api/endpoint/url variable
+    re.compile(r'(?:api[Uu]rl|endpoint|apiPath|baseUrl)\s*(?:=|:)\s*["\'](/[a-zA-Z0-9/_.-]+)["\']'),
+    # XMLHttpRequest .open("METHOD", "/...")
+    re.compile(r'\.open\s*\(\s*["\'][A-Z]+["\']\s*,\s*["\'](/[a-zA-Z0-9/_.-]+)["\']'),
+    # Template literal API paths: `/api/${...}`
+    re.compile(r'`(/api/[a-zA-Z0-9/_${}.-]+)`'),
+    # $.ajax({ url: "/..." })
+    re.compile(r'\$\.ajax\s*\(\s*\{[^}]*url\s*:\s*["\'](/[a-zA-Z0-9/_.-]+)["\']'),
+]
+
+# Paths to exclude (static assets, not routes)
+_SPA_ROUTE_EXCLUDE = re.compile(
+    r'\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map|json|xml)$'
+    r'|^/static/'
+    r'|^/assets/'
+    r'|^/node_modules/'
+    r'|^/favicon',
+    re.I)
+
+# JS bundle filename patterns to prioritise
+_SPA_BUNDLE_RE = re.compile(
+    r'(?:bundle|chunk|main|app|index|vendor|client)\.[a-f0-9]*\.js$'
+    r'|\.(?:bundle|chunk)\.js$'
+    r'|/(?:main|app|index|client)\.js$',
+    re.I)
+
+_SPA_MAX_BUNDLE_SIZE = 5 * 1024 * 1024  # 5 MB
+_SPA_MAX_BUNDLES     = 10
+
+
+
+def _extract_spa_routes(target: dict, cfg: dict, out: "OutputManager",
+                        sess: "requests.Session", crawl_data: dict,
+                        timeout: int = 10) -> "list[dict]":
+    """Extract route and API endpoint definitions from JavaScript bundles.
+
+    Returns a list of dicts ``[{"path": "/route", "source": "js-bundle",
+    "type": "route"|"api"}]`` for injection into the access-matrix
+    structure map.
+    """
+    phase = "crawl"
+    discovered: "list[dict]" = []
+    _seen_paths: set = set()
+
+    # Collect JS links from crawl data
+    all_links = crawl_data.get("links", [])
+    js_links = [lk for lk in all_links if lk.endswith(".js")]
+
+    if not js_links:
+        vc.log("[spa-routes] No JavaScript bundles found in crawl data", "INFO")
+        return discovered
+
+    # Prioritise bundles (main/app/client/vendor) over generic JS
+    _prioritised = sorted(js_links,
+                          key=lambda u: (0 if _SPA_BUNDLE_RE.search(u) else 1, u))
+    _to_fetch = _prioritised[:_SPA_MAX_BUNDLES]
+
+    vc.log(f"[spa-routes] Extracting routes from {len(_to_fetch)} JS bundle(s) ...",
+           "INFO")
+
+    _pu = urllib.parse.urlparse(target["url"])
+    _base_origin = f"{_pu.scheme}://{_pu.netloc}"
+
+    for js_url in _to_fetch:
+        try:
+            r = sess.get(js_url, timeout=timeout,
+                         headers={"Accept": "application/javascript, */*"},
+                         stream=True)
+            if r.status_code != 200:
+                continue
+            # Enforce size cap
+            _cl = int(r.headers.get("Content-Length", 0) or 0)
+            if _cl > _SPA_MAX_BUNDLE_SIZE:
+                vc.log(f"[spa-routes] Skipping oversized bundle: "
+                       f"{js_url} ({_cl // 1024}KB)", "INFO")
+                continue
+            _body = r.text[:_SPA_MAX_BUNDLE_SIZE]
+            if not _body:
+                continue
+
+            # Extract routes
+            for _rx in _SPA_ROUTE_PATTERNS:
+                for _m in _rx.finditer(_body):
+                    _path = _m.group(1)
+                    if _path and _path not in _seen_paths and not _SPA_ROUTE_EXCLUDE.search(_path):
+                        # Normalise dynamic segments: /users/:id → /users/{id}
+                        _clean = re.sub(r':([a-zA-Z_]+)', r'{\1}', _path)
+                        _seen_paths.add(_path)
+                        discovered.append({
+                            "path": _clean,
+                            "full_url": _base_origin + _clean,
+                            "source": "js-bundle",
+                            "type": "route",
+                            "bundle": js_url,
+                        })
+
+            # Extract API endpoints
+            for _rx in _SPA_API_PATTERNS:
+                for _m in _rx.finditer(_body):
+                    _path = _m.group(1)
+                    if _path and _path not in _seen_paths and not _SPA_ROUTE_EXCLUDE.search(_path):
+                        _clean = re.sub(r':([a-zA-Z_]+)', r'{\1}', _path)
+                        # Strip template literal placeholders
+                        _clean = re.sub(r'\$\{[^}]+\}', '{param}', _clean)
+                        _seen_paths.add(_path)
+                        discovered.append({
+                            "path": _clean,
+                            "full_url": _base_origin + _clean,
+                            "source": "js-bundle",
+                            "type": "api",
+                            "bundle": js_url,
+                        })
+
+        except Exception as _e:
+            vc.log(f"[spa-routes] Error parsing {js_url}: {_e}", "WARNING")
+            continue
+
+    if discovered:
+        # Emit an INFO finding summarising what was discovered
+        _route_count = sum(1 for d in discovered if d["type"] == "route")
+        _api_count   = sum(1 for d in discovered if d["type"] == "api")
+        _ev_lines = [f"SPA Route Extraction Results",
+                     f"{'='*50}",
+                     f"Routes found: {_route_count}",
+                     f"API endpoints found: {_api_count}",
+                     f"Bundles analysed: {len(_to_fetch)}",
+                     ""]
+        if _route_count:
+            _ev_lines.append("Routes:")
+            for d in discovered:
+                if d["type"] == "route":
+                    _ev_lines.append(f"  {d['path']}  (from {d['bundle'].rsplit('/', 1)[-1]})")
+        if _api_count:
+            _ev_lines.append("")
+            _ev_lines.append("API Endpoints:")
+            for d in discovered:
+                if d["type"] == "api":
+                    _ev_lines.append(f"  {d['path']}  (from {d['bundle'].rsplit('/', 1)[-1]})")
+
+        _ev_path = out.output_path(phase, f"spa_routes_{target['hostname']}")
+        try:
+            _ev_path.write_text("\n".join(_ev_lines), encoding="utf-8")
+        except Exception:
+            pass
+
+        out.add_finding(
+            title="SPA Routes Extracted from JavaScript Bundle",
+            url=target["url"], port=target["port"], risk="INFO",
+            description=(
+                f"Static analysis of {len(_to_fetch)} JavaScript bundle(s) discovered "
+                f"{_route_count} route definition(s) and {_api_count} API endpoint "
+                f"reference(s) that may not be reachable via traditional crawling. "
+                "These routes have been added to the access matrix for BFLA testing."
+            ),
+            output="\n".join(_ev_lines),
+            sources="fracture-crawl", service=target["scheme"],
+            output_file=str(_ev_path),
+            affected="\n".join(d["path"] for d in discovered[:50]),
+            owasp="A01:2025 Broken Access Control", nist="AC-3",
+            remediation=(
+                "Review all SPA routes for proper server-side authorization. "
+                "Routes embedded in JavaScript bundles are accessible to any user "
+                "who can read the bundle — ensure backend enforcement of access controls."
+            ),
+        )
+        vc.log(f"[spa-routes] Extracted {_route_count} routes + "
+               f"{_api_count} API endpoints from {len(_to_fetch)} bundle(s)",
+               "SUCCESS")
+    else:
+        vc.log("[spa-routes] No routes or API endpoints found in bundles", "INFO")
+
+    return discovered
+
+
 def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                  out: OutputManager, sess: requests.Session,
                  landing_url: str = "") -> None:
@@ -12021,21 +13001,12 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             if _all_cookies:
                 for _ck_name, _ck_val in _all_cookies.items():
                     if _ck_name.lower().startswith("bigipserver"):
-                        try:
-                            _parts = _ck_val.split(".")
-                            if len(_parts) >= 2:
-                                _enc_ip = int(_parts[0])
-                                _enc_port = int(_parts[1])
-                                _ip_bytes = _enc_ip.to_bytes(4, "little")
-                                _decoded_ip = ".".join(str(b) for b in _ip_bytes)
-                                _decoded_port = int.from_bytes(
-                                    _enc_port.to_bytes(2, "big"), "little")
-                                _lb_out.append(
-                                    f"F5 BIG-IP Cookie Decoded: {_ck_name}={_ck_val}")
-                                _lb_out.append(
-                                    f"  Backend Server: {_decoded_ip}:{_decoded_port}")
-                        except (ValueError, OverflowError):
-                            pass
+                        _decoded = _decode_bigip_cookie(_ck_val)
+                        if _decoded:
+                            _lb_out.append(
+                                f"F5 BIG-IP Cookie Decoded: {_ck_name}={_ck_val}")
+                            _lb_out.append(
+                                f"  Backend Server: {_decoded}")
             out.add_finding(
                 title=f"Load Balancer Detected: {_lb_label}",
                 url=url, port=target["port"], risk="INFO",
@@ -13198,6 +14169,32 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                  path_redirects=_wp_sm_rd or None,
                                  source="wayback")
         _wp_discovered = [_wu for _wu, *_ in _wp_info.get("discovered_paths", [])]
+
+    # ── Soft-404 detection ──────────────────────────────────────────────────
+    _soft_404_info = None
+    if not cfg.get("_waf_stealth_applied"):
+        try:
+            _soft_404_info = _detect_soft_404(target, cfg, out, sess, timeout)
+        except Exception as _s4_err:
+            vc.error(f"[recon] Soft-404 detection error: {_s4_err}")
+
+    # ── IIS/ASP.NET-specific probes ──────────────────────────────────────
+    try:
+        _probe_iis_aspnet(target, cfg, out, sess)
+    except Exception as _iis_exc:
+        vc.error(f"[iis-probes] Probe battery failed: {_iis_exc}")
+
+    # ── F5 BIG-IP backend consistency check ──────────────────────────────
+    try:
+        # Check if F5 BIG-IP was detected during edge-security analysis
+        _tp_f5_check = out.root / "target_profile.json"
+        if _tp_f5_check.exists():
+            _tp_f5_data = json.loads(_tp_f5_check.read_text(encoding="utf-8"))
+            _tp_edge = _tp_f5_data.get("edge_security", {})
+            if "F5 BIG-IP" in str(_tp_edge):
+                _check_f5_consistency(target, cfg, out, sess, timeout)
+    except Exception as _f5_err:
+        vc.error(f"[f5-consistency] Check failed: {_f5_err}")
 
     vc.status(phase, "Recon", "complete", "Done", 10, 10)
     vc.log("[recon] Phase complete", "SUCCESS")
@@ -15623,6 +16620,150 @@ def _platform_remed(base: str, server: str = "", powered_by: str = "") -> str:
     return "\n".join(parts)
 
 
+# ── CSP directive-level analysis ──────────────────────────────────────────────
+
+# Module-level constant — risk ordering for CSP weaknesses
+_CSP_RISK_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "INFO": 3}
+
+
+def _analyze_csp_directives(csp_value, headers):
+    """Parse a CSP header value and return (weaknesses, max_risk, detail_output).
+
+    weaknesses:   list of (risk, short_label, explanation) tuples
+    max_risk:     highest risk level found ("HIGH"/"MEDIUM"/"LOW"/"INFO" or None)
+    detail_output: multi-line string suitable for the finding output field
+    """
+    directives = {}
+    for part in csp_value.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        tokens = part.split()
+        if tokens:
+            directives[tokens[0].lower()] = " ".join(tokens[1:]) if len(tokens) > 1 else ""
+
+    weaknesses = []
+
+    # ── script-src / default-src analysis ──
+    _script_src = directives.get("script-src", "")
+    _default_src = directives.get("default-src", "")
+    # script-src inherits from default-src if not set
+    _effective_script = _script_src or _default_src
+
+    if "'unsafe-inline'" in _effective_script:
+        weaknesses.append((
+            "MEDIUM", "unsafe-inline in script-src",
+            "Allows inline <script> tags — attackers can inject scripts via "
+            "XSS without needing to host external payloads."))
+    if "'unsafe-eval'" in _effective_script:
+        weaknesses.append((
+            "MEDIUM", "unsafe-eval in script-src",
+            "Allows eval(), Function(), and setTimeout(string) — enables "
+            "eval-based XSS exploitation."))
+    if "data:" in _effective_script:
+        weaknesses.append((
+            "MEDIUM", "data: URI in script-src",
+            "Allows script loading via data: URIs — bypasses origin "
+            "restrictions for script injection."))
+    # Check for wildcard
+    _script_tokens = _effective_script.split()
+    if "*" in _script_tokens:
+        weaknesses.append((
+            "HIGH", "Wildcard (*) in script-src",
+            "Allows script loading from ANY origin — CSP provides no "
+            "meaningful XSS protection."))
+    # Check for overly broad hosts (e.g. *.googleapis.com can host JSONP)
+    for _tk in _script_tokens:
+        if _tk.startswith("*.") and any(
+            _d in _tk for _d in ("googleapis.com", "cloudflare.com",
+                                  "amazonaws.com", "azureedge.net")):
+            weaknesses.append((
+                "MEDIUM", f"Broad CDN host in script-src: {_tk}",
+                f"CDN wildcards like {_tk} may host JSONP endpoints or "
+                f"user-uploaded scripts that bypass CSP."))
+            break  # report once
+
+    # ── frame-ancestors / clickjacking ──
+    if "frame-ancestors" not in directives:
+        _xfo = headers.get("X-Frame-Options", "")
+        if not _xfo or _xfo.upper().strip() not in ("DENY", "SAMEORIGIN"):
+            weaknesses.append((
+                "MEDIUM", "Missing frame-ancestors (no X-Frame-Options fallback)",
+                "No clickjacking protection — page can be embedded in any "
+                "iframe for UI redress attacks."))
+
+    # ── object-src ──
+    _obj_src = directives.get("object-src", "")
+    if not _obj_src:
+        # Not set — inherits from default-src
+        if "*" in _default_src.split() or not _default_src:
+            weaknesses.append((
+                "LOW", "Permissive object-src (not set, no restrictive default-src)",
+                "Allows loading Flash/Java/plugin objects from any origin."))
+    elif "*" in _obj_src.split():
+        weaknesses.append((
+            "LOW", "Wildcard object-src",
+            "Allows loading plugin objects from any origin."))
+
+    # ── base-uri ──
+    if "base-uri" not in directives:
+        weaknesses.append((
+            "LOW", "Missing base-uri directive",
+            "Allows <base> tag injection — attackers can redirect relative "
+            "URLs to a controlled domain."))
+
+    # ── form-action ──
+    _form_action = directives.get("form-action", "")
+    if not _form_action:
+        weaknesses.append((
+            "LOW", "Missing form-action directive",
+            "Allows forms to submit to any origin — enables phishing via "
+            "injected form action attributes."))
+    elif "*" in _form_action.split():
+        weaknesses.append((
+            "LOW", "Wildcard form-action",
+            "Allows forms to submit to any origin."))
+
+    # ── upgrade-insecure-requests ──
+    if "upgrade-insecure-requests" not in directives:
+        weaknesses.append((
+            "INFO", "Missing upgrade-insecure-requests",
+            "Subresources loaded via http:// are not automatically upgraded "
+            "to https://, allowing potential mixed-content attacks."))
+
+    # ── style-src unsafe-inline (common, lower risk than script) ──
+    _style_src = directives.get("style-src", _default_src)
+    if "'unsafe-inline'" in _style_src and "'unsafe-inline'" not in _effective_script:
+        # Only report if not already covered by script-src unsafe-inline
+        weaknesses.append((
+            "INFO", "unsafe-inline in style-src",
+            "Allows inline styles — lower risk than script-src unsafe-inline "
+            "but can enable CSS injection attacks."))
+
+    # Determine max risk
+    max_risk = None
+    if weaknesses:
+        max_risk = min(weaknesses, key=lambda w: _CSP_RISK_ORDER.get(w[0], 9))[0]
+
+    # Build detail output
+    detail_lines = [f"Content-Security-Policy: {csp_value[:500]}", ""]
+    if directives:
+        detail_lines.append("Parsed directives:")
+        for _d, _v in sorted(directives.items()):
+            detail_lines.append(f"  {_d}: {_v[:100]}")
+        detail_lines.append("")
+    if weaknesses:
+        detail_lines.append(f"Weaknesses identified ({len(weaknesses)}):")
+        for _risk, _label, _expl in weaknesses:
+            detail_lines.append(f"  [{_risk}] {_label}")
+            detail_lines.append(f"         {_expl}")
+    else:
+        detail_lines.append("No significant weaknesses identified.")
+
+    detail_output = "\n".join(detail_lines)
+    return weaknesses, max_risk, detail_output
+
+
 def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                    out: OutputManager, sess: requests.Session) -> None:
     phase   = "headers"
@@ -15757,27 +16898,46 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     # ── Permissive (misconfigured) security header checks ────────────────────
     _csp_val = headers.get("Content-Security-Policy", "")
     if _csp_val:
-        _csp_l = _csp_val.lower()
-        if "unsafe-inline" in _csp_l or "unsafe-eval" in _csp_l or (
-            re.search(r"(?:default|script)-src[^;]*\*", _csp_l)
-        ):
+        _csp_weaknesses, _csp_max_risk, _csp_detail = _analyze_csp_directives(
+            _csp_val, headers)
+        if _csp_weaknesses:
+            _csp_risk = _csp_max_risk or "LOW"
+            _csp_desc_parts = [
+                "Content-Security-Policy is present but contains the following "
+                f"weaknesses ({len(_csp_weaknesses)} found):"
+            ]
+            for _w_risk, _w_label, _w_expl in _csp_weaknesses:
+                _csp_desc_parts.append(f"  \u2022 [{_w_risk}] {_w_label}")
+            _csp_remed_parts = []
+            for _w_risk, _w_label, _ in _csp_weaknesses:
+                if "unsafe-inline" in _w_label and "script" in _w_label.lower():
+                    _csp_remed_parts.append(
+                        "Replace 'unsafe-inline' with nonces or hashes for inline scripts.")
+                elif "unsafe-eval" in _w_label:
+                    _csp_remed_parts.append(
+                        "Remove 'unsafe-eval' and refactor code to avoid eval().")
+                elif "Wildcard" in _w_label and "script" in _w_label.lower():
+                    _csp_remed_parts.append(
+                        "Replace wildcard (*) in script-src with explicit allowed origins.")
+                elif "frame-ancestors" in _w_label:
+                    _csp_remed_parts.append(
+                        "Add frame-ancestors 'self' (or 'none') to prevent clickjacking.")
+                elif "base-uri" in _w_label:
+                    _csp_remed_parts.append("Add base-uri 'self'.")
+                elif "form-action" in _w_label:
+                    _csp_remed_parts.append("Add form-action 'self'.")
+            if not _csp_remed_parts:
+                _csp_remed_parts.append("Tighten CSP directives to remove identified weaknesses.")
             out.add_finding(
                 title="Permissive Security Header: Content-Security-Policy",
-                url=url, port=target["port"], risk="LOW",
-                description=(
-                    "Content-Security-Policy is present but contains permissive directives "
-                    f"(unsafe-inline, unsafe-eval, or wildcard sources) that undermine XSS protection: "
-                    f"{_csp_val[:200]}"
-                ),
-                output=f"Content-Security-Policy: {_csp_val[:300]}",
+                url=url, port=target["port"], risk=_csp_risk,
+                description="\n".join(_csp_desc_parts),
+                output=_csp_detail,
                 sources="fracture-headers", service=target["scheme"],
                 output_file=str(out_f),
                 owasp="A05:2025 Security Misconfiguration", nist="SI-10",
                 remediation=_platform_remed(
-                    "Remove 'unsafe-inline' and 'unsafe-eval' from CSP. "
-                    "Use nonces or hashes for inline scripts. Replace wildcard (*) sources with explicit origins.",
-                    server_hdr, powered_by,
-                ),
+                    " ".join(_csp_remed_parts), server_hdr, powered_by),
                 command=_hdr_cmd,
                 http_code=resp.status_code,
             )
@@ -22621,6 +23781,86 @@ _NUCLEI_NORM: "list[tuple]" = [
 _NUCLEI_NORM_COMPILED = [(re.compile(p, re.IGNORECASE), t, r, o, n, rm)
                           for p, t, r, o, n, rm in _NUCLEI_NORM]
 
+# ── Nuclei technology-based template pre-filtering ────────────────────────────
+# Module-level constants — place near other nuclei constants
+# (around the _NUCLEI_NORM table area, ~line 22200)
+
+_NUCLEI_CMS_TAGS = {
+    "wordpress": ["wordpress", "wp-plugin", "wp-theme"],
+    "drupal": ["drupal"],
+    "joomla": ["joomla"],
+    "magento": ["magento"],
+    "moodle": ["moodle"],
+    "shopify": ["shopify"],
+    "prestashop": ["prestashop"],
+    "typo3": ["typo3"],
+    "ghost": ["ghost"],
+    "strapi": ["strapi"],
+    "umbraco": ["umbraco"],
+    "sitecore": ["sitecore"],
+    "kentico": ["kentico"],
+}
+
+_NUCLEI_SERVER_TAGS = {
+    "apache": ["apache"],
+    "nginx": ["nginx"],
+    "tomcat": ["tomcat"],
+    "weblogic": ["weblogic"],
+    "websphere": ["websphere"],
+    "caddy": ["caddy"],
+    "lighttpd": ["lighttpd"],
+}
+
+
+def _build_nuclei_exclude_tags(target_profile_path):
+    """Build a list of nuclei tags to exclude based on undetected technologies.
+
+    Reads target_profile.json and returns tags for CMS/server platforms NOT
+    present in the detected technology stack.  Returns an empty list if the
+    file is absent or unparseable (safe default: exclude nothing).
+    """
+    try:
+        if not target_profile_path.exists():
+            return []
+        _tp = json.loads(target_profile_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    # Collect all detected tech names (lowered) from every relevant field
+    _detected = set()
+    _cms = (_tp.get("cms") or "").lower().strip()
+    if _cms:
+        _detected.add(_cms)
+    for _t in _tp.get("technologies", []):
+        _tn = (_t.get("name") or "").lower().strip()
+        if _tn:
+            _detected.add(_tn)
+    _server = (_tp.get("server") or "").lower().strip()
+    if _server:
+        _detected.add(_server)
+        # Also add the base server name (e.g. "microsoft-iis/10.0" → "iis")
+        for _frag in ("iis", "apache", "nginx", "tomcat", "lighttpd",
+                       "caddy", "weblogic", "websphere"):
+            if _frag in _server:
+                _detected.add(_frag)
+    # Add technologies from the web_structure, framework, etc.
+    for _key in ("framework", "web_structure"):
+        _val = (_tp.get(_key) or "").lower().strip()
+        if _val:
+            _detected.add(_val)
+
+    exclude_tags = []
+    for _cms_key, _tags in _NUCLEI_CMS_TAGS.items():
+        if _cms_key not in _detected:
+            exclude_tags.extend(_tags)
+    for _srv_key, _tags in _NUCLEI_SERVER_TAGS.items():
+        if _srv_key not in _detected:
+            exclude_tags.extend(_tags)
+
+    return sorted(set(exclude_tags))
+
+
+
 
 # Nuclei template-ids that produce a dynamic title embedding the tech/panel
 # name from nuclei's info.name field.
@@ -22652,6 +23892,73 @@ _NUCLEI_HDR_MATCHER: dict = {
 }
 
 
+# ── Nuclei output quality enrichment ──────────────────────────────────────────
+# This is a MODIFICATION to the existing _normalize_nuclei() function, not a
+# new function.  The change replaces the `_output` variable computation at
+# the top of the function and adds a helper.
+
+# ── OLD CODE (lines 22665-22667 in fracture.py) ──
+def _enrich_nuclei_output(raw_output: str, item: dict) -> str:
+    """Build informative output text for a nuclei finding.
+
+    When the raw output is empty or just "Template: <id>", enriches it with
+    matched-at URL, template metadata, curl command, and response excerpts
+    so the finding is human-reviewable without consulting raw nuclei logs.
+    """
+    _tid = item.get("template-id", "")
+    _matched = item.get("matched-at", "")
+    _matcher = item.get("matcher-name", "")
+    _sev = (item.get("info", {}).get("severity") or "info").upper()
+
+    # If we have real extracted content, use it with light context
+    if raw_output and not raw_output.startswith("Template:"):
+        parts = []
+        if _matched:
+            parts.append(f"Matched at: {_matched}")
+        parts.append(str(raw_output)[:2000])
+        return "\n".join(parts)
+
+    # Build enriched output from all available nuclei fields
+    parts = []
+    if _matched:
+        parts.append(f"Matched at: {_matched}")
+    parts.append(f"Template: {_tid}")
+    if _matcher:
+        parts.append(f"Matcher: {_matcher}")
+    parts.append(f"Severity: {_sev}")
+
+    # Try to get actual evidence from nuclei's output fields
+    _curl = item.get("curl-command", "")
+    _response = item.get("response", "")
+    _matched_line = item.get("matched-line", "")
+    _host = item.get("host", "")
+
+    if _matched_line and _matched_line != raw_output:
+        parts.append("")
+        parts.append("Matched line:")
+        parts.append(str(_matched_line)[:500])
+    elif _response:
+        parts.append("")
+        parts.append("Response excerpt:")
+        # Extract just the body portion if it looks like a full HTTP response
+        _resp_str = str(_response)
+        _body_start = _resp_str.find("\r\n\r\n")
+        if _body_start > 0:
+            _resp_body = _resp_str[_body_start + 4:]
+            parts.append(_resp_body[:500])
+        else:
+            parts.append(_resp_str[:500])
+
+    if _curl:
+        parts.append("")
+        parts.append(f"Reproduce: {str(_curl)[:300]}")
+
+    if _host and _host != _matched:
+        parts.append(f"Host: {_host}")
+
+    return "\n".join(parts)
+
+
 def _normalize_nuclei(item: dict) -> dict:
     """Map a nuclei JSONL item to a Fracture-convention finding dict."""
     _info = item.get("info", {})
@@ -22662,9 +23969,10 @@ def _normalize_nuclei(item: dict) -> dict:
     _desc = _info.get("description", "")
     _cves = ",".join(_info.get("classification", {}).get("cve-id", []) or [])
     _matched = item.get("matched-at", "")
-    _output = item.get("extracted-results", item.get("matched-line", ""))
-    if isinstance(_output, list):
-        _output = "\n".join(_output)
+    _output_raw = item.get("extracted-results", item.get("matched-line", ""))
+    if isinstance(_output_raw, list):
+        _output_raw = "\n".join(_output_raw)
+    _output = _enrich_nuclei_output(_output_raw, item)
 
     # ── Priority 1: http-missing-security-headers with named matchers ──
     # Each JSONL line for this template carries a matcher-name like
@@ -22971,6 +24279,13 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
             vc.log("[vulnscan] nuclei: passing session cookies for authenticated scanning", "INFO")
         if Path(_nuc_templates_dir).is_dir():
             cmd += ["-t", _nuc_templates_dir]
+        # ── Technology-based template pre-filtering ──
+        _nuc_exclude = _build_nuclei_exclude_tags(out.root / "target_profile.json")
+        if _nuc_exclude:
+            cmd += ["-etags", ",".join(_nuc_exclude)]
+            vc.log(
+                f"[vulnscan] nuclei: excluding {len(_nuc_exclude)} irrelevant "
+                f"technology tags based on target profile", "INFO")
         _nuc_max_time = f"{max(timeout // 60, 1)}m"
         cmd += ["-max-time", _nuc_max_time]
         vc.log(f"[vulnscan] Launching nuclei in background (max-time {_nuc_max_time}) ...", "INFO")
@@ -23159,6 +24474,17 @@ def _collect_vulnscan_bg(handle: dict) -> None:
             pass
         _nuc_cms_suppressed = 0
 
+        # Load soft-404 info for nuclei finding filtering
+        _nuc_soft_404 = None
+        try:
+            _tp_path_s4 = out.root / "target_profile.json"
+            if _tp_path_s4.exists():
+                _tp_data_s4 = json.loads(_tp_path_s4.read_text())
+                _nuc_soft_404 = _tp_data_s4.get("soft_404")
+        except Exception:
+            pass
+        _nuc_soft404_suppressed = 0
+
         _nuc_count = 0
         for line in (nuc_stdout or "").splitlines():
             try:
@@ -23175,6 +24501,12 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                 if _nuc_cms_hit:
                     _nuc_cms_suppressed += 1
                     continue
+                # Soft-404 suppression
+                if _nuc_soft_404 and _nuc_soft_404.get("detected"):
+                    _nuc_resp = item.get("response", "")
+                    if _nuc_resp and _is_soft_404(_nuc_resp, _nuc_soft_404):
+                        _nuc_soft404_suppressed += 1
+                        continue
                 matched = item.get("matched-at", url)
                 _norm   = _normalize_nuclei(item)
                 out.add_finding(
@@ -23200,8 +24532,27 @@ def _collect_vulnscan_bg(handle: dict) -> None:
             vc.log(
                 f"[vulnscan] nuclei: suppressed {_nuc_cms_suppressed} "
                 f"CMS-specific finding(s) (CMS not detected on target)", "INFO")
+        if _nuc_soft404_suppressed:
+            vc.log(
+                f"[vulnscan] nuclei: suppressed {_nuc_soft404_suppressed} "
+                f"finding(s) matching soft-404 error page pattern", "INFO")
         if _nuc_count:
             vc.log(f"[vulnscan] nuclei: {_nuc_count} finding(s) parsed", "SUCCESS")
+
+        # ── Telerik validation ──
+        try:
+            _has_telerik = any(
+                "telerik" in (f.get("title", "") + f.get("sources", "")).lower()
+                for f in json.loads(out.findings_json.read_text())
+            ) if out.findings_json.exists() else False
+            if _has_telerik:
+                try:
+                    _validate_telerik(target, handle.get("cfg", {}), out,
+                                      handle.get("sess") or requests.Session())
+                except Exception as _tv_err:
+                    vc.error(f"[telerik] Validation failed: {_tv_err}")
+        except Exception:
+            pass
 
     vc.status(phase, "Vuln Scan", "running", "nikto", 1, 2)
 
@@ -23407,6 +24758,694 @@ def _phase_graphql(target: dict, cfg: dict, pm: ProgressManager,
 # ─────────────────────────────────────────────
 # Phase 11: Auth Recon
 # ─────────────────────────────────────────────
+# ── ASP.NET ViewState Analyzer ─────────────────────────────────────────────────
+_VS_FIELD_RE = re.compile(
+    r'<input[^>]+name=["\'](__VIEWSTATE)["\'][^>]+value=["\']([^"\']*)["\']',
+    re.I | re.S)
+_VS_GENERATOR_RE = re.compile(
+    r'<input[^>]+name=["\']__VIEWSTATEGENERATOR["\'][^>]+value=["\']([^"\']*)["\']',
+    re.I | re.S)
+_VS_EVENTVALIDATION_RE = re.compile(
+    r'<input[^>]+name=["\']__EVENTVALIDATION["\'][^>]+value=["\']([^"\']*)["\']',
+    re.I | re.S)
+# Also match value-first attribute order: <input value="..." name="__VIEWSTATE">
+_VS_FIELD_ALT_RE = re.compile(
+    r'<input[^>]+value=["\']([^"\']*)["\'][^>]+name=["\'](__VIEWSTATE)["\']',
+    re.I | re.S)
+_VS_GENERATOR_ALT_RE = re.compile(
+    r'<input[^>]+value=["\']([^"\']*)["\'][^>]+name=["\']__VIEWSTATEGENERATOR["\']',
+    re.I | re.S)
+_VS_EVENTVALIDATION_ALT_RE = re.compile(
+    r'<input[^>]+value=["\']([^"\']*)["\'][^>]+name=["\']__EVENTVALIDATION["\']',
+    re.I | re.S)
+
+# Patterns indicating sensitive data in decoded ViewState
+_VS_SENSITIVE_PATTERNS = [
+    (re.compile(r'(?:Data\s*Source|Initial\s*Catalog|Server)\s*=', re.I),
+     "Database connection string fragment"),
+    (re.compile(r'(?:password|passwd|pwd)\s*=', re.I),
+     "Credential fragment"),
+    (re.compile(r'[A-Za-z]:\\(?:inetpub|Windows|Users|Program Files)', re.I),
+     "Internal file path"),
+    (re.compile(r'(?:SELECT|INSERT|UPDATE|DELETE)\s+(?:FROM|INTO|SET)\s', re.I),
+     "SQL query fragment"),
+    (re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}'),
+     "Email address"),
+    (re.compile(r'(?:api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]', re.I),
+     "API key / secret reference"),
+    (re.compile(r'machine[Kk]ey|validation[Kk]ey|decryption[Kk]ey', re.I),
+     "ASP.NET MachineKey reference"),
+]
+
+# ASP.NET ViewState MAC signature marker
+# The last 20 bytes of a MAC-protected ViewState (HMACSHA1) are the signature.
+# For HMACSHA256 it's 32 bytes.  A ViewState with fewer than 24 bytes of raw
+# decoded data almost certainly has no MAC.
+_VS_MIN_MAC_LEN = 24
+
+
+# ── Main function ───────────────────────────────────────────────────────────
+
+def _check_viewstate(target: dict, cfg: dict, out: "OutputManager",
+                     sess: "requests.Session", crawl_data: dict) -> None:
+    """Analyze ASP.NET ViewState fields discovered during crawl.
+
+    Checks for:
+      1. Missing MAC protection (HIGH — parameter tampering / deserialization)
+      2. Sensitive data embedded in decoded ViewState (MEDIUM — information disclosure)
+      3. Generator fingerprinting (INFO — logged, not a finding)
+    """
+    phase   = "auth_recon"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    _pu     = urllib.parse.urlparse(url)
+    origin  = f"{_pu.scheme}://{_pu.netloc}"
+    port    = target["port"]
+    scheme  = target["scheme"]
+
+    # Collect unique .aspx / form-bearing pages from crawl
+    _vs_pages: list = []
+    _seen_pages: set = set()
+    for link in crawl_data.get("links", []):
+        _lp = urllib.parse.urlparse(link).path or ""
+        _norm = link.rstrip("/").lower()
+        if _norm in _seen_pages:
+            continue
+        # Check .aspx pages and root pages that might have ViewState
+        if (_lp.lower().endswith(".aspx")
+                or _lp.lower().endswith("/")
+                or not "." in _lp.rsplit("/", 1)[-1]):
+            _seen_pages.add(_norm)
+            _vs_pages.append(link)
+    # Also check forms pages
+    for form in crawl_data.get("forms", []):
+        _form_url = form.get("action") or form.get("url") or ""
+        if _form_url and _form_url.rstrip("/").lower() not in _seen_pages:
+            _seen_pages.add(_form_url.rstrip("/").lower())
+            _vs_pages.append(_form_url)
+
+    if not _vs_pages:
+        vc.log("[viewstate] No .aspx or form pages to analyze", "INFO")
+        return
+
+    vc.log(f"[viewstate] Analyzing {len(_vs_pages)} page(s) for ViewState fields", "INFO")
+
+    _vs_no_mac_pages:    list = []
+    _vs_sensitive_pages: list = []
+    _vs_generators:      dict = {}  # page → generator value
+    _vs_evidence_lines:  list = []
+    _vs_max_pages = min(len(_vs_pages), 50)
+
+    for _idx, page_url in enumerate(_vs_pages[:_vs_max_pages]):
+        try:
+            r = sess.get(page_url, timeout=timeout, allow_redirects=True)
+            if r.status_code != 200:
+                continue
+            body = r.text or ""
+            if not body:
+                continue
+
+            # Extract __VIEWSTATE value
+            _vs_match = _VS_FIELD_RE.search(body)
+            if not _vs_match:
+                _vs_match = _VS_FIELD_ALT_RE.search(body)
+                if _vs_match:
+                    _vs_val = _vs_match.group(1)  # value is group 1 in alt
+                else:
+                    continue
+            else:
+                _vs_val = _vs_match.group(2)  # value is group 2 in primary
+
+            if not _vs_val or len(_vs_val) < 10:
+                continue
+
+            _page_path = urllib.parse.urlparse(page_url).path or page_url
+
+            # Extract __VIEWSTATEGENERATOR
+            _vsg_match = _VS_GENERATOR_RE.search(body)
+            if not _vsg_match:
+                _vsg_match = _VS_GENERATOR_ALT_RE.search(body)
+            if _vsg_match:
+                _vsg_val = _vsg_match.group(1) if _VS_GENERATOR_ALT_RE.search(body) else _vsg_match.group(1)
+                _vs_generators[_page_path] = _vsg_val
+
+            # Check for __EVENTVALIDATION (indicates MAC is likely configured)
+            _has_ev = bool(_VS_EVENTVALIDATION_RE.search(body)
+                          or _VS_EVENTVALIDATION_ALT_RE.search(body))
+
+            # Decode ViewState
+            try:
+                # ViewState values may have URL encoding
+                _vs_decoded_b = base64.b64decode(_vs_val)
+            except Exception:
+                try:
+                    _vs_decoded_b = base64.b64decode(urllib.parse.unquote(_vs_val))
+                except Exception:
+                    _vs_evidence_lines.append(
+                        f"Page: {_page_path}\n  ViewState: (decode failed, {len(_vs_val)} chars)\n")
+                    continue
+
+            _vs_len = len(_vs_decoded_b)
+            _vs_evidence_lines.append(
+                f"Page: {_page_path}\n"
+                f"  ViewState length: {_vs_len} bytes (encoded: {len(_vs_val)} chars)\n"
+                f"  EventValidation: {'present' if _has_ev else 'MISSING'}\n"
+                f"  Generator: {_vs_generators.get(_page_path, 'not found')}\n"
+            )
+
+            # ── MAC check ──────────────────────────────────────────────────
+            # Heuristic: ASP.NET appends a 20-byte (SHA1) or 32-byte (SHA256)
+            # HMAC to the serialized ViewState.  A ViewState without MAC
+            # protection will typically have its first bytes as the ASP.NET
+            # serialization marker (0xFF 0x01) without trailing MAC bytes.
+            #
+            # Additional signals of missing MAC:
+            #   - No __EVENTVALIDATION field (usually co-enabled with MAC)
+            #   - ViewState shorter than typical MAC-protected payload
+            #   - enableViewStateMac="false" in decoded content
+            _mac_missing = False
+            _mac_evidence = []
+
+            if not _has_ev:
+                _mac_evidence.append("__EVENTVALIDATION field absent")
+
+            if _vs_len < _VS_MIN_MAC_LEN:
+                _mac_evidence.append(f"ViewState too short ({_vs_len}B) for MAC")
+                _mac_missing = True
+
+            # Check for explicit MAC disable in the decoded bytes
+            try:
+                _vs_text = _vs_decoded_b.decode("utf-8", errors="replace")
+                if "enableviewstatemac" in _vs_text.lower():
+                    if re.search(r'enableViewStateMac\s*=\s*["\']?false', _vs_text, re.I):
+                        _mac_evidence.append("enableViewStateMac=false found in ViewState")
+                        _mac_missing = True
+            except Exception:
+                _vs_text = ""
+
+            # If no EVENTVALIDATION AND short → likely no MAC
+            if not _has_ev and _vs_len < 200:
+                _mac_missing = True
+
+            if _mac_missing or (len(_mac_evidence) >= 2):
+                _vs_no_mac_pages.append({
+                    "page": _page_path,
+                    "evidence": _mac_evidence,
+                    "vs_len": _vs_len,
+                })
+
+            # ── Sensitive data check ───────────────────────────────────────
+            # Scan the decoded bytes (as lossy UTF-8) for sensitive patterns
+            if not _vs_text:
+                try:
+                    _vs_text = _vs_decoded_b.decode("utf-8", errors="replace")
+                except Exception:
+                    _vs_text = repr(_vs_decoded_b[:2000])
+
+            _found_sensitive: list = []
+            for _pat, _label in _VS_SENSITIVE_PATTERNS:
+                _matches = _pat.findall(_vs_text)
+                if _matches:
+                    _found_sensitive.append((_label, _matches[:3]))
+
+            if _found_sensitive:
+                _vs_sensitive_pages.append({
+                    "page": _page_path,
+                    "findings": _found_sensitive,
+                    "preview": _vs_text[:500],
+                })
+
+        except requests.exceptions.Timeout:
+            vc.log(f"[viewstate] Timeout fetching {page_url}", "WARNING")
+        except Exception as _vs_err:
+            vc.error(f"[viewstate] Error analyzing {page_url}: {_vs_err}")
+
+    # ── Emit findings ──────────────────────────────────────────────────────
+
+    # Save evidence file with all analysis details
+    _ev_path = ""
+    if _vs_evidence_lines or _vs_generators:
+        try:
+            _ev_file = out.output_path(phase, "viewstate_analysis")
+            _ev_content = [
+                "ASP.NET ViewState Analysis",
+                "=" * 50,
+                f"Target: {url}",
+                f"Pages analyzed: {min(len(_vs_pages), _vs_max_pages)}",
+                "",
+            ]
+            _ev_content.extend(_vs_evidence_lines)
+            if _vs_generators:
+                _ev_content.append("\nViewState Generators:")
+                for _pg, _gen in _vs_generators.items():
+                    _ev_content.append(f"  {_pg} → {_gen}")
+            _ev_file.write_text("\n".join(_ev_content), encoding="utf-8")
+            _ev_path = str(_ev_file)
+        except Exception:
+            pass
+
+    # Finding 1: ViewState not MAC-protected
+    if _vs_no_mac_pages:
+        _affected = "\n".join(p["page"] for p in _vs_no_mac_pages)
+        _out_lines = []
+        for p in _vs_no_mac_pages:
+            _out_lines.append(f"{p['page']}:")
+            for e in p["evidence"]:
+                _out_lines.append(f"  - {e}")
+            _out_lines.append(f"  ViewState size: {p['vs_len']} bytes")
+        out.add_finding(
+            title="ASP.NET ViewState Not MAC-Protected",
+            url=url, port=port, risk="HIGH",
+            description=(
+                "One or more ASP.NET pages serve ViewState without Message Authentication "
+                "Code (MAC) protection. An attacker can tamper with serialized ViewState "
+                "data to bypass security controls, manipulate server-side state, or — if "
+                "the application deserializes ViewState objects — achieve remote code "
+                "execution via .NET deserialization attacks (e.g. ysoserial.net payloads).\n\n"
+                "ViewState MAC protection (enableViewStateMac) was made mandatory in "
+                ".NET 4.5.2+ (MS14-059 / KB2990942). Applications that explicitly "
+                "disable it are critically vulnerable."
+            ),
+            output="\n".join(_out_lines),
+            sources="fracture-viewstate", service=scheme,
+            output_file=_ev_path,
+            affected=_affected,
+            cves="CVE-2020-0688,CVE-2014-4075",
+            owasp="A08:2025 Software and Data Integrity Failures",
+            nist="SI-10",
+            remediation=(
+                "1. Ensure enableViewStateMac is NOT set to 'false' in web.config or any page directive.\n"
+                "2. Apply MS14-059 (KB2990942) — .NET 4.5.2+ enforces MAC regardless of config.\n"
+                "3. Set a strong, unique MachineKey in web.config (do not use auto-generated keys "
+                "in web farm scenarios).\n"
+                "4. Consider migrating stateful pages to ASP.NET MVC or Razor Pages which do not "
+                "use ViewState."
+            ),
+        )
+        vc.log(
+            f"[viewstate] ViewState MAC not detected on {len(_vs_no_mac_pages)} page(s)",
+            "SUCCESS")
+
+    # Finding 2: Sensitive data in ViewState
+    if _vs_sensitive_pages:
+        _affected = "\n".join(p["page"] for p in _vs_sensitive_pages)
+        _out_lines = []
+        for p in _vs_sensitive_pages:
+            _out_lines.append(f"{p['page']}:")
+            for _label, _matches in p["findings"]:
+                _out_lines.append(f"  {_label}: {', '.join(str(m) for m in _matches[:2])}")
+            if p["preview"]:
+                _out_lines.append(f"  Preview: {p['preview'][:200]}...")
+        out.add_finding(
+            title="ViewState Contains Sensitive Data",
+            url=url, port=port, risk="MEDIUM",
+            description=(
+                "The decoded ASP.NET ViewState contains data that may be sensitive: "
+                "connection strings, file paths, email addresses, SQL fragments, or "
+                "credential references. Even with MAC protection, ViewState is only "
+                "signed (not encrypted by default) — the data is base64-encoded and "
+                "readable by any client."
+            ),
+            output="\n".join(_out_lines),
+            sources="fracture-viewstate", service=scheme,
+            output_file=_ev_path,
+            affected=_affected,
+            owasp="A01:2025 Broken Access Control",
+            nist="SC-28",
+            remediation=(
+                "1. Enable ViewState encryption: set viewStateEncryptionMode='Always' in web.config.\n"
+                "2. Do not store sensitive data in ViewState — use server-side Session or cache.\n"
+                "3. Review each flagged page and remove sensitive data from control properties."
+            ),
+        )
+        vc.log(
+            f"[viewstate] Sensitive data found in ViewState on {len(_vs_sensitive_pages)} page(s)",
+            "SUCCESS")
+
+    _total = len(_vs_no_mac_pages) + len(_vs_sensitive_pages)
+    if _total:
+        vc.log(f"[viewstate] Analysis complete: {_total} finding(s)", "SUCCESS")
+    else:
+        vc.log("[viewstate] ViewState analysis complete — no issues found", "INFO")
+
+
+# ── Telerik Vulnerability Validator ───────────────────────────────────────────
+# Telerik CVE version ranges: (max_affected_version, cve_id, severity, description)
+# Version tuples are compared as tuple(int, int, int[, int]) to handle 4-part versions.
+_TELERIK_CVE_RANGES = [
+    # (max_affected as tuple, CVE, risk, description, remediation)
+    ((2017, 2, 621),   "CVE-2017-9248",  "CRITICAL",
+     "Cryptographic weakness in Telerik.Web.UI DialogHandler allows key brute-force, "
+     "leading to arbitrary file upload and remote code execution.",
+     "Upgrade Telerik UI to version 2017.2.711 or later."),
+    ((2017, 2, 621),   "CVE-2017-11357", "HIGH",
+     "Insecure direct object reference in Telerik.Web.UI allows unauthenticated "
+     "access to internal handler endpoints.",
+     "Upgrade Telerik UI to version 2017.2.711 or later."),
+    ((2017, 2, 711),   "CVE-2017-11317", "HIGH",
+     "Arbitrary file upload via Telerik.Web.UI AsyncUpload handler allows "
+     "uploading web shells to the server.",
+     "Upgrade Telerik UI to version 2017.3.913 or later."),
+    ((2019, 3, 1023),  "CVE-2019-18935", "CRITICAL",
+     ".NET deserialization vulnerability in Telerik.Web.UI AsyncUpload handler "
+     "allows remote code execution via crafted serialized objects.",
+     "Upgrade Telerik UI to version 2020.1.114 or later. Apply Telerik security patch R1 2020 SP1."),
+]
+
+# Known Telerik handler paths relative to the application root
+_TELERIK_HANDLER_PATHS = [
+    "Telerik.Web.UI.DialogHandler.aspx",
+    "Telerik.Web.UI.WebResource.axd",
+    "Telerik.Web.UI.SpellCheckHandler.axd",
+    "ChartImage.axd",
+]
+
+# AsyncUpload handler — separate because it's the CVE-2019-18935 vector
+_TELERIK_ASYNC_UPLOAD = "Telerik.Web.UI.WebResource.axd?type=rau"
+
+# Version extraction patterns
+_TELERIK_VERSION_RE = re.compile(
+    r'(?:Telerik\.Web\.UI[,\s]+Version=|'           # Assembly version
+    r'telerik\.web\.ui[/\\]|'                        # JS path component
+    r'Telerik_Web_UI_WebResource_|'                  # Resource URL
+    r'["\']version["\']\s*:\s*["\']|'                # JSON metadata
+    r'Version\s*=\s*)'
+    r'(\d{4}\.\d+\.\d+(?:\.\d+)?)',                 # Capture: 2023.3.1010[.45]
+    re.I)
+
+# DialogHandler CVE-2017-9248 probe: invalid key causes a different response
+# than a valid key, enabling a timing/content oracle.
+_TELERIK_DH_PROBE_PARAMS = "?DialogHandler&dp=1"
+
+
+def _parse_telerik_version(ver_str: str) -> "tuple[int, ...] | None":
+    """Parse a Telerik version string like '2023.3.1010.45' into a comparable tuple."""
+    try:
+        parts = ver_str.strip().split(".")
+        return tuple(int(p) for p in parts)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _telerik_version_str(ver_tuple: "tuple[int, ...]") -> str:
+    """Convert a version tuple back to a dotted string."""
+    return ".".join(str(p) for p in ver_tuple)
+
+
+# ── Main function ───────────────────────────────────────────────────────────
+
+def _validate_telerik(target: dict, cfg: dict, out: "OutputManager",
+                      sess: "requests.Session") -> None:
+    """Validate Telerik UI installation: extract version, check CVE exposure,
+    and perform targeted probes for known vulnerabilities.
+
+    Called after nuclei detects Telerik presence (template-id matches
+    telerik-dialoghandler or telerik-fileupload).
+    """
+    phase   = "vulnscan"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    port    = target["port"]
+    scheme  = target["scheme"]
+    _pu     = urllib.parse.urlparse(url)
+    origin  = f"{_pu.scheme}://{_pu.netloc}"
+
+    vc.log("[telerik] Starting Telerik vulnerability validation", "INFO")
+
+    # Build candidate base URLs — the Telerik handlers may be at the app root
+    # or nested under the application path
+    _app_path = _pu.path.rstrip("/")
+    _bases = [origin]
+    if _app_path:
+        # Add each parent path segment
+        _parts = _app_path.split("/")
+        for i in range(2, len(_parts) + 1):
+            _b = origin + "/".join(_parts[:i])
+            if _b not in _bases:
+                _bases.append(_b)
+
+    # ── 1. Probe handler endpoints and extract version ────────────────────
+    _detected_handlers: list = []
+    _detected_version:  "tuple[int, ...] | None" = None
+    _version_source:    str = ""
+    _evidence_lines:    list = ["Telerik UI Vulnerability Validation", "=" * 50, ""]
+    _handler_responses: dict = {}
+
+    for _base in _bases:
+        for _hpath in _TELERIK_HANDLER_PATHS + [_TELERIK_ASYNC_UPLOAD]:
+            _probe_url = _base.rstrip("/") + "/" + _hpath
+            try:
+                r = sess.get(_probe_url, timeout=timeout, allow_redirects=False)
+                _handler_responses[_probe_url] = r
+
+                # A handler is "accessible" if it returns anything other than
+                # 404/403/401/301-to-login
+                if r.status_code in (404, 403, 401):
+                    continue
+                if r.status_code in (301, 302):
+                    _loc = r.headers.get("Location", "")
+                    if "login" in _loc.lower() or "error" in _loc.lower():
+                        continue
+
+                _detected_handlers.append({
+                    "url": _probe_url,
+                    "status": r.status_code,
+                    "path": _hpath,
+                })
+                _evidence_lines.append(
+                    f"Handler: {_hpath}\n"
+                    f"  URL:    {_probe_url}\n"
+                    f"  Status: {r.status_code}\n"
+                    f"  Size:   {len(r.text or '')} bytes\n")
+
+                # Try to extract version from response headers
+                for _hdr in ("X-Telerik-Version", "X-AspNet-Version"):
+                    _hv = r.headers.get(_hdr, "")
+                    _ver = _TELERIK_VERSION_RE.search(_hv)
+                    if _ver:
+                        _pv = _parse_telerik_version(_ver.group(1))
+                        if _pv and (not _detected_version or _pv > _detected_version):
+                            _detected_version = _pv
+                            _version_source = f"header {_hdr}"
+
+                # Try to extract from response body
+                if r.text:
+                    for _vm in _TELERIK_VERSION_RE.finditer(r.text[:4000]):
+                        _pv = _parse_telerik_version(_vm.group(1))
+                        if _pv and (not _detected_version or _pv > _detected_version):
+                            _detected_version = _pv
+                            _version_source = f"response body of {_hpath}"
+
+            except requests.exceptions.Timeout:
+                vc.log(f"[telerik] Timeout probing {_probe_url}", "WARNING")
+            except Exception as _te:
+                vc.error(f"[telerik] Error probing {_probe_url}: {_te}")
+
+        # If we found handlers at this base, don't check deeper bases
+        if _detected_handlers:
+            break
+
+    if not _detected_handlers:
+        vc.log("[telerik] No accessible Telerik handlers found", "INFO")
+        return
+
+    vc.log(
+        f"[telerik] Found {len(_detected_handlers)} handler(s)"
+        + (f", version {_telerik_version_str(_detected_version)}"
+           if _detected_version else ", version unknown"),
+        "INFO")
+
+    # ── 2. Version-based CVE cross-reference ──────────────────────────────
+    _matched_cves: list = []
+    if _detected_version:
+        _evidence_lines.append(
+            f"\nDetected Version: {_telerik_version_str(_detected_version)}"
+            f" (source: {_version_source})\n")
+
+        for _max_ver, _cve_id, _risk, _cve_desc, _cve_remed in _TELERIK_CVE_RANGES:
+            # Compare only up to the number of components in the CVE range
+            _cmp_ver = _detected_version[:len(_max_ver)]
+            if _cmp_ver <= _max_ver:
+                _matched_cves.append((_cve_id, _risk, _cve_desc, _cve_remed))
+                _evidence_lines.append(
+                    f"CVE Match: {_cve_id} ({_risk})\n"
+                    f"  Affected: <= {_telerik_version_str(_max_ver)}\n"
+                    f"  Detected: {_telerik_version_str(_detected_version)}\n"
+                    f"  {_cve_desc}\n")
+
+    # ── 3. DialogHandler CVE-2017-9248 active probe ───────────────────────
+    _dh_vuln_confirmed = False
+    _dh_handler = next(
+        (h for h in _detected_handlers
+         if "DialogHandler" in h["path"]), None)
+
+    if _dh_handler:
+        vc.log("[telerik] Probing DialogHandler for CVE-2017-9248 oracle", "INFO")
+        _dh_base = _dh_handler["url"].split("?")[0]
+        try:
+            # Send two requests: one with an empty key, one with a random key.
+            # CVE-2017-9248 manifests as a measurable difference in response
+            # content or timing between valid/invalid encryption keys.
+            _dh_r1 = sess.get(
+                _dh_base + "?DialogParametersRecovery=1&dp=AAAA",
+                timeout=timeout, allow_redirects=False)
+            _dh_r2 = sess.get(
+                _dh_base + "?DialogParametersRecovery=1&dp=BBBB",
+                timeout=timeout, allow_redirects=False)
+
+            _r1_len = len(_dh_r1.text or "")
+            _r2_len = len(_dh_r2.text or "")
+
+            _evidence_lines.append(
+                f"\nDialogHandler CVE-2017-9248 Probe:\n"
+                f"  Request 1 (dp=AAAA): {_dh_r1.status_code}, {_r1_len}B\n"
+                f"  Request 2 (dp=BBBB): {_dh_r2.status_code}, {_r2_len}B\n")
+
+            # The oracle exists when different invalid keys produce different
+            # response lengths (the handler leaks info about key validity
+            # through response size variation).
+            if (_dh_r1.status_code == 200 and _dh_r2.status_code == 200
+                    and abs(_r1_len - _r2_len) > 10):
+                _dh_vuln_confirmed = True
+                _evidence_lines.append(
+                    f"  RESULT: Response size differs by {abs(_r1_len - _r2_len)}B "
+                    f"→ oracle detected (CVE-2017-9248 CONFIRMED)\n")
+            elif _dh_r1.status_code == 500 or _dh_r2.status_code == 500:
+                # 500 on invalid key is also a signal — patched versions
+                # return a generic error regardless of key validity
+                _evidence_lines.append(
+                    f"  RESULT: Server error on probe — may indicate "
+                    f"vulnerability (requires manual verification)\n")
+            else:
+                _evidence_lines.append(
+                    f"  RESULT: Responses consistent — oracle not detected\n")
+
+        except Exception as _dh_err:
+            vc.error(f"[telerik] DialogHandler probe error: {_dh_err}")
+            _evidence_lines.append(f"  ERROR: {_dh_err}\n")
+
+    # ── 4. Save evidence and emit findings ────────────────────────────────
+    _ev_path = ""
+    try:
+        _ev_file = out.output_path(phase, "telerik_validation")
+        _ev_file.write_text("\n".join(_evidence_lines), encoding="utf-8")
+        _ev_path = str(_ev_file)
+    except Exception:
+        pass
+
+    # Save individual handler responses as evidence
+    for _h in _detected_handlers[:5]:
+        try:
+            _h_resp = _handler_responses.get(_h["url"])
+            if _h_resp:
+                _safe_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', _h["path"])[:60]
+                _h_ev = out.output_path(phase, f"telerik_{_safe_name}_response")
+                _h_content = [
+                    f"URL: {_h['url']}",
+                    f"Status: {_h_resp.status_code}",
+                    "",
+                    "Response Headers:",
+                ]
+                for _hk, _hv in _h_resp.headers.items():
+                    _h_content.append(f"  {_hk}: {_hv}")
+                _h_content.append("")
+                _h_content.append("Response Body (first 2000 chars):")
+                _h_content.append((_h_resp.text or "")[:2000])
+                _h_ev.write_text("\n".join(_h_content), encoding="utf-8")
+        except Exception:
+            pass
+
+    # ── Emit findings ─────────────────────────────────────────────────────
+    _handler_list = "\n".join(
+        f"  {h['path']} → {h['status']}" for h in _detected_handlers)
+    _ver_str = _telerik_version_str(_detected_version) if _detected_version else "unknown"
+
+    if _dh_vuln_confirmed:
+        # CRITICAL: CVE-2017-9248 oracle confirmed
+        out.add_finding(
+            title=f"Telerik UI Remote Code Execution (CVE-2017-9248) — Version {_ver_str}",
+            url=url, port=port, risk="CRITICAL",
+            description=(
+                "The Telerik UI DialogHandler is vulnerable to CVE-2017-9248: a "
+                "cryptographic weakness allows an attacker to brute-force the "
+                "encryption key and upload arbitrary files (including web shells) "
+                "to the server. Active probing confirmed a response-size oracle "
+                "that leaks key validity information.\n\n"
+                f"Detected version: {_ver_str}\n"
+                f"Accessible handlers:\n{_handler_list}"
+            ),
+            output="\n".join(_evidence_lines[-20:]),
+            sources="fracture-telerik", service=scheme,
+            output_file=_ev_path,
+            affected="\n".join(h["url"] for h in _detected_handlers),
+            cves="CVE-2017-9248",
+            owasp="A06:2025 Vulnerable and Outdated Components",
+            nist="SI-2",
+            remediation=(
+                "1. IMMEDIATE: Restrict access to Telerik.Web.UI.DialogHandler.aspx "
+                "via IIS URL Authorization or web.config.\n"
+                "2. Upgrade Telerik UI to the latest version (2024.x+).\n"
+                "3. Rotate the Telerik encryption keys in web.config.\n"
+                "4. Audit the server for web shells in upload directories."
+            ),
+        )
+        vc.log("[telerik] CVE-2017-9248 CONFIRMED — CRITICAL finding emitted", "SUCCESS")
+
+    elif _matched_cves:
+        # HIGH: Version in vulnerable range but exploit not actively confirmed
+        _cve_list = ", ".join(c[0] for c in _matched_cves)
+        _highest_risk = "CRITICAL" if any(c[1] == "CRITICAL" for c in _matched_cves) else "HIGH"
+        out.add_finding(
+            title=f"Telerik UI Vulnerable Version Detected: {_ver_str}",
+            url=url, port=port, risk=_highest_risk,
+            description=(
+                f"Telerik UI version {_ver_str} is within the affected range "
+                f"for {len(_matched_cves)} known CVE(s): {_cve_list}.\n\n"
+                "Version-based matching indicates the installation is vulnerable, "
+                "but active exploitation was not confirmed during this scan.\n\n"
+                f"Accessible handlers:\n{_handler_list}\n\n"
+                + "\n".join(f"- {c[0]} ({c[1]}): {c[2]}" for c in _matched_cves)
+            ),
+            output="\n".join(_evidence_lines),
+            sources="fracture-telerik", service=scheme,
+            output_file=_ev_path,
+            affected="\n".join(h["url"] for h in _detected_handlers),
+            cves=_cve_list,
+            owasp="A06:2025 Vulnerable and Outdated Components",
+            nist="SI-2",
+            remediation=_matched_cves[0][3],  # Use remediation from first (most severe) CVE
+        )
+        vc.log(f"[telerik] Version {_ver_str} matches {len(_matched_cves)} CVE(s)", "SUCCESS")
+
+    else:
+        # MEDIUM: Handler accessible, version not in known vulnerable range
+        out.add_finding(
+            title=f"Telerik UI Handler Accessible: Version {_ver_str}",
+            url=url, port=port, risk="MEDIUM",
+            description=(
+                f"Telerik UI handlers are publicly accessible (version: {_ver_str}). "
+                "While the detected version is not in the range of known CVEs, "
+                "Telerik handlers should be restricted to authorized users only. "
+                "Unrestricted handler access increases the attack surface.\n\n"
+                f"Accessible handlers:\n{_handler_list}"
+            ),
+            output="\n".join(_evidence_lines),
+            sources="fracture-telerik", service=scheme,
+            output_file=_ev_path,
+            affected="\n".join(h["url"] for h in _detected_handlers),
+            owasp="A06:2025 Vulnerable and Outdated Components",
+            nist="SI-2",
+            remediation=(
+                "1. Restrict access to Telerik handler endpoints via IIS URL "
+                "Authorization or web.config <location> rules.\n"
+                "2. Keep Telerik UI updated to the latest version.\n"
+                "3. Monitor Telerik security advisories at "
+                "https://www.telerik.com/support/whats-new/aspnet-ajax/release-history"
+            ),
+        )
+        vc.log(f"[telerik] Handler accessible, version {_ver_str} — MEDIUM finding", "SUCCESS")
+
+
 def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
                       out: OutputManager, auth_sess: requests.Session,
                       crawl_data: dict) -> dict:
@@ -23587,6 +25626,13 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
         for m in _id_re.finditer(link):
             resource_ids.append({"url": link, "id": int(m.group(1))})
 
+    # ── ViewState analysis ──────────────────────────────────────────────────
+    try:
+        _vs_crawl_data = {"links": list(set(auth_links)), "forms": auth_forms}
+        _check_viewstate(target, cfg, out, auth_sess, _vs_crawl_data)
+    except Exception as _vs_exc:
+        vc.error(f"[viewstate] Analysis failed: {_vs_exc}")
+
     vc.status(phase, "Auth Recon", "complete", "Done", 3, 3)
     vc.log("[auth_recon] Phase complete", "SUCCESS")
     return {"forms": auth_forms, "links": list(set(auth_links)), "resource_ids": resource_ids}
@@ -23595,6 +25641,75 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
 # ─────────────────────────────────────────────
 # Phase 12: Authorization (IDOR)
 # ─────────────────────────────────────────────
+# ── HTTP Method Tampering validation ──────────────────────────────────────────
+def _validate_method_functional(method, link, r, auth_sess, timeout,
+                                _mt_base_hash, _mt_base_body):
+    """Validate whether an accepted HTTP method actually changed server state.
+
+    Returns (is_functional: bool, evidence_lines: list[str]).
+    """
+    evidence = []
+    try:
+        if method == "DELETE":
+            # After DELETE, GET the same URL — if it still returns 200 with
+            # same body hash, the DELETE was ignored.
+            _del_check = auth_sess.get(link, timeout=timeout)
+            _del_body = _del_check.text or ""
+            _del_hash = hashlib.md5(
+                _del_body.encode("utf-8", "replace")).hexdigest()
+            evidence.append(f"Validation: GET after DELETE → {_del_check.status_code}")
+            if _del_check.status_code == 200 and _del_hash == _mt_base_hash:
+                evidence.append("Result: Resource unchanged — DELETE was ignored")
+                return False, evidence
+            elif _del_check.status_code in (404, 410):
+                evidence.append("Result: Resource removed — DELETE is functional")
+                return True, evidence
+            elif _del_hash != _mt_base_hash:
+                evidence.append("Result: Response body changed after DELETE")
+                return True, evidence
+            else:
+                evidence.append("Result: Inconclusive (different status, same body)")
+                return False, evidence
+
+        elif method in ("PUT", "PATCH"):
+            # Send a second request with a canary body, then GET to check
+            # whether the response body was affected.
+            _canary = f"_fracture_canary_{hashlib.md5(link.encode()).hexdigest()[:8]}"
+            _canary_body = json.dumps({"_fracture_probe": _canary})
+            _put_r = auth_sess.request(
+                method, link, timeout=timeout,
+                data=_canary_body,
+                headers={"Content-Type": "application/json"})
+            evidence.append(
+                f"Validation: {method} with canary body → {_put_r.status_code}")
+
+            _put_check = auth_sess.get(link, timeout=timeout)
+            _put_body = _put_check.text or ""
+            _put_hash = hashlib.md5(
+                _put_body.encode("utf-8", "replace")).hexdigest()
+            evidence.append(
+                f"Validation: GET after {method} → {_put_check.status_code}")
+
+            if _canary in _put_body:
+                evidence.append(
+                    f"Result: Canary value reflected — {method} is functional")
+                return True, evidence
+            elif _put_hash != _mt_base_hash:
+                evidence.append(
+                    f"Result: Response body changed after {method} "
+                    f"(hash {_mt_base_hash[:8]}→{_put_hash[:8]})")
+                return True, evidence
+            else:
+                evidence.append(
+                    f"Result: Response unchanged — {method} was ignored")
+                return False, evidence
+
+    except Exception as _ve:
+        evidence.append(f"Validation error: {_ve}")
+    return False, evidence
+
+
+
 def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
                           out: OutputManager, auth_sess: requests.Session,
                           auth_recon_data: dict) -> None:
@@ -23847,6 +25962,27 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
                             f"[authorization] Skipping method tampering FP: "
                             f"{method} {link} — SPA shell ~same size as GET", "INFO")
                         continue
+                    # ── Functional validation ──
+                    # Confirm the method actually changed state before
+                    # reporting a MEDIUM finding.
+                    _mt_functional, _mt_val_ev = _validate_method_functional(
+                        method, link, r, auth_sess, timeout,
+                        _mt_base_hash, _mt_base_body)
+                    if _mt_functional:
+                        _mt_risk  = "MEDIUM"
+                        _mt_title = f"HTTP Method Tampering: {method} Accepted"
+                        _mt_desc  = (
+                            f"The endpoint {link} accepted HTTP {method} "
+                            f"(status {r.status_code}) and the method was "
+                            f"confirmed to be functional — server state changed.")
+                    else:
+                        _mt_risk  = "INFO"
+                        _mt_title = f"HTTP Method Accepted But Not Functional: {method}"
+                        _mt_desc  = (
+                            f"The endpoint {link} responded to HTTP {method} "
+                            f"with status {r.status_code}, but validation "
+                            f"confirms the method did not alter server state. "
+                            f"The server accepts the method but ignores it.")
                     # Capture evidence for the accepted method
                     _mt_ev_path = ""
                     try:
@@ -23866,16 +26002,29 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
                         _mt_ev_lines.append("")
                         _mt_ev_lines.append("Response Body (first 2000 chars):")
                         _mt_ev_lines.append(_mt_resp_body[:2000])
-                        _mt_ev_file.write_text("\n".join(_mt_ev_lines), encoding="utf-8")
+                        if _mt_val_ev:
+                            _mt_ev_lines.append("")
+                            _mt_ev_lines.append("Validation Steps:")
+                            _mt_ev_lines.extend(f"  {v}" for v in _mt_val_ev)
+                        _mt_ev_file.write_text(
+                            "\n".join(_mt_ev_lines), encoding="utf-8")
                         _mt_ev_path = str(_mt_ev_file)
                     except Exception:
                         pass
+                    _mt_output_lines = [
+                        f"{method} {link} → {r.status_code}",
+                        "",
+                        "Response headers:",
+                    ] + [f"  {k}: {v}" for k, v in list(r.headers.items())[:10]]
+                    if _mt_val_ev:
+                        _mt_output_lines.append("")
+                        _mt_output_lines.append("Validation:")
+                        _mt_output_lines.extend(f"  {v}" for v in _mt_val_ev)
                     out.add_finding(
-                        title=f"HTTP Method Tampering: {method} Accepted",
-                        url=link, port=target["port"], risk="MEDIUM",
-                        description=f"The endpoint {link} accepted HTTP {method} (status {r.status_code}).",
-                        output=f"{method} {link} → {r.status_code}\n\nResponse headers:\n"
-                               + "\n".join(f"  {k}: {v}" for k, v in list(r.headers.items())[:10]),
+                        title=_mt_title,
+                        url=link, port=target["port"], risk=_mt_risk,
+                        description=_mt_desc,
+                        output="\n".join(_mt_output_lines),
                         sources="fracture-authorization", service=target["scheme"],
                         output_file=_mt_ev_path,
                         affected=link,
@@ -23883,7 +26032,10 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
                         remediation="Restrict HTTP methods to only those required for each endpoint.",
                         http_code=r.status_code,
                     )
-                    vc.log(f"[authorization] Method tampering {method} on {link}", "SUCCESS")
+                    vc.log(
+                        f"[authorization] Method tampering {method} on {link} "
+                        f"({'functional' if _mt_functional else 'accepted but not functional'})",
+                        "SUCCESS" if _mt_functional else "INFO")
             except Exception:
                 pass
 
@@ -27603,6 +29755,83 @@ def _reauth_session(cfg: dict, target: dict, role_label: str) -> "requests.Sessi
 #   ...  # long-running phase
 #   _ka.stop()
 
+# ── Session timeout detection ─────────────────────────────────────────────────
+
+_SESSION_TIMEOUT_PROBE_INTERVALS = [30, 60, 90, 120, 180, 300]
+_SESSION_TIMEOUT_MIN_KEEPALIVE   = 10   # seconds
+_SESSION_TIMEOUT_MAX_KEEPALIVE   = 60   # seconds
+_SESSION_EXPIRED_CODES           = frozenset({301, 302, 303, 307, 308, 401, 403})
+
+
+
+def _detect_session_timeout(sess: "requests.Session", target: dict,
+                            cfg: dict, out: "OutputManager",
+                            canary_url: str = "",
+                            timeout: int = 10) -> "int | None":
+    """Probe the server's session idle timeout.
+
+    Sends heartbeat GETs at increasing intervals.  Returns the detected
+    timeout in seconds, or None if the session survived the longest
+    interval (300 s).
+
+    **Time-intensive** — only called when:
+      1. cfg.get("detect_session_timeout") is truthy (opt-in), OR
+      2. A quick 30 s probe reveals session expiry (aggressive timeout).
+    """
+    phase = "recon"
+    url = canary_url or target["url"]
+    verify = cfg.get("verify_ssl", False)
+
+    # Confirm the session is alive before starting
+    try:
+        _pre = sess.get(url, timeout=timeout, allow_redirects=False,
+                        verify=verify)
+        if _pre.status_code in _SESSION_EXPIRED_CODES:
+            vc.log("[session-timeout] Session already dead before probing — "
+                   "cannot detect timeout", "WARNING")
+            return None
+    except Exception as _e:
+        vc.error(f"[session-timeout] Pre-probe failed: {_e}")
+        return None
+
+    vc.log("[session-timeout] Probing server session idle timeout ...", "INFO")
+
+    _last_ok = 0
+    for _wait in _SESSION_TIMEOUT_PROBE_INTERVALS:
+        vc.log(f"[session-timeout] Waiting {_wait}s ...", "INFO")
+        time.sleep(_wait)
+        try:
+            _r = sess.get(url, timeout=timeout, allow_redirects=False,
+                          verify=verify)
+            if _r.status_code in _SESSION_EXPIRED_CODES:
+                vc.log(f"[session-timeout] Session expired after {_wait}s idle "
+                       f"(last OK at {_last_ok}s)", "WARNING")
+                _detected = _last_ok if _last_ok else _wait
+                # Store in target_profile.json
+                _ka_interval = max(
+                    _SESSION_TIMEOUT_MIN_KEEPALIVE,
+                    min(_detected // 3, _SESSION_TIMEOUT_MAX_KEEPALIVE))
+                _write_target_profile(out, session_timeout={
+                    "detected_seconds": _detected,
+                    "keepalive_interval": _ka_interval,
+                    "method": "incremental_probe",
+                    "expired_at": _wait,
+                    "last_ok_at": _last_ok,
+                })
+                vc.log(f"[session-timeout] Detected idle timeout: ~{_detected}s — "
+                       f"keepalive interval set to {_ka_interval}s", "SUCCESS")
+                return _detected
+            _last_ok = _wait
+        except Exception as _e:
+            vc.error(f"[session-timeout] Probe at {_wait}s failed: {_e}")
+            # Network error ≠ session expiry; continue
+            continue
+
+    vc.log("[session-timeout] Session survived 300s — no aggressive timeout detected",
+           "INFO")
+    return None
+
+
 class _SessionKeepalive:
     """Periodic session heartbeat to prevent server-side idle timeout."""
 
@@ -27612,11 +29841,19 @@ class _SessionKeepalive:
 
     def __init__(self, sess: "requests.Session", target: dict, cfg: dict,
                  sm_data: "dict | None" = None, interval: int = _INTERVAL_DEFAULT,
-                 landing_url: str = ""):
+                 landing_url: str = "",
+                 detected_timeout: "int | None" = None):
         self._sess     = sess
         self._target   = target
         self._cfg      = cfg
-        self._interval = interval
+        # Adaptive interval: use timeout/3 if session timeout was detected
+        if detected_timeout is not None and detected_timeout > 0:
+            _adaptive = max(10, min(detected_timeout // 3, 60))
+            self._interval = _adaptive
+            vc.log(f"[keepalive] Adaptive interval: {_adaptive}s "
+                   f"(session timeout ~{detected_timeout}s)", "INFO")
+        else:
+            self._interval = interval
         self._stop_evt = threading.Event()
         self._thread   = None
         self._url      = self._pick_canary(target, sm_data, landing_url)
@@ -30705,9 +32942,20 @@ def main() -> None:
                         if _as_landing_url and _as_landing_code == 200
                         else ""
                     )
+                    # Read detected session timeout from target_profile
+                    _ka_detected_timeout = None
+                    try:
+                        _ka_tp = json.loads(
+                            (out.root / "target_profile.json").read_text()
+                        ) if (out.root / "target_profile.json").exists() else {}
+                        _ka_st = _ka_tp.get("session_timeout", {})
+                        _ka_detected_timeout = _ka_st.get("detected_seconds")
+                    except Exception:
+                        pass
                     _keepalive = _SessionKeepalive(
                         effective_auth, target, _ctx_cfg, sm_data=_ka_sm,
-                        landing_url=_ka_landing)
+                        landing_url=_ka_landing,
+                        detected_timeout=_ka_detected_timeout)
                     _keepalive.start()
                 except Exception:
                     pass
@@ -31182,6 +33430,19 @@ def main() -> None:
                     vc.error(f"Phase shcheck [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"shcheck#{_ctx_label}", "error", detail=str(e))
 
+            # ── Session timeout detection (opt-in, Role 1 only) ──
+            if not _is_reduced_ctx and _ctx_cfg.get("detect_session_timeout"):
+                try:
+                    _detected_st = _detect_session_timeout(
+                        effective_auth, target, _ctx_cfg, out,
+                        canary_url=_as_canary_url or _as_landing_url or "",
+                        timeout=_ctx_cfg.get("timeout", 10))
+                    if _detected_st is not None:
+                        vc.log(f"[session-timeout] Detected idle timeout: "
+                               f"~{_detected_st}s", "SUCCESS")
+                except Exception as _st_err:
+                    vc.error(f"[session-timeout] Detection failed: {_st_err}")
+
             # ── Phase 3: crawl ──
             if not _skip("crawl"):
                 pm.set_phase_status(f"crawl#{_ctx_label}", "running", "Crawl")
@@ -31260,6 +33521,21 @@ def main() -> None:
 
             # Accumulate crawl links for access_matrix
             _all_crawl_links.extend(crawl_data.get("links", []))
+
+            # ── Extract SPA routes from JS bundles ──
+            try:
+                _spa_routes = _extract_spa_routes(
+                    target, _ctx_cfg, out, effective_auth, crawl_data,
+                    timeout=_ctx_cfg.get("timeout", 10))
+                if _spa_routes:
+                    for _sr in _spa_routes:
+                        _sr_full = _sr.get("full_url", "")
+                        if _sr_full and _sr_full not in _all_crawl_links:
+                            _all_crawl_links.append(_sr_full)
+                    vc.log(f"[spa-routes] Added {len(_spa_routes)} SPA routes "
+                           f"to crawl links for access matrix", "INFO")
+            except Exception as _spa_err:
+                vc.error(f"[spa-routes] Route extraction failed: {_spa_err}")
 
             # Write structure map from crawl data (first pass — pages, forms, params)
             try:
