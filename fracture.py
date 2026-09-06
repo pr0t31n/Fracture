@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.42.2"
+VERSION = "2.43.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -488,6 +488,125 @@ def _wc_body_fp(text: str, probe_paths: "list[str]") -> dict:
         "length": len(norm),
         "sample": sample,
     }
+
+
+# ── Error Page / Catch-All Detection ─────────────────────────────────────────
+# ASP.NET (and many other frameworks) route unknown paths to a generic error
+# page that returns HTTP 200.  The wildcard detector (_detect_wildcard) catches
+# uniform catch-alls, but FAILS when the error page body varies slightly
+# between paths (e.g. relative script/CSS paths change, or a nonce differs).
+# _response_is_error_page() is a secondary, content-based guard: it examines
+# the response body for fingerprints of generic error/default pages.
+
+_ERROR_PAGE_TITLE_RE = re.compile(
+    r'<title[^>]*>\s*(?:error|404|not\s+found|page\s+not\s+found|default|'
+    r'object\s+moved|access\s+denied|forbidden|500|server\s+error|'
+    r'application\s+error|runtime\s+error|oops|unavailable|under\s+construction)',
+    re.I,
+)
+
+# File extensions that should NEVER return text/html content if the file
+# genuinely exists (e.g. requesting /.env and getting HTML = catch-all page).
+_NON_HTML_EXTENSIONS = frozenset({
+    ".env", ".yml", ".yaml", ".sql", ".py", ".php", ".json", ".xml",
+    ".config", ".txt", ".bak", ".old", ".orig", ".swp", ".log", ".ini",
+    ".conf", ".cfg", ".toml", ".properties", ".htpasswd", ".htaccess",
+    ".DS_Store", ".git", ".svn", ".hg", ".gitignore", ".npmrc",
+    ".dockerignore", ".editorconfig", ".eslintrc", ".babelrc",
+    ".travis.yml", ".circleci", ".env.local", ".env.production",
+    ".pem", ".key", ".crt", ".cert", ".p12", ".jks", ".keystore",
+    ".csv", ".tsv", ".dat",
+})
+
+# Known error-page body markers (frameworks that return 200 for everything)
+_ERROR_PAGE_BODY_MARKERS = (
+    # ASP.NET
+    "ghg-html",
+    "ErrorPage.aspx",
+    "ctl00_ContentPlaceHolder",
+    "aspxerrorpath",
+    # IIS
+    "Object moved to",
+    "HttpForbiddenHandler",
+    "HTTP Error",
+    "Server Error in",
+    "Runtime Error",
+    # Generic
+    "The resource cannot be found",
+    "The page you are looking for",
+    "does not exist on this server",
+    "This page is unavailable",
+)
+
+
+def _response_is_error_page(body: str, requested_path: str = "") -> bool:
+    """Return True when *body* looks like a generic error/default/catch-all page
+    rather than the actual content of the requested resource.
+
+    Checks three independent signals:
+      1. HTML <title> matches known error-page patterns
+      2. Body contains known error-page framework markers (≥1 match)
+      3. For non-HTML file extensions, body being HTML is a content-type mismatch
+
+    Any single signal returning True is sufficient to classify as an error page.
+    """
+    if not body or len(body) < 20:
+        return False
+
+    body_lower = body[:8000].lower()
+
+    # Signal 1: error-like <title>
+    if _ERROR_PAGE_TITLE_RE.search(body[:4000]):
+        return True
+
+    # Signal 2: known error-page body markers (case-sensitive substring check)
+    _marker_hits = 0
+    for marker in _ERROR_PAGE_BODY_MARKERS:
+        if marker in body[:8000]:
+            _marker_hits += 1
+            if _marker_hits >= 1:
+                return True
+
+    # Signal 3: content-type mismatch — HTML response for non-HTML resource
+    if requested_path:
+        _ext = ""
+        _rp = requested_path.rstrip("/").split("?")[0]
+        if "." in _rp.split("/")[-1]:
+            _ext = "." + _rp.split("/")[-1].rsplit(".", 1)[-1].lower()
+        if _ext and _ext in _NON_HTML_EXTENSIONS:
+            # If the response starts with HTML markup, it's a catch-all page
+            _stripped = body.lstrip()
+            if (_stripped.startswith("<!") or _stripped.startswith("<html")
+                    or _stripped.startswith("<HTML") or "<head" in body_lower[:500]
+                    or "<!doctype" in body_lower[:200]):
+                return True
+
+    return False
+
+
+# Infrastructure cookie patterns — load balancer, CDN, WAF cookies that are
+# NOT session cookies and should not trigger session-cookie-flag findings.
+_INFRA_COOKIE_RE = re.compile(
+    r'^(BIGipServer|AWSALB|AWSELB|__cf|_cf_bm|cf_clearance|'
+    r'incap_ses|visid_incap|nlbi_|GCLB|SERVERID|HAProxy|'
+    r'route|__RequestVerificationToken|__AntiXsrf|'
+    r'AWSALBCORS|AWSELBCORS|__cflb|__cfruid)',
+    re.I,
+)
+
+# URL path patterns for handler endpoints that should be excluded from
+# parameter injection testing (their params are not database-bound).
+_INJECTION_SKIP_URL_RE = re.compile(
+    r'(?:Telerik\.Web\.UI\.)?WebResource\.axd|ScriptResource\.axd|'
+    r'_TSM_CombinedScripts_|Telerik\.Web\.UI\.',
+    re.I,
+)
+
+# Parameter names that are never database-bound (skip injection tests)
+_INJECTION_SKIP_PARAMS = frozenset({
+    "compress", "timestamp", "t", "d", "s",
+    "_TSM_HiddenField_", "_TSM_CombinedScripts_",
+})
 
 
 def _detect_wildcard(base_url: str, sess: "requests.Session",
@@ -3450,6 +3569,26 @@ class OutputManager:
                 "backend server configuration",
                 "spa routes extracted",
                 "http method accepted but not functional:",
+                # Additional SSL/TLS merge: testssl/sslscan emit per-check
+                # titles (OCSP, BREACH, LUCKY13, etc.) that are always
+                # host-level and must not duplicate across probed paths.
+                "ssl/tls obsolete",
+                "ssl/tls signature",
+                "ssl/tls ocsp",
+                "ssl/tls breach",
+                "ssl/tls lucky13",
+                "ssl/tls sweet32",
+                "ssl/tls dns:",
+                "ssl/tls cert_",
+                "ssl/tls cookie_",
+                "ssl/tls certificate information",
+                "ssl/tls non-standard",
+                "ssl/tls session",
+                # Host-level findings from various phases
+                "single page application",
+                "unknown header:",
+                "missing secure cookie:",
+                "timing attack on login",
             )
             _is_global = any(_title_lower.startswith(_p) for _p in _GLOBAL_MERGE_PREFIXES)
             _norm_key  = (_title_lower, "" if _is_global else url.strip(),
@@ -10166,6 +10305,20 @@ _SOFT_404_FINGERPRINTS = [
     # ── IIS Detailed Error ──
     re.compile(r'<title>\s*IIS\s+\d+(?:\.\d+)?\s+Detailed\s+Error', re.I),
     re.compile(r'Module\s+IIS\s+Web\s+Core.*Notification\s+MapRequestHandler', re.I),
+
+    # ── Broad error-in-title catch (v2.43.0) ──
+    # Many custom error pages have "Error" or "Not Found" as part of a longer
+    # title (e.g. "OMT Critical Error", "MyApp - Error", "Acme 404 Page").
+    # The narrow patterns above miss these.  This broader match catches any
+    # <title> containing "error" or "not found" as a word.
+    re.compile(r'<title>[^<]{0,60}(?:critical\s+error|server\s+error|\berror\b)[^<]{0,60}</title>', re.I),
+    re.compile(r'<title>[^<]{0,60}(?:not\s+found|unavailable|access\s+denied)[^<]{0,60}</title>', re.I),
+
+    # ── ASP.NET catch-all marker class (v2.43.0) ──
+    # target app (and similar ASP.NET apps) use a ghg-html class on the
+    # error page's <html> tag.  The literal string "ErrorPage.aspx" is in the
+    # URL (not the body), so the earlier regex can't match it.
+    re.compile(r'class=["\']ghg-html\b', re.I),
 ]
 
 
@@ -12207,6 +12360,11 @@ def _probe_iis_aspnet(target: dict, cfg: dict, out: "OutputManager",
                     if _body_hash == _soft404_hash:
                         _evidence_lines.append("  Result: Soft-404 match — skipped\n")
                         continue
+                # Error page fingerprint fallback (catch-all pages whose body
+                # varies slightly per path defeat the hash check above)
+                if _matches_error_fingerprint(body):
+                    _evidence_lines.append("  Result: Error-page fingerprint — skipped\n")
+                    continue
 
                 # Validate response body: at least one required validator must match
                 _required_matched = False
@@ -13776,6 +13934,10 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 if r.status_code == 200:
                     if _is_wildcard_match(r, wc_baseline):
                         continue
+                    if _matches_error_fingerprint(r.text):
+                        continue   # custom error page catch-all
+                    if _response_is_error_page(r.text, apath):
+                        continue   # secondary error-page guard
                     _admin_found.add(_adm_full_path)
                     _admin_risk = "HIGH"
                     _admin_desc = (
@@ -13833,7 +13995,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             try:
                 r = sess.get(_cp_base.rstrip("/") + cpath, timeout=timeout, allow_redirects=False)
                 if r.status_code == 200 and cpath in ("/.git/HEAD", "/.env") \
-                        and not _is_wildcard_match(r, wc_baseline):
+                        and not _is_wildcard_match(r, wc_baseline) \
+                        and not _matches_error_fingerprint(r.text) \
+                        and not _response_is_error_page(r.text, cpath):
                     _cp_found.add(_cp_full_path)
                     _cp_safe = _cp_full_path.lstrip("/").replace("/", "_").replace(".", "_")
                     _cp_rq, _cp_rp = _save_http_evidence(out, phase, f"sensitive_path_{_cp_safe}", r)
@@ -15012,6 +15176,9 @@ def _phase_endpoint_tools(
                 _ep_sc_low = _ep_sc.lower()
                 _ep_cname  = (_ep_sc.split("=")[0].strip() if "=" in _ep_sc
                               else _ep_sc.split(";")[0].strip())
+                # Skip infrastructure cookies (load balancer, CDN, WAF)
+                if _INFRA_COOKIE_RE.match(_ep_cname):
+                    continue
                 _ep_sc_out = f"Set-Cookie: {_ep_sc[:300]}"
                 if "httponly" not in _ep_sc_low:
                     out.add_finding(
@@ -17093,6 +17260,10 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         cname    = sc.split("=")[0].strip() if "=" in sc else sc.split(";")[0].strip()
         if cname:
             _hdr_cookie_names.append(cname)
+        # Skip infrastructure cookies (load balancer, CDN, WAF) — not session
+        # cookies and missing flags on them is not a session-hijack vector.
+        if _INFRA_COOKIE_RE.match(cname):
+            continue
         _sc_out  = f"Set-Cookie: {sc[:300]}"
         _sc_src  = "fracture-headers"
         _sc_owasp = "A05:2025 Security Misconfiguration"
@@ -21560,7 +21731,13 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     _bool_sqli_false = "' OR '1'='2"
     for entry in params[:8]:
         purl = entry["url"]
+        # Skip handler URLs whose params are never database-bound
+        if _INJECTION_SKIP_URL_RE.search(purl):
+            continue
         for param in entry["params"]:
+            # Skip params that are never database-bound (Telerik, handlers)
+            if param.lower() in _INJECTION_SKIP_PARAMS or param.startswith("_TSM_"):
+                continue
             try:
                 r_true  = _qs_inject(purl, param, _bool_sqli_true,  sess, timeout)
                 r_false = _qs_inject(purl, param, _bool_sqli_false, sess, timeout)
@@ -21599,7 +21776,13 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     import time as _ti
     for entry in params[:5]:
         purl = entry["url"]
+        # Skip handler URLs whose params are never database-bound
+        if _INJECTION_SKIP_URL_RE.search(purl):
+            continue
         for param in entry["params"]:
+            # Skip params that are never database-bound (Telerik, handlers)
+            if param.lower() in _INJECTION_SKIP_PARAMS or param.startswith("_TSM_"):
+                continue
             # Measure baseline response time with a benign value
             try:
                 _bl_t0 = _ti.monotonic()
@@ -21615,7 +21798,9 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     _delta = elapsed - _bl_elapsed
                     if r and _inj_is_login_page(r):
                         continue
-                    if r and elapsed >= delay and _delta >= (delay - 0.5):
+                    # Require delta to be at least 2x baseline to avoid FPs on
+                    # naturally slow endpoints or load-balanced jitter.
+                    if r and elapsed >= delay and _delta >= max(delay - 0.5, _bl_elapsed * 2):
                         out.add_finding(
                             title="Blind SQL Injection (Time-Based)",
                             url=purl, port=target["port"], risk="CRITICAL",
@@ -23188,6 +23373,19 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
             if r.status_code == 200 and len(r.text) > 5:
                 if _is_wildcard_match(r, _file_wc):
                     continue   # matches catch-all baseline — not a real file
+                if _matches_error_fingerprint(r.text):
+                    continue   # custom error page (e.g. ErrorPage.aspx catch-all)
+                if _response_is_error_page(r.text, fpath):
+                    continue   # secondary error-page / content-type mismatch guard
+                # Content-Type sanity check — a genuine .json/.xml/.env file
+                # should NOT come back as text/html.
+                _ct = (r.headers.get("Content-Type") or "").lower()
+                _fext = ""
+                _fp_base = fpath.rstrip("/").split("/")[-1]
+                if "." in _fp_base:
+                    _fext = "." + _fp_base.rsplit(".", 1)[-1].lower()
+                if _fext and _fext in _NON_HTML_EXTENSIONS and "text/html" in _ct:
+                    continue   # HTML response for non-HTML file = catch-all
                 out_f = out.output_path(phase, "file_" + fpath.replace("/", "_").lstrip("_"))
                 out_f.write_text(r.text[:10000], encoding="utf-8")
                 out.add_finding(
@@ -24531,6 +24729,12 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                     if _nuc_resp and _is_soft_404(_nuc_resp, _nuc_soft_404):
                         _nuc_soft404_suppressed += 1
                         continue
+                # Error-page fingerprint suppression (catches catch-all
+                # error pages that vary too much for the hash-based check)
+                _nuc_resp_body = item.get("response", "")
+                if _nuc_resp_body and _matches_error_fingerprint(_nuc_resp_body):
+                    _nuc_soft404_suppressed += 1
+                    continue
                 matched = item.get("matched-at", url)
                 _norm   = _normalize_nuclei(item)
                 # Extract v1.1 enrichment fields from normalizer output
@@ -26191,7 +26395,10 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                         # session is actually authenticated — a stale cookie
                         # in the jar that the server ignores is NOT fixation.
                         _verify_r = _sf_sess.get(url, timeout=timeout)
-                        if _verify_r and not _inj_is_login_page(_verify_r):
+                        if (_verify_r
+                                and not _inj_is_login_page(_verify_r)
+                                and not _matches_error_fingerprint(
+                                    _verify_r.text)):
                             _ev_pairs = ""
                             try:
                                 _sf_rq, _sf_rp = _save_http_evidence(
@@ -26389,6 +26596,12 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
     _bad_samesite_none: list = []
 
     for _ck in auth_sess.cookies:
+        # Skip infrastructure cookies (load balancer, CDN, WAF persistence) —
+        # these are NOT session cookies and missing flags on them is not a
+        # session-hijack vector.
+        if _INFRA_COOKIE_RE.match(_ck.name):
+            continue
+
         # Secure flag (standard http.cookiejar attribute)
         if not _ck.secure:
             _miss_secure.append(_ck.name)
@@ -26574,7 +26787,10 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                 # Save the follow-up protected-endpoint request + response too
                 _follow_rq, _follow_rp = _save_http_evidence(
                     out, phase, f"logout_followup_{hostname}", r2)
-                if r2.status_code == 200 and not re.search(r'login|sign.?in|auth', r2.url, re.I):
+                if (r2.status_code == 200
+                        and not re.search(r'login|sign.?in|auth', r2.url, re.I)
+                        and not _matches_error_fingerprint(r2.text)
+                        and not _response_is_error_page(r2.text)):
                     # Evidence: 4 saved files — logout req, logout resp,
                     # follow-up req, follow-up resp. Pass them as a JSON-
                     # array of HTTP-exchange dicts so Crucible's Evidence
@@ -26661,6 +26877,32 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
     if _logout_src_sess is None:
         vc.log("[logout] No authenticated sessions available — skipping phase", "INFO")
         return
+
+    # ── Auth-gating guard ────────────────────────────────────────────────
+    # If the target URL returns 200 for an unauthenticated request (catch-all
+    # page, SPA shell, public page), session tests are meaningless — the page
+    # is not behind authentication and any "session not invalidated" finding
+    # would be a false positive.
+    try:
+        _unauth_guard = requests.Session()
+        _unauth_guard.verify = cfg.get("verify_ssl", False)
+        _ug_r = _unauth_guard.get(url, timeout=timeout, allow_redirects=True)
+        if (_ug_r.status_code == 200
+                and not _matches_error_fingerprint(_ug_r.text)
+                and not _response_is_error_page(_ug_r.text)):
+            # The page is publicly accessible. Check if the response looks
+            # like the same content the authed session sees.
+            try:
+                _ag_r = _logout_src_sess.get(url, timeout=timeout, allow_redirects=True)
+                if (_ag_r.status_code == 200
+                        and abs(len(_ag_r.text) - len(_ug_r.text)) < max(200, int(len(_ag_r.text) * 0.1))):
+                    vc.log("[logout] Target URL returns same response authed and unauthed "
+                           "— page is not behind auth, skipping session tests", "INFO")
+                    return
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     vc.log(f"[logout] Testing session lifecycle for role: {_logout_role_label}", "INFO")
     vc.status(phase, "Logout Testing", "running", "Logoff function detection", 0, 5)
@@ -26869,6 +27111,22 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
     _last_probe_resp  = None     # captured for evidence
     _probe_status_log: list = []  # [(elapsed_seconds, status_code, body_len)]
 
+    # Guard: if the authenticated landing page is a custom error page, the
+    # idle timeout probe is meaningless — the page always returns 200
+    # regardless of session state.
+    try:
+        _to_guard = _idle_probe.get(url, timeout=timeout, allow_redirects=True)
+        if _to_guard and (_matches_error_fingerprint(_to_guard.text)
+                          or _response_is_error_page(_to_guard.text)):
+            vc.log(
+                "[logout] Target URL returns a custom error page — "
+                "skipping idle timeout probe (not a protected resource)",
+                "INFO",
+            )
+            _timeout_detected = True   # suppress the finding
+    except Exception:
+        pass
+
     vc.log(
         f"[logout] Starting idle timeout probe — checking every {_timeout_interval}s "
         f"for up to {_timeout_max // 60} minutes ...", "INFO"
@@ -27060,6 +27318,8 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                     _r_old.status_code == 200
                     and not _REDIR_LOGIN_RE.search(_r_old.url or "")
                     and not _REDIR_LOGIN_RE.search(_r_old.text[:3000])
+                    and not _matches_error_fingerprint(_r_old.text)
+                    and not _response_is_error_page(_r_old.text)
                 )
 
                 if _still_valid:
@@ -27176,6 +27436,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                 _a_ok = (
                     _r_a.status_code == 200
                     and not _REDIR_LOGIN_RE.search(_r_a.url or "")
+                    and not _matches_error_fingerprint(_r_a.text)
                 )
             except Exception:
                 pass
@@ -27200,6 +27461,8 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                         _a_still_valid = (
                             _r_a2.status_code == 200
                             and not _REDIR_LOGIN_RE.search(_r_a2.url or "")
+                            and not _matches_error_fingerprint(_r_a2.text)
+                            and not _response_is_error_page(_r_a2.text)
                         )
                     except Exception:
                         pass
@@ -27608,6 +27871,10 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                         break
                 if _is_catchall:
                     continue
+                if _matches_error_fingerprint(r.text):
+                    continue   # custom error page catch-all
+                if _response_is_error_page(r.text, path):
+                    continue   # secondary error-page guard
                 out.add_finding(
                     title=f"Exposed Admin/Debug Endpoint: {path}",
                     url=probe_url, port=target["port"], risk="HIGH",
@@ -29777,6 +30044,8 @@ def _reauth_session(cfg: dict, target: dict, role_label: str) -> "requests.Sessi
     """
     fresh = _build_auth_session(cfg, no_interactive=True, role_label=role_label)
     if fresh is None:
+        vc.log(f"[auth] Re-auth failed for role '{role_label}' — "
+               f"session will be unauthenticated", "WARNING")
         return None
     if cfg.get("_auth_needs_spa_resolve"):
         try:
@@ -30639,12 +30908,17 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     print(f"{'─'*60}")
 
     role_sessions = {}
+    _failed_auth_roles: set = set()   # roles where auth failed — results are unreliable
     if prebuilt_sessions:
         # Reuse sessions already authenticated during the context loop — no re-auth needed.
         for role_label, r_sess in prebuilt_sessions.items():
             if r_sess is None:
+                _failed_auth_roles.add(role_label)
                 r_sess = requests.Session()
                 r_sess.verify = verify_ssl
+                vc.log(f"[access-matrix] Auth failed for role '{role_label}' — "
+                       f"results for this role may reflect unauthenticated access",
+                       "WARNING")
             role_sessions[role_label] = r_sess
             print(f"  → Role '{role_label}' session reused (no re-authentication)")
     else:
@@ -30661,13 +30935,19 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             role = role_cfg.get("role") or f"role{len(role_sessions)+1}"
             r_sess = _build_role_session(role_cfg)
             if r_sess is None:
+                _failed_auth_roles.add(role)
                 r_sess = requests.Session()
                 r_sess.verify = verify_ssl
+                vc.log(f"[access-matrix] Re-auth failed for role '{role}' — "
+                       f"results for this role may reflect unauthenticated access",
+                       "WARNING")
             role_sessions[role] = r_sess
             print(f"  → Role '{role}' session built (user: {role_cfg.get('username','?')})")
 
+    # Build a truly clean unauthenticated session — no inherited cookies
     unauth_sess = requests.Session()
     unauth_sess.verify = verify_ssl
+    unauth_sess.cookies.clear()
     role_sessions["unauthenticated"] = unauth_sess
     all_roles  = list(role_sessions.keys())
     cred_roles = [r for r in all_roles if r != "unauthenticated"]
@@ -30886,6 +31166,8 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             return "soft_404"
         if _P20_BODY_ERR_GENERIC_RE.search(visible):
             return "error_page"
+        if _matches_error_fingerprint(body):
+            return "error_page"
         if body_hash in _p20_baseline_hashes:
             return "spa_shell"
         return "unique"
@@ -31095,6 +31377,10 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 for low_role in cred_roles:
                     if low_role == most_privileged:
                         continue
+                    # Skip BFLA for roles whose auth failed — their session
+                    # is unauthenticated and the results are meaningless.
+                    if low_role in _failed_auth_roles:
+                        continue
                     if _ok(ep_access.get(low_role), low_role, ep):
                         out.add_finding(
                             title=f"BFLA: Role '{low_role}' Can Access Admin Path",
@@ -31115,10 +31401,22 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                             remediation="Implement role-based access control (RBAC).",
                         )
 
+    # Build per-role auth status so consumers (Crucible, reviewers) can see
+    # which roles actually authenticated vs which reflect unauthenticated access.
+    _role_auth_status = {}
+    for _r in all_roles:
+        if _r == "unauthenticated":
+            _role_auth_status[_r] = "unauthenticated"
+        elif _r in _failed_auth_roles:
+            _role_auth_status[_r] = "auth_failed"
+        else:
+            _role_auth_status[_r] = "authenticated"
+
     access_matrix_data = {
         "roles":            all_roles,
         "most_privileged":  most_privileged,
         "privilege_counts": privilege_counts,
+        "auth_status":      _role_auth_status,
         "paths":            path_access,
     }
     try:
@@ -36341,9 +36639,17 @@ def main() -> None:
                 _as_landing_body = ""
                 _as_canary_url = ""   # requests-viable URL for canary cross-checks
                 _as_canary_code = 0
-                # Session to probe with: authenticated session or (for unauth) the
-                # fresh unauthenticated session that accumulated cookies during phases.
-                _as_session = _ctx_auth if _ctx_auth is not None else effective_auth
+                # Session to probe with: authenticated session for auth contexts.
+                # For the unauthenticated context, use a FRESH session — not
+                # effective_auth (which at this point still holds the PREVIOUS
+                # context's session and would leak that role's cookies into
+                # the unauthenticated auth-status entry).
+                if _ctx_auth is not None:
+                    _as_session = _ctx_auth
+                elif _ctx_label == "unauthenticated":
+                    _as_session = _make_session(_ctx_cfg, _scope_hostnames)
+                else:
+                    _as_session = _make_session(_ctx_cfg, _scope_hostnames)
                 try:
                     _as_r = _as_session.get(
                         target["url"], timeout=cfg.get("timeout", 10),
@@ -36383,7 +36689,7 @@ def main() -> None:
                             )
                             try:
                                 _spa_lnd_url = _resolve_spa_landing(
-                                    target, cfg, _ctx_auth, target["url"])
+                                    target, _ctx_cfg, _ctx_auth, target["url"])
                                 if _spa_lnd_url:
                                     _spa_lnd_path = urllib.parse.urlparse(
                                         _spa_lnd_url).path.rstrip("/").lower()
@@ -37871,6 +38177,12 @@ def main() -> None:
                 elif not _is_reduced_ctx:
                     # Role 1 itself — nothing to compare against yet; skip silently.
                     vc.status("bfla", "BFLA Testing", "skipped")
+                    pm.set_phase_status(f"bfla#{_ctx_label}", "skipped", "bfla")
+                elif _ctx_auth is None and _ctx_label != "unauthenticated":
+                    # Auth failed for this role — BFLA results would be
+                    # misleading (session is effectively unauthenticated).
+                    vc.log(f"[bfla] Skipping BFLA for role '{_ctx_label}' — "
+                           f"auth failed, results would reflect unauth access", "WARNING")
                     pm.set_phase_status(f"bfla#{_ctx_label}", "skipped", "bfla")
                 else:
                     pm.set_phase_status(f"bfla#{_ctx_label}", "running", "BFLA Testing")
