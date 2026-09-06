@@ -3287,8 +3287,13 @@ class OutputManager:
         remediation: str = "",
         command: str = "",
         http_code: int = 0,
+        **extra_v11,
     ) -> None:
-        """Record a security finding to findings.json and findings.csv. Thread-safe."""
+        """Record a security finding to findings.json and findings.csv. Thread-safe.
+
+        Any extra keyword arguments are merged into the finding dict as v1.1
+        enrichment fields (cvss_score, cvss_vector, cwe, mitre_attack, etc.).
+        """
         ts    = self._ts()
         title = _normalize_finding_title(title)
 
@@ -3354,6 +3359,9 @@ class OutputManager:
             "accounts":       list(self._current_accounts),
             "http_code":      int(http_code) if http_code else 0,
         }
+        # Merge v1.1 enrichment fields (cvss_score, cvss_vector, cwe, etc.)
+        if extra_v11:
+            entry.update(extra_v11)
         csv_entry = dict(entry)
         csv_entry["title"] = ascii_title
 
@@ -23968,6 +23976,21 @@ def _normalize_nuclei(item: dict) -> dict:
     _sev = _NUCLEI_SEVERITY_MAP.get(_info.get("severity", "info"), "INFO")
     _desc = _info.get("description", "")
     _cves = ",".join(_info.get("classification", {}).get("cve-id", []) or [])
+    # ── v1.1 enrichment fields from nuclei classification ──
+    _cls = _info.get("classification", {})
+    _v11: dict = {}
+    _n_cvss = _cls.get("cvss-score")
+    if _n_cvss is not None:
+        try:
+            _v11["cvss_score"] = round(float(_n_cvss), 1)
+        except (ValueError, TypeError):
+            pass
+    _n_cvss_vec = _cls.get("cvss-metrics", "")
+    if _n_cvss_vec:
+        _v11["cvss_vector"] = str(_n_cvss_vec)
+    _n_cwe = _cls.get("cwe-id") or []
+    if _n_cwe:
+        _v11["cwe"] = [str(c) for c in _n_cwe if c]
     _matched = item.get("matched-at", "")
     _output_raw = item.get("extracted-results", item.get("matched-line", ""))
     if isinstance(_output_raw, list):
@@ -23989,7 +24012,7 @@ def _normalize_nuclei(item: dict) -> dict:
                 "output": str(_output)[:2000] if _output else f"Template: {_tid}:{_matcher}",
                 "owasp": "A05:2025 Security Misconfiguration", "nist": "SI-11",
                 "remediation": f"Add the {_hdr_display} header to all HTTP responses.",
-                "cves": _cves,
+                "cves": _cves, **_v11,
             }
 
     # ── Priority 2: Dynamic titles from template category ──
@@ -24002,7 +24025,7 @@ def _normalize_nuclei(item: dict) -> dict:
             "output": str(_output)[:2000] if _output else f"Template: {_tid}",
             "owasp": "A05:2025 Security Misconfiguration", "nist": "CM-7",
             "remediation": "Review exposed technology stack for known vulnerabilities.",
-            "cves": _cves,
+            "cves": _cves, **_v11,
         }
     if _NUCLEI_DYN_WAF.search(_tid):
         # Classify: if _name resolves to a known LB-only platform, emit a
@@ -24027,7 +24050,7 @@ def _normalize_nuclei(item: dict) -> dict:
                     "Review session affinity configuration. Do not confuse load balancing with "
                     "WAF protection."
                 ),
-                "cves": _cves,
+                "cves": _cves, **_v11,
             }
         return {
             "title": f"WAF / Edge Security Platform Active: {_name}", "risk": "INFO",
@@ -24035,7 +24058,7 @@ def _normalize_nuclei(item: dict) -> dict:
             "output": str(_output)[:2000] if _output else f"Template: {_tid}",
             "owasp": "A05:2025 Security Misconfiguration", "nist": "CM-7",
             "remediation": "WAF/CDN detected — informational.",
-            "cves": _cves,
+            "cves": _cves, **_v11,
         }
     if _NUCLEI_DYN_PANEL.search(_tid):
         _panel_path = ""
@@ -24050,7 +24073,7 @@ def _normalize_nuclei(item: dict) -> dict:
             "output": str(_output)[:2000] if _output else f"Template: {_tid}",
             "owasp": "A05:2025 Security Misconfiguration", "nist": "AC-3",
             "remediation": "Restrict admin interfaces by IP allowlist or VPN.",
-            "cves": _cves,
+            "cves": _cves, **_v11,
         }
 
     # ── Priority 3: Table-driven regex on template-id / matcher-name / name ──
@@ -24071,7 +24094,7 @@ def _normalize_nuclei(item: dict) -> dict:
                 "description": _desc or f"{_name} ({_tid})",
                 "output": str(_output)[:2000] if _output else f"Template: {_tid}",
                 "owasp": _owasp, "nist": _nist,
-                "remediation": _remed, "cves": _cves,
+                "remediation": _remed, "cves": _cves, **_v11,
             }
 
     # ── Priority 4: Template-path directory category ──
@@ -24101,7 +24124,7 @@ def _normalize_nuclei(item: dict) -> dict:
                 "output": str(_output)[:2000] if _output else f"Template: {_tid}",
                 "owasp": "A01:2025 Broken Access Control", "nist": "CM-7",
                 "remediation": "Restrict access to administrative panels.",
-                "cves": _cves,
+                "cves": _cves, **_v11,
             }
         if "technologies" in _tp_parts:
             _clean = _name
@@ -24116,7 +24139,7 @@ def _normalize_nuclei(item: dict) -> dict:
                 "output": str(_output)[:2000] if _output else f"Template: {_tid}",
                 "owasp": "A06:2025 Vulnerable and Outdated Components", "nist": "SI-2",
                 "remediation": "Keep identified components up to date.",
-                "cves": _cves,
+                "cves": _cves, **_v11,
             }
         if "default-logins" in _tp_parts:
             return {
@@ -24125,7 +24148,7 @@ def _normalize_nuclei(item: dict) -> dict:
                 "output": str(_output)[:2000] if _output else f"Template: {_tid}",
                 "owasp": "A07:2025 Identification and Authentication Failures", "nist": "IA-5",
                 "remediation": "Change default credentials immediately.",
-                "cves": _cves,
+                "cves": _cves, **_v11,
             }
         if "exposures" in _tp_parts:
             _ep_path = ""
@@ -24140,7 +24163,7 @@ def _normalize_nuclei(item: dict) -> dict:
                 "output": str(_output)[:2000] if _output else f"Template: {_tid}",
                 "owasp": "A01:2025 Broken Access Control", "nist": "AC-3",
                 "remediation": "Restrict access to the exposed resource.",
-                "cves": _cves,
+                "cves": _cves, **_v11,
             }
         if "cves" in _tp_parts or "vulnerabilities" in _tp_parts:
             return {
@@ -24149,7 +24172,7 @@ def _normalize_nuclei(item: dict) -> dict:
                 "output": str(_output)[:2000] if _output else f"Template: {_tid}",
                 "owasp": "A06:2025 Vulnerable and Outdated Components", "nist": "SI-2",
                 "remediation": "Apply vendor patches and update affected components.",
-                "cves": _cves,
+                "cves": _cves, **_v11,
             }
         if "misconfiguration" in _tp_parts:
             return {
@@ -24158,7 +24181,7 @@ def _normalize_nuclei(item: dict) -> dict:
                 "output": str(_output)[:2000] if _output else f"Template: {_tid}",
                 "owasp": "A05:2025 Security Misconfiguration", "nist": "CM-6",
                 "remediation": "Review and correct the identified misconfiguration.",
-                "cves": _cves,
+                "cves": _cves, **_v11,
             }
 
     # Fallback: no prefix, so identical findings from different tools merge.
@@ -24168,7 +24191,7 @@ def _normalize_nuclei(item: dict) -> dict:
         "output": str(_output)[:2000] if _output else f"Template: {_tid}",
         "owasp": "A06:2025 Vulnerable and Outdated Components", "nist": "SI-2",
         "remediation": "Apply vendor patches and update affected components.",
-        "cves": _cves,
+        "cves": _cves, **_v11,
     }
 
 
@@ -24509,6 +24532,9 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                         continue
                 matched = item.get("matched-at", url)
                 _norm   = _normalize_nuclei(item)
+                # Extract v1.1 enrichment fields from normalizer output
+                _nuc_v11 = {k: _norm[k] for k in ("cvss_score", "cvss_vector", "cwe")
+                            if k in _norm and _norm[k]}
                 out.add_finding(
                     title=_norm["title"],
                     url=matched, port=target["port"],
@@ -24522,6 +24548,7 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                     owasp=_norm["owasp"],
                     nist=_norm["nist"],
                     remediation=_norm["remediation"],
+                    **_nuc_v11,
                 )
                 _nuc_count += 1
             except (ValueError, KeyError):
@@ -25031,6 +25058,8 @@ def _check_viewstate(target: dict, cfg: dict, out: "OutputManager",
             output_file=_ev_path,
             affected=_affected,
             cves="CVE-2020-0688,CVE-2014-4075",
+            cvss_score=8.8, cvss_vector="CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+            cwe=["CWE-642", "CWE-502"],
             owasp="A08:2025 Software and Data Integrity Failures",
             nist="SI-10",
             remediation=(
@@ -25111,6 +25140,18 @@ _TELERIK_CVE_RANGES = [
      "allows remote code execution via crafted serialized objects.",
      "Upgrade Telerik UI to version 2020.1.114 or later. Apply Telerik security patch R1 2020 SP1."),
 ]
+
+# Telerik CVE → v1.1 enrichment data (CVSS, CWE)
+_TELERIK_CVE_V11 = {
+    "CVE-2017-9248":  {"cvss_score": 9.8, "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                       "cwe": ["CWE-338"]},
+    "CVE-2017-11357": {"cvss_score": 9.8, "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                       "cwe": ["CWE-284"]},
+    "CVE-2017-11317": {"cvss_score": 9.8, "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                       "cwe": ["CWE-434"]},
+    "CVE-2019-18935": {"cvss_score": 9.8, "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                       "cwe": ["CWE-502"]},
+}
 
 # Known Telerik handler paths relative to the application root
 _TELERIK_HANDLER_PATHS = [
@@ -25388,6 +25429,7 @@ def _validate_telerik(target: dict, cfg: dict, out: "OutputManager",
                 "3. Rotate the Telerik encryption keys in web.config.\n"
                 "4. Audit the server for web shells in upload directories."
             ),
+            **_TELERIK_CVE_V11.get("CVE-2017-9248", {}),
         )
         vc.log("[telerik] CVE-2017-9248 CONFIRMED — CRITICAL finding emitted", "SUCCESS")
 
@@ -25414,6 +25456,7 @@ def _validate_telerik(target: dict, cfg: dict, out: "OutputManager",
             owasp="A06:2025 Vulnerable and Outdated Components",
             nist="SI-2",
             remediation=_matched_cves[0][3],  # Use remediation from first (most severe) CVE
+            **_TELERIK_CVE_V11.get(_matched_cves[0][0], {}),
         )
         vc.log(f"[telerik] Version {_ver_str} matches {len(_matched_cves)} CVE(s)", "SUCCESS")
 
