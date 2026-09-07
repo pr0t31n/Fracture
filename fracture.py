@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.47.1"
+VERSION = "2.48.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -1170,6 +1170,16 @@ def _waf_session_health(
     _body   = (_probe.text or "")[:4096]
     _loc    = _probe.headers.get("Location", "") or ""
 
+    # Save HTTP evidence once for all WAF health findings from this probe
+    _waf_ev = ""
+    try:
+        _waf_rq, _waf_rp = _save_http_evidence(
+            out, "waf-health", f"waf_probe_{target.get('hostname', 'host')}", _probe)
+        _waf_ev = json.dumps(
+            [{"url": target_url, "req": str(_waf_rq), "resp": str(_waf_rp)}])
+    except Exception:
+        pass
+
     # ── IP block ──────────────────────────────────────────────────────────────
     if _is_waf_block(_probe):
         _msg = (
@@ -1189,6 +1199,7 @@ def _waf_session_health(
             output=f"HTTP {_status}\n{_body[:512]}",
             affected=target_url, sources="fracture-waf-health",
             service=target.get("scheme", "https"),
+            output_file=_waf_ev,
             command=f"GET {target_url}",
             owasp="A05:2021 – Security Misconfiguration", nist="SI-4",
             remediation=(
@@ -1220,6 +1231,7 @@ def _waf_session_health(
             output=f"HTTP {_status}\n{_body[:512]}",
             affected=target_url, sources="fracture-waf-health",
             service=target.get("scheme", "https"),
+            output_file=_waf_ev,
             command=f"GET {target_url}",
             owasp="A05:2021 – Security Misconfiguration", nist="SI-4",
             remediation="Informational — no remediation required for the WAF challenge itself.",
@@ -1245,6 +1257,7 @@ def _waf_session_health(
             output=f"HTTP {_status}\n{_body[:512]}",
             affected=target_url, sources="fracture-waf-health",
             service=target.get("scheme", "https"),
+            output_file=_waf_ev,
             command=f"GET {target_url}",
             owasp="A07:2021 – Identification and Authentication Failures", nist="IA-3",
             remediation=(
@@ -1275,6 +1288,7 @@ def _waf_session_health(
             output=f"HTTP {_status} Location: {_loc}",
             affected=target_url, sources="fracture-waf-health",
             service=target.get("scheme", "https"),
+            output_file=_waf_ev,
             command=f"GET {target_url}",
             owasp="A07:2021 – Identification and Authentication Failures", nist="IA-3",
             remediation=(
@@ -1305,6 +1319,7 @@ def _waf_session_health(
             output=f"HTTP {_status}\n{_body[:512]}",
             affected=target_url, sources="fracture-waf-health",
             service=target.get("scheme", "https"),
+            output_file=_waf_ev,
             command=f"GET {target_url}",
             owasp="A07:2021 – Identification and Authentication Failures", nist="IA-3",
             remediation=(
@@ -11042,6 +11057,14 @@ def _phase_wordpress_scan(
         _hd = sess.head(base + "/", timeout=wp_timeout, allow_redirects=True)
         xpb = _hd.headers.get("X-Pingback", "")
         if xpb:
+            _xpb_ev = ""
+            try:
+                _xpb_rq, _xpb_rp = _save_http_evidence(
+                    out, phase, f"wp_xpingback_{hostname}", _hd)
+                _xpb_ev = json.dumps(
+                    [{"url": base, "req": str(_xpb_rq), "resp": str(_xpb_rp)}])
+            except Exception:
+                pass
             out.add_finding(
                 title="WordPress X-Pingback Header Present",
                 url=base, port=target["port"], risk="LOW",
@@ -11051,6 +11074,7 @@ def _phase_wordpress_scan(
                 ),
                 output=f"X-Pingback: {xpb}",
                 sources="fracture-wordpress", service=target["scheme"],
+                output_file=_xpb_ev,
                 owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                 remediation=(
                     "Remove the X-Pingback header and disable XML-RPC if not required."
@@ -11338,6 +11362,15 @@ def _phase_wordpress_scan(
                 if _oe_slug not in [u.get("slug") for u in wp_info["users"]]:
                     wp_info["users"].append(
                         {"id": None, "slug": _oe_slug, "source": "oembed"})
+                    _oe_ev = ""
+                    try:
+                        _oe_rq, _oe_rp = _save_http_evidence(
+                            out, phase, f"wp_oembed_{hostname}", r_oe)
+                        _oe_ev = json.dumps(
+                            [{"url": base + "/wp-json/oembed/1.0/embed",
+                              "req": str(_oe_rq), "resp": str(_oe_rp)}])
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="WordPress Username Disclosed via oEmbed API",
                         url=base + "/wp-json/oembed/1.0/embed",
@@ -11348,6 +11381,7 @@ def _phase_wordpress_scan(
                         ),
                         output=f"author_url: {_oe_au}",
                         sources="fracture-wordpress", service=target["scheme"],
+                        output_file=_oe_ev,
                         owasp="A07:2025 Identification and Authentication Failures",
                         nist="IA-5",
                         remediation=(
@@ -11546,6 +11580,15 @@ def _phase_wordpress_scan(
     r = _wp_get("/wp-signup.php")
     if r and r.status_code == 200 and "signup" in r.text.lower():
         wp_info["multisite"] = True
+        _ms_ev = ""
+        try:
+            _ms_rq, _ms_rp = _save_http_evidence(
+                out, phase, f"wp_multisite_{hostname}", r)
+            _ms_ev = json.dumps(
+                [{"url": base + "/wp-signup.php", "req": str(_ms_rq),
+                  "resp": str(_ms_rp)}])
+        except Exception:
+            pass
         out.add_finding(
             title="WordPress Multisite Installation Detected",
             url=base + "/wp-signup.php", port=target["port"], risk="INFO",
@@ -11556,6 +11599,7 @@ def _phase_wordpress_scan(
             ),
             output=f"GET /wp-signup.php → HTTP {r.status_code}",
             sources="fracture-wordpress", service=target["scheme"],
+            output_file=_ms_ev,
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
             remediation=(
                 "Restrict /wp-signup.php if public sub-site registration is "
@@ -11774,6 +11818,15 @@ def _phase_wordpress_scan(
                 if m_ptn:
                     _pt_name = m_ptn.group(1).strip()
                 _pt_ver_str = f" v{_pt_ver}" if _pt_ver else ""
+                _pt_ev = ""
+                try:
+                    _pt_rq, _pt_rp = _save_http_evidence(
+                        out, phase, f"wp_parent_theme_{_t_parent}", r_par)
+                    _pt_ev = json.dumps(
+                        [{"url": base + _psc, "req": str(_pt_rq),
+                          "resp": str(_pt_rp)}])
+                except Exception:
+                    pass
                 out.add_finding(
                     title=f"WordPress Parent Theme Detected: {_pt_name}{_pt_ver_str}",
                     url=base + _psc, port=target["port"], risk="INFO",
@@ -11783,6 +11836,7 @@ def _phase_wordpress_scan(
                     ),
                     output=r_par.text[:200],
                     sources="fracture-wordpress", service=target["scheme"],
+                    output_file=_pt_ev,
                     owasp="A06:2025 Vulnerable and Outdated Components", nist="SI-2",
                     remediation=f"Keep parent theme '{_pt_name}' updated.",
                     http_code=r_par.status_code,
@@ -11801,6 +11855,15 @@ def _phase_wordpress_scan(
                 if m_tv2:
                     _tv2 = m_tv2.group(1)
                 _tv2_str = f" v{_tv2}" if _tv2 else ""
+                _tim_ev = ""
+                try:
+                    _tim_rq, _tim_rp = _save_http_evidence(
+                        out, phase, f"wp_timthumb_{_tslug}", r_tim)
+                    _tim_ev = json.dumps(
+                        [{"url": base + _tim_sub, "req": str(_tim_rq),
+                          "resp": str(_tim_rp)}])
+                except Exception:
+                    pass
                 out.add_finding(
                     title=f"TimThumb Script Detected: {_t_name}{_tv2_str}",
                     url=base + _tim_sub, port=target["port"], risk="HIGH",
@@ -11812,6 +11875,7 @@ def _phase_wordpress_scan(
                     ),
                     output=f"GET {_tim_sub} → HTTP {r_tim.status_code}",
                     sources="fracture-wordpress", service=target["scheme"],
+                    output_file=_tim_ev,
                     owasp="A06:2025 Vulnerable and Outdated Components", nist="SI-2",
                     remediation=(
                         "Remove timthumb.php from the theme and replace with "
@@ -12640,6 +12704,17 @@ def _probe_iis_aspnet(target: dict, cfg: dict, out: "OutputManager",
         _handler_out = "\n".join(
             f"  {h['url']} ({h['type']})" for h in _found_handlers)
         _handler_affected = "\n".join(h["url"] for h in _found_handlers)
+        # Save evidence for the first handler probe as representative sample
+        _handler_ev = ""
+        try:
+            _hfirst_url = _found_handlers[0]["url"]
+            _hfirst_r = sess.get(_hfirst_url, timeout=timeout, allow_redirects=False)
+            _hf_rq, _hf_rp = _save_http_evidence(
+                out, phase, "iis_handler_probe", _hfirst_r)
+            _handler_ev = json.dumps(
+                [{"url": _hfirst_url, "req": str(_hf_rq), "resp": str(_hf_rp)}])
+        except Exception:
+            pass
         out.add_finding(
             title="ASP.NET Handler Endpoints Discovered",
             url=url, port=port, risk="LOW",
@@ -12650,6 +12725,7 @@ def _probe_iis_aspnet(target: dict, cfg: dict, out: "OutputManager",
             ),
             output=_handler_out,
             sources="fracture-iis-probes", service=scheme,
+            output_file=_handler_ev,
             affected=_handler_affected,
             owasp="A05:2025 Security Misconfiguration",
             nist="CM-7",
@@ -13216,6 +13292,14 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             _cdn_out.append(f"X-Powered-By: {powered_by}")
         if _recon_edge_security:
             _cdn_out.append(f"Co-located edge security: {', '.join(_recon_edge_security)}")
+        _cdn_ev = ""
+        try:
+            _cdn_rq, _cdn_rp = _save_http_evidence(
+                out, phase, f"cdn_detect_{target['hostname']}", resp)
+            _cdn_ev = json.dumps(
+                [{"url": url, "req": str(_cdn_rq), "resp": str(_cdn_rp)}])
+        except Exception:
+            pass
         out.add_finding(
             title=f"CDN Active: {_recon_cdn}",
             url=url, port=target["port"], risk="INFO",
@@ -13231,6 +13315,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             ),
             output="\n".join(_cdn_out),
             sources="fracture-recon", service=target["scheme"],
+            output_file=_cdn_ev,
             owasp="A05:2025 Security Misconfiguration", nist="SC-5",
             remediation=(
                 "Restrict origin server to accept connections only from CDN IP ranges. "
@@ -16514,13 +16599,23 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             ) as s:
                 proto = s.version()
             # Informational: record negotiated TLS version
+            _tls_sock_ev = ""
             if proto:
+                try:
+                    _tls_sock_path = out.output_path(phase, f"tls_socket_{hostname}_{port}")
+                    _tls_sock_path.write_text(
+                        f"TLS socket probe: {hostname}:{port}\nNegotiated: {proto}\n",
+                        encoding="utf-8")
+                    _tls_sock_ev = str(_tls_sock_path)
+                except Exception:
+                    pass
                 out.add_finding(
                     title="TLS Version Identified",
                     url=target["url"], port=port, risk="INFO",
                     description=f"Server negotiated {proto}.",
                     output=f"Negotiated protocol: {proto}",
                     sources="fracture-tls-socket", service="https",
+                    output_file=_tls_sock_ev,
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                     remediation="",
                 )
@@ -16531,6 +16626,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     risk="MEDIUM" if "1.1" in (proto or "") else "HIGH",
                     description=f"Server negotiated {proto} which is considered weak.",
                     sources="fracture-tls-socket", service="https",
+                    output_file=_tls_sock_ev,
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                     remediation="Configure TLS 1.2/1.3 only.",
                 )
@@ -16568,6 +16664,15 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         + ", ".join(_sock_sans[:30])
                     )
                 if _sock_cert_lines:
+                    _cert_sock_ev = ""
+                    try:
+                        _cert_sock_path = out.output_path(
+                            phase, f"tls_cert_socket_{hostname}_{port}")
+                        _cert_sock_path.write_text(
+                            "\n".join(_sock_cert_lines), encoding="utf-8")
+                        _cert_sock_ev = str(_cert_sock_path)
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="SSL/TLS Certificate Information",
                         url=target["url"], port=port, risk="INFO",
@@ -16577,6 +16682,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         ),
                         output="\n".join(_sock_cert_lines),
                         sources="fracture-tls-socket", service="https",
+                        output_file=_cert_sock_ev,
                         owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                         remediation="",
                     )
@@ -16593,12 +16699,28 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 pass  # verified OK — no cert finding needed
         except _ssl.SSLCertVerificationError as _e:
             _em = str(_e).lower()
+            # Re-use cert socket evidence if already saved, otherwise write the error
+            _cert_verr_ev = ""
+            try:
+                _cert_verr_ev = _cert_sock_ev  # noqa: F821 — set above
+            except NameError:
+                pass
+            if not _cert_verr_ev:
+                try:
+                    _verr_p = out.output_path(
+                        phase, f"tls_cert_verify_{hostname}_{port}")
+                    _verr_p.write_text(
+                        f"Certificate verification failed: {_e}\n", encoding="utf-8")
+                    _cert_verr_ev = str(_verr_p)
+                except Exception:
+                    pass
             if "self signed" in _em or "unable to get local issuer" in _em:
                 out.add_finding(
                     title="SSL/TLS Certificate: Self-Signed",
                     url=target["url"], port=port, risk="MEDIUM",
                     description="The server presented a self-signed TLS certificate that is not anchored to a publicly trusted CA, preventing clients from verifying the server's identity and enabling trivial MITM attacks.",
                     sources="fracture-tls-socket", service="https",
+                    output_file=_cert_verr_ev,
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                     remediation="Replace self-signed certificates with certificates issued by a trusted CA; use ACME/Let's Encrypt for cost-free automation.",
                 )
@@ -16608,6 +16730,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     url=target["url"], port=port, risk="HIGH",
                     description="The server's TLS certificate has passed its expiry date, causing browser trust errors and indicating a breakdown in certificate lifecycle management.",
                     sources="fracture-tls-socket", service="https",
+                    output_file=_cert_verr_ev,
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                     remediation="Renew the certificate immediately and implement automated renewal (e.g., ACME/Let's Encrypt) to prevent future expiry.",
                 )
@@ -16718,6 +16841,15 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
         try:
             r = sess.get(f"https://{cname_target}", timeout=timeout,
                          headers={"Host": host}, allow_redirects=True)
+            _sto_ev = ""
+            try:
+                _sto_rq, _sto_rp = _save_http_evidence(
+                    out, phase, f"subdomain_cname_{host}", r)
+                _sto_ev = json.dumps(
+                    [{"url": f"https://{cname_target}", "req": str(_sto_rq),
+                      "resp": str(_sto_rp)}])
+            except Exception:
+                pass
             for service, pattern in _TAKEOVER_FINGERPRINTS:
                 if pattern.search(r.text):
                     out.add_finding(
@@ -16735,6 +16867,7 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
                             f"Response excerpt: {r.text[:500]}"
                         ),
                         sources="fracture-subdomain-takeover", service=target["scheme"],
+                        output_file=_sto_ev,
                         affected=url,
                         owasp="A05:2025 Security Misconfiguration", nist="CM-8",
                         remediation=(
@@ -16752,6 +16885,14 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
         # No CNAME — check A/AAAA record resolves to a responsive host
         try:
             r = sess.get(url, timeout=timeout, allow_redirects=True)
+            _sti_ev = ""
+            try:
+                _sti_rq, _sti_rp = _save_http_evidence(
+                    out, phase, f"subdomain_indicator_{host}", r)
+                _sti_ev = json.dumps(
+                    [{"url": url, "req": str(_sti_rq), "resp": str(_sti_rp)}])
+            except Exception:
+                pass
             for service, pattern in _TAKEOVER_FINGERPRINTS:
                 if pattern.search(r.text):
                     out.add_finding(
@@ -16764,6 +16905,7 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
                         ),
                         output=f"Service: {service}\nResponse: {r.text[:500]}",
                         sources="fracture-subdomain-takeover", service=target["scheme"],
+                        output_file=_sti_ev,
                         affected=url,
                         owasp="A05:2025 Security Misconfiguration", nist="CM-8",
                         remediation=(
@@ -16790,6 +16932,15 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
                 if zone:
                     # AXFR succeeded — huge finding
                     names = [str(n) for n in zone.nodes.keys()][:20]
+                    _axfr_ev = ""
+                    try:
+                        _axfr_path = out.output_path(phase, f"axfr_{ns_host}")
+                        _axfr_lines = [f"Nameserver: {ns_host}", f"Domain: {host}", ""]
+                        _axfr_lines.extend(str(n) for n in zone.nodes.keys())
+                        _axfr_path.write_text("\n".join(_axfr_lines), encoding="utf-8")
+                        _axfr_ev = str(_axfr_path)
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="DNS Zone Transfer Permitted (AXFR)",
                         url=url, port=target["port"], risk="HIGH",
@@ -16799,6 +16950,7 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
                             f"Records ({len(names)} shown): {', '.join(names)}"
                         ),
                         sources="fracture-subdomain-takeover", service="dns",
+                        output_file=_axfr_ev,
                         affected=host,
                         owasp="A05:2025 Security Misconfiguration", nist="SC-5",
                         remediation="Restrict zone transfer permissions to authorised secondary name server IP addresses using ACLs in the DNS server configuration.",
@@ -17515,6 +17667,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             description="The CORS policy reflects arbitrary origins or uses a wildcard origin combined with credentials-allowed, permitting malicious third-party sites to make credentialed cross-origin requests and read responses.",
             output=f"Access-Control-Allow-Origin: {acao}\nAccess-Control-Allow-Credentials: {acac}",
             sources="fracture-headers", service=target["scheme"],
+            output_file=_sh_ev,
             owasp="A05:2025 Security Misconfiguration", nist="AC-4",
             remediation="Maintain an explicit allowlist of trusted origins; never combine Access-Control-Allow-Origin: * with Access-Control-Allow-Credentials: true; and reject unexpected Origin headers.",
             http_code=resp.status_code,
@@ -17669,6 +17822,14 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                                 "ACCEPT:", "ACCEPT-ENCODING:"))
         )
         if _tr_echoes:
+            _tr_ev = ""
+            try:
+                _tr_rq, _tr_rp = _save_http_evidence(
+                    out, phase, f"trace_method_{target['hostname']}", _tr)
+                _tr_ev = json.dumps(
+                    [{"url": url, "req": str(_tr_rq), "resp": str(_tr_rp)}])
+            except Exception:
+                pass
             out.add_finding(
                 title="HTTP Methods: Dangerous Methods Enabled",
                 url=url, port=target["port"], risk="MEDIUM",
@@ -17680,6 +17841,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 ),
                 output=f"TRACE {url} → HTTP {_tr.status_code}",
                 sources="fracture-headers", service=target["scheme"],
+                output_file=_tr_ev,
                 owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                 remediation="Disable the TRACE HTTP method on all web servers. In Apache: TraceEnable off. In Nginx: if ($request_method = TRACE) { return 405; }",
             )
@@ -17700,6 +17862,15 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         try:
             _dbr = sess.get(url.rstrip("/") + _dbpath, timeout=timeout, allow_redirects=False)
             if _dbr is not None and _dbr.status_code == 200 and _debug_body_re.search(_dbr.text[:4000]):
+                _dbg_ev = ""
+                try:
+                    _dbg_rq, _dbg_rp = _save_http_evidence(
+                        out, phase, f"debug_{_dbpath.strip('/')}", _dbr)
+                    _dbg_ev = json.dumps(
+                        [{"url": url.rstrip("/") + _dbpath, "req": str(_dbg_rq),
+                          "resp": str(_dbg_rp)}])
+                except Exception:
+                    pass
                 out.add_finding(
                     title="Debug Mode Enabled / Developer Console Exposed",
                     url=url.rstrip("/") + _dbpath, port=target["port"], risk="HIGH",
@@ -17711,6 +17882,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                     ),
                     output=f"GET {_dbpath} → HTTP {_dbr.status_code}\n{_dbr.text[:500]}",
                     sources="fracture-headers", service=target["scheme"],
+                    output_file=_dbg_ev,
                     owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                     remediation="Set DEBUG=False in production. Remove or restrict all debug/console endpoints.",
                 )
@@ -20490,6 +20662,17 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
             hdr_json = json.loads(_b64.urlsafe_b64decode(hdr_raw).decode("utf-8", errors="replace"))
             alg      = hdr_json.get("alg", "unknown")
 
+            _jwt_id_ev = ""
+            try:
+                _jwt_ev_path = out.output_path(phase, f"jwt_token_{alg}")
+                _jwt_ev_path.write_text(
+                    f"JWT Token Analysis\nAlgorithm: {alg}\n"
+                    f"Header: {json.dumps(hdr_json, indent=2)}\n"
+                    f"Token (truncated): {token[:80]}...\n",
+                    encoding="utf-8")
+                _jwt_id_ev = str(_jwt_ev_path)
+            except Exception:
+                pass
             out.add_finding(
                 title=f"JWT Token Identified: Algorithm {alg}",
                 url=url, port=port, risk="INFO",
@@ -20500,6 +20683,7 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
                 ),
                 output=f"alg: {alg}\nHeader: {json.dumps(hdr_json)}",
                 sources="fracture-jwt", service=target["scheme"],
+                output_file=_jwt_id_ev,
                 owasp="A07:2025 Identification and Authentication Failures", nist="IA-5",
                 remediation=(
                     "Use asymmetric algorithms (RS256, ES256). "
@@ -20526,6 +20710,14 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
                 if (r_none.status_code == 200
                         and r_base.status_code in (401, 403)
                         and r_orig.status_code == 200):
+                    _jwt_none_ev = ""
+                    try:
+                        _jn_rq, _jn_rp = _save_http_evidence(
+                            out, phase, "jwt_none_bypass", r_none)
+                        _jwt_none_ev = json.dumps(
+                            [{"url": url, "req": str(_jn_rq), "resp": str(_jn_rp)}])
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="JWT Vulnerability: 'none' Algorithm Accepted",
                         url=url, port=port, risk="CRITICAL",
@@ -20542,6 +20734,7 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
                             f"Forged (none) response: HTTP {r_none.status_code}"
                         ),
                         sources="fracture-jwt", service=target["scheme"],
+                        output_file=_jwt_none_ev,
                         cves="CVE-2015-9235, CVE-2016-10555",
                         owasp="A07:2025 Identification and Authentication Failures", nist="IA-5",
                         remediation=(
@@ -20644,6 +20837,18 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
                         cracked = secret
                         break
                 if cracked:
+                    _jwt_bf_ev = ""
+                    try:
+                        _jwt_bf_path = out.output_path(phase, f"jwt_brute_{alg}")
+                        _jwt_bf_path.write_text(
+                            f"JWT Signing Secret Brute-Force\n"
+                            f"Algorithm: {alg}\n"
+                            f"Recovered secret: {cracked}\n"
+                            f"Token (truncated): {token[:80]}...\n",
+                            encoding="utf-8")
+                        _jwt_bf_ev = str(_jwt_bf_path)
+                    except Exception:
+                        pass
                     out.add_finding(
                         title=f"JWT Signing Secret Brute-Force Recovered ({alg})",
                         url=url, port=port, risk="CRITICAL",
@@ -20658,6 +20863,7 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
                                f"Recovered secret: {cracked}",
                         sources="fracture-jwt-hs256-brute",
                         service=target["scheme"],
+                        output_file=_jwt_bf_ev,
                         cves="",
                         owasp="A07:2025 Identification and Authentication Failures",
                         nist="IA-5", remediation=(
@@ -21441,12 +21647,20 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 _deregister_proc(proc)
                 out.log_command("sqlmap", cmd, None)
                 if re.search(r'Parameter.*is (vulnerable|injectable)', stdout, re.I):
+                    _sqm_ev = ""
+                    try:
+                        _sqm_ev_path = sq_dir / "sqlmap_output.txt"
+                        _sqm_ev_path.write_text(stdout, encoding="utf-8")
+                        _sqm_ev = str(_sqm_ev_path)
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="SQL Injection Confirmed by sqlmap",
                         url=sample_url, port=target["port"], risk="CRITICAL",
                         description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
                         output=stdout[:2000], sources="sqlmap",
                         service=target["scheme"],
+                        output_file=_sqm_ev,
                         owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                     )
@@ -22040,12 +22254,22 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             r = sess.get(js_url, timeout=timeout)
             if r and r.status_code == 200 and _dom_sink_re.search(r.text):
                 m = _dom_sink_re.search(r.text)
+                _dom_ev = ""
+                try:
+                    _dom_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', js_url)[:50]
+                    _dom_rq, _dom_rp = _save_http_evidence(
+                        out, phase, f"dom_xss_{_dom_safe}", r)
+                    _dom_ev = json.dumps(
+                        [{"url": js_url, "req": str(_dom_rq), "resp": str(_dom_rp)}])
+                except Exception:
+                    pass
                 out.add_finding(
                     title="DOM-Based Cross-Site Scripting (XSS)",
                     url=js_url, port=target["port"], risk="HIGH",
                     description="User-controlled input is reflected or stored and rendered in a browser context without proper encoding, enabling arbitrary script execution.",
                     output=f"Pattern found near: ...{m.group(0)[:200]}...",
                     sources="fracture-injection", service=target["scheme"],
+                    output_file=_dom_ev,
                     affected=js_url, owasp="A03:2025 Injection", nist="SI-10",
                     remediation="Encode all output contextually (HTML, JS, URL, CSS), sanitise stored input server-side, and enforce a strict Content-Security-Policy.",
                     http_code=r.status_code,
@@ -22066,6 +22290,15 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 _jsonp_body = _strip_url_echo(r.text, r, ["fracture_jsonp_cb"])
                 if ("javascript" in ct or "json" in ct or _jsonp_wrap_re.search(_jsonp_body[:100])):
                     if "fracture_jsonp_cb" in _jsonp_body and _jsonp_wrap_re.search(_jsonp_body[:100]):
+                        _jp_ev = ""
+                        try:
+                            _jp_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', purl)[:50]
+                            _jp_rq, _jp_rp = _save_http_evidence(
+                                out, phase, f"jsonp_{_jp_safe}", r)
+                            _jp_ev = json.dumps(
+                                [{"url": purl, "req": str(_jp_rq), "resp": str(_jp_rp)}])
+                        except Exception:
+                            pass
                         out.add_finding(
                             title="JSONP Endpoint — Cross-Origin Data Leakage",
                             url=purl, port=target["port"], risk="HIGH",
@@ -22075,6 +22308,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                          f"to exfiltrate the response data."),
                             output=f"Parameter: {cb_param}\nCallback reflected: {r.text[:200]}",
                             sources="fracture-injection", service=target["scheme"],
+                            output_file=_jp_ev,
                             affected=purl, owasp="A05:2025 Security Misconfiguration", nist="SC-8",
                             remediation=(
                                 "Remove JSONP support and use CORS instead. "
@@ -22105,6 +22339,14 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         and r_true.status_code == 200
                         and r_false.status_code in (200, 302, 404)
                         and abs(len(r_true.text) - len(r_false.text)) > 50):
+                    _bsqli_ev = ""
+                    try:
+                        _bsqli_rq, _bsqli_rp = _save_http_evidence(
+                            out, phase, f"sqli_bool_{param}", r_true)
+                        _bsqli_ev = json.dumps(
+                            [{"url": purl, "req": str(_bsqli_rq), "resp": str(_bsqli_rp)}])
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Blind SQL Injection (Boolean-Based)",
                         url=purl, port=target["port"], risk="CRITICAL",
@@ -22113,6 +22355,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                 f"TRUE payload: {_bool_sqli_true} → {r_true.status_code} ({len(r_true.text)} bytes)\n"
                                 f"FALSE payload: {_bool_sqli_false} → {r_false.status_code} ({len(r_false.text)} bytes)"),
                         sources="fracture-injection", service=target["scheme"],
+                        output_file=_bsqli_ev,
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                     )
@@ -22161,6 +22404,14 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     # Require delta to be at least 2x baseline to avoid FPs on
                     # naturally slow endpoints or load-balanced jitter.
                     if r and elapsed >= delay and _delta >= max(delay - 0.5, _bl_elapsed * 2):
+                        _tsqli_ev = ""
+                        try:
+                            _tsqli_rq, _tsqli_rp = _save_http_evidence(
+                                out, phase, f"sqli_time_{param}", r)
+                            _tsqli_ev = json.dumps(
+                                [{"url": purl, "req": str(_tsqli_rq), "resp": str(_tsqli_rp)}])
+                        except Exception:
+                            pass
                         out.add_finding(
                             title="Blind SQL Injection (Time-Based)",
                             url=purl, port=target["port"], risk="CRITICAL",
@@ -22169,6 +22420,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                     f"Response time: {elapsed:.2f}s (baseline: {_bl_elapsed:.2f}s, "
                                     f"delta: {_delta:.2f}s, threshold: {delay}s)"),
                             sources="fracture-injection", service=target["scheme"],
+                            output_file=_tsqli_ev,
                             affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                             remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                         )
@@ -22455,12 +22707,21 @@ def _phase_traversal(target: dict, cfg: dict, pm: ProgressManager,
             for payload in payloads:
                 r = _qs_inject(purl, param, payload, sess, timeout)
                 if r and _TRAVERSAL_RE.search(r.text):
+                    _lfi_ev = ""
+                    try:
+                        _lfi_rq, _lfi_rp = _save_http_evidence(
+                            out, phase, f"traversal_{param}", r)
+                        _lfi_ev = json.dumps(
+                            [{"url": purl, "req": str(_lfi_rq), "resp": str(_lfi_rp)}])
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Path Traversal / Local File Inclusion",
                         url=purl, port=target["port"], risk="HIGH",
                         description="User-supplied input is used in filesystem path construction without adequate sanitisation, allowing an attacker to read or include arbitrary files outside the intended directory.",
                         output=f"Parameter: {param}\nPayload: {payload}\nExcerpt: {r.text[:500]}",
                         sources="fracture-traversal", service=target["scheme"],
+                        output_file=_lfi_ev,
                         affected=f"{purl}?{param}=<traversal>",
                         owasp="A01:2025 Broken Access Control", nist="AC-3",
                         remediation="Canonicalise all user-supplied paths, resolve them against a fixed base directory, and reject any path that escapes the base; prefer indirect reference maps over direct path handling.",
@@ -22808,12 +23069,21 @@ def _phase_ssrf(target: dict, cfg: dict, pm: ProgressManager,
             r = _qs_inject(purl, param, ssrf_payload, sess, timeout)
             if r and (r.status_code == 200 and len(r.text) > 10 or
                       _SSRF_RESPONSE_INDICATORS.search(r.text)):
+                _ssrf_ev = ""
+                try:
+                    _ssrf_rq, _ssrf_rp = _save_http_evidence(
+                        out, phase, f"ssrf_{param}", r)
+                    _ssrf_ev = json.dumps(
+                        [{"url": purl, "req": str(_ssrf_rq), "resp": str(_ssrf_rp)}])
+                except Exception:
+                    pass
                 out.add_finding(
                     title=f"Server-Side Request Forgery (SSRF) — {ssrf_desc}",
                     url=purl, port=target["port"], risk="CRITICAL",
                     description=f"SSRF confirmed via parameter '{param}'. Target: {ssrf_payload}",
                     output=f"Parameter: {param}\nPayload: {ssrf_payload}\nResponse: {r.text[:500]}",
                     sources="fracture-ssrf", service=target["scheme"],
+                    output_file=_ssrf_ev,
                     affected=f"{purl}?{param}={ssrf_payload}",
                     owasp="A10:2025 Server-Side Request Forgery", nist="SC-7",
                     remediation="Validate and restrict URLs supplied by users. Use an allowlist of permitted destinations.",
@@ -22841,6 +23111,14 @@ def _phase_ssrf(target: dict, cfg: dict, pm: ProgressManager,
                 # A response with content (not just a connection error) to an
                 # internal address strongly suggests the server fetched it
                 if r and r.status_code == 200 and len(r.text) > 20:
+                    _bssrf_ev = ""
+                    try:
+                        _bssrf_rq, _bssrf_rp = _save_http_evidence(
+                            out, phase, f"blind_ssrf_{param}", r)
+                        _bssrf_ev = json.dumps(
+                            [{"url": purl, "req": str(_bssrf_rq), "resp": str(_bssrf_rp)}])
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Blind SSRF — Internal Network Probing",
                         url=purl, port=target["port"], risk="HIGH",
@@ -22850,6 +23128,7 @@ def _phase_ssrf(target: dict, cfg: dict, pm: ProgressManager,
                         output=(f"Parameter: {param}\nTarget: {blind_target}\n"
                                 f"Response: HTTP {r.status_code}, {len(r.text)} bytes\n{r.text[:300]}"),
                         sources="fracture-ssrf", service=target["scheme"],
+                        output_file=_bssrf_ev,
                         affected=f"{purl}?{param}={blind_target}",
                         owasp="A10:2025 Server-Side Request Forgery", nist="SC-7",
                         remediation=(
@@ -23569,6 +23848,17 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
     for link in crawl_data.get("links", []):
         if _cred_param_re.search(link):
             m = _cred_param_re.search(link)
+            _cred_ev = ""
+            try:
+                _cred_ev_path = out.output_path(phase, f"cred_url_{m.group(1)}")
+                _cred_ev_path.write_text(
+                    f"Credentials in URL Query Parameters\n"
+                    f"URL: {link}\nParameter: {m.group(1)}\n"
+                    f"Value (redacted): {'*' * len(m.group(2))}\n",
+                    encoding="utf-8")
+                _cred_ev = str(_cred_ev_path)
+            except Exception:
+                pass
             out.add_finding(
                 title="Credentials Transmitted in URL Query Parameters",
                 url=link, port=target["port"], risk="HIGH",
@@ -23577,6 +23867,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                              f"and browser history, exposing them to unintended disclosure."),
                 output=f"URL: {link}\nParameter: {m.group(1)}",
                 sources="fracture-auth-bypass", service=target["scheme"],
+                output_file=_cred_ev,
                 affected=link,
                 owasp="A07:2025 Identification and Authentication Failures",
                 nist="IA-5",
@@ -25283,11 +25574,20 @@ def _phase_graphql(target: dict, cfg: dict, pm: ProgressManager,
             if r.status_code == 200 and "__schema" in r.text:
                 found_gql = url + gpath
                 vc.log(f"[graphql] GraphQL endpoint: {found_gql}", "SUCCESS")
+                _gql_intr_ev = ""
+                try:
+                    _gql_rq, _gql_rp = _save_http_evidence(
+                        out, phase, "graphql_introspection", r)
+                    _gql_intr_ev = json.dumps(
+                        [{"url": found_gql, "req": str(_gql_rq), "resp": str(_gql_rp)}])
+                except Exception:
+                    pass
                 out.add_finding(
                     title="GraphQL Introspection Enabled",
                     url=found_gql, port=target["port"], risk="MEDIUM",
                     description=f"GraphQL introspection is enabled at {found_gql}. This allows attackers to enumerate the full API schema.",
                     output=r.text[:500], sources="fracture-graphql",
+                    output_file=_gql_intr_ev,
                     service=target["scheme"], affected=found_gql,
                     owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                     remediation="Disable GraphQL introspection in production environments.",
@@ -25312,11 +25612,20 @@ def _phase_graphql(target: dict, cfg: dict, pm: ProgressManager,
         r = sess.post(found_gql, data=batch_query,
                       headers={"Content-Type": "application/json"}, timeout=timeout)
         if r.status_code == 200 and isinstance(json.loads(r.text), list):
+            _gql_batch_ev = ""
+            try:
+                _gb_rq, _gb_rp = _save_http_evidence(
+                    out, phase, "graphql_batch", r)
+                _gql_batch_ev = json.dumps(
+                    [{"url": found_gql, "req": str(_gb_rq), "resp": str(_gb_rp)}])
+            except Exception:
+                pass
             out.add_finding(
                 title="GraphQL Batch Query Attack Possible",
                 url=found_gql, port=target["port"], risk="MEDIUM",
                 description="GraphQL accepts batched queries, which can be used to bypass rate limiting.",
                 output=r.text[:300], sources="fracture-graphql",
+                output_file=_gql_batch_ev,
                 service=target["scheme"], affected=found_gql,
                 owasp="A05:2025 Security Misconfiguration", nist="SC-5",
                 remediation="Implement query complexity limits and disable batching if not required.",
@@ -25331,11 +25640,20 @@ def _phase_graphql(target: dict, cfg: dict, pm: ProgressManager,
                       data='{"query":"{doesNotExist}"}',
                       headers={"Content-Type": "application/json"}, timeout=timeout)
         if "Did you mean" in r.text or "suggestion" in r.text.lower():
+            _gql_sug_ev = ""
+            try:
+                _gs_rq, _gs_rp = _save_http_evidence(
+                    out, phase, "graphql_suggestions", r)
+                _gql_sug_ev = json.dumps(
+                    [{"url": found_gql, "req": str(_gs_rq), "resp": str(_gs_rp)}])
+            except Exception:
+                pass
             out.add_finding(
                 title="GraphQL Field Suggestions Enabled",
                 url=found_gql, port=target["port"], risk="LOW",
                 description="GraphQL returns field name suggestions on typos, which can aid schema enumeration.",
                 output=r.text[:300], sources="fracture-graphql",
+                output_file=_gql_sug_ev,
                 service=target["scheme"], affected=found_gql,
                 owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                 remediation="Disable field suggestions in production.",
@@ -26744,12 +27062,26 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         # Check for low-entropy tokens
         unique_chars = len(set(val))
         if unique_chars < 8 and len(val) < 20:
+            _le_ev = ""
+            try:
+                _le_path = out.output_path(phase, f"low_entropy_{cookie.name}")
+                _le_path.write_text(
+                    f"Session Token Entropy Analysis\n"
+                    f"Cookie: {cookie.name}\n"
+                    f"Value length: {len(val)}\n"
+                    f"Unique characters: {unique_chars}\n"
+                    f"Value (truncated): {val[:40]}...\n",
+                    encoding="utf-8")
+                _le_ev = str(_le_path)
+            except Exception:
+                pass
             out.add_finding(
                 title="Low-Entropy Session Token",
                 url=url, port=target["port"], risk="HIGH",
                 description=f"Session cookie '{cookie.name}' has low entropy (value length={len(val)}, unique chars={unique_chars}).",
                 output=f"Cookie: {cookie.name}={val[:20]}...",
                 sources="fracture-session", service=target["scheme"],
+                output_file=_le_ev,
                 owasp="A07:2025 Identification and Authentication Failures",
                 nist="IA-5",
                 remediation="Use cryptographically secure random session token generators (e.g. 128-bit+).",
@@ -26757,12 +27089,25 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
 
         # Check for sequential/predictable tokens
         if val.isdigit():
+            _pred_ev = ""
+            try:
+                _pred_path = out.output_path(phase, f"predictable_{cookie.name}")
+                _pred_path.write_text(
+                    f"Predictable Session Token Analysis\n"
+                    f"Cookie: {cookie.name}\n"
+                    f"Value: {val[:40]}\n"
+                    f"Pattern: all-numeric (possible sequential ID)\n",
+                    encoding="utf-8")
+                _pred_ev = str(_pred_path)
+            except Exception:
+                pass
             out.add_finding(
                 title="Potentially Predictable Session Token",
                 url=url, port=target["port"], risk="HIGH",
                 description=f"Session cookie '{cookie.name}' consists entirely of digits, which may indicate a sequential or predictable value.",
                 output=f"Cookie: {cookie.name}={val[:20]}",
                 sources="fracture-session", service=target["scheme"],
+                output_file=_pred_ev,
                 owasp="A07:2025 Identification and Authentication Failures",
                 nist="IA-5",
                 remediation="Use cryptographically secure random session identifiers.",
@@ -27384,6 +27729,19 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                 pass
 
     if not _logout_url:
+        _no_logout_ev = ""
+        try:
+            _no_logout_path = out.output_path(phase, "no_logout_probes")
+            _no_logout_path.write_text(
+                "Logout endpoint probe results — all checked paths returned no logout function\n"
+                "Checked crawl links, structure_map, and common paths:\n"
+                "  /logout /signout /logoff /sign-out /log-out\n"
+                "  /auth/logout /api/logout /session/destroy\n"
+                "  /account/logout /user/logout\n",
+                encoding="utf-8")
+            _no_logout_ev = str(_no_logout_path)
+        except Exception:
+            pass
         out.add_finding(
             title="No Logout (Logoff) Function Detected",
             url=url, port=target["port"], risk="MEDIUM",
@@ -27399,6 +27757,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                 "/auth/logout /api/logout /session/destroy)"
             ),
             sources="fracture-logout", service=target["scheme"],
+            output_file=_no_logout_ev,
             owasp="A07:2025 Identification and Authentication Failures",
             nist="SC-23",
             remediation=(
@@ -27897,6 +28256,14 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
 
+                    _cs_ev = ""
+                    try:
+                        _cs_rq, _cs_rp = _save_http_evidence(
+                            out, phase, "concurrent_session_probe", _r_a2)
+                        _cs_ev = json.dumps(
+                            [{"url": url, "req": str(_cs_rq), "resp": str(_cs_rp)}])
+                    except Exception:
+                        pass
                     if not _a_still_valid:
                         out.add_finding(
                             title="Concurrent Session Limit Enforced",
@@ -27915,6 +28282,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                                 "test session A was rejected (login redirect or 401/403)."
                             ),
                             sources="fracture-logout", service=target["scheme"],
+                            output_file=_cs_ev,
                             owasp="A07:2025 Identification and Authentication Failures",
                             nist="AC-10",
                             remediation=(
@@ -27944,6 +28312,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                                 "remained valid after session B authenticated."
                             ),
                             sources="fracture-logout", service=target["scheme"],
+                            output_file=_cs_ev,
                             owasp="A07:2025 Identification and Authentication Failures",
                             nist="AC-10",
                             remediation=(
@@ -28016,12 +28385,22 @@ def _phase_csrf(target: dict, cfg: dict, pm: ProgressManager,
                              "Referer": "https://evil.attacker.com/"}
                 )
                 if r.status_code in (200, 302):
+                    _csrf_ev = ""
+                    try:
+                        _csrf_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', action)[:50]
+                        _csrf_rq, _csrf_rp = _save_http_evidence(
+                            out, phase, f"csrf_{_csrf_safe}", r)
+                        _csrf_ev = json.dumps(
+                            [{"url": action, "req": str(_csrf_rq), "resp": str(_csrf_rp)}])
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Cross-Site Request Forgery (CSRF) — Missing Token",
                         url=action, port=target["port"], risk="HIGH",
                         description=f"State-changing form at {action} lacks a CSRF token. A cross-origin POST was accepted.",
                         output=f"Form action: {action}\nInputs: {[i['name'] for i in inputs]}",
                         sources="fracture-csrf", service=target["scheme"],
+                        output_file=_csrf_ev,
                         affected=action,
                         owasp="A04:2025 Insecure Design", nist="SI-10",
                         remediation="Implement synchronised CSRF tokens on all state-changing forms. Use SameSite=Lax/Strict cookies.",
@@ -28210,12 +28589,22 @@ def _phase_cross_user(target: dict, cfg: dict, pm: ProgressManager,
                 if r1.status_code == 200 and r2.status_code == 200:
                     # If both users see the same data, check for user-specific content
                     if r1.text == r2.text and len(r1.text) > 50:
+                        _xu_ev = ""
+                        try:
+                            _xu_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', link)[:50]
+                            _xu_rq, _xu_rp = _save_http_evidence(
+                                out, phase, f"cross_user_{_xu_safe}", r2)
+                            _xu_ev = json.dumps(
+                                [{"url": link, "req": str(_xu_rq), "resp": str(_xu_rp)}])
+                        except Exception:
+                            pass
                         out.add_finding(
                             title="API Endpoint Returns Same Data for All Users",
                             url=link, port=target["port"], risk="MEDIUM",
                             description=f"API endpoint {link} returns identical data for different authenticated users — may indicate missing user-scope filtering.",
                             output=f"User1 == User2 response ({len(r1.text)} bytes)",
                             sources="fracture-cross-user", service=target["scheme"],
+                            output_file=_xu_ev,
                             affected=link,
                             owasp="A01:2025 Broken Access Control", nist="AC-3",
                             remediation="Scope API responses to the authenticated user. Do not return data for all users.",
@@ -28305,6 +28694,15 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                     continue   # custom error page catch-all
                 if _response_is_error_page(r.text, path):
                     continue   # secondary error-page guard
+                _adm_ev = ""
+                try:
+                    _adm_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', path)[:30]
+                    _adm_rq, _adm_rp = _save_http_evidence(
+                        out, phase, f"admin_debug_{_adm_safe}", r)
+                    _adm_ev = json.dumps(
+                        [{"url": probe_url, "req": str(_adm_rq), "resp": str(_adm_rp)}])
+                except Exception:
+                    pass
                 out.add_finding(
                     title=f"Exposed Admin/Debug Endpoint: {path}",
                     url=probe_url, port=target["port"], risk="HIGH",
@@ -28315,6 +28713,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                     ),
                     output=f"GET {probe_url} → HTTP {r.status_code}\n{r.text[:500]}",
                     sources="fracture-logging", service=target["scheme"],
+                    output_file=_adm_ev,
                     affected=probe_url,
                     owasp="A09:2025 Security Logging and Monitoring Failures", nist="AU-9",
                     remediation=(
@@ -28345,6 +28744,15 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                 # Risk lowered MEDIUM→LOW per 2026-06-11 review: stack-trace
                 # disclosure is information disclosure that aids reconnaissance
                 # but doesn't enable an attack on its own.
+                _stk_ev = ""
+                try:
+                    _stk_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', eu)[:50]
+                    _stk_rq, _stk_rp = _save_http_evidence(
+                        out, phase, f"stack_trace_{_stk_safe}", r)
+                    _stk_ev = json.dumps(
+                        [{"url": eu, "req": str(_stk_rq), "resp": str(_stk_rp)}])
+                except Exception:
+                    pass
                 out.add_finding(
                     title="Verbose Error Messages — Stack Trace Disclosed",
                     url=eu, port=target["port"], risk="LOW",
@@ -28355,6 +28763,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                     ),
                     output=f"GET {eu} → HTTP {r.status_code}\n{r.text[:1000]}",
                     sources="fracture-logging", service=target["scheme"],
+                    output_file=_stk_ev,
                     affected=eu,
                     owasp="A09:2025 Security Logging and Monitoring Failures", nist="AU-3",
                     remediation=(
@@ -28407,6 +28816,14 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
         if r:
             debug_hdrs = [h for h in r.headers if _DEBUG_HEADER_RE.search(h)]
             if debug_hdrs:
+                _dbg_hdr_ev = ""
+                try:
+                    _dbg_rq, _dbg_rp = _save_http_evidence(
+                        out, phase, f"debug_headers_{target['hostname']}", r)
+                    _dbg_hdr_ev = json.dumps(
+                        [{"url": url, "req": str(_dbg_rq), "resp": str(_dbg_rp)}])
+                except Exception:
+                    pass
                 out.add_finding(
                     title="Header Data Leakage: Debug/Trace Headers",
                     url=url, port=target["port"], risk="LOW",
@@ -28418,6 +28835,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                     ),
                     output=f"Headers: {', '.join(f'{h}: {r.headers[h]}' for h in debug_hdrs)}",
                     sources="fracture-logging", service=target["scheme"],
+                    output_file=_dbg_hdr_ev,
                     affected=url,
                     owasp="A09:2025 Security Logging and Monitoring Failures", nist="AU-3",
                     remediation=(
@@ -28692,6 +29110,15 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
         try:
             r = sess.get(murl, timeout=timeout, allow_redirects=False)
             if r and r.status_code == 200 and re.search(r'^#\s+HELP\s+|^#\s+TYPE\s+|\bprocess_cpu\b|\bgo_goroutines\b', r.text, re.M):
+                _met_ev = ""
+                try:
+                    _met_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', mpath)[:30]
+                    _met_rq, _met_rp = _save_http_evidence(
+                        out, phase, f"metrics_{_met_safe}", r)
+                    _met_ev = json.dumps(
+                        [{"url": murl, "req": str(_met_rq), "resp": str(_met_rp)}])
+                except Exception:
+                    pass
                 out.add_finding(
                     title="Exposed Metrics Endpoint with Sensitive Data",
                     url=murl, port=target["port"], risk="MEDIUM",
@@ -28700,6 +29127,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                                  f"and potentially sensitive timing and resource data."),
                     output=f"GET {murl} → HTTP {r.status_code}\n{r.text[:500]}",
                     sources="fracture-logging", service=target["scheme"],
+                    output_file=_met_ev,
                     affected=murl, owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                     remediation="Restrict /metrics and /prometheus endpoints to localhost or a monitoring network. Require authentication.",
                 )
@@ -28718,6 +29146,15 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
             r = sess.get(jurl, timeout=timeout, allow_redirects=False)
             if r and r.status_code == 200:
                 if "fracture_jsonp_check" in r.text and _jsonp_wrap_re2.search(r.text[:100]):
+                    _jp2_ev = ""
+                    try:
+                        _jp2_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', jpath)[:30]
+                        _jp2_rq, _jp2_rp = _save_http_evidence(
+                            out, phase, f"jsonp_lm_{_jp2_safe}", r)
+                        _jp2_ev = json.dumps(
+                            [{"url": jurl, "req": str(_jp2_rq), "resp": str(_jp2_rp)}])
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="JSONP Endpoint — Cross-Origin Data Leakage",
                         url=url.rstrip("/") + jpath, port=target["port"], risk="HIGH",
@@ -28726,6 +29163,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                                      f"An attacker can embed a <script> tag to exfiltrate the response from any domain."),
                         output=f"GET {jurl} → HTTP {r.status_code}\n{r.text[:300]}",
                         sources="fracture-logging", service=target["scheme"],
+                        output_file=_jp2_ev,
                         affected=url.rstrip("/") + jpath,
                         owasp="A05:2025 Security Misconfiguration", nist="SC-8",
                         remediation="Remove JSONP support and use CORS with an origin allowlist instead.",
@@ -28747,6 +29185,15 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                 pragma = r.headers.get("Pragma", "")
                 if not re.search(r'no-store|no-cache|private|must-revalidate', cc, re.I) \
                         and "no-cache" not in pragma.lower():
+                    _cc_ev = ""
+                    try:
+                        _cc_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', spath)[:30]
+                        _cc_rq, _cc_rp = _save_http_evidence(
+                            out, phase, f"cache_ctrl_{_cc_safe}", r)
+                        _cc_ev = json.dumps(
+                            [{"url": surl, "req": str(_cc_rq), "resp": str(_cc_rp)}])
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Missing Cache-Control on Sensitive Page",
                         url=surl, port=target["port"], risk="LOW",
@@ -28755,6 +29202,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                                      f"exposing sensitive data to users of shared computers."),
                         output=f"GET {surl} → HTTP {r.status_code}\nCache-Control: {cc or '(absent)'}\nPragma: {pragma or '(absent)'}",
                         sources="fracture-logging", service=target["scheme"],
+                        output_file=_cc_ev,
                         affected=surl, owasp="A05:2025 Security Misconfiguration", nist="SC-28",
                         remediation="Add 'Cache-Control: no-store, no-cache, private' and 'Pragma: no-cache' to all authenticated and sensitive pages.",
                     )
@@ -29194,6 +29642,14 @@ def _phase_open_redirect(target: dict, cfg: dict, pm: ProgressManager,
                 if _OPEN_REDIRECT_EXTERNAL_RE.search(loc) or \
                         _OPEN_REDIRECT_EXTERNAL_RE.search(r.text[:3000]):
                     _found.add(purl)
+                    _redir_ev = ""
+                    try:
+                        _redir_rq, _redir_rp = _save_http_evidence(
+                            out, phase, f"open_redirect_{param}", r)
+                        _redir_ev = json.dumps(
+                            [{"url": purl, "req": str(_redir_rq), "resp": str(_redir_rp)}])
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Open Redirect",
                         url=purl, port=target["port"], risk="MEDIUM",
@@ -29204,6 +29660,7 @@ def _phase_open_redirect(target: dict, cfg: dict, pm: ProgressManager,
                         output=(f"Parameter: {param}\nPayload: {payload}\n"
                                 f"Response: HTTP {r.status_code}\nLocation: {loc or '(in body)'}"),
                         sources="fracture-open-redirect", service=target["scheme"],
+                        output_file=_redir_ev,
                         affected=purl, owasp="A01:2025 Broken Access Control", nist="SC-7",
                         remediation=(
                             "Validate redirect destinations against an allowlist of trusted domains. "
@@ -30065,6 +30522,16 @@ def _phase_sri_check(target: dict, cfg: dict, pm: ProgressManager,
             key = (entry["host"], entry["tag"])
             if key in seen_pairs: continue
             seen_pairs.add(key)
+            _sri_ev = ""
+            try:
+                _sri_r = sess.get(entry["page"], timeout=timeout, verify=False, allow_redirects=True)
+                _sri_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', entry["host"])[:30]
+                _sri_rq, _sri_rp = _save_http_evidence(
+                    out, phase, f"sri_{_sri_safe}_{entry['tag']}", _sri_r)
+                _sri_ev = json.dumps(
+                    [{"url": entry["page"], "req": str(_sri_rq), "resp": str(_sri_rp)}])
+            except Exception:
+                pass
             out.add_finding(
                 title=f"Missing Subresource Integrity — {entry['tag']} from {entry['host']}",
                 url=entry["page"], port=target["port"], risk="MEDIUM",
@@ -30076,6 +30543,7 @@ def _phase_sri_check(target: dict, cfg: dict, pm: ProgressManager,
                     f"the application's origin. Resource: {entry['url']}"),
                 output=f"Page: {entry['page']}\nTag:  <{entry['tag']}>\nURL:  {entry['url']}",
                 sources="fracture-sri",
+                output_file=_sri_ev,
                 service=target["scheme"], affected=entry["url"],
                 owasp="A08:2025 Software and Data Integrity Failures",
                 nist="SI-7",
@@ -30140,6 +30608,14 @@ def _phase_host_header_ssrf(target: dict, cfg: dict, pm: ProgressManager,
                                             f"(status {base_status} → {r.status_code}, "
                                             f"len {base_len} → {len(body)})")
         if triggered:
+            _hssrf_ev = ""
+            try:
+                _hssrf_rq, _hssrf_rp = _save_http_evidence(
+                    out, phase, f"host_ssrf_{label}", r)
+                _hssrf_ev = json.dumps(
+                    [{"url": url, "req": str(_hssrf_rq), "resp": str(_hssrf_rp)}])
+            except Exception:
+                pass
             out.add_finding(
                 title=f"Host-Header SSRF Surface ({label})",
                 url=url, port=target["port"], risk="MEDIUM",
@@ -30152,6 +30628,7 @@ def _phase_host_header_ssrf(target: dict, cfg: dict, pm: ProgressManager,
                        f"Spoof: {label}\nResponse: {r.status_code}, len={len(body)}\n"
                        f"Evidence: {evidence}",
                 sources="fracture-host-ssrf",
+                output_file=_hssrf_ev,
                 service=target["scheme"], affected=url,
                 owasp="A10:2025 Server-Side Request Forgery",
                 nist="SC-7",
@@ -30410,6 +30887,15 @@ def _phase_mass_assignment(target: dict, cfg: dict, pm: ProgressManager,
                 reflected = [f for f in _MASS_ASSIGN_FIELDS
                              if f in r_aug.text and f not in r_base.text]
                 _ma_found.add(action)
+                _ma_ev = ""
+                try:
+                    _ma_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', action)[:50]
+                    _ma_rq, _ma_rp = _save_http_evidence(
+                        out, phase, f"mass_assign_form_{_ma_safe}", r_aug)
+                    _ma_ev = json.dumps(
+                        [{"url": action, "req": str(_ma_rq), "resp": str(_ma_rp)}])
+                except Exception:
+                    pass
                 out.add_finding(
                     title="Mass Assignment / Privilege Escalation via Parameter Binding",
                     url=action, port=target["port"], risk="HIGH",
@@ -30417,6 +30903,7 @@ def _phase_mass_assignment(target: dict, cfg: dict, pm: ProgressManager,
                     output=(f"Form: {action}\nInjected fields: {', '.join(reflected)}\n"
                             f"Response snippet: {r_aug.text[:400]}"),
                     sources="fracture-mass-assignment", service=target["scheme"],
+                    output_file=_ma_ev,
                     affected=action, owasp="A01:2025 Broken Access Control", nist="AC-3",
                     remediation="Define and enforce an explicit allowlist of bindable properties using DTOs or input validation schemas; reject or ignore any request field not explicitly permitted for the given operation.",
                 )
@@ -30445,6 +30932,14 @@ def _phase_mass_assignment(target: dict, cfg: dict, pm: ProgressManager,
                     reflected_j = [f for f in _MASS_ASSIGN_FIELDS
                                    if f in r_priv.text and f not in base_resp.text]
                     _ma_found.add(jurl)
+                    _maj_ev = ""
+                    try:
+                        _maj_rq, _maj_rp = _save_http_evidence(
+                            out, phase, f"mass_assign_json_{jpath.strip('/')}", r_priv)
+                        _maj_ev = json.dumps(
+                            [{"url": jurl, "req": str(_maj_rq), "resp": str(_maj_rp)}])
+                    except Exception:
+                        pass
                     out.add_finding(
                         title="Mass Assignment / Privilege Escalation via Parameter Binding",
                         url=jurl, port=target["port"], risk="HIGH",
@@ -30452,6 +30947,7 @@ def _phase_mass_assignment(target: dict, cfg: dict, pm: ProgressManager,
                         output=(f"PUT {jpath}\nInjected: {list(priv_payload.keys())}\n"
                                 f"Reflected: {reflected_j}\nResponse: {r_priv.text[:400]}"),
                         sources="fracture-mass-assignment", service=target["scheme"],
+                        output_file=_maj_ev,
                         affected=jurl, owasp="A01:2025 Broken Access Control", nist="AC-3",
                         remediation="Define and enforce an explicit allowlist of bindable properties using DTOs or input validation schemas; reject or ignore any request field not explicitly permitted for the given operation.",
                     )
@@ -31875,6 +32371,18 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             _ep_lower = (ep.get("path") or "").lower().rstrip("/")
             if _P20_LOGIN_PATH_RE.search(_ep_lower):
                 continue
+            _unauth_ev = ""
+            try:
+                _unauth_path = out.output_path("auth_walk",
+                    f"unauth_access_{re.sub(r'[^a-zA-Z0-9_-]', '_', ep['path'])[:40]}")
+                _unauth_lines = [f"URL: {ep['url']}",
+                    f"Unauthenticated: HTTP {unauth_st}"]
+                for _r in cred_roles:
+                    _unauth_lines.append(f"Role '{_r}': HTTP {ep_access.get(_r)}")
+                _unauth_path.write_text("\n".join(_unauth_lines), encoding="utf-8")
+                _unauth_ev = str(_unauth_path)
+            except Exception:
+                pass
             out.add_finding(
                 title="Unauthenticated Access to Protected Path",
                 url=ep["url"], port=port, risk="MEDIUM",
@@ -31885,6 +32393,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 ),
                 output=f"URL: {ep['url']} | Unauth: HTTP {unauth_st}",
                 command=f"GET {ep['url']} (no auth)",
+                output_file=_unauth_ev,
                 affected=ep["url"],
                 owasp="A01:2021 Broken Access Control", nist="AC-3",
                 remediation="Enforce authentication middleware on all non-public routes.",
@@ -32127,6 +32636,19 @@ def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
             f"Role ({ctx_label}): HTTP {h['r_status']} ({h['r_len']} bytes)"
             for h in hits
         ]
+        _bfla_ev = ""
+        try:
+            _bfla_path = out.output_path("auth_walk",
+                f"bfla_{risk.lower()}_{ctx_label}")
+            _bfla_path.write_text(
+                f"BFLA Evidence — {risk}\n"
+                f"Testing role: {ctx_label}\n"
+                f"Reference role: {role1_label}\n"
+                f"Endpoints:\n" + "\n".join(output_lines),
+                encoding="utf-8")
+            _bfla_ev = str(_bfla_path)
+        except Exception:
+            pass
         out.add_finding(
             title="Broken Function Level Authorization (BFLA)",
             url=target["url"],
@@ -32141,6 +32663,7 @@ def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
             output="\n".join(output_lines),
             sources="fracture-bfla",
             service=target["scheme"],
+            output_file=_bfla_ev,
             affected=affected_urls,
             owasp="A01:2025 Broken Access Control",
             nist="AC-3",
@@ -32359,6 +32882,14 @@ def _test_hsts_preload(target: dict, cfg: dict, out: "OutputManager",
         issues.append("preload directive missing")
 
     if issues:
+        _hsts_ev = ""
+        try:
+            _hsts_rq, _hsts_rp = _save_http_evidence(
+                out, phase, f"hsts_preload_{target['hostname']}", r)
+            _hsts_ev = json.dumps(
+                [{"url": url, "req": str(_hsts_rq), "resp": str(_hsts_rp)}])
+        except Exception:
+            pass
         out.add_finding(
             title="HSTS Not Preload-Ready",
             url=url, port=target["port"], risk="LOW",
@@ -32371,6 +32902,7 @@ def _test_hsts_preload(target: dict, cfg: dict, out: "OutputManager",
             ),
             output=f"Strict-Transport-Security: {hsts}\nIssues: {'; '.join(issues)}",
             sources="fracture-hsts-preload", service=target["scheme"],
+            output_file=_hsts_ev,
             affected=url,
             owasp="A05:2025 Security Misconfiguration", nist="SC-8",
             cwe=["CWE-523"],
@@ -32434,6 +32966,15 @@ def _test_coop_coep_corp(target: dict, cfg: dict, out: "OutputManager",
         ),
     ]
 
+    _coi_ev = ""
+    try:
+        _coi_rq, _coi_rp = _save_http_evidence(
+            out, phase, f"cross_origin_headers_{target['hostname']}", r)
+        _coi_ev = json.dumps(
+            [{"url": url, "req": str(_coi_rq), "resp": str(_coi_rp)}])
+    except Exception:
+        pass
+
     for hdr_name, short, desc, remed in _headers_to_check:
         if hdr_name not in r.headers:
             out.add_finding(
@@ -32442,6 +32983,7 @@ def _test_coop_coep_corp(target: dict, cfg: dict, out: "OutputManager",
                 description=f"The {hdr_name} ({short}) header is not set. {desc}",
                 output=f"Response headers do not include {hdr_name}.",
                 sources="fracture-cross-origin-headers", service=target["scheme"],
+                output_file=_coi_ev,
                 affected=url,
                 owasp="A05:2025 Security Misconfiguration", nist="SC-7",
                 cwe=["CWE-346"],
@@ -32565,6 +33107,15 @@ def _test_source_maps(target: dict, cfg: dict, out: "OutputManager",
                         if _sm_url.startswith("data:"):
                             # Inline source map — entire source embedded in the JS file
                             _found.add(js_url)
+                            _ism_ev = ""
+                            try:
+                                _ism_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', js_url)[:50]
+                                _ism_rq, _ism_rp = _save_http_evidence(
+                                    out, phase, f"inline_srcmap_{_ism_safe}", r_js)
+                                _ism_ev = json.dumps(
+                                    [{"url": js_url, "req": str(_ism_rq), "resp": str(_ism_rp)}])
+                            except Exception:
+                                pass
                             out.add_finding(
                                 title="Inline Source Map in JavaScript Bundle",
                                 url=js_url, port=target["port"], risk="MEDIUM",
@@ -32576,6 +33127,7 @@ def _test_source_maps(target: dict, cfg: dict, out: "OutputManager",
                                 ),
                                 output=f"URL: {js_url}\nsourceMappingURL=data:... (inline)",
                                 sources="fracture-source-maps", service=target["scheme"],
+                                output_file=_ism_ev,
                                 affected=js_url,
                                 owasp="A05:2025 Security Misconfiguration", nist="SC-28",
                                 cvss_score=5.3,
@@ -32960,6 +33512,15 @@ def _test_prototype_pollution_client(target: dict, cfg: dict,
             if _matches and _js_url not in _found:
                 _found.add(_js_url)
                 _match_preview = "; ".join(set(_matches))[:200]
+                _pp_ev = ""
+                try:
+                    _pp_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', _js_url)[:50]
+                    _pp_rq, _pp_rp = _save_http_evidence(
+                        out, phase, f"proto_pollution_{_pp_safe}", _r)
+                    _pp_ev = json.dumps(
+                        [{"url": _js_url, "req": str(_pp_rq), "resp": str(_pp_rp)}])
+                except Exception:
+                    pass
                 out.add_finding(
                     title="Potential Client-Side Prototype Pollution",
                     url=_js_url, port=target["port"], risk="MEDIUM",
@@ -32979,6 +33540,7 @@ def _test_prototype_pollution_client(target: dict, cfg: dict,
                     ),
                     sources="fracture-prototype-pollution-client",
                     service=target["scheme"],
+                    output_file=_pp_ev,
                     affected=_js_url,
                     owasp="A03:2025 Injection", nist="SI-10",
                     cvss_score=6.1,
@@ -35068,6 +35630,17 @@ def _test_password_policy(target: dict, cfg: dict, out: "OutputManager",
             f"  • '{pw}' ({desc}) — HTTP {code}"
             for pw, desc, code in accepted_weak
         )
+        _pwpol_ev = ""
+        try:
+            _pwpol_path = out.output_path(phase, "weak_password_policy")
+            _pwpol_path.write_text(
+                f"Password Policy Test Results\n"
+                f"Form: {pw_forms[0].get('action', url)}\n\n"
+                f"Accepted weak passwords:\n{details}\n",
+                encoding="utf-8")
+            _pwpol_ev = str(_pwpol_path)
+        except Exception:
+            pass
         out.add_finding(
             title="Weak Password Policy",
             url=pw_forms[0].get("action", url), port=target["port"],
@@ -35080,6 +35653,7 @@ def _test_password_policy(target: dict, cfg: dict, out: "OutputManager",
             output=f"Accepted weak passwords:\n{details}",
             sources="fracture-password-policy",
             service=target["scheme"],
+            output_file=_pwpol_ev,
             affected=pw_forms[0].get("action", url),
             owasp="A07:2025 Identification and Authentication Failures",
             nist="IA-5",
@@ -35119,6 +35693,8 @@ def _test_csrf_advanced(target: dict, cfg: dict, out: "OutputManager",
             if re.search(r'samesite\s*=\s*none', hdr_val, re.I):
                 _cookie_name = re.match(r'\s*([^=]+)', hdr_val)
                 cname = _cookie_name.group(1).strip() if _cookie_name else "(unknown)"
+                _ss_rq, _ss_rp = _save_http_evidence(
+                    out, phase, f"samesite_{cname[:20]}", r, endpoint_url=url)
                 out.add_finding(
                     title=f"Cookie SameSite=None Enables Cross-Site Requests: {cname}",
                     url=url, port=target["port"], risk="MEDIUM",
@@ -35128,6 +35704,7 @@ def _test_csrf_advanced(target: dict, cfg: dict, out: "OutputManager",
                         f"weak CSRF protection, this enables cross-site request forgery."
                     ),
                     output=f"Set-Cookie: {hdr_val.strip()[:300]}",
+                    output_file=f"{_ss_rq},{_ss_rp}",
                     sources="fracture-csrf-advanced",
                     service=target["scheme"], affected=url,
                     owasp="A01:2025 Broken Access Control", nist="SC-23",
@@ -35207,6 +35784,14 @@ def _test_csrf_advanced(target: dict, cfg: dict, out: "OutputManager",
         params = urllib.parse.parse_qs(parsed.query)
         for pname in params:
             if _CSRF_TOKEN_RE.search(pname):
+                _csrf_url_ev = out.output_path(phase, f"csrf_url_{pname[:20]}")
+                _csrf_url_ev.write_text(
+                    f"Form action URL: {action}\n"
+                    f"Token parameter: {pname}\n"
+                    f"Value: {params[pname]}\n"
+                    f"Full query string: {parsed.query}\n",
+                    encoding="utf-8",
+                )
                 out.add_finding(
                     title="CSRF Token Leaked via URL Query Parameter",
                     url=action, port=target["port"], risk="MEDIUM",
@@ -35216,6 +35801,7 @@ def _test_csrf_advanced(target: dict, cfg: dict, out: "OutputManager",
                         f"the Referer header, browser history, and server logs."
                     ),
                     output=f"Form action: {action}\nToken param: {pname}",
+                    output_file=str(_csrf_url_ev),
                     sources="fracture-csrf-advanced",
                     service=target["scheme"], affected=action,
                     owasp="A01:2025 Broken Access Control", nist="SC-23",
@@ -35394,6 +35980,9 @@ def _test_api_rate_limiting(target: dict, cfg: dict, out: "OutputManager",
                 break
 
         if not _rate_limited and _last_r:
+            _rl_rq, _rl_rp = _save_http_evidence(
+                out, phase, f"rate_limit_{ep.split('/')[-1][:20]}",
+                _last_r, endpoint_url=ep)
             out.add_finding(
                 title="API Endpoint Missing Rate Limiting",
                 url=ep, port=target["port"], risk="INFO",
@@ -35407,6 +35996,7 @@ def _test_api_rate_limiting(target: dict, cfg: dict, out: "OutputManager",
                         f"Requests sent: 10\n"
                         f"All returned: HTTP {_last_r.status_code}\n"
                         f"Rate limiting headers: None"),
+                output_file=f"{_rl_rq},{_rl_rp}",
                 sources="fracture-api-rate-limit",
                 service=target["scheme"], affected=ep,
                 owasp="A04:2025 Insecure Design", nist="SC-5",
@@ -35561,6 +36151,8 @@ def _test_graphql_advanced(target: dict, cfg: dict, out: "OutputManager",
             try:
                 data = json.loads(r.text)
                 if not data.get("errors"):
+                    _fd_rq, _fd_rp = _save_http_evidence(
+                        out, phase, "gql_field_dup", r, endpoint_url=found_gql)
                     out.add_finding(
                         title="GraphQL Field Duplication Not Limited",
                         url=found_gql, port=target["port"], risk="INFO",
@@ -35570,6 +36162,7 @@ def _test_graphql_advanced(target: dict, cfg: dict, out: "OutputManager",
                             f"exploitable, this indicates missing query complexity limits."
                         ),
                         output=f"Query: {dup_query[:200]}…\nStatus: HTTP {r.status_code}",
+                        output_file=f"{_fd_rq},{_fd_rp}",
                         sources="fracture-graphql-advanced",
                         service=target["scheme"], affected=found_gql,
                         owasp="A04:2025 Insecure Design", nist="SC-5",
@@ -38043,6 +38636,16 @@ def main() -> None:
                                         timeout=min(cfg.get("timeout", 10), 6),
                                         allow_redirects=False)
                                     if _bi_r.status_code == 200:
+                                        _bi_ev = ""
+                                        try:
+                                            _bi_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', _bi_path)[:30]
+                                            _bi2_rq, _bi2_rp = _save_http_evidence(
+                                                out, "recon", f"bi_unauth_{_bi_safe}", _bi_r)
+                                            _bi_ev = json.dumps(
+                                                [{"url": target["url"].rstrip("/") + _bi_path,
+                                                  "req": str(_bi2_rq), "resp": str(_bi2_rp)}])
+                                        except Exception:
+                                            pass
                                         out.add_finding(
                                             title=f"Unauthenticated {_bi_name} Access: {_bi_desc}",
                                             url=target["url"].rstrip("/") + _bi_path,
@@ -38055,6 +38658,7 @@ def main() -> None:
                                             affected=_bi_path,
                                             sources="fracture-discovery",
                                             service=target["scheme"],
+                                            output_file=_bi_ev,
                                             owasp="A01:2025 Broken Access Control", nist="AC-3",
                                             remediation=(
                                                 f"Require authentication for {_bi_path}. "
@@ -38339,6 +38943,7 @@ def main() -> None:
                             output=f"Server: {_ep_svr}",
                             affected=_ep_rel,
                             sources="fracture-headers", service=target["scheme"],
+                            output_file=_ep_shdr_ev,
                             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                             remediation="Remove or genericise the Server response header in the web server configuration (e.g., ServerTokens Prod in Apache; server_tokens off in nginx).",
                             http_code=_ep_resp.status_code,
@@ -38353,6 +38958,7 @@ def main() -> None:
                             output=f"X-Powered-By: {_ep_xpb}",
                             affected=_ep_rel,
                             sources="fracture-headers", service=target["scheme"],
+                            output_file=_ep_shdr_ev,
                             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                             remediation='Remove or suppress the X-Powered-By header at the application framework or reverse-proxy level (e.g., app.disable("x-powered-by") in Express; Header unset X-Powered-By in Apache).',
                             http_code=_ep_resp.status_code,
@@ -38370,6 +38976,7 @@ def main() -> None:
                             output=f"X-AspNet-Version: {_ep_aspnet}",
                             affected=_ep_rel,
                             sources="fracture-headers", service=target["scheme"],
+                            output_file=_ep_shdr_ev,
                             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                             remediation='Disable the header by setting enableVersionHeader="false" in the httpRuntime element of web.config.',
                             http_code=_ep_resp.status_code,
@@ -39141,6 +39748,7 @@ def main() -> None:
                     if p not in ("/", "")
                 ]
             if not _sm_paths_found:
+                _ns_ev = str(_sm_path_final) if _sm_path_final.exists() else None
                 out.add_finding(
                     title="No Web Structure Identified",
                     url=target["url"],
@@ -39153,6 +39761,7 @@ def main() -> None:
                         "or the application relies entirely on front-end routing (SPA)."
                     ),
                     output="No paths discovered beyond /",
+                    output_file=_ns_ev,
                     affected="/",
                     sources="fracture-structure",
                     service=target["scheme"],
@@ -39225,6 +39834,7 @@ def main() -> None:
                                 options=["Yes", "No"],
                             ).strip().lower()
                             if _retest_ans in ("yes", "y", "1"):
+                                _af_ev = str(_auth_status_path) if _auth_status_path.exists() else None
                                 out.add_finding(
                                     title="Authentication Failure Detected",
                                     url=target["url"],
@@ -39237,6 +39847,7 @@ def main() -> None:
                                         "with valid credentials for this role."
                                     ),
                                     output=f"Role: {_retest_role}\nUser: {_retest_user}",
+                                    output_file=_af_ev,
                                     affected="/",
                                     sources="fracture-auth",
                                     service=target["scheme"],
