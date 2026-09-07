@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.46.0"
+VERSION = "2.46.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -31785,19 +31785,29 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                     continue
                 for low_role in _lower_roles_ok:
                     # ── Hierarchy filter ──────────────────────────────
-                    # Only flag this role if a role with HIGHER or EQUAL
-                    # privilege is denied.  Roles with LESS privilege
-                    # being denied is expected in a tiered model (e.g.
-                    # Standard > Limited means Standard SHOULD have more
-                    # access).
+                    # Only flag this role if a role with HIGHER privilege
+                    # is denied.  Roles with LESS privilege being denied
+                    # is expected in a tiered model (e.g. Standard >
+                    # Limited means Standard SHOULD have more access).
+                    #
+                    # Peer-role threshold: roles whose privilege_counts
+                    # are within 15% of each other are treated as peers
+                    # (lateral roles with different permission shapes,
+                    # e.g. Editor vs Auditor).  Neither being denied
+                    # triggers BFLA for the other — they aren't in a
+                    # hierarchical relationship.  Only roles with a
+                    # meaningfully HIGHER count qualify as "higher
+                    # privilege" evidence.
                     _lr_priv = privilege_counts.get(low_role, 0)
+                    _peer_threshold = max(_lr_priv * 0.15, 1)
                     _higher_denied = [
                         d for d in _lower_roles_denied
-                        if privilege_counts.get(d, 0) >= _lr_priv
+                        if privilege_counts.get(d, 0) > _lr_priv + _peer_threshold
                     ]
                     if not _higher_denied and not _is_admin_path:
-                        # Only lower-privilege roles are denied — proper
-                        # hierarchy, not BFLA.
+                        # Only lower-privilege or peer roles are denied
+                        # — proper hierarchy / lateral permissions, not
+                        # BFLA.
                         continue
                     # Build per-role access summary as evidence output
                     _bfla_lines = [f"URL: {ep['url']}"]
