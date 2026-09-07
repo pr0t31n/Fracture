@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.45.0"
+VERSION = "2.46.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3937,6 +3937,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         role_label: str = "",
                         no_interactive: bool = False,
                         session: "requests.Session | None" = None,
+                        quiet: bool = False,
                         ) -> "requests.Session | None":
     """
     Return an authenticated requests.Session for the given cfg/auth_key, or None if disabled.
@@ -3949,6 +3950,10 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
     session: optional pre-built Session.  When provided the auth flow authenticates
     through this session instead of creating a new one.  Used by the session-fixation
     test so the injected cookie survives through the login exchange.
+
+    quiet: when True, suppress WARNING-level log messages for expected failures
+    (credential rejections, field-name resets).  Used by default-credential testing
+    where dozens of rejected logins are expected.
     """
     auth = cfg.get(auth_key, {})
     if not auth.get("enabled"):
@@ -7402,16 +7407,18 @@ return null;
         # Guard: field names must not equal credential values (Crucible
         # misconfiguration — credential pasted into field-name slot).
         if u and configured_uf == u:
-            vc.log(
-                f"[auth] login_username_field equals the username value "
-                f"({configured_uf!r}) — resetting to 'username'",
-                "WARNING",
-            )
+            if not quiet:
+                vc.log(
+                    f"[auth] login_username_field equals the username value "
+                    f"({configured_uf!r}) — resetting to 'username'",
+                    "WARNING",
+                )
             configured_uf = "username"
         if p and pf == p:
-            vc.log(
-                f"[auth] login_password_field equals the password value "
-                f"— resetting to 'password'",
+            if not quiet:
+                vc.log(
+                    f"[auth] login_password_field equals the password value "
+                    f"— resetting to 'password'",
                 "WARNING",
             )
             pf = "password"
@@ -8791,7 +8798,8 @@ return null;
                         except Exception:
                             pass
             except Exception as _ge:
-                vc.log(f"[auth] Could not verify login form at {_login_url}: {_ge}", "WARNING")
+                if not quiet:
+                    vc.log(f"[auth] Could not verify login form at {_login_url}: {_ge}", "WARNING")
 
         # 3. POST credentials, then handle any post-login pages
         if _login_url:
@@ -8947,11 +8955,12 @@ return null;
                     pass
                 if _json_api_rejected:
                     auth["auth_verified"] = False
-                    vc.log(
-                        "[auth] JSON API explicitly rejected credentials "
-                        "— skipping MFA probes / post-login analysis",
-                        "WARNING",
-                    )
+                    if not quiet:
+                        vc.log(
+                            "[auth] JSON API explicitly rejected credentials "
+                            "— skipping MFA probes / post-login analysis",
+                            "WARNING",
+                        )
                     return None
                 _handle_post_login_page(_post_resp)
 
@@ -23133,7 +23142,7 @@ def _probe_login_default_creds(login_url: str, target: dict,
             _test_cfg["auth"] = _test_auth
             try:
                 _test_sess = _build_auth_session(
-                    _test_cfg, no_interactive=True)
+                    _test_cfg, no_interactive=True, quiet=True)
                 if _test_sess:
                     # Verify: hit the auth-gated page and check for real content
                     _vr = _test_sess.get(_verify_url, timeout=cfg.get("timeout", 10),
@@ -31725,20 +31734,31 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 # access — the path is public, no privilege to escalate.
                 if _ok(unauth_st, "unauthenticated", ep):
                     continue
-                # ── Differential access check ────────────────────────
-                # BFLA is only meaningful when the endpoint shows differential
-                # access control: at least one lower-privilege role is DENIED.
-                # If ALL lower-privilege roles can access it, the endpoint is
-                # shared functionality (e.g. /api/profile), not admin-only —
-                # not a BFLA finding.
+                # ── Hierarchy-aware differential access check ─────────
+                # Roles are ranked by privilege_counts (number of
+                # accessible paths): more paths = more privilege.  In a
+                # tiered RBAC model (e.g. Admin > Standard > Limited),
+                # Standard having access to something Limited cannot is
+                # EXPECTED — not BFLA.
                 #
-                # Exception: paths with admin-specific keywords ARE flagged
-                # even when all roles can access them (genuinely broken RBAC).
+                # TRUE BFLA occurs when:
+                #   a) A role has access to a path that a HIGHER-privilege
+                #      role (other than most_privileged) is DENIED, or
+                #   b) The path looks genuinely admin-only (keyword
+                #      match) AND only admin can access it — but a lower
+                #      role also has access.
+                #
+                # NOT BFLA:
+                #   - A mid-tier role (Standard) has access but a lower-
+                #     tier role (Limited) does not → proper tiered RBAC.
+                #   - A path matches an admin keyword but ALL authenticated
+                #     roles can access it → shared authenticated
+                #     functionality (e.g. /Audit is a business function).
                 _ep_path_lower = (ep.get("path") or "").lower()
                 _is_admin_path = bool(re.search(
                     r'/admin(?![a-z])|/manage(?![a-z])|/config(?:uration)?(?![a-z])'
                     r'|/settings(?![a-z])|/users?/(?:admin|manage|create|delete)'
-                    r'|/roles?(?![a-z])|/permissions?(?![a-z])|/audit(?![a-z])'
+                    r'|/roles?(?![a-z])|/permissions?(?![a-z])'
                     r'|/internal(?![a-z])',
                     _ep_path_lower))
                 _lower_roles_ok = []
@@ -31752,18 +31772,42 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                         _lower_roles_ok.append(_lr)
                     else:
                         _lower_roles_denied.append(_lr)
-                # Skip when all lower roles have access and path is not admin-typed
+                # Skip when all lower roles have access and path is not
+                # admin-typed — shared authenticated functionality.
                 if _lower_roles_ok and not _lower_roles_denied and not _is_admin_path:
                     continue
+                # For admin-keyword paths where ALL authenticated roles
+                # have access: not a BFLA — the path is shared
+                # authenticated functionality whose name happens to
+                # match an admin keyword (e.g. /Audit is a business
+                # domain, not an admin panel).
+                if _is_admin_path and not _lower_roles_denied:
+                    continue
                 for low_role in _lower_roles_ok:
+                    # ── Hierarchy filter ──────────────────────────────
+                    # Only flag this role if a role with HIGHER or EQUAL
+                    # privilege is denied.  Roles with LESS privilege
+                    # being denied is expected in a tiered model (e.g.
+                    # Standard > Limited means Standard SHOULD have more
+                    # access).
+                    _lr_priv = privilege_counts.get(low_role, 0)
+                    _higher_denied = [
+                        d for d in _lower_roles_denied
+                        if privilege_counts.get(d, 0) >= _lr_priv
+                    ]
+                    if not _higher_denied and not _is_admin_path:
+                        # Only lower-privilege roles are denied — proper
+                        # hierarchy, not BFLA.
+                        continue
                     # Build per-role access summary as evidence output
                     _bfla_lines = [f"URL: {ep['url']}"]
                     for _br in all_roles:
                         _bc = ep_access.get(_br, "N/A")
                         _bfla_lines.append(f"  {_br}: HTTP {_bc}")
-                    if _lower_roles_denied:
+                    if _higher_denied:
                         _bfla_lines.append(
-                            f"Denied roles: {', '.join(_lower_roles_denied)}")
+                            f"Denied higher-privilege roles: "
+                            f"{', '.join(_higher_denied)}")
                     _bfla_output = "\n".join(_bfla_lines)
                     # Save evidence file
                     _bfla_ev = ""
@@ -31778,7 +31822,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                         _bfla_ev = str(_bfla_file)
                     except Exception:
                         pass
-                    _bfla_risk = "HIGH" if _lower_roles_denied or _is_admin_path else "MEDIUM"
+                    _bfla_risk = "HIGH" if _higher_denied else "MEDIUM"
                     out.add_finding(
                         title=f"BFLA: Role '{low_role}' Can Access Admin Path",
                         url=ep["url"], port=port, risk=_bfla_risk,
@@ -31786,8 +31830,9 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                             f"Role '{low_role}' can access {ep['path']} which "
                             f"is accessible to '{most_privileged}' (most "
                             f"privileged)"
-                            + (f" but denied to {', '.join(_lower_roles_denied)}"
-                               if _lower_roles_denied
+                            + (f" but denied to {', '.join(_higher_denied)}"
+                               f" (higher-privilege role{'s' if len(_higher_denied) > 1 else ''})"
+                               if _higher_denied
                                else " and contains admin-specific functionality")
                             + ". This indicates broken function-level authorization."
                         ),
