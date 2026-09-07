@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.48.0"
+VERSION = "2.48.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3683,6 +3683,7 @@ class OutputManager:
                 "ssl/tls ciphers:",
                 "ssl/tls forward secrecy:",
                 "ssl/tls vulnerability:",
+                "ssl/tls vulnerability (potential):",
                 "ssl/tls: tlsv1.3",
                 "header data leakage:",
                 "waf / edge security platform active:",
@@ -32611,6 +32612,13 @@ def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
         _bfla_body = (r.text or "")[:8000]
         if _P20_LOGIN_FORM_RE.search(_bfla_body):
             continue
+        # Skip error/catch-all pages — custom error pages (e.g.
+        # ErrorPage.aspx) return 200 to all roles and are not
+        # real protected content.
+        if _response_is_error_page(_bfla_body, _bfla_rel):
+            continue
+        if _matches_error_fingerprint(_bfla_body):
+            continue
 
         body_hash  = hash(r.text[:4096])
         body_match = (body_hash == ep.get("body_hash")) and (
@@ -38491,9 +38499,11 @@ def main() -> None:
                     r'static|assets?|css|js|fonts?|images?|img|icons?|'
                     r'favicon|robots\.txt|sitemap|\.well-known|'
                     r'health|healthcheck|ping|status|version|'
-                    r'register|signup|password[\-_]?reset|forgot[\-_]?password'
+                    r'register|signup|password[\-_]?reset|forgot[\-_]?password|'
+                    r'error[\-_]?page|errorpage|error\.aspx|error\.html|'
+                    r'(?:custom[\-_]?)?error(?:[\-_]handler)?'
                     r')'
-                    r'(?:[/\-_?#]|$)',
+                    r'(?:[/\-_?#.]|$)',
                     re.IGNORECASE,
                 )
 
@@ -38518,6 +38528,14 @@ def main() -> None:
                         _br = effective_auth.get(
                             _burl, timeout=_bfla_timeout, allow_redirects=False)
                         if _br.status_code == 200:
+                            _br_body = (_br.text or "")[:8000]
+                            _br_rel  = urllib.parse.urlparse(_burl).path or "/"
+                            # Skip error/catch-all pages — they return 200 to
+                            # everyone and are not real privileged content.
+                            if _response_is_error_page(_br_body, _br_rel):
+                                continue
+                            if _matches_error_fingerprint(_br_body):
+                                continue
                             _role1_accessible_endpoints.append({
                                 "url":        _burl,
                                 "status":     _br.status_code,
