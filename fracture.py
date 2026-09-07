@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.46.1"
+VERSION = "2.47.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3388,6 +3388,131 @@ class OutputManager:
             result.append(rel)
         return "\n".join(result)
 
+    @staticmethod
+    def _auto_highlights(
+        title: str, output: str, cves: str, affected: str,
+    ) -> list:
+        """Derive highlight terms from finding data when none are explicit.
+
+        Returns a list of 1-10 strings suitable for searching in evidence
+        files.  The terms should be precise enough to avoid false matches
+        (e.g. ``Server: Microsoft-IIS/10.0`` rather than ``Server``).
+        """
+        hl: list = []
+        t = title or ""
+
+        # ── Header findings — use full "Name: Value" lines from output ──
+        if re.match(
+            r"^(Header Data Leakage|Software Version Disclosed"
+            r"|HTTP Header Fingerprints|Unknown Header Identified"
+            r"|Endpoint-Specific Security Header Found"
+            r"|Technology Identified|Vulnerable Component):",
+            t,
+        ):
+            for ln in (output or "").split("\n"):
+                ln = ln.strip()
+                if not ln or re.match(
+                    r"^(HTTP Status:|Matched at:|Plugin:|Missing:)", ln, re.I
+                ):
+                    continue
+                if 5 <= len(ln) <= 120:
+                    hl.append(ln)
+            if hl:
+                return hl[:8]
+
+        # ── Missing / permissive security headers ──
+        if t.startswith("Missing Security Header:"):
+            _hdr = t.split(":", 1)[1].strip()
+            if _hdr:
+                hl.append(_hdr)
+                return hl
+        if t.startswith("Permissive Security Header:"):
+            for ln in (output or "").split("\n"):
+                ln = ln.strip()
+                if ln and ":" in ln and len(ln) >= 8:
+                    hl.append(ln[:120])
+                    break
+            if hl:
+                return hl
+
+        # ── Cookie findings — cookie name from output ──
+        if re.search(r"Cookie|Session", t, re.I):
+            _ck_m = re.findall(
+                r"(?:Cookies?\s+without\s+\w+:\s*|Cookie:\s*|"
+                r"Set-Cookie:\s*)(\S+)",
+                output or "", re.I,
+            )
+            if _ck_m:
+                hl.extend(_ck_m[:3])
+                return hl
+
+        # ── Injection / XSS — use the payload from output ──
+        if re.search(
+            r"injection|xss|sqli|ssrf|rce|xxe|ssti|crlf|traversal|"
+            r"deserialization|smuggling|open.redirect",
+            t, re.I,
+        ):
+            for ln in (output or "").split("\n"):
+                ln = ln.strip()
+                _pm = re.match(
+                    r"^(?:Payload|Parameter|Field|Vector|Matched):\s*(.+)",
+                    ln, re.I,
+                )
+                if _pm and len(_pm.group(1)) >= 3:
+                    hl.append(_pm.group(1).strip()[:100])
+            if hl:
+                return hl[:5]
+
+        # ── SSL/TLS — cipher names + CVEs ──
+        if re.match(r"^(SSL/TLS|CBC Mode|Non-Standard Cipher|Deprecated)", t):
+            for ln in (output or "").split("\n"):
+                ln = ln.strip()
+                if ln and len(ln) >= 4 and not ln.startswith("Matched"):
+                    hl.append(ln)
+            if cves:
+                hl.extend(
+                    c.strip() for c in cves.split(",") if c.strip()
+                )
+            if hl:
+                return hl[:10]
+
+        # ── WAF / LB / CDN — platform name ──
+        if re.match(r"^(WAF|Load Balancer|CDN)", t):
+            for ln in (output or "").split("\n"):
+                ln = ln.strip()
+                if ln and ":" in ln and len(ln) >= 5:
+                    hl.append(ln[:120])
+            if hl:
+                return hl[:5]
+
+        # ── Telerik / ViewState / specific tech ──
+        if "Telerik" in t:
+            hl.extend([
+                "Telerik.Web.UI", "DialogHandler",
+                "WebResource.axd", "ScriptResource.axd",
+            ])
+            return hl
+        if "ViewState" in t:
+            hl.extend([
+                "__VIEWSTATE", "ViewState",
+                "EnableViewStateMac",
+            ])
+            return hl
+
+        # ── CVEs as last resort ──
+        if cves:
+            hl.extend(c.strip() for c in cves.split(",") if c.strip())
+            return hl[:5]
+
+        # ── Title suffix after ":" as minimal fallback ──
+        if ":" in t:
+            _suffix = t.split(":")[-1].strip()
+            if 4 <= len(_suffix) <= 80:
+                hl.append(_suffix)
+                return hl
+
+        return hl
+
     def add_finding(
         self,
         title: str,
@@ -3478,7 +3603,8 @@ class OutputManager:
             "remediation":    remediation or "",
             "accounts":       list(self._current_accounts),
             "http_code":      int(http_code) if http_code else 0,
-            "highlights":     highlights or [],
+            "highlights":     highlights or self._auto_highlights(
+                                  title, output, cves, affected),
         }
         # Merge v1.1 enrichment fields (cvss_score, cvss_vector, cwe, etc.)
         if extra_v11:
@@ -13582,6 +13708,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                         _ww_fp = _FINGERPRINT_HEADERS.get(_ww_hn_l)
                                         if _ww_fp:
                                             _fp_tech, _fp_desc = _ww_fp
+                                            _ww_hl_uc1 = [f"{hdr_name}: {hdr_value}"] if hdr_value else [hdr_name]
                                             out.add_finding(
                                                 title=f"HTTP Header Fingerprints {_fp_tech}: {hdr_name}",
                                                 url=url, port=target["port"], risk="INFO",
@@ -13604,8 +13731,10 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                                     "attacker reconnaissance."
                                                 ),
                                                 http_code=_ww_http_status or 0,
+                                                highlights=_ww_hl_uc1,
                                             )
                                             continue
+                                        _ww_hl_uc2 = [f"{hdr_name}: {hdr_value}"] if hdr_value else [hdr_name]
                                         out.add_finding(
                                             title=f"Unknown Header Identified: {hdr_name}",
                                             url=url, port=target["port"], risk="INFO",
@@ -13627,6 +13756,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                                 "remove non-standard headers if not required."
                                             ),
                                             http_code=_ww_http_status or 0,
+                                            highlights=_ww_hl_uc2,
                                         )
                                 continue
 
@@ -13664,6 +13794,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                 _ww_pn_fp = _FINGERPRINT_HEADERS.get(_ww_pn_l)
                                 if _ww_pn_fp:
                                     _pn_fp_tech, _pn_fp_desc = _ww_pn_fp
+                                    _ww_hl_hp1 = [f"{pname}: {version}"] if version else [pname]
                                     out.add_finding(
                                         title=f"HTTP Header Fingerprints {_pn_fp_tech}: {pname}",
                                         url=url, port=target["port"], risk="INFO",
@@ -13685,8 +13816,10 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                             "to prevent technology disclosure."
                                         ),
                                         http_code=_ww_http_status or 0,
+                                        highlights=_ww_hl_hp1,
                                     )
                                     continue
+                                _ww_hl_hp2 = [f"{pname}: {version}"] if version else [pname]
                                 out.add_finding(
                                     title=f"Unknown Header Identified: {pname}",
                                     url=url, port=target["port"], risk="INFO",
@@ -13708,6 +13841,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                         "remove non-standard headers if not required."
                                     ),
                                     http_code=_ww_http_status or 0,
+                                    highlights=_ww_hl_hp2,
                                 )
                                 continue
 
@@ -13725,6 +13859,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                     _recon_edge_security.append(_ww_pt_es)
                                     vc.log(f"[recon] Edge security identified via WhatWeb plugin: {_ww_pt_es}", "INFO")
                             _ww_versions.append((pname, version))
+                            _ww_hl_tech = [f"{pname} {version}".strip()] if version else [pname]
                             out.add_finding(
                                 title=(f"Technology Identified: {pname} {version}".strip()
                                        if version else f"Technology Identified: {pname}"),
@@ -13746,6 +13881,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                     "and properly configured."
                                 ),
                                 http_code=_ww_http_status or 0,
+                                highlights=_ww_hl_tech,
                             )
                             # 2026-06-11 review A06 fix: compare version against
                             # an embedded vulnerable-version map. The map covers
@@ -13754,6 +13890,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             if version:
                                 _vuln_summary = _check_component_vuln(pname, version)
                                 if _vuln_summary:
+                                    _ww_hl_vuln = [f"{pname} {version}"]
+                                    _ww_hl_vuln.extend(_vuln_summary.get("cves") or [])
                                     out.add_finding(
                                         title=f"Vulnerable Component: {pname} {version}",
                                         url=url, port=target["port"],
@@ -13771,6 +13909,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                             f"Upgrade {pname} to {_vuln_summary.get('fixed_in', 'latest')} "
                                             f"or apply vendor patches."),
                                         http_code=_ww_http_status or 0,
+                                        highlights=_ww_hl_vuln,
                                     )
                         except Exception:
                             pass
@@ -15732,14 +15871,19 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             # Certificate information finding — always emitted when cert data is available
             if _ss_cert_subject or _ss_cert_issuer or _ss_cert_expiry:
                 _ss_cert_lines = []
+                _ss_cert_hl = []
                 if _ss_cert_subject:
                     _ss_cert_lines.append(f"Subject: {_ss_cert_subject}")
+                    _ss_cert_hl.append(f"Subject: {_ss_cert_subject}")
                 if _ss_cert_issuer:
                     _ss_cert_lines.append(f"Issuer: {_ss_cert_issuer}")
+                    _ss_cert_hl.append(f"Issuer: {_ss_cert_issuer}")
                 if _ss_cert_expiry:
                     _ss_cert_lines.append(f"Not Valid After: {_ss_cert_expiry}")
+                    _ss_cert_hl.append(_ss_cert_expiry)
                 if _ss_cert_valid:
                     _ss_cert_lines.append(f"Status: {_ss_cert_valid}")
+                    _ss_cert_hl.append(_ss_cert_valid)
                 out.add_finding(
                     title="SSL/TLS Certificate Information",
                     url=target["url"], port=port, risk="INFO",
@@ -15752,6 +15896,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     output_file=str(out_f),
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                     remediation="",
+                    highlights=_ss_cert_hl,
                 )
             # Dedicated Heartbleed check on raw output — the section-header filter
             # removes "  Heartbleed:" so the generic _TLS_VULN_PATTERNS match fails.
@@ -15776,6 +15921,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                             "Update OpenSSL to 1.0.1g+ or 1.0.2+. Revoke and reissue "
                             "all certificates. Invalidate all active session tokens."
                         ),
+                        highlights=["Heartbleed", "vulnerable", "CVE-2014-0160"],
                     )
             # Explicit cert expiry check — compare parsed Not-valid-after date to UTC now
             if _ss_cert_expiry:
@@ -15805,6 +15951,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                             output_file=str(out_f),
                             owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                             remediation="Renew the certificate immediately and implement automated renewal (e.g., ACME/Let's Encrypt) to prevent future expiry.",
+                            highlights=[_ss_cert_expiry, "expired"],
                         )
                 except Exception:
                     pass
@@ -15817,6 +15964,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     output_file=str(out_f),
                     owasp="A02:2025 Cryptographic Failures", nist="SC-8",
                     remediation="Replace self-signed certificates with certificates issued by a trusted CA; use ACME/Let's Encrypt for cost-free automation.",
+                    highlights=["self-signed", "Self-signed"],
                 )
             _tls10_on    = any("1.0" in c.get("protocol", "") for c in _ss_ciphers)
             _cbc_suites  = [c["cipher"] for c in _ss_ciphers if "cbc" in c["cipher"].lower()]
@@ -15915,6 +16063,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         "library (OpenSSL 1.1.1+, SChannel on Server "
                         "2022+) supports it."
                     ),
+                    highlights=["TLSv1.3"],
                 )
 
             # 2. Ciphers without forward secrecy (no ECDHE/DHE key exchange)
@@ -15947,6 +16096,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         "suites (preferring ECDHE for performance). "
                         "TLSv1.3 mandates forward secrecy."
                     ),
+                    highlights=_no_fs_ciphers[:5],
                 )
 
             # 3. CBC mode cipher suites (standalone finding, beyond LUCKY13)
@@ -15972,6 +16122,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         "legacy compatibility, ensure it is not preferred "
                         "and the server stack is patched."
                     ),
+                    highlights=_cbc_suites[:5],
                 )
 
             # 4. SHA-1 HMAC cipher suites
