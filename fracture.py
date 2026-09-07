@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.47.0"
+VERSION = "2.47.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -17765,6 +17765,17 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                         continue
                     _sh_checked += 1
                     _sh_ep_hdrs = _shr.headers
+                    # Save HTTP evidence for this endpoint response
+                    _sh_ep_ev = ""
+                    try:
+                        _sh_ep_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', _shp)[:50]
+                        _sh_ep_rq, _sh_ep_rp = _save_http_evidence(
+                            out, phase, f"ep_headers_{_sh_ep_safe}", _shr)
+                        _sh_ep_ev = json.dumps(
+                            [{"url": _sh_full, "req": str(_sh_ep_rq),
+                              "resp": str(_sh_ep_rp)}])
+                    except Exception:
+                        pass
                     # Check each security header that was present on the base
                     for _sh_hname in _base_sec_hdrs_present:
                         if _sh_hname not in _sh_ep_hdrs:
@@ -17782,6 +17793,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                                 output=f"Missing: {_sh_hname}\nEndpoint: {_shp}",
                                 sources="fracture-headers",
                                 service=target["scheme"],
+                                output_file=_sh_ep_ev,
                                 affected=_shp,
                                 owasp="A05:2025 Security Misconfiguration",
                                 nist="CM-7",
