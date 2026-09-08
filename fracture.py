@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.48.2"
+VERSION = "2.48.3"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -32183,6 +32183,16 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
 
+    # URL path patterns that indicate an error/catch-all page.  SPAs render
+    # error content client-side so the server HTML shell has no error markers —
+    # the URL itself is the only signal.
+    _P20_ERROR_PATH_RE = re.compile(
+        r'(?i)(?:^|/)'
+        r'(?:error[\-_]?page|errorpage|error\.aspx|error\.html|'
+        r'(?:custom[\-_]?)?error(?:[\-_]handler)?)'
+        r'(?:[/\-_?#.]|$)'
+    )
+
     def _classify_response(resp, rel_path: str) -> str:
         """Classify a 200 response body beyond the bare status code."""
         body = (resp.text or "").strip()
@@ -32193,6 +32203,12 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         # JS so the static HTML won't contain <input type=password>.
         if _P20_LOGIN_PATH_RE.search(rel_path):
             return "login_form"
+        # URL-path heuristic: paths that ARE error pages or route through
+        # an error handler (e.g. /omt/ErrorPage.aspx/anything).  SPAs
+        # render error content client-side — the raw HTML shell has no
+        # body markers, so the URL is the only reliable signal.
+        if _P20_ERROR_PATH_RE.search(rel_path):
+            return "error_page"
         body_hash = _p20_hl.md5(body.encode("utf-8", "replace")).hexdigest()
         # Strip tags for text matching
         visible = re.sub(r'<[^>]+>', ' ', body[:8000])
@@ -32390,6 +32406,10 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             # accessible and are not missing access control.
             _ep_lower = (ep.get("path") or "").lower().rstrip("/")
             if _P20_LOGIN_PATH_RE.search(_ep_lower):
+                continue
+            # Defence in depth: skip error-page URLs even if body
+            # classification missed them (SPA shell hides error markers).
+            if _P20_ERROR_PATH_RE.search(_ep_lower):
                 continue
             _unauth_ev = ""
             try:
