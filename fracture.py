@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.48.1"
+VERSION = "2.48.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -28373,6 +28373,15 @@ def _phase_csrf(target: dict, cfg: dict, pm: ProgressManager,
             pass
 
         if not csrf_fields:
+            # ASP.NET WebForms: __VIEWSTATE + __EVENTVALIDATION together
+            # serve as CSRF protection via MAC validation — the server
+            # rejects cross-origin POSTs that don't carry a valid,
+            # server-issued ViewState.
+            _aspnet_vs = any(i.get("name") == "__VIEWSTATE" for i in inputs)
+            _aspnet_ev = any(i.get("name") == "__EVENTVALIDATION" for i in inputs)
+            if _aspnet_vs and _aspnet_ev:
+                continue  # treat as CSRF-protected
+
             # No CSRF token — attempt a cross-origin POST
             data = {i["name"]: "fracture_csrf_test" for i in inputs if i.get("name")}
             try:
@@ -28386,6 +28395,16 @@ def _phase_csrf(target: dict, cfg: dict, pm: ProgressManager,
                              "Referer": "https://evil.attacker.com/"}
                 )
                 if r.status_code in (200, 302):
+                    # Skip error/catch-all pages — custom error pages
+                    # (e.g. ASP.NET ErrorPage.aspx) return 200 to any
+                    # POST regardless of origin and are not state-changing.
+                    _csrf_body = (r.text or "")[:8000]
+                    _csrf_rel  = urllib.parse.urlparse(action).path or "/"
+                    if _response_is_error_page(_csrf_body, _csrf_rel):
+                        continue
+                    if _matches_error_fingerprint(_csrf_body):
+                        continue
+
                     _csrf_ev = ""
                     try:
                         _csrf_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', action)[:50]
@@ -35748,6 +35767,12 @@ def _test_csrf_advanced(target: dict, cfg: dict, out: "OutputManager",
                                timeout=timeout, allow_redirects=False,
                                headers={"Content-Type": "application/x-www-form-urlencoded"})
             if r_form.status_code in range(200, 300):
+                _ct_body = (r_form.text or "")[:8000]
+                _ct_rel  = urllib.parse.urlparse(ep).path or "/"
+                if _response_is_error_page(_ct_body, _ct_rel):
+                    continue
+                if _matches_error_fingerprint(_ct_body):
+                    continue
                 _rq, _rp = _save_http_evidence(
                     out, phase, f"json_csrf_{ep.split('/')[-1][:20]}",
                     r_form, endpoint_url=ep, method="POST")
@@ -35856,6 +35881,13 @@ def _test_csrf_advanced(target: dict, cfg: dict, out: "OutputManager",
                     r'invalid.?token|csrf.?fail|forbidden|expired.?token',
                     r.text[:2000], re.I,
                 ):
+                    # Skip error/catch-all pages
+                    _tv_body = (r.text or "")[:8000]
+                    _tv_rel  = urllib.parse.urlparse(action).path or "/"
+                    if _response_is_error_page(_tv_body, _tv_rel):
+                        continue
+                    if _matches_error_fingerprint(_tv_body):
+                        continue
                     _rq, _rp = _save_http_evidence(
                         out, phase, f"csrf_token_{test_label}",
                         r, endpoint_url=action, method="POST")
@@ -35899,34 +35931,42 @@ def _test_csrf_advanced(target: dict, cfg: dict, out: "OutputManager",
                 r'invalid.?token|csrf.?fail|forbidden|missing.?token',
                 r.text[:2000], re.I,
             ):
-                _rq, _rp = _save_http_evidence(
-                    out, phase, "csrf_token_removed",
-                    r, endpoint_url=action, method="POST")
-                out.add_finding(
-                    title="CSRF Token Not Required (removed token accepted)",
-                    url=action, port=target["port"], risk="HIGH",
-                    description=(
-                        f"The form at {action} accepted a POST request with the "
-                        f"CSRF token field '{csrf_name}' entirely removed. "
-                        f"The server does not require the token for state-changing requests."
-                    ),
-                    output=(f"Form: {action}\n"
-                            f"Removed field: {csrf_name}\n"
-                            f"Status: HTTP {r.status_code}"),
-                    output_file=f"{_rq},{_rp}",
-                    sources="fracture-csrf-advanced",
-                    service=target["scheme"], affected=action,
-                    owasp="A01:2025 Broken Access Control", nist="SC-23",
-                    cvss_score=8.1,
-                    cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N",
-                    cwe=["CWE-352"],
-                    remediation=(
-                        "Require and validate CSRF tokens on every state-changing request. "
-                        "Reject requests that omit the token entirely."
-                    ),
-                    http_code=r.status_code,
-                )
-                vc.log(f"[csrf_advanced] Token not required at {action}", "SUCCESS")
+                # Skip error/catch-all pages
+                _rm_body = (r.text or "")[:8000]
+                _rm_rel  = urllib.parse.urlparse(action).path or "/"
+                if _response_is_error_page(_rm_body, _rm_rel):
+                    pass  # skip finding
+                elif _matches_error_fingerprint(_rm_body):
+                    pass  # skip finding
+                else:
+                    _rq, _rp = _save_http_evidence(
+                        out, phase, "csrf_token_removed",
+                        r, endpoint_url=action, method="POST")
+                    out.add_finding(
+                        title="CSRF Token Not Required (removed token accepted)",
+                        url=action, port=target["port"], risk="HIGH",
+                        description=(
+                            f"The form at {action} accepted a POST request with the "
+                            f"CSRF token field '{csrf_name}' entirely removed. "
+                            f"The server does not require the token for state-changing requests."
+                        ),
+                        output=(f"Form: {action}\n"
+                                f"Removed field: {csrf_name}\n"
+                                f"Status: HTTP {r.status_code}"),
+                        output_file=f"{_rq},{_rp}",
+                        sources="fracture-csrf-advanced",
+                        service=target["scheme"], affected=action,
+                        owasp="A01:2025 Broken Access Control", nist="SC-23",
+                        cvss_score=8.1,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N",
+                        cwe=["CWE-352"],
+                        remediation=(
+                            "Require and validate CSRF tokens on every state-changing request. "
+                            "Reject requests that omit the token entirely."
+                        ),
+                        http_code=r.status_code,
+                    )
+                    vc.log(f"[csrf_advanced] Token not required at {action}", "SUCCESS")
         except Exception:
             pass
 
