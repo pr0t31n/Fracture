@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.49.1"
+VERSION = "2.49.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -23989,27 +23989,58 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
 
     vc.status(phase, "Auth Bypass", "running", "Timing attack probe", 6, 7)
     # 7. Timing attack — non-constant-time comparison on login
+    # Uses the KNOWN username from cfg["auth"] so the "valid user" probe
+    # is actually valid.  Hardcoding "admin" is unreliable — we don't
+    # know that username exists in the target system.  If no known
+    # username was provided, skip the probe entirely.
     import time as _time_ab
+    _timing_auth = cfg.get("auth", {})
+    _timing_known_user = (_timing_auth.get("username") or "").strip()
+    _timing_user_field = _timing_auth.get("login_username_field", "username")
+    _timing_pass_field = _timing_auth.get("login_password_field", "password")
+    if not _timing_known_user:
+        vc.log("[auth_bypass] Timing probe: skipped — no known username in auth config", "INFO")
     _timing_login_paths = ["/login", "/auth/login", "/api/login", "/signin", "/auth/token"]
-    for lpath in _timing_login_paths:
+    for lpath in (_timing_login_paths if _timing_known_user else []):
         try:
             login_u = url + lpath
             times_invalid = []
             times_valid_fmt = []
             _timing_resp_invalid = None
             _timing_resp_valid   = None
-            # Probe with clearly invalid usernames vs. valid-format usernames
+            # Probe with clearly invalid username vs. the KNOWN valid username
             for _ in range(5):
                 t0 = _time_ab.monotonic()
-                _timing_resp_invalid = sess.post(login_u, json={"username": "zzznouserzzzz", "password": "wrong"}, timeout=timeout)
+                _timing_resp_invalid = sess.post(login_u, json={_timing_user_field: "zzznouserzzzz", _timing_pass_field: "wrong"}, timeout=timeout)
                 times_invalid.append(_time_ab.monotonic() - t0)
             for _ in range(5):
                 t0 = _time_ab.monotonic()
-                _timing_resp_valid = sess.post(login_u, json={"username": "admin", "password": "wrong_password_xyz"}, timeout=timeout)
+                _timing_resp_valid = sess.post(login_u, json={_timing_user_field: _timing_known_user, _timing_pass_field: "wrong_password_xyz"}, timeout=timeout)
                 times_valid_fmt.append(_time_ab.monotonic() - t0)
             if times_invalid and times_valid_fmt:
                 avg_invalid = sum(times_invalid) / len(times_invalid)
                 avg_valid   = sum(times_valid_fmt) / len(times_valid_fmt)
+                # Gate: both probes must return the SAME status code.
+                # Different codes mean different server code paths (error
+                # redirect vs backend timeout, etc.) — the timing delta
+                # reflects routing, not credential-comparison timing.
+                _sc_inv = _timing_resp_invalid.status_code if _timing_resp_invalid else 0
+                _sc_val = _timing_resp_valid.status_code   if _timing_resp_valid   else 0
+                if _sc_inv != _sc_val:
+                    vc.log(
+                        f"[auth_bypass] Timing probe at {lpath}: skipped — "
+                        f"status codes differ ({_sc_inv} vs {_sc_val}), "
+                        f"delta {(avg_valid-avg_invalid)*1000:.0f}ms not attributable "
+                        f"to credential comparison", "INFO")
+                    continue
+                # Also skip when either probe hit an error page redirect
+                # (3xx) or server error (5xx) — the timing is unreliable.
+                if (_sc_inv >= 500 or _sc_val >= 500
+                        or 300 <= _sc_inv < 400 or 300 <= _sc_val < 400):
+                    vc.log(
+                        f"[auth_bypass] Timing probe at {lpath}: skipped — "
+                        f"HTTP {_sc_inv}/{_sc_val} (server error or redirect)", "INFO")
+                    continue
                 # If valid-format username is consistently >150ms slower, timing oracle likely
                 if avg_valid - avg_invalid > 0.15:
                     _timing_evidence: list = []
@@ -24032,13 +24063,14 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                         title="Timing Attack — Non-Constant-Time Authentication",
                         url=login_u, port=target["port"], risk="MEDIUM",
                         description=(f"Login endpoint {lpath} shows a {(avg_valid - avg_invalid)*1000:.0f}ms "
-                                     f"average response time difference between invalid usernames and "
-                                     f"valid-format usernames, suggesting non-constant-time comparison. "
+                                     f"average response time difference between a non-existent username and "
+                                     f"the known valid username, suggesting non-constant-time comparison. "
+                                     f"Both probes returned HTTP {_sc_val}. "
                                      f"An attacker can use this timing oracle for username enumeration."),
                         output=(f"Avg time (invalid user): {avg_invalid*1000:.0f}ms\n"
-                                f"Avg time (valid-format user): {avg_valid*1000:.0f}ms\n"
+                                f"Avg time (known valid user): {avg_valid*1000:.0f}ms\n"
                                 f"Delta: {(avg_valid-avg_invalid)*1000:.0f}ms\n"
-                                f"HTTP status (valid-format probe): {_timing_http_code}"),
+                                f"HTTP status (both probes): {_sc_val}"),
                         output_file=",".join(_timing_evidence) if _timing_evidence else None,
                         sources="fracture-auth-bypass", service=target["scheme"],
                         affected=login_u,
