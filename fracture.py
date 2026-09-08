@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.48.3"
+VERSION = "2.49.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -4072,6 +4072,54 @@ def _make_session(cfg: dict, scope_hostnames: "set | None" = None) -> requests.S
         except Exception:
             pass
     return sess
+
+
+# ── Session → subprocess auth extraction ─────────────────────────────────────
+# Default session headers that should NOT be forwarded as "auth" to subprocesses
+_SUBPROCESS_SKIP_HEADERS = frozenset({
+    "user-agent", "accept-encoding", "connection", "accept",
+    "upgrade-insecure-requests",
+})
+
+
+def _extract_subprocess_auth(sess: requests.Session) -> "tuple[str, list[tuple[str, str]]]":
+    """Extract cookies + auth headers from a session for subprocess tools.
+
+    Returns (cookie_str, auth_headers) where:
+      cookie_str  — "name=val; name2=val2" ready for CLI flags (empty if none)
+      auth_headers — list of (Header-Name, value) tuples for Authorization,
+                     X-Auth-Token, X-API-Key, etc. (excludes User-Agent and
+                     other non-auth defaults)
+    """
+    # ── Cookies ──────────────────────────────────────────────────────────────
+    cookie_str = ""
+    try:
+        cookies = sess.cookies.get_dict()
+        if cookies:
+            cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    except Exception:
+        pass
+    # ── Auth headers ─────────────────────────────────────────────────────────
+    auth_headers: list[tuple[str, str]] = []
+    try:
+        for hname, hval in sess.headers.items():
+            if hname.lower() in _SUBPROCESS_SKIP_HEADERS:
+                continue
+            auth_headers.append((hname, hval))
+        # If sess.auth is set (Basic/Digest) but no Authorization header yet,
+        # synthesise the Basic header.  Digest/NTLM/Kerberos require a
+        # challenge–response flow that subprocess tools cannot replicate, so
+        # we only handle the simple case.
+        if sess.auth and not any(h.lower() == "authorization" for h, _ in auth_headers):
+            if isinstance(sess.auth, tuple) and len(sess.auth) == 2:
+                import base64
+                _cred = base64.b64encode(
+                    f"{sess.auth[0]}:{sess.auth[1]}".encode()
+                ).decode()
+                auth_headers.append(("Authorization", f"Basic {_cred}"))
+    except Exception:
+        pass
+    return cookie_str, auth_headers
 
 
 def _build_auth_session(cfg: dict, auth_key: str = "auth",
@@ -13631,8 +13679,16 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         whatweb = None
     if whatweb:
         ww_out = out.output_path(phase, "whatweb_" + target["hostname"])
-        cmd = [whatweb, f"--log-json={ww_out}", "-a", "3", "--quiet", "--no-errors", url]
-        vc.log("[recon] Running whatweb ...", "INFO")
+        cmd = [whatweb, f"--log-json={ww_out}", "-a", "3", "--quiet", "--no-errors"]
+        # Forward session cookies + auth headers to whatweb
+        _ww_cookie_str, _ww_auth_headers = _extract_subprocess_auth(sess)
+        if _ww_cookie_str:
+            cmd += ["--cookie", _ww_cookie_str]
+        for _ah_name, _ah_val in _ww_auth_headers:
+            cmd += ["--header", f"{_ah_name}:{_ah_val}"]
+        cmd.append(url)
+        _ww_authed = bool(_ww_cookie_str or _ww_auth_headers)
+        vc.log("[recon] Running whatweb" + (" (authenticated)" if _ww_authed else "") + " ...", "INFO")
         try:
             _ww_started = datetime.now().astimezone()
             proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -15829,7 +15885,10 @@ _TLS_VULN_PATTERNS = {
     # DROWN: HIGH — cross-protocol Bleichenbacher oracle via SSLv2 decrypts TLS sessions
     # (CVE-2016-0800 CVSS v3 5.9 MEDIUM; pentest consensus HIGH given C:H impact). CWE-310.
     "SSL/TLS Vulnerability: DROWN":         (re.compile(r'DROWN|VULNERABLE.*drown', re.I),    "HIGH",   "CVE-2016-0800", ""),
-    "SSL/TLS Vulnerability: LOGJAM":        (re.compile(r'LOGJAM|VULNERABLE.*logjam', re.I),  "HIGH",   "CVE-2015-4000", ""),
+    # LOGJAM: HIGH only when testssl/sslscan explicitly says VULNERABLE (≤1024-bit
+    # DH or export ciphers). The common-prime advisory (2048+ bits, no export) is
+    # handled by dedicated post-loop logic that emits MEDIUM. CWE-326.
+    "SSL/TLS Vulnerability: LOGJAM":        (re.compile(r'(?:VULNERABLE[^\n]*LOGJAM|LOGJAM[^\n]*VULNERABLE)', re.I),  "HIGH",   "CVE-2015-4000", ""),
     "SSL/TLS Vulnerability: FREAK":         (re.compile(r'FREAK|VULNERABLE.*freak', re.I),    "MEDIUM", "CVE-2015-0204", ""),
     "SSL/TLS Vulnerability: SWEET32":       (re.compile(r'SWEET32|3DES.*cipher|DES-CBC3', re.I), "MEDIUM", "CVE-2016-2183", ""),
     "SSL/TLS Vulnerability: LUCKY13":       (re.compile(r'LUCKY13|lucky13', re.I),            "MEDIUM", "CVE-2013-0169", ""),
@@ -16327,6 +16386,51 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         remediation="Disable weak protocols. Enable TLS 1.2/1.3 only.",
                         highlights=_tvp_hl2,
                     )
+            # ── LOGJAM common-prime detection (MEDIUM) ──────────────────
+            # testssl flags "common prime with XXXX bits" when the server
+            # uses a well-known DH group (RFC 7919 ffdhe2048/3072/4096).
+            # This is NOT the classic LOGJAM attack (which requires
+            # ≤1024-bit or export DH) but carries a theoretical
+            # precomputation risk.  The _TLS_VULN_PATTERNS entry fires
+            # HIGH only on explicitly "VULNERABLE" lines; this block
+            # catches the common-prime advisory separately.
+            _logjam_cp = re.search(
+                r'LOGJAM[^\n]*common prime[^\n]*?(\d+)\s*bits',
+                stdout, re.I,
+            )
+            if _logjam_cp and not re.search(
+                r'LOGJAM[^\n]*VULNERABLE', stdout, re.I
+            ):
+                _dh_bits = int(_logjam_cp.group(1))
+                _lj_risk = "HIGH" if _dh_bits <= 1024 else "MEDIUM"
+                out.add_finding(
+                    title="SSL/TLS Vulnerability: LOGJAM",
+                    url=target["url"], port=port,
+                    risk=_lj_risk,
+                    description=(
+                        f"TLS service uses a common {_dh_bits}-bit "
+                        f"Diffie-Hellman prime for DHE key exchange. "
+                        + ("DH modulus ≤1024 bits permits the classic "
+                           "LOGJAM downgrade attack."
+                           if _dh_bits <= 1024
+                           else "While the key length exceeds the classic "
+                                "LOGJAM threshold, use of a widely shared "
+                                "prime introduces a theoretical "
+                                "precomputation risk.")
+                    ),
+                    cves="CVE-2015-4000",
+                    sources="testssl.sh", service="https",
+                    output_file=str(out_f),
+                    owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                    remediation=(
+                        "Enable TLS 1.3. Prefer ECDHE over DHE cipher "
+                        "suites. If DHE must remain, use a unique "
+                        "server-generated DH group rather than "
+                        "standardized common primes."
+                    ),
+                    highlights=["LOGJAM", "CVE-2015-4000",
+                                f"{_dh_bits} bits"],
+                )
             # Detect missing security headers reported by testssl.
             # Checked against the full _SECURITY_HEADERS list; risk and format
             # aligned with shcheck findings so duplicates merge rather than stack.
@@ -18033,6 +18137,8 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
 
     _HSTS = "Strict-Transport-Security"
     _val_timeout = min(cfg.get("timeout", 10), 6)
+    # Extract session cookies + auth headers for shcheck subprocess
+    _shc_cookie_str, _shc_auth_headers = _extract_subprocess_auth(sess)
     targets_to_scan = [target]
     if extra_urls:
         for eu in extra_urls:
@@ -18073,12 +18179,17 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
 
         # Build command: python3 path/to/shcheck.py if it's a .py script
         _flags = ["-k", "--colors=none", "-j"]
+        if _shc_cookie_str:
+            _flags += ["-c", _shc_cookie_str]
+        for _ah_name, _ah_val in _shc_auth_headers:
+            _flags += ["-a", f"{_ah_name}:{_ah_val}"]
         if shcheck.endswith(".py"):
             cmd = [sys.executable, shcheck] + _flags + [tgt_url]
         else:
             cmd = [shcheck] + _flags + [tgt_url]
 
-        vc.log(f"[shcheck] Running on {tgt_url}", "INFO")
+        _shc_authed = bool(_shc_cookie_str or _shc_auth_headers)
+        vc.log(f"[shcheck] Running on {tgt_url}" + (" (authenticated)" if _shc_authed else ""), "INFO")
         try:
             _shc_started = datetime.now().astimezone()
             proc = subprocess.run(
@@ -25079,14 +25190,8 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
             _vp_url = _vs_origin + _vp
             if _vp_url not in _vs_parents:
                 _vs_parents.append(_vp_url)
-    # Extract session cookies for subprocess tools (nikto, nuclei)
-    _vs_cookie_str = ""
-    try:
-        _vs_cookies = sess.cookies.get_dict()
-        if _vs_cookies:
-            _vs_cookie_str = "; ".join(f"{k}={v}" for k, v in _vs_cookies.items())
-    except Exception:
-        pass
+    # Extract session cookies + auth headers for subprocess tools (nuclei, nikto)
+    _vs_cookie_str, _vs_auth_headers = _extract_subprocess_auth(sess)
     vc.status(phase, "Vuln Scan", "running", "launching background", 0, 2)
 
     # ── 1. Launch nuclei ────────────────────────────────────────────────────
@@ -25150,7 +25255,10 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
                "-o", str(nuc_out)]
         if _vs_cookie_str:
             cmd += ["-H", f"Cookie: {_vs_cookie_str}"]
-            vc.log("[vulnscan] nuclei: passing session cookies for authenticated scanning", "INFO")
+        for _ah_name, _ah_val in _vs_auth_headers:
+            cmd += ["-H", f"{_ah_name}: {_ah_val}"]
+        if _vs_cookie_str or _vs_auth_headers:
+            vc.log("[vulnscan] nuclei: passing session auth for authenticated scanning", "INFO")
         if Path(_nuc_templates_dir).is_dir():
             cmd += ["-t", _nuc_templates_dir]
         # ── Technology-based template pre-filtering ──
@@ -25191,10 +25299,13 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
                    "-output", str(nik_out), "-nointeractive"]
             if _vs_cookie_str:
                 cmd += ["-Add-header", f"Cookie: {_vs_cookie_str}"]
+            for _ah_name, _ah_val in _vs_auth_headers:
+                cmd += ["-Add-header", f"{_ah_name}: {_ah_val}"]
+            _nik_authed = bool(_vs_cookie_str or _vs_auth_headers)
             vc.log(
                 f"[vulnscan] Launching nikto ({_nik_idx + 1}/{len(_vs_parents)}) "
                 f"in background against {_nik_base}"
-                + (" (authenticated)" if _vs_cookie_str else "") + " ...",
+                + (" (authenticated)" if _nik_authed else "") + " ...",
                 "INFO",
             )
             try:
