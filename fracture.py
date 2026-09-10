@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.49.2"
+VERSION = "2.50.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -2807,6 +2807,7 @@ _VP_LOG    = "__CRUCIBLE_LOG__:"
 _VP_ERR    = "__CRUCIBLE_ERR__:"
 _VP_PROMPT = "__CRUCIBLE_PROMPT__:"
 _VP_STATUS = "__CRUCIBLE_STATUS__:"
+_CR_ACTION = "__CRUCIBLE_ACTION_ITEM__:"
 
 
 class VantageConsole:
@@ -3005,6 +3006,12 @@ class VantageConsole:
                 return raw
             else:
                 return input(f"  [?] {question}: ").strip()
+
+    def action_item(self, entry: dict) -> None:
+        with self._lock:
+            if self._managed:
+                sys.stdout.write(_CR_ACTION + json.dumps(entry) + "\n")
+                sys.stdout.flush()
 
     @staticmethod
     def _categorise(msg: str) -> str:
@@ -3226,6 +3233,10 @@ class OutputManager:
         # occurrence per title+hostname is recorded.  Subsequent calls for the
         # same header on different paths are silently dropped.
         self._hdr_disclosure_seen: set = set()
+        # ── Action items (Siphon recommendations) ─────────────────────────
+        self._action_items_lock = threading.Lock()
+        self.action_items_json  = self.root / "action_items.json"
+        self._ai_seen: set      = set()
         self._setup_dirs()
         vc.set_error_log(self.error_log)
 
@@ -3243,6 +3254,8 @@ class OutputManager:
             self.findings_json.write_text("[]\n", encoding="utf-8")
         if not self.findings_csv.exists():
             self._write_findings_csv_header()
+        if not self.action_items_json.exists():
+            self.action_items_json.write_text("[]\n", encoding="utf-8")
 
     def _write_log_header(self) -> None:
         header = (
@@ -3286,6 +3299,44 @@ class OutputManager:
         with self.findings_csv.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=self.FINDINGS_CSV_FIELDS, extrasaction="ignore")
             writer.writeheader()
+
+    def log_action_item(self, *, type: str, recommended_tool: str,
+                        target: str, ip: str, port: int, hostname: str,
+                        title: str, description: str, source_finding: str,
+                        priority: str, scope: str,
+                        metadata: "dict | None" = None) -> None:
+        key = (recommended_tool.lower(), target.lower(), title.strip().lower())
+        with self._action_items_lock:
+            if key in self._ai_seen:
+                return
+            self._ai_seen.add(key)
+            entry = {
+                "id":              str(_uuid.uuid4()),
+                "type":            type,
+                "recommended_tool": recommended_tool,
+                "target":          target,
+                "ip":              ip,
+                "port":            port,
+                "hostname":        hostname,
+                "title":           title,
+                "description":     description,
+                "source_finding":  source_finding,
+                "priority":        priority,
+                "scope":           scope,
+                "status":          "pending",
+                "datetime":        datetime.now().isoformat(),
+                "metadata":        metadata or {},
+            }
+            try:
+                items = json.loads(
+                    self.action_items_json.read_text(encoding="utf-8") or "[]")
+            except Exception:
+                items = []
+            items.append(entry)
+            tmp = self.action_items_json.with_suffix(".tmp")
+            tmp.write_text(json.dumps(items, indent=2), encoding="utf-8")
+            os.replace(str(tmp), str(self.action_items_json))
+        vc.action_item(entry)
 
     def _ts(self) -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -14171,6 +14222,26 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                         remediation=f"Update or patch {term} to address known vulnerabilities.",
                     )
                     vc.log(f"[recon] searchsploit: {len(exploits)} hit(s) for {term!r}", "SUCCESS")
+                    # ── Action item: exploit verification ──────────────────
+                    out.log_action_item(
+                        type="exploit",
+                        recommended_tool="ExploitDB",
+                        target=url,
+                        ip=target.get("ip", ""),
+                        port=target["port"],
+                        hostname=target.get("hostname", ""),
+                        title=f"Exploit Verification Required — {term}",
+                        description=(
+                            f"{len(exploits)} public exploit(s) found for '{term}'. "
+                            "Manual verification recommended."
+                        ),
+                        source_finding=f"Public Exploit Available: {term}",
+                        priority="HIGH",
+                        scope="webapp",
+                        metadata={"search_term": term,
+                                  "exploit_count": len(exploits),
+                                  "titles": titles_list[:3]},
+                    )
             except Exception as e:
                 out.log_error("searchsploit", cmd, str(e))
     else:
@@ -20354,6 +20425,29 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             ),
         )
         vc.log(f"[crawl] API layer identified: {len(_crawl_api_sorted)} endpoint(s)", "SUCCESS")
+        # ── Action item: recommend Siphon for API security testing ─────
+        out.log_action_item(
+            type="api",
+            recommended_tool="Siphon",
+            target=url,
+            ip=target.get("ip", ""),
+            port=target["port"],
+            hostname=target.get("hostname", ""),
+            title="API Layer Detected — Siphon Scan Recommended",
+            description=(
+                f"{len(_crawl_api_sorted)} API endpoint(s) were discovered during "
+                f"unauthenticated crawling at {url}. Recommend Siphon for "
+                f"comprehensive OWASP API Security Top 10 testing."
+            ),
+            source_finding="API Endpoint Identified",
+            priority="medium",
+            scope=target.get("scope", ""),
+            metadata={
+                "api_count": len(_crawl_api_sorted),
+                "source_phase": "crawl",
+                "auth_state": "unauthenticated",
+            },
+        )
 
     vc.status(phase, "Crawl", "running", "JS secret scan", page_count, max_pages)
     for js_url in set(all_js):
@@ -23987,7 +24081,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
             )
             vc.log(f"[auth_bypass] Credentials in URL: {link[:80]}", "SUCCESS")
 
-    vc.status(phase, "Auth Bypass", "running", "Timing attack probe", 6, 7)
+    vc.status(phase, "Auth Bypass", "running", "Timing attack probe", 6, 8)
     # 7. Timing attack — non-constant-time comparison on login
     # Uses the KNOWN username from cfg["auth"] so the "valid user" probe
     # is actually valid.  Hardcoding "admin" is unreliable — we don't
@@ -24087,7 +24181,295 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
 
-    vc.status(phase, "Auth Bypass", "complete", "Done", 7, 7)
+    vc.status(phase, "Auth Bypass", "running", "Jenkins console probes", 7, 8)
+    # 8. Jenkins unauthenticated console probes
+    # Detect Jenkins from target_profile.json technologies, Server header, or
+    # crawl_data fingerprints.  If Jenkins is identified, probe for RCE-level
+    # unauth access to /script, /manage, /api/json, and /asynchPeople/.
+    _jenkins_detected = False
+    try:
+        _jk_tp_path = out.root / "target_profile.json"
+        if _jk_tp_path.exists():
+            _jk_tp = json.loads(_jk_tp_path.read_text(encoding="utf-8"))
+            _jk_blob = " ".join([
+                _jk_tp.get("server", ""),
+                _jk_tp.get("powered_by", ""),
+                " ".join(
+                    (t.get("name", "") if isinstance(t, dict) else str(t))
+                    for t in (_jk_tp.get("technologies") or [])
+                ),
+            ]).lower()
+            if "jenkins" in _jk_blob or "hudson" in _jk_blob:
+                _jenkins_detected = True
+    except Exception:
+        pass
+    # Also check crawl_data responses and Server headers
+    if not _jenkins_detected:
+        try:
+            _jk_r = sess.get(url, timeout=timeout, allow_redirects=True)
+            if _jk_r and ("jenkins" in (_jk_r.headers.get("X-Jenkins", "").lower())
+                          or "jenkins" in (_jk_r.headers.get("Server", "").lower())
+                          or "jenkins" in _jk_r.text[:5000].lower()):
+                _jenkins_detected = True
+        except Exception:
+            pass
+
+    if _jenkins_detected:
+        vc.log("[auth_bypass] Jenkins detected — probing unauthenticated consoles", "INFO")
+        _jk_evidence = out.output_path(phase, "jenkins_console_" + target["hostname"])
+        _jk_evidence.write_text(
+            f"# Jenkins Unauthenticated Console Probes — {url}\n\n",
+            encoding="utf-8"
+        )
+
+        # 8a. Groovy Script Console — /script (RCE)
+        try:
+            _jk_script_url = url.rstrip("/") + "/script"
+            _jk_r1 = sess.get(_jk_script_url, timeout=timeout, allow_redirects=True)
+            if _jk_r1 and _jk_r1.status_code == 200 and re.search(
+                    r'groovy\s*script|script\s*console', _jk_r1.text, re.I):
+                with _jk_evidence.open("a", encoding="utf-8") as _jf:
+                    _jf.write(
+                        f"## Groovy Script Console (RCE)\n"
+                        f"URL: {_jk_script_url}\n"
+                        f"Status: {_jk_r1.status_code}\n"
+                        f"Response excerpt:\n{_jk_r1.text[:3000]}\n\n"
+                    )
+                out.add_finding(
+                    title="Jenkins: Unauthenticated Groovy Script Console (RCE)",
+                    url=_jk_script_url, port=target["port"], risk="CRITICAL",
+                    description=(
+                        "The Jenkins Groovy Script Console at /script is accessible "
+                        "without authentication, allowing arbitrary code execution "
+                        "on the Jenkins server. An attacker can execute system "
+                        "commands, read files, install backdoors, and pivot into "
+                        "the internal network."
+                    ),
+                    output=f"GET {_jk_script_url} → {_jk_r1.status_code}",
+                    sources="fracture-auth-bypass", service=target["scheme"],
+                    affected=_jk_script_url, output_file=str(_jk_evidence),
+                    owasp="A05:2025 Security Misconfiguration",
+                    nist="CM-7",
+                    remediation=(
+                        "Immediately restrict access to the Jenkins script console. "
+                        "Enable authentication, restrict /script to administrators, "
+                        "and place Jenkins behind a reverse proxy with access controls."
+                    ),
+                    cwe=["CWE-306"],
+                    mitre_attack=[{"technique": "T1059.007", "tactic": "Execution",
+                                   "name": "Command and Scripting Interpreter: JavaScript"}],
+                    http_code=_jk_r1.status_code,
+                )
+                vc.log("[auth_bypass] CRITICAL — Jenkins Groovy console open (RCE)!", "SUCCESS")
+                # Action item: exploit verification for RCE
+                out.log_action_item(
+                    type="exploit",
+                    recommended_tool="Manual Verification",
+                    target=_jk_script_url,
+                    ip=target.get("ip", ""),
+                    port=target["port"],
+                    hostname=target.get("hostname", ""),
+                    title="Exploit Verification Required — Jenkins Unauthenticated RCE",
+                    description=(
+                        "CRITICAL: Jenkins Groovy Script Console at /script is "
+                        "accessible without authentication. Verify arbitrary code "
+                        "execution via Groovy scripting (e.g. 'println \"id\".execute().text')."
+                    ),
+                    source_finding="Jenkins: Unauthenticated Groovy Script Console (RCE)",
+                    priority="CRITICAL",
+                    scope="webapp",
+                    metadata={"endpoint": "/script", "rce": True},
+                )
+                # Cross-tool action item: recommend SS3 for network-level follow-up
+                out.log_action_item(
+                    type="cross_tool",
+                    recommended_tool="Scattershot3",
+                    target=url,
+                    ip=target.get("ip", ""),
+                    port=target["port"],
+                    hostname=target.get("hostname", ""),
+                    title="Network Pivot Assessment — Jenkins RCE Confirmed",
+                    description=(
+                        "Jenkins Groovy Script Console is unauthenticated (RCE confirmed). "
+                        "Recommend Scattershot3 network scan to assess lateral movement "
+                        "potential and identify additional hosts reachable from the "
+                        "Jenkins server."
+                    ),
+                    source_finding="Jenkins: Unauthenticated Groovy Script Console (RCE)",
+                    priority="CRITICAL",
+                    scope="webapp",
+                    metadata={"source_phase": "auth_bypass", "rce_confirmed": True},
+                )
+        except Exception:
+            pass
+
+        # 8b. Management Console — /manage
+        try:
+            _jk_manage_url = url.rstrip("/") + "/manage"
+            _jk_r2 = sess.get(_jk_manage_url, timeout=timeout, allow_redirects=True)
+            if _jk_r2 and _jk_r2.status_code == 200 and re.search(
+                    r'manage\s*jenkins', _jk_r2.text, re.I):
+                with _jk_evidence.open("a", encoding="utf-8") as _jf:
+                    _jf.write(
+                        f"## Management Console\n"
+                        f"URL: {_jk_manage_url}\n"
+                        f"Status: {_jk_r2.status_code}\n"
+                        f"Response excerpt:\n{_jk_r2.text[:3000]}\n\n"
+                    )
+                out.add_finding(
+                    title="Jenkins: Unauthenticated Management Console",
+                    url=_jk_manage_url, port=target["port"], risk="HIGH",
+                    description=(
+                        "The Jenkins management console at /manage is accessible "
+                        "without authentication, exposing system configuration, "
+                        "plugin management, and credential stores. An attacker "
+                        "can install malicious plugins, modify build pipelines, "
+                        "and extract stored secrets."
+                    ),
+                    output=f"GET {_jk_manage_url} → {_jk_r2.status_code}",
+                    sources="fracture-auth-bypass", service=target["scheme"],
+                    affected=_jk_manage_url, output_file=str(_jk_evidence),
+                    owasp="A05:2025 Security Misconfiguration",
+                    nist="CM-7",
+                    remediation=(
+                        "Enable Jenkins authentication and restrict /manage to "
+                        "administrator accounts. Place Jenkins behind a reverse "
+                        "proxy with IP-based access controls."
+                    ),
+                    cwe=["CWE-306"],
+                    http_code=_jk_r2.status_code,
+                )
+                vc.log("[auth_bypass] Jenkins management console open!", "SUCCESS")
+                out.log_action_item(
+                    type="exploit",
+                    recommended_tool="Manual Verification",
+                    target=_jk_manage_url,
+                    ip=target.get("ip", ""),
+                    port=target["port"],
+                    hostname=target.get("hostname", ""),
+                    title="Verification Required — Jenkins Management Console Exposed",
+                    description=(
+                        "HIGH: Jenkins management console at /manage is accessible "
+                        "without authentication. Verify credential extraction from "
+                        "credential stores and plugin installation capabilities."
+                    ),
+                    source_finding="Jenkins: Unauthenticated Management Console",
+                    priority="HIGH",
+                    scope="webapp",
+                    metadata={"endpoint": "/manage"},
+                )
+        except Exception:
+            pass
+
+        # 8c. API Access — /api/json
+        try:
+            _jk_api_url = url.rstrip("/") + "/api/json"
+            _jk_r3 = sess.get(_jk_api_url, timeout=timeout, allow_redirects=True)
+            if _jk_r3 and _jk_r3.status_code == 200:
+                try:
+                    _jk_api_data = _jk_r3.json()
+                except Exception:
+                    _jk_api_data = None
+                if _jk_api_data and isinstance(_jk_api_data, dict):
+                    _jk_jobs = _jk_api_data.get("jobs", [])
+                    _jk_views = _jk_api_data.get("views", [])
+                    _jk_mode = _jk_api_data.get("mode", "")
+                    _jk_desc = _jk_api_data.get("description", "")
+                    with _jk_evidence.open("a", encoding="utf-8") as _jf:
+                        _jf.write(
+                            f"## API Access (/api/json)\n"
+                            f"URL: {_jk_api_url}\n"
+                            f"Status: {_jk_r3.status_code}\n"
+                            f"Jobs: {len(_jk_jobs)}\n"
+                            f"Views: {len(_jk_views)}\n"
+                            f"Mode: {_jk_mode}\n"
+                            f"Response:\n{_jk_r3.text[:3000]}\n\n"
+                        )
+                    out.add_finding(
+                        title="Jenkins: Unauthenticated API Access",
+                        url=_jk_api_url, port=target["port"], risk="MEDIUM",
+                        description=(
+                            f"The Jenkins JSON API is accessible without authentication, "
+                            f"exposing {len(_jk_jobs)} job(s) and {len(_jk_views)} view(s). "
+                            f"Build information, job configurations, and potentially "
+                            f"credentials are accessible via the API."
+                        ),
+                        output=(
+                            f"GET {_jk_api_url} → {_jk_r3.status_code}\n"
+                            f"Jobs: {len(_jk_jobs)}, Views: {len(_jk_views)}, "
+                            f"Mode: {_jk_mode}"
+                        ),
+                        sources="fracture-auth-bypass", service=target["scheme"],
+                        affected=_jk_api_url, output_file=str(_jk_evidence),
+                        owasp="A05:2025 Security Misconfiguration",
+                        nist="CM-7",
+                        remediation=(
+                            "Enable Jenkins authentication for API endpoints. "
+                            "Restrict anonymous read access in Global Security settings."
+                        ),
+                        cwe=["CWE-306"],
+                        http_code=_jk_r3.status_code,
+                    )
+                    vc.log(
+                        f"[auth_bypass] Jenkins API open — {len(_jk_jobs)} jobs, "
+                        f"{len(_jk_views)} views exposed", "SUCCESS"
+                    )
+        except Exception:
+            pass
+
+        # 8d. User Enumeration — /asynchPeople/
+        try:
+            _jk_people_url = url.rstrip("/") + "/asynchPeople/"
+            _jk_r4 = sess.get(_jk_people_url, timeout=timeout, allow_redirects=True)
+            if _jk_r4 and _jk_r4.status_code == 200 and re.search(
+                    r'<a\s+href="[^"]*user/[^"]*"', _jk_r4.text, re.I):
+                _jk_users = re.findall(
+                    r'href="[^"]*user/([^"/]+)"', _jk_r4.text, re.I)
+                _jk_users = list(dict.fromkeys(_jk_users))[:50]
+                with _jk_evidence.open("a", encoding="utf-8") as _jf:
+                    _jf.write(
+                        f"## User Enumeration (/asynchPeople/)\n"
+                        f"URL: {_jk_people_url}\n"
+                        f"Status: {_jk_r4.status_code}\n"
+                        f"Users found: {len(_jk_users)}\n"
+                        f"Usernames: {', '.join(_jk_users[:20])}\n\n"
+                    )
+                out.add_finding(
+                    title="Jenkins: User Enumeration via People Page",
+                    url=_jk_people_url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"The Jenkins People page at /asynchPeople/ is accessible "
+                        f"without authentication, revealing {len(_jk_users)} "
+                        f"user account(s). Exposed usernames facilitate password "
+                        f"spraying and social engineering attacks."
+                    ),
+                    output=(
+                        f"GET {_jk_people_url} → {_jk_r4.status_code}\n"
+                        f"Users ({len(_jk_users)}): "
+                        f"{', '.join(_jk_users[:10])}"
+                        f"{'...' if len(_jk_users) > 10 else ''}"
+                    ),
+                    sources="fracture-auth-bypass", service=target["scheme"],
+                    affected=_jk_people_url, output_file=str(_jk_evidence),
+                    owasp="A01:2025 Broken Access Control",
+                    nist="AC-3",
+                    remediation=(
+                        "Enable Jenkins authentication and disable anonymous access. "
+                        "Configure the 'People' page to require login."
+                    ),
+                    cwe=["CWE-200"],
+                    http_code=_jk_r4.status_code,
+                )
+                vc.log(
+                    f"[auth_bypass] Jenkins user enumeration — "
+                    f"{len(_jk_users)} user(s) exposed", "SUCCESS"
+                )
+        except Exception:
+            pass
+    else:
+        vc.log("[auth_bypass] Jenkins not detected — skipping console probes", "INFO")
+
+    vc.status(phase, "Auth Bypass", "complete", "Done", 8, 8)
     vc.log("[auth_bypass] Phase complete", "SUCCESS")
     return _discovered
 
@@ -25551,6 +25933,31 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                     **_nuc_v11,
                 )
                 _nuc_count += 1
+                # ── Action item: CVE exploit verification ─────────────
+                _ai_cves = _norm.get("cves", "")
+                _ai_risk = _norm["risk"]
+                if _ai_cves and _ai_risk in ("CRITICAL", "HIGH"):
+                    _ai_cve_list = [c.strip() for c in _ai_cves.split(",") if c.strip()]
+                    out.log_action_item(
+                        type="vulnerability",
+                        recommended_tool="Manual Verification",
+                        target=matched,
+                        ip=target.get("ip", ""),
+                        port=target["port"],
+                        hostname=target.get("hostname", ""),
+                        title=f"CVE Verification Required — {_norm['title'][:80]}",
+                        description=(
+                            f"{_ai_risk} nuclei finding with {len(_ai_cve_list)} "
+                            f"CVE(s): {', '.join(_ai_cve_list[:5])}. "
+                            "Manual exploitation verification recommended."
+                        ),
+                        source_finding=_norm["title"],
+                        priority=_ai_risk,
+                        scope="webapp",
+                        metadata={"cves": _ai_cve_list[:5],
+                                  "nuclei_template": item.get("template-id", ""),
+                                  "cvss_score": _nuc_v11.get("cvss_score")},
+                    )
             except (ValueError, KeyError):
                 pass
             except Exception as _nuc_line_err:
@@ -25743,6 +26150,27 @@ def _phase_graphql(target: dict, cfg: dict, pm: ProgressManager,
                 break
         except Exception:
             pass
+
+    if found_gql:
+        # ── Action item: recommend Siphon for GraphQL testing ─────
+        out.log_action_item(
+            type="api",
+            recommended_tool="Siphon",
+            target=found_gql,
+            ip=target.get("ip", ""),
+            port=target["port"],
+            hostname=target.get("hostname", ""),
+            title="GraphQL Endpoint Detected — Siphon Scan Recommended",
+            description=(
+                f"GraphQL endpoint discovered at {found_gql}. Recommend Siphon "
+                f"for comprehensive API security testing including introspection "
+                f"analysis, query depth/complexity attacks, and batching abuse."
+            ),
+            source_finding="GraphQL Introspection Enabled",
+            priority="high",
+            scope=target.get("scope", ""),
+            metadata={"source_phase": "graphql", "endpoint": found_gql},
+        )
 
     if not found_gql:
         vc.log("[graphql] No GraphQL endpoint found", "INFO")
@@ -26757,6 +27185,30 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
             ),
         )
         vc.log(f"[auth_recon] API layer identified: {len(_api_paths_sorted)} endpoint(s)", "SUCCESS")
+        # ── Action item: recommend Siphon for authenticated API testing ──
+        out.log_action_item(
+            type="api",
+            recommended_tool="Siphon",
+            target=url,
+            ip=target.get("ip", ""),
+            port=target["port"],
+            hostname=target.get("hostname", ""),
+            title="Authenticated API Layer Detected — Siphon Scan Recommended",
+            description=(
+                f"{len(_api_paths_sorted)} API endpoint(s) were discovered during "
+                f"authenticated crawling at {url}. Recommend Siphon for "
+                f"comprehensive OWASP API Security Top 10 testing with "
+                f"authenticated session context."
+            ),
+            source_finding="API Endpoint Identified",
+            priority="high",
+            scope=target.get("scope", ""),
+            metadata={
+                "api_count": len(_api_paths_sorted),
+                "source_phase": "auth_recon",
+                "auth_state": "authenticated",
+            },
+        )
 
     vc.status(phase, "Auth Recon", "running", "User ID extraction", 2, 3)
     # Look for numeric/UUID IDs in links
