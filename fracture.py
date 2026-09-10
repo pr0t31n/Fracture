@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.50.2"
+VERSION = "2.50.3"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -22718,7 +22718,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     _ERR_REFL_MARKER_SCR = '<script>alert("fracture_errxss")</script>'
     _err_refl_seen: set = set()
     _err_refl_confirmed: set = set()   # actions already confirmed vulnerable
-    _err_refl_results: list = []       # collected (action, field, script_ok, ev_r, rq, rp, err_ctx)
+    _err_refl_results: list = []       # collected (action, field, script_ok, ev_r, rq, rp, err_ctx, inj_rq, inj_rp)
     # Test all form fields — including hidden and *_ClientState fields,
     # which are exactly the pattern from the ASP.NET/Telerik finding.
     # Once error-page reflection is confirmed for ONE field on a given
@@ -22796,6 +22796,23 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     out, phase, f"err_refl_xss_{pname}", _ev_r,
                     endpoint_url=action, method=method)
 
+                # ── Capture the original injection request ──────────
+                # When the server redirects (e.g. ASP.NET POST →
+                # ErrorPage.aspx), _ev_r.request is the redirected
+                # GET, not the POST that carried the XSS payload.
+                # The original injection lives in history[0].
+                _inj_rq = ""
+                _inj_rp = ""
+                if getattr(_ev_r, "history", None):
+                    try:
+                        _inj_rq, _inj_rp = _save_http_evidence(
+                            out, phase,
+                            f"err_refl_xss_{pname}_injection",
+                            _ev_r.history[0],
+                            endpoint_url=action, method=method)
+                    except Exception:
+                        pass
+
                 # Detect the specific framework error pattern for context.
                 _err_ctx = ""
                 if "HttpRequestValidationException" in _ev_r.text:
@@ -22810,7 +22827,8 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
 
                 _err_refl_confirmed.add(action)
                 _err_refl_results.append((action, pname, _script_confirmed,
-                                          _ev_r, _rq, _rp, _err_ctx))
+                                          _ev_r, _rq, _rp, _err_ctx,
+                                          _inj_rq, _inj_rp))
                 vc.log(f"[injection] Error-page reflection XSS: "
                        f"{action} field={pname} "
                        f"(script={'confirmed' if _script_confirmed else 'html-only'})",
@@ -22820,7 +22838,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
 
     # Emit ONE merged finding for all error-page reflection XSS instances.
     if _err_refl_results:
-        _any_script = any(sc for _, _, sc, _, _, _, _ in _err_refl_results)
+        _any_script = any(sc for _, _, sc, _, _, _, _, _, _ in _err_refl_results)
         _merged_risk = "HIGH" if _any_script else "MEDIUM"
         _merged_title = ("Reflected XSS via Error Page — Script Injection Confirmed"
                          if _any_script
@@ -22828,11 +22846,16 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         # Use the first result's evidence as primary; list all as output_file
         _all_ev = []
         _out_lines = []
-        for _ma, _mf, _msc, _mev, _mrq, _mrp, _mctx in _err_refl_results:
+        for _ma, _mf, _msc, _mev, _mrq, _mrp, _mctx, _mirq, _mirp in _err_refl_results:
+            _redirected = bool(getattr(_mev, "history", None))
             _out_lines.append(
                 f"  • {_ma}  field={_mf}  "
                 f"script={'CONFIRMED' if _msc else 'html-only'}  "
-                f"HTTP={_mev.status_code}")
+                f"HTTP={_mev.status_code}"
+                + (f"  (redirected from {_mev.history[0].request.url})"
+                   if _redirected else ""))
+            if _mirq:
+                _all_ev.extend([_mirq, _mirp])
             _all_ev.extend([_mrq, _mrp])
         _affected = "\n".join(dict.fromkeys(
             r[0] for r in _err_refl_results))
@@ -22859,6 +22882,11 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 f"Affected endpoints ({len(_err_refl_results)}):\n"
                 + "\n".join(_out_lines)
                 + f"\n\nProbe: {_ERR_REFL_HTML_PROBE}\n"
+                + (f"Injection URL: {_first_ev.history[0].request.url}\n"
+                   f"Injection method: {_first_ev.history[0].request.method}\n"
+                   f"Injection field: {_err_refl_results[0][1]}\n"
+                   f"Redirect → Error page: {_first_ev.url}\n\n"
+                   if getattr(_first_ev, "history", None) else "")
                 + f"Response excerpt (first instance):\n{_first_ev.text[:800]}"),
             output_file=",".join(_all_ev),
             sources="fracture-injection", service=target["scheme"],
