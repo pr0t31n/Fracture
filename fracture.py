@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.51.0"
+VERSION = "2.51.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -16856,6 +16856,12 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                                 _tsf_risk  = "LOW"
                             elif _tsf_id == "TLS_session_ticket":
                                 _tsf_title = "SSL/TLS Session: Long Duration"
+                            elif _tsf_id == "TLS_misses_extension_23":
+                                # Missing Extended Master Secret (RFC 7627) —
+                                # vulnerable to Triple Handshake (CVE-2014-1295)
+                                # on TLS ≤ 1.2.
+                                _tsf_title = "SSL/TLS Vulnerability: TLS_misses_extension_23"
+                                _tsf_risk  = "MEDIUM"
                             else:
                                 if _tsf_risk == "INFO":
                                     continue
