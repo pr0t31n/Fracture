@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.50.3"
+VERSION = "2.51.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -14887,9 +14887,75 @@ def _gobuster_run(
     return True
 
 
+def _add_url_bar(png_path: Path, url: str) -> bool:
+    """Overlay a browser-style address bar at the top of a screenshot PNG.
+
+    Uses Pillow to composite a URL bar showing the page address above the
+    original screenshot, so evidence captures include the target URL in a
+    format immediately recognisable to reviewers.  Returns True on success;
+    False (silently) when Pillow is unavailable or processing fails.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return False
+    try:
+        img = Image.open(str(png_path))
+        w, h = img.size
+        bar_h = 52
+        pad_x = 16
+        # Find a monospace font; fall back to Pillow's built-in bitmap font
+        _font = None
+        for _fp in (
+            "/System/Library/Fonts/Supplemental/Courier New.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        ):
+            if Path(_fp).exists():
+                try:
+                    _font = ImageFont.truetype(_fp, 14)
+                    break
+                except Exception:
+                    pass
+        if _font is None:
+            _font = ImageFont.load_default()
+        # Compose new image
+        composite = Image.new("RGB", (w, h + bar_h), (245, 245, 245))
+        draw = ImageDraw.Draw(composite)
+        # Bar background
+        draw.rectangle([0, 0, w, bar_h - 1], fill=(240, 240, 240))
+        draw.line([0, bar_h - 1, w, bar_h - 1], fill=(200, 200, 200))
+        # Address field (rounded rect area)
+        _af_y1, _af_y2 = 10, bar_h - 10
+        draw.rounded_rectangle(
+            [pad_x, _af_y1, w - pad_x, _af_y2],
+            radius=6, fill=(255, 255, 255), outline=(200, 200, 200))
+        # Lock icon / scheme indicator
+        _is_https = url.startswith("https://")
+        _icon = "\U0001F512 " if _is_https else "⚠️ "
+        # Truncate URL to fit the bar width
+        _max_chars = max(20, (w - pad_x * 2 - 60) // 8)
+        _disp_url = url if len(url) <= _max_chars else url[:_max_chars - 1] + "…"
+        _url_color = (32, 100, 32) if _is_https else (160, 80, 0)
+        try:
+            draw.text((pad_x + 10, _af_y1 + 4), _icon + _disp_url,
+                      fill=_url_color, font=_font)
+        except Exception:
+            draw.text((pad_x + 10, _af_y1 + 4), _disp_url,
+                      fill=_url_color, font=_font)
+        # Paste original screenshot below bar
+        composite.paste(img, (0, bar_h))
+        composite.save(str(png_path), "PNG")
+        return True
+    except Exception:
+        return False
+
+
 def _capture_screenshot_to(ep_url: str, out_path: Path,
                             target: dict, cfg: dict,
                             auth_session: "requests.Session | None" = None,
+                            _url_bar_url: str = "",
                             ) -> bool:
     """Take a headless screenshot of ep_url and save to out_path.
     Returns True on success.  Tries Chrome first, falls back to Firefox.
@@ -14984,6 +15050,7 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
             )
             driver.set_window_size(1280, max(800, int(total_h)))
             driver.save_screenshot(str(out_path))
+            _add_url_bar(out_path, _url_bar_url or ep_url)
             return True
         finally:
             try:
@@ -14992,6 +15059,91 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                 pass
     except Exception:
         return False
+
+
+def _capture_xss_screenshot(proof_url: str, out: "OutputManager",
+                             phase: str, label: str,
+                             target: dict, cfg: dict,
+                             auth_session: "requests.Session | None" = None,
+                             ) -> str:
+    """Take a screenshot of a confirmed XSS proof URL.
+
+    Returns the run-dir-relative path to the PNG on success, or empty string.
+    The screenshot is placed in evidence/<phase>/ alongside the HTTP evidence.
+    """
+    safe = re.sub(r'[^\w]', '_', label)[:60]
+    ss_dir = out.root / phase
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    ss_path = ss_dir / f"{safe}_screenshot.png"
+    if _capture_screenshot_to(proof_url, ss_path, target, cfg,
+                              auth_session=auth_session):
+        try:
+            return str(ss_path.relative_to(out.root))
+        except Exception:
+            return str(ss_path)
+    return ""
+
+
+def _capture_clickjack_screenshot(target_url: str, out: "OutputManager",
+                                   phase: str, label: str,
+                                   target: dict, cfg: dict,
+                                   ) -> str:
+    """Create a clickjacking PoC HTML page with an iframe embedding
+    target_url, screenshot it, and return the run-dir-relative PNG path.
+
+    The PoC demonstrates that the page renders inside a third-party iframe
+    because no X-Frame-Options or frame-ancestors directive prevents it.
+    Returns empty string on failure.
+    """
+    if not _check_selenium():
+        return ""
+    safe = re.sub(r'[^\w]', '_', label)[:60]
+    ss_dir = out.root / phase
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    ss_path = ss_dir / f"{safe}_clickjack_poc.png"
+
+    # Build the PoC HTML
+    _esc_url = target_url.replace("&", "&amp;").replace("<", "&lt;")
+    poc_html = (
+        "<!DOCTYPE html><html><head>"
+        "<title>Clickjacking PoC</title>"
+        "<style>"
+        "body{margin:0;font-family:sans-serif;background:#f5f5f5}"
+        ".banner{background:#c0392b;color:#fff;padding:12px 20px;"
+        "font-size:16px;font-weight:bold}"
+        ".url{font-family:monospace;font-size:13px;color:#ffeaa7;"
+        "word-break:break-all;margin-top:4px}"
+        ".frame-wrap{border:3px dashed #c0392b;margin:10px;"
+        "position:relative}"
+        ".label{position:absolute;top:-14px;left:12px;background:#c0392b;"
+        "color:#fff;padding:2px 8px;font-size:11px;border-radius:3px}"
+        "iframe{width:100%;height:700px;border:none}"
+        "</style></head><body>"
+        "<div class='banner'>⚠️ Clickjacking Proof-of-Concept"
+        f"<div class='url'>Target: {_esc_url}</div></div>"
+        "<div class='frame-wrap'>"
+        "<div class='label'>IFRAME — target page renders here</div>"
+        f"<iframe src='{target_url}'></iframe>"
+        "</div></body></html>"
+    )
+    poc_path = Path(tempfile.mktemp(suffix=".html", prefix="fracture_cj_"))
+    try:
+        poc_path.write_text(poc_html, encoding="utf-8")
+        poc_file_url = f"file://{poc_path}"
+        if _capture_screenshot_to(poc_file_url, ss_path, target, cfg,
+                                  _url_bar_url=target_url):
+            try:
+                return str(ss_path.relative_to(out.root))
+            except Exception:
+                return str(ss_path)
+    except Exception:
+        pass
+    finally:
+        try:
+            poc_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    return ""
 
 
 def _chrome_form_login(driver, cfg: dict, login_url: str) -> bool:
@@ -17648,11 +17800,18 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             continue
         if hdr_name not in headers:
             _base_sec_hdrs_absent.add(hdr_name)
+            _sh_of = _sh_ev
+            if hdr_name == "X-Frame-Options":
+                _cj_ss = _capture_clickjack_screenshot(
+                    url, out, phase, "clickjack_missing_xfo",
+                    target, cfg)
+                if _cj_ss:
+                    _sh_of = f"{_sh_ev},{_cj_ss}" if _sh_ev else _cj_ss
             out.add_finding(
                 title=f"Missing Security Header: {hdr_name}",
                 url=url, port=target["port"], risk=risk,
                 description=desc, sources="fracture-headers",
-                service=target["scheme"], output_file=_sh_ev,
+                service=target["scheme"], output_file=_sh_of,
                 owasp="A05", nist=nist_ctrl,
                 remediation=_platform_remed(remed, server_hdr, powered_by),
                 output=f"Missing: {hdr_name}",
@@ -17751,6 +17910,10 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
 
     _xfo_val = headers.get("X-Frame-Options", "")
     if _xfo_val and _xfo_val.upper().strip() not in ("DENY", "SAMEORIGIN"):
+        _cj_perm_ss = _capture_clickjack_screenshot(
+            url, out, phase, "clickjack_permissive_xfo",
+            target, cfg)
+        _xfo_of = str(out_f) + (f",{_cj_perm_ss}" if _cj_perm_ss else "")
         out.add_finding(
             title="Permissive Security Header: X-Frame-Options",
             url=url, port=target["port"], risk="LOW",
@@ -17760,7 +17923,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             ),
             output=f"X-Frame-Options: {_xfo_val}",
             sources="fracture-headers", service=target["scheme"],
-            output_file=str(out_f),
+            output_file=_xfo_of,
             owasp="A05:2025 Security Misconfiguration", nist="SI-10",
             remediation=_platform_remed(
                 "Set X-Frame-Options: DENY (or SAMEORIGIN if same-origin embedding is required).",
@@ -18515,6 +18678,7 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             )
             driver.set_window_size(1280, max(800, int(total_h)))
             driver.save_screenshot(str(out_path))
+            _add_url_bar(out_path, url)
         finally:
             try:
                 driver.quit()
@@ -21906,12 +22070,15 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                              "script execution.")
                     if _detail:
                         _desc += f"\n\n[Inline validation] {_detail}"
+                    _xss_ss = _capture_xss_screenshot(
+                        purl, out, phase, f"reflected_xss_{param}",
+                        target, cfg, auth_session=sess)
                     out.add_finding(
                         title="Reflected Cross-Site Scripting (XSS)",
                         url=purl, port=target["port"], risk="HIGH",
                         description=_desc,
                         output=f"Parameter: {param}\nPayload: {payload}",
-                        output_file=f"{_rq},{_rp}",
+                        output_file=f"{_rq},{_rp}" + (f",{_xss_ss}" if _xss_ss else ""),
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Encode all output contextually (HTML, JS, URL, CSS), sanitise stored input server-side, and enforce a strict Content-Security-Policy.",
@@ -21976,12 +22143,20 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     continue
                 _valid_pocs.append(_dl)
             if _valid_pocs:
+                _df_ss_url = params[0]["url"]
+                _df_m = re.search(r'(https?://\S+)', _valid_pocs[0])
+                if _df_m:
+                    _df_ss_url = _df_m.group(1)
+                _df_ss = _capture_xss_screenshot(
+                    _df_ss_url, out, phase, "dalfox_xss",
+                    target, cfg, auth_session=sess)
                 out.add_finding(
                     title="XSS Confirmed by dalfox",
                     url=params[0]["url"], port=target["port"], risk="HIGH",
                     description="dalfox confirmed XSS.",
                     output="\n".join(_valid_pocs)[:2000], sources="dalfox",
-                    service=target["scheme"], output_file=str(df_out),
+                    service=target["scheme"],
+                    output_file=str(df_out) + (f",{_df_ss}" if _df_ss else ""),
                     owasp="A03:2025 Injection", nist="SI-10",
                     remediation="Encode all user output. Implement CSP.",
                 )
@@ -22428,12 +22603,15 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     if r2 and "fracture_sxss" in r2.text:
                         _stored_xss_found.add(action)
                         _rq, _rp = _save_http_evidence(out, phase, f"sxss_{pname}", r2, endpoint_url=action, method="POST")
+                        _sxss_ss = _capture_xss_screenshot(
+                            check_url, out, phase, f"stored_xss_{pname}",
+                            target, cfg, auth_session=sess)
                         out.add_finding(
                             title="Stored Cross-Site Scripting (XSS)",
                             url=action, port=target["port"], risk="CRITICAL",
                             description="User-controlled input is reflected or stored and rendered in a browser context without proper encoding, enabling arbitrary script execution.",
                             output=f"Field: {pname}\nPayload: {_stored_xss_marker}\nReflected at: {check_url}",
-                            output_file=f"{_rq},{_rp}",
+                            output_file=f"{_rq},{_rp}" + (f",{_sxss_ss}" if _sxss_ss else ""),
                             sources="fracture-injection", service=target["scheme"],
                             affected=check_url, owasp="A03:2025 Injection", nist="SI-10",
                             remediation="Encode all output contextually (HTML, JS, URL, CSS), sanitise stored input server-side, and enforce a strict Content-Security-Policy.",
@@ -22666,6 +22844,9 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         _rq, _rp = _save_http_evidence(
                             out, phase, f"post_xss_{pname}", r,
                             endpoint_url=action, method="POST")
+                        _pxss_ss = _capture_xss_screenshot(
+                            action, out, phase, f"post_xss_ss_{pname}",
+                            target, cfg, auth_session=sess)
                         out.add_finding(
                             title="Reflected Cross-Site Scripting (XSS) — POST Parameter",
                             url=action, port=target["port"], risk="HIGH",
@@ -22677,7 +22858,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                 f"victim's browser session."),
                             output=(f"Form action: {action}\nField: {pname}\n"
                                     f"Payload: {payload}\nHTTP {r.status_code}"),
-                            output_file=f"{_rq},{_rp}",
+                            output_file=f"{_rq},{_rp}" + (f",{_pxss_ss}" if _pxss_ss else ""),
                             sources="fracture-injection", service=target["scheme"],
                             affected=action,
                             owasp="A03:2025 Injection", nist="SI-10",
@@ -22862,6 +23043,11 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         # First result's context for description
         _first_ctx = _err_refl_results[0][6] or ""
         _first_ev = _err_refl_results[0][3]
+        _err_xss_ss = _capture_xss_screenshot(
+            _err_refl_results[0][0], out, phase, "error_page_xss",
+            target, cfg, auth_session=sess)
+        if _err_xss_ss:
+            _all_ev.append(_err_xss_ss)
         out.add_finding(
             title=_merged_title,
             url=_err_refl_results[0][0], port=target["port"],
