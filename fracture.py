@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.51.1"
+VERSION = "2.52.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -263,6 +263,14 @@ _TOOL_PATHS: dict = {
                    "/usr/local/bin/jwt_tool.py"],
         "Linux":  ["/opt/jwt_tool/jwt_tool.py", "/usr/local/bin/jwt_tool",
                    "/usr/bin/jwt_tool", "/usr/local/bin/jwt_tool.py"],
+    },
+    "zap": {
+        "Darwin": ["/Applications/ZAP.app/Contents/Java/zap.sh",
+                   "/usr/local/bin/zap.sh", "/opt/homebrew/bin/zap.sh",
+                   "/opt/zaproxy/zap.sh"],
+        "Linux":  ["/usr/share/zaproxy/zap.sh", "/usr/bin/zaproxy",
+                   "/usr/local/bin/zap.sh", "/opt/zaproxy/zap.sh",
+                   "/snap/zaproxy/current/ZAP/zap.sh"],
     },
 }
 
@@ -3198,7 +3206,7 @@ class OutputManager:
 
     TOOL_DIRS = [
         "recon", "tls", "headers", "crawl", "injection",
-        "traversal", "ssrf", "auth_bypass", "files", "vulnscan",
+        "traversal", "ssrf", "auth_bypass", "files", "vulnscan", "zap",
         "graphql", "auth_recon", "authorization", "session", "csrf", "cross_user",
         "logout",
     ]
@@ -10247,6 +10255,7 @@ DEFAULT_SETTINGS: dict = {
             "ffuf": True, "crawl": True, "jwt": True,
             "injection": True, "traversal": True, "business_logic": True, "ssrf": True,
             "auth_bypass": True, "files": True, "vulnscan": True,
+            "zap": True,
             "graphql": False, "logging_monitoring": True, "account_lockout": True,
             "auth_recon": False, "authorization": False,
             "session": False, "csrf": False, "cross_user": False,
@@ -10383,6 +10392,7 @@ PHASE_LIST = [
     ("auth_bypass",   "Phase 7:  Authentication bypass / default creds"),
     ("files",         "Phase 8:  Sensitive file exposure"),
     ("vulnscan",      "Phase 9:  Nuclei + Nikto vulnerability scan"),
+    ("zap",           "Phase 9b: OWASP ZAP — automated web vulnerability scanner"),
     ("graphql",       "Phase 10: GraphQL endpoint detection and introspection"),
     ("logging_monitoring", "Phase 10b: Security logging/monitoring failures — actuator exposure, verbose errors"),
     ("account_lockout",   "Phase 7b: Account lockout and brute-force protection testing"),
@@ -26321,6 +26331,294 @@ def _collect_vulnscan_bg(handle: dict) -> None:
 
 
 # ─────────────────────────────────────────────
+# Phase 9b: OWASP ZAP (background)
+# ─────────────────────────────────────────────
+
+def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
+                   out: OutputManager, sess: requests.Session) -> dict:
+    phase = "zap"
+    url   = target["url"]
+    zap_bin = _find_tool("zap")
+    if not zap_bin:
+        vc.log("[zap] ZAP not found — skipping", "WARNING")
+        return None
+
+    import random as _zap_rnd
+    api_port = 8090 + _zap_rnd.randint(0, 900)
+
+    cmd = [
+        zap_bin, "-daemon",
+        "-port", str(api_port),
+        "-config", "api.disablekey=true",
+        "-config", "api.addrs.addr.name=127.0.0.1",
+        "-config", "api.addrs.addr.regex=true",
+        "-config", "connection.timeoutInSecs=120",
+    ]
+    vc.log(f"[zap] Launching ZAP daemon on port {api_port}", "INFO")
+    vc.status(phase, "ZAP Scan", "running", "starting daemon", 0, 4)
+
+    started = datetime.now().astimezone()
+    try:
+        proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        _register_proc(proc)
+    except Exception as e:
+        vc.error(f"[zap] Failed to launch ZAP daemon: {e}")
+        out.log_error("zap", " ".join(cmd), str(e))
+        return None
+
+    # Wait for ZAP API to become ready
+    import requests as _zap_req
+    _zap_base = f"http://127.0.0.1:{api_port}"
+    _zap_ready = False
+    for _attempt in range(30):
+        try:
+            _r = _zap_req.get(f"{_zap_base}/JSON/core/view/version/", timeout=5)
+            if _r.status_code == 200:
+                _zap_ready = True
+                _ver = _r.json().get("version", "unknown")
+                vc.log(f"[zap] ZAP daemon ready (v{_ver})", "INFO")
+                break
+        except Exception:
+            pass
+        import time as _zap_time
+        _zap_time.sleep(2)
+
+    if not _zap_ready:
+        vc.log("[zap] ZAP daemon did not become ready within 60s — aborting", "WARNING")
+        out.log_error("zap", " ".join(cmd), "daemon startup timeout (60s)")
+        try:
+            proc.kill()
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+        _deregister_proc(proc)
+        return None
+
+    # Pass auth cookies to ZAP
+    cookie_str, auth_headers = _extract_subprocess_auth(sess)
+    if cookie_str:
+        for _ck_pair in cookie_str.split("; "):
+            if "=" in _ck_pair:
+                _ck_name, _ck_val = _ck_pair.split("=", 1)
+                try:
+                    _zap_req.get(
+                        f"{_zap_base}/JSON/httpsession/action/setSessionTokenValue/",
+                        params={"site": urllib.parse.urlparse(url).netloc,
+                                "sessionToken": _ck_name, "tokenValue": _ck_val},
+                        timeout=10,
+                    )
+                except Exception:
+                    pass
+
+    # Start ZAP spider
+    spider_id = None
+    try:
+        _sr = _zap_req.get(
+            f"{_zap_base}/JSON/spider/action/scan/",
+            params={"url": url, "maxChildren": "10", "recurse": "true",
+                    "subtreeOnly": "true"},
+            timeout=30,
+        )
+        spider_id = _sr.json().get("scan")
+        vc.log(f"[zap] Spider started (id={spider_id})", "INFO")
+    except Exception as e:
+        vc.log(f"[zap] Spider start failed: {e}", "WARNING")
+
+    # Start AJAX spider (best-effort)
+    try:
+        _zap_req.get(
+            f"{_zap_base}/JSON/ajaxSpider/action/scan/",
+            params={"url": url, "subtreeOnly": "true"},
+            timeout=30,
+        )
+        vc.log("[zap] AJAX spider started", "INFO")
+    except Exception:
+        pass
+
+    handle = {
+        "zap_proc": proc, "zap_port": api_port, "zap_cmd": cmd,
+        "spider_id": spider_id, "target": target, "out": out,
+        "started": started, "phase": phase,
+    }
+    return handle
+
+
+def _collect_zap_bg(handle: dict) -> None:
+    if not handle:
+        return
+    target   = handle["target"]
+    out      = handle["out"]
+    phase    = handle["phase"]
+    proc     = handle["zap_proc"]
+    api_port = handle["zap_port"]
+    url      = target["url"]
+    hostname = target.get("hostname", "target")
+    started  = handle["started"]
+
+    import requests as _zap_req
+    import time as _zap_time
+    _zap_base = f"http://127.0.0.1:{api_port}"
+
+    _ZAP_RISK_MAP = {
+        "High": "HIGH", "Medium": "MEDIUM", "Low": "LOW",
+        "Informational": "INFO", "False Positive": None,
+    }
+
+    # ── Wait for spider ──────────────────────────────────────────────────────
+    spider_id = handle.get("spider_id")
+    if spider_id is not None:
+        vc.status(phase, "ZAP Scan", "running", "spidering", 1, 4)
+        _spider_deadline = _zap_time.time() + 600
+        while _zap_time.time() < _spider_deadline:
+            try:
+                _ss = _zap_req.get(
+                    f"{_zap_base}/JSON/spider/view/status/",
+                    params={"scanId": str(spider_id)}, timeout=30,
+                )
+                if _ss.json().get("status") == "100":
+                    vc.log("[zap] Spider complete", "INFO")
+                    break
+            except Exception:
+                pass
+            _zap_time.sleep(5)
+        else:
+            vc.log("[zap] Spider timed out after 600s — continuing", "WARNING")
+
+    # ── Start active scan ────────────────────────────────────────────────────
+    ascan_id = None
+    try:
+        vc.status(phase, "ZAP Scan", "running", "active scan", 2, 4)
+        _ar = _zap_req.get(
+            f"{_zap_base}/JSON/ascan/action/scan/",
+            params={"url": url, "recurse": "true"},
+            timeout=30,
+        )
+        ascan_id = _ar.json().get("scan")
+        vc.log(f"[zap] Active scan started (id={ascan_id})", "INFO")
+    except Exception as e:
+        vc.log(f"[zap] Active scan start failed: {e}", "WARNING")
+
+    # ── Wait for active scan ─────────────────────────────────────────────────
+    if ascan_id is not None:
+        _ascan_deadline = _zap_time.time() + 1800
+        while _zap_time.time() < _ascan_deadline:
+            try:
+                _as = _zap_req.get(
+                    f"{_zap_base}/JSON/ascan/view/status/",
+                    params={"scanId": str(ascan_id)}, timeout=30,
+                )
+                _pct = _as.json().get("status", "0")
+                if _pct == "100":
+                    vc.log("[zap] Active scan complete", "INFO")
+                    break
+                if int(_pct) % 20 == 0 and int(_pct) > 0:
+                    vc.log(f"[zap] Active scan {_pct}% complete", "INFO")
+            except Exception:
+                pass
+            _zap_time.sleep(10)
+        else:
+            vc.log("[zap] Active scan timed out after 1800s — collecting partial results", "WARNING")
+
+    # ── Retrieve alerts ──────────────────────────────────────────────────────
+    vc.status(phase, "ZAP Scan", "running", "collecting alerts", 3, 4)
+    alerts = []
+    try:
+        _al = _zap_req.get(
+            f"{_zap_base}/JSON/core/view/alerts/",
+            params={"baseurl": url, "start": "0", "count": "500"},
+            timeout=30,
+        )
+        alerts = _al.json().get("alerts", [])
+        vc.log(f"[zap] Retrieved {len(alerts)} alert(s)", "INFO")
+    except Exception as e:
+        vc.log(f"[zap] Failed to retrieve alerts: {e}", "WARNING")
+
+    # Save raw alerts JSON
+    _alerts_out = out.output_path("zap", f"zap_alerts_{hostname}.json")
+    try:
+        _alerts_out.parent.mkdir(parents=True, exist_ok=True)
+        _alerts_out.write_text(json.dumps(alerts, indent=2, default=str),
+                               encoding="utf-8")
+    except Exception as e:
+        vc.log(f"[zap] Failed to write alerts JSON: {e}", "WARNING")
+
+    # ── Parse alerts into findings ───────────────────────────────────────────
+    _cve_re = re.compile(r"CVE-\d{4}-\d{4,}")
+    _finding_count = 0
+    for _alert in alerts:
+        _risk_raw = _alert.get("risk", "Informational")
+        _risk = _ZAP_RISK_MAP.get(_risk_raw)
+        if _risk is None:
+            continue
+
+        _ref = _alert.get("reference", "")
+        _cves_found = ", ".join(sorted(set(_cve_re.findall(_ref))))
+        _owasp = ""
+        if "owasp.org" in _ref.lower():
+            for _line in _ref.splitlines():
+                if "owasp.org" in _line.lower():
+                    _owasp = _line.strip()
+                    break
+
+        _output = _alert.get("evidence", "") or _alert.get("other", "")
+
+        out.add_finding(
+            title=_alert.get("alert", "ZAP Alert"),
+            url=_alert.get("url", url),
+            port=target.get("port", 443),
+            risk=_risk,
+            description=_alert.get("description", ""),
+            sources="zap",
+            output=_output[:4096] if _output else "",
+            affected=_alert.get("url", ""),
+            owasp=_owasp,
+            remediation=_alert.get("solution", ""),
+            output_file=str(_alerts_out.relative_to(out.root))
+                        if _alerts_out.exists() else "",
+            cves=_cves_found,
+            command="ZAP automated scan (spider + active scan)",
+        )
+        _finding_count += 1
+
+    # ── Save HTML report ─────────────────────────────────────────────────────
+    _html_out = out.output_path("zap", f"zap_report_{hostname}.html")
+    try:
+        _html_out.parent.mkdir(parents=True, exist_ok=True)
+        _hr = _zap_req.get(f"{_zap_base}/OTHER/core/other/htmlreport/", timeout=30)
+        _html_out.write_bytes(_hr.content)
+        vc.log(f"[zap] HTML report saved: {_html_out.name}", "INFO")
+    except Exception as e:
+        vc.log(f"[zap] Failed to retrieve HTML report: {e}", "WARNING")
+
+    # ── Log command ──────────────────────────────────────────────────────────
+    ended = datetime.now().astimezone()
+    out.log_command(
+        "zap", handle["zap_cmd"], str(_alerts_out),
+        tool_path=handle["zap_cmd"][0] if handle["zap_cmd"] else "",
+        stdout="", stderr="",
+        started=started, ended=ended,
+        exit_code=0,
+    )
+
+    # ── Shut down ZAP ────────────────────────────────────────────────────────
+    try:
+        _zap_req.get(f"{_zap_base}/JSON/core/action/shutdown/", timeout=10)
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+    _deregister_proc(proc)
+
+    vc.status(phase, "ZAP Scan", "complete", "Done", 4, 4)
+    vc.log(f"[zap] Phase complete — {_finding_count} finding(s)", "SUCCESS")
+
+
+# ─────────────────────────────────────────────
 # Phase 10: GraphQL
 # ─────────────────────────────────────────────
 _GRAPHQL_PATHS = ["/graphql", "/api/graphql", "/graphql/v1",
@@ -38257,6 +38555,7 @@ def main() -> None:
         #   - Unauthenticated: same reduced scan as roles 2..n.
         # When _n_roles == 0: existing auth_matrix behaviour (settings-file driven).
         _vulnscan_handle = None  # set by _launch_vulnscan_bg, collected before summary
+        _zap_handle = None       # set by _launch_zap_bg, collected before summary
         _cred_contexts: list = []
         if _n_roles >= 1:
             # Role 1 — full scan (most permissive user)
@@ -39742,6 +40041,21 @@ def main() -> None:
                         pm.set_phase_status(f"vulnscan#{_ctx_label}", "error", detail=str(e))
                         _vulnscan_handle = None
 
+            # ── Phase 9b: ZAP (background, alongside vulnscan) ──────────────
+            if not _is_reduced_ctx:
+                if not _skip("zap"):
+                    pm.set_phase_status(f"zap#{_ctx_label}", "running", "ZAP Scan")
+                    try:
+                        _zap_handle = _launch_zap_bg(target, _ctx_cfg, pm, out, effective_auth)
+                        if _zap_handle:
+                            vc.log("[zap] ZAP daemon launched in background", "INFO")
+                        _save_checkpoint()
+                    except Exception as e:
+                        vc.error(f"Phase zap [{_ctx_label}] launch error: {e}")
+                        out.log_error("zap", "phase-level exception", str(e))
+                        pm.set_phase_status(f"zap#{_ctx_label}", "error", detail=str(e))
+                        _zap_handle = None
+
             # ── Phase 3c: endpoint tools ──
             _ep_discovered = [
                 u for u in (
@@ -40875,6 +41189,17 @@ def main() -> None:
                 vc.error(f"[vulnscan] Error collecting background results: {e}")
                 out.log_error("vulnscan", "background collection", str(e))
             _vulnscan_handle = None
+
+        # ── Collect ZAP results ──────────────────────────────────────────
+        if _zap_handle is not None:
+            try:
+                _collect_zap_bg(_zap_handle)
+                pm.set_phase_status(f"zap#{_ctx_label}", "complete", "ZAP Scan")
+            except Exception as e:
+                vc.error(f"[zap] Error collecting ZAP results: {e}")
+                out.log_error("zap", "background collection", str(e))
+                pm.set_phase_status(f"zap#{_ctx_label}", "error", detail=str(e))
+            _zap_handle = None
 
         # Final checkpoint save before summary
         _save_checkpoint()
