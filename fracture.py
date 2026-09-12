@@ -4072,7 +4072,19 @@ class _ScopedSession(requests.Session):
                 f"[scope] Blocked out-of-scope request: {request.method} {request.url}",
                 "WARNING",
             )
-            raise ValueError(f"Out-of-scope request blocked: {request.url}")
+            # Return a synthetic 403 instead of raising ValueError.
+            # When a redirect chain crosses out of scope (e.g. target →
+            # CAS → third-party IdP), raising makes the caller treat the
+            # entire request as a connection failure.  A non-redirect
+            # response stops the chain gracefully.
+            resp = requests.models.Response()
+            resp.status_code = 403
+            resp._content = b"Blocked by Fracture scope enforcement"
+            resp.url = request.url
+            resp.request = request
+            resp.encoding = "utf-8"
+            resp.headers["X-Fracture-Scope-Blocked"] = "true"
+            return resp
         return super().send(request, **kwargs)
 
 
