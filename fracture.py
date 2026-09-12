@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.52.0"
+VERSION = "2.52.1"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -37923,6 +37923,16 @@ def main() -> None:
         _all_roles_ctx[:] = [r["role"] for r in _collected_roles]
         if "unauthenticated" not in _all_roles_ctx:
             _all_roles_ctx.append("unauthenticated")
+    elif _VANTAGE_MANAGED:
+        # Managed mode with no auth_matrix — run unauthenticated only.
+        # Do NOT prompt; the operator is in Vantage/Crucible and cannot
+        # interact with Fracture's stdin.
+        _n_roles = 0
+        vc.log(
+            "[multi-role] No auth_matrix in project settings — running "
+            "unauthenticated only (managed mode, no prompt)",
+            "INFO",
+        )
     else:
         _n_roles = _prompt_multi_role_setup(cfg["auth"])
         if _n_roles >= 1:
