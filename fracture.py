@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.52.1"
+VERSION = "2.52.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -38299,8 +38299,29 @@ def main() -> None:
                 )
                 time.sleep(_alive_delay)
             try:
-                _alive_r = sess.get(target["url"], timeout=10, allow_redirects=True)
+                # allow_redirects=False: we only need to know the target host
+                # responds.  Following redirects through _ScopedSession raises
+                # ValueError when the target redirects to a different hostname
+                # (e.g. SSO/CAS login on another domain), which would wrongly
+                # mark the target as unreachable.
+                _alive_r = sess.get(target["url"], timeout=10, allow_redirects=False)
                 vc.log(f"[pre-scan] Target reachable (HTTP {_alive_r.status_code})", "INFO")
+                # If the target redirects to an out-of-scope host (SSO, CAS,
+                # IdP), auto-add that host to the scope so downstream requests
+                # can follow the redirect chain.
+                if _alive_r.is_redirect or _alive_r.status_code in (301, 302, 303, 307, 308):
+                    _redir_loc = _alive_r.headers.get("Location", "")
+                    if _redir_loc:
+                        try:
+                            _redir_host = urllib.parse.urlparse(_redir_loc).hostname
+                            if _redir_host and _redir_host not in _scope_hostnames:
+                                _scope_hostnames.add(_redir_host)
+                                vc.log(
+                                    f"[scope] Auto-added redirect target to scope: {_redir_host}",
+                                    "INFO",
+                                )
+                        except Exception:
+                            pass
                 break
             except Exception as _alive_e:
                 if _alive_attempt == len(_alive_delays):
