@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.52.2"
+VERSION = "2.52.3"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -39779,7 +39779,9 @@ def main() -> None:
             # directory brute-forcing has found little of value.  Prompt the user
             # to browse manually; Fracture captures all requests/responses via
             # mitmproxy and adds discovered paths to _ep_base before testing runs.
-            if not _is_reduced_ctx:
+            # Skip in managed mode — no human operator to browse, and the 180s
+            # timeout causes extreme delays in unattended scans.
+            if not _is_reduced_ctx and not vc._managed:
                 try:
                     _sm_path = out.root / "structure_map.json"
                     if _sm_path.exists():
