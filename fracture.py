@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.52.3"
+VERSION = "2.52.4"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -25452,27 +25452,33 @@ def _build_nuclei_exclude_tags(target_profile_path):
     except Exception:
         return []
 
-    # Collect all detected tech names (lowered) from every relevant field
+    # Collect all detected tech names (lowered) from every relevant field.
+    # target_profile.json values may be str OR list[str] depending on how
+    # the profile was built (CMS detection can record multiple CMSes).
+    def _str_val(v):
+        """Safely coerce a scalar-or-list profile value to a list of strings."""
+        if isinstance(v, list):
+            return [str(x).lower().strip() for x in v if x]
+        if isinstance(v, str) and v.strip():
+            return [v.lower().strip()]
+        return []
+
     _detected = set()
-    _cms = (_tp.get("cms") or "").lower().strip()
-    if _cms:
-        _detected.add(_cms)
+    for _cv in _str_val(_tp.get("cms")):
+        _detected.add(_cv)
     for _t in _tp.get("technologies", []):
-        _tn = (_t.get("name") or "").lower().strip()
-        if _tn:
+        for _tn in _str_val(_t.get("name") if isinstance(_t, dict) else _t):
             _detected.add(_tn)
-    _server = (_tp.get("server") or "").lower().strip()
-    if _server:
-        _detected.add(_server)
+    for _sv in _str_val(_tp.get("server")):
+        _detected.add(_sv)
         # Also add the base server name (e.g. "microsoft-iis/10.0" → "iis")
         for _frag in ("iis", "apache", "nginx", "tomcat", "lighttpd",
                        "caddy", "weblogic", "websphere"):
-            if _frag in _server:
+            if _frag in _sv:
                 _detected.add(_frag)
     # Add technologies from the web_structure, framework, etc.
     for _key in ("framework", "web_structure"):
-        _val = (_tp.get(_key) or "").lower().strip()
-        if _val:
+        for _val in _str_val(_tp.get(_key)):
             _detected.add(_val)
 
     exclude_tags = []
@@ -41264,6 +41270,50 @@ def main() -> None:
 
         vc.log(f"Scan complete. Findings: {len(findings)}", "SUCCESS")
         vc.log(f"Output: {project_dir}", "INFO")
+
+        # ── Incremental merge: copy this target's findings into root ─────
+        # In multi-target mode each target writes to a per-host subdirectory.
+        # Crucible reads from the ROOT findings.json, which wouldn't exist
+        # until the final post-scan merge.  Incrementally updating the root
+        # file after each target ensures findings are visible as they arrive.
+        _root_proj_inc = Path(cfg["project"]).resolve()
+        if project_dir != _root_proj_inc and findings:
+            try:
+                _root_fj_inc = _root_proj_inc / "findings.json"
+                _root_fj_inc.parent.mkdir(parents=True, exist_ok=True)
+                with threading.Lock():
+                    _existing_root: list = []
+                    if _root_fj_inc.exists():
+                        try:
+                            _existing_root = json.loads(
+                                _root_fj_inc.read_text(encoding="utf-8"))
+                        except Exception:
+                            _existing_root = []
+                    if not isinstance(_existing_root, list):
+                        _existing_root = []
+                    _seen_inc = {((_e.get("title") or "").lower(),
+                                  (_e.get("affected") or "").lower())
+                                 for _e in _existing_root}
+                    _inc_count = 0
+                    for _f in findings:
+                        _fk = ((_f.get("title") or "").lower(),
+                               (_f.get("affected") or "").lower())
+                        if _fk not in _seen_inc:
+                            _seen_inc.add(_fk)
+                            _existing_root.append(_f)
+                            _inc_count += 1
+                    if _inc_count:
+                        _tmp_inc = _root_fj_inc.with_suffix(".tmp")
+                        _tmp_inc.write_text(
+                            json.dumps(_existing_root, indent=2, default=str),
+                            encoding="utf-8",
+                        )
+                        _tmp_inc.replace(_root_fj_inc)
+                        vc.log(
+                            f"[merge] Incremental: {_inc_count} finding(s) → root "
+                            f"(total: {len(_existing_root)})", "INFO")
+            except Exception as _inc_err:
+                vc.error(f"[merge] Incremental merge failed: {_inc_err}")
 
         # Queue any in-scope redirect-discovered URLs for full scanning
         for _new_url in _in_scope_new:
