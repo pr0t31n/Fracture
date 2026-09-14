@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.52.4"
+VERSION = "2.52.5"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -25319,7 +25319,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Server-Side Template Injection (SSTI)", "CRITICAL",
      "A03:2025 Injection", "SI-10",
      "Do not pass user input to template engines without sanitisation."),
-    (r"command-injection|os-command|rce\b",
+    (r"command-injection|os-command|\brce\b",
      "OS Command Injection", "CRITICAL",
      "A03:2025 Injection", "SI-10",
      "Do not pass user input to OS commands; use safe APIs."),
@@ -26161,6 +26161,13 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                     _nuc_soft404_suppressed += 1
                     continue
                 matched = item.get("matched-at", url)
+                # Strip query params for dedup — session-specific tokens
+                # (sessionDataKey, wct, etc.) create false duplicates.
+                try:
+                    _mp = urllib.parse.urlparse(matched)
+                    matched = urllib.parse.urlunparse((_mp.scheme, _mp.netloc, _mp.path, "", "", ""))
+                except Exception:
+                    pass
                 _norm   = _normalize_nuclei(item)
                 # Extract v1.1 enrichment fields from normalizer output
                 _nuc_v11 = {k: _norm[k] for k in ("cvss_score", "cvss_vector", "cwe")
@@ -26611,7 +26618,7 @@ def _collect_zap_bg(handle: dict) -> None:
     # ── Log command ──────────────────────────────────────────────────────────
     ended = datetime.now().astimezone()
     out.log_command(
-        "zap", handle["zap_cmd"], str(_alerts_out),
+        "zap", handle["zap_cmd"], _alerts_out,
         tool_path=handle["zap_cmd"][0] if handle["zap_cmd"] else "",
         stdout="", stderr="",
         started=started, ended=ended,
