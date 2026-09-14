@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.52.5"
+VERSION = "2.52.6"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -3656,7 +3656,7 @@ class OutputManager:
         entry = {
             "title":          title,
             "datetime":       ts,
-            "ip":             url,
+            "ip":             hostname,
             "port":           int(port) if port else 0,
             "hostname":       hostname,
             "risk":           risk or "",
@@ -26168,6 +26168,16 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                     matched = urllib.parse.urlunparse((_mp.scheme, _mp.netloc, _mp.path, "", "", ""))
                 except Exception:
                     pass
+                # Scope filter: discard findings on out-of-scope hosts
+                # (nuclei follows redirects to SSO / IdP domains etc.)
+                try:
+                    _nuc_match_host = urllib.parse.urlparse(matched).hostname or ""
+                    _nuc_tgt_host = target["hostname"]
+                    if (_nuc_match_host and _nuc_tgt_host
+                            and _nuc_match_host.lower() != _nuc_tgt_host.lower()):
+                        continue
+                except Exception:
+                    pass
                 _norm   = _normalize_nuclei(item)
                 # Extract v1.1 enrichment fields from normalizer output
                 _nuc_v11 = {k: _norm[k] for k in ("cvss_score", "cvss_vector", "cwe")
@@ -26185,6 +26195,7 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                     owasp=_norm["owasp"],
                     nist=_norm["nist"],
                     remediation=_norm["remediation"],
+                    command=" ".join(handle["nuclei_cmd"]),
                     **_nuc_v11,
                 )
                 _nuc_count += 1
@@ -26286,9 +26297,18 @@ def _collect_vulnscan_bg(handle: dict) -> None:
             out.log_error("nikto", _nik_cmd,
                           f"exit code {_nik_proc.returncode}: "
                           f"{(_nik_stderr or '').strip()[:500]}")
-        if _nik_out.exists():
+        # Resolve actual output path — nikto sometimes appends its own
+        # extension (.json, .txt.json) rather than writing to the exact path.
+        _nik_json_path = _nik_out
+        if not _nik_json_path.exists():
+            for _nik_ext in (".json", ".txt.json"):
+                _nik_alt = Path(str(_nik_out) + _nik_ext)
+                if _nik_alt.exists():
+                    _nik_json_path = _nik_alt
+                    break
+        if _nik_json_path.exists():
             try:
-                ndata = json.loads(_nik_out.read_text(encoding="utf-8"))
+                ndata = json.loads(_nik_json_path.read_text(encoding="utf-8"))
                 _nik_hosts = ndata if isinstance(ndata, list) else [ndata]
                 _nik_count = 0
                 for _nik_host in _nik_hosts:
@@ -26317,6 +26337,7 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                             owasp=_norm["owasp"],
                             nist=_norm["nist"],
                             remediation=_norm["remediation"],
+                            command=" ".join(_nik_cmd),
                         )
                         _nik_count += 1
                 if _nik_count:
@@ -37999,11 +38020,14 @@ def main() -> None:
         _set_http_evidence_dir(out.root)  # §14h: per-request HTTP evidence
         pm  = ProgressManager(project_dir / "checkpoint.json")
         eng = settings.get("engagement", {})
+        _pm_year = (eng.get("start_date", "") or "")[:4]
+        if not (_pm_year and _pm_year.isdigit()):
+            _pm_year = datetime.now().strftime("%Y")
         _write_project_meta(
             Path(cfg["project"]).resolve(),
             tool="fracture",
             client_short=eng.get("client_short", ""),
-            year=(eng.get("start_date", "") or "")[:4] or datetime.now().strftime("%Y"),
+            year=_pm_year,
             version=VERSION,
         )
         # Dual-write universal meta.json (schema 1.0) for Prometheus UniversalParser.
@@ -41299,12 +41323,14 @@ def main() -> None:
                     if not isinstance(_existing_root, list):
                         _existing_root = []
                     _seen_inc = {((_e.get("title") or "").lower(),
-                                  (_e.get("affected") or "").lower())
+                                  (_e.get("ip") or "").lower(),
+                                  int(_e.get("port") or 0))
                                  for _e in _existing_root}
                     _inc_count = 0
                     for _f in findings:
                         _fk = ((_f.get("title") or "").lower(),
-                               (_f.get("affected") or "").lower())
+                               (_f.get("ip") or "").lower(),
+                               int(_f.get("port") or 0))
                         if _fk not in _seen_inc:
                             _seen_inc.add(_fk)
                             _existing_root.append(_f)
@@ -41361,11 +41387,12 @@ def main() -> None:
     try:
         _root_findings: list = json.loads(_root_fj.read_text(encoding="utf-8")) if _root_fj.exists() else []
         _merge_count = 0
-        # Dedup key: (title_lower, affected_lower)
+        # Dedup key: (title_lower, ip_lower, port)
         _seen = set()
         for _rf in _root_findings:
             _seen.add(((_rf.get("title") or "").lower(),
-                       (_rf.get("affected") or "").lower()))
+                       (_rf.get("ip") or "").lower(),
+                       int(_rf.get("port") or 0)))
         for _sub in sorted(_root_proj.iterdir()):
             if not _sub.is_dir():
                 continue
@@ -41376,7 +41403,8 @@ def main() -> None:
                 _sub_findings = json.loads(_sub_fj.read_text(encoding="utf-8"))
                 for _sf in _sub_findings:
                     _key = ((_sf.get("title") or "").lower(),
-                            (_sf.get("affected") or "").lower())
+                            (_sf.get("ip") or "").lower(),
+                            int(_sf.get("port") or 0))
                     if _key not in _seen:
                         _seen.add(_key)
                         _root_findings.append(_sf)
