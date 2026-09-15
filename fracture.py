@@ -40,11 +40,12 @@ import time
 import hashlib
 import urllib.parse
 import warnings
+import xml.etree.ElementTree as _ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.53.7"
+VERSION = "2.53.8"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -825,6 +826,81 @@ def _is_wildcard_match(r: "requests.Response",
             votes += 1
 
     return votes >= 2
+
+
+def _parse_sitemap_urls(body: str, sess: "requests.Session", origin: str,
+                        target_host: str, timeout: int = 10,
+                        *, _depth: int = 0) -> "list[str]":
+    """Extract in-scope URLs from a sitemap XML body.
+
+    Handles both ``<urlset>`` (individual URLs) and ``<sitemapindex>``
+    (sitemap-of-sitemaps) formats.  For sitemapindex, recursively
+    fetches child sitemaps up to depth 2 to prevent infinite loops.
+
+    Returns a deduplicated list of absolute URL strings that belong
+    to *target_host*.
+    """
+    MAX_DEPTH = 2
+    MAX_CHILD_SITEMAPS = 20  # cap child fetches to limit request count
+    MAX_URLS = 5000          # cap total URL extraction
+
+    urls: list[str] = []
+    try:
+        root = _ET.fromstring(body)
+    except _ET.ParseError:
+        return urls
+
+    # Strip namespace prefix — sitemap XMLs use
+    # xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" or similar
+    ns = ""
+    _ns_match = re.match(r'\{([^}]+)\}', root.tag)
+    if _ns_match:
+        ns = "{%s}" % _ns_match.group(1)
+
+    tag_local = root.tag.split("}")[-1] if "}" in root.tag else root.tag
+
+    if tag_local == "sitemapindex" and _depth < MAX_DEPTH:
+        # Sitemap index — fetch child sitemaps
+        _child_locs = []
+        for sm_elem in root.findall(f"{ns}sitemap"):
+            loc_elem = sm_elem.find(f"{ns}loc")
+            if loc_elem is not None and loc_elem.text:
+                _child_locs.append(loc_elem.text.strip())
+        for _child_url in _child_locs[:MAX_CHILD_SITEMAPS]:
+            try:
+                _cr = sess.get(_child_url, timeout=timeout)
+                if _cr.status_code == 200 and len(_cr.text) > 10:
+                    urls.extend(_parse_sitemap_urls(
+                        _cr.text, sess, origin, target_host,
+                        timeout, _depth=_depth + 1))
+            except Exception:
+                pass
+            if len(urls) >= MAX_URLS:
+                break
+    else:
+        # Standard urlset — extract <loc> entries
+        for url_elem in root.findall(f"{ns}url"):
+            loc_elem = url_elem.find(f"{ns}loc")
+            if loc_elem is not None and loc_elem.text:
+                _loc = loc_elem.text.strip()
+                urls.append(_loc)
+                if len(urls) >= MAX_URLS:
+                    break
+
+    # Filter to in-scope host and deduplicate
+    seen: set = set()
+    filtered: list[str] = []
+    for u in urls:
+        if u in seen:
+            continue
+        seen.add(u)
+        try:
+            p = urllib.parse.urlparse(u)
+            if p.hostname and p.hostname == target_host:
+                filtered.append(u)
+        except Exception:
+            pass
+    return filtered
 
 
 def _filter_buster_wildcards(
@@ -14699,6 +14775,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         vc.log("[recon] searchsploit not found — skipping exploit lookup", "WARNING")
 
     vc.status(phase, "Recon", "running", "robots.txt/sitemap", 2, 10)
+    _sitemap_discovered: list = []  # URLs from sitemap.xml, merged later
     for rpath in ["/robots.txt", "/sitemap.xml"]:
         try:
             r = sess.get(_recon_origin + rpath, timeout=timeout)
@@ -14740,6 +14817,88 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                             remediation="Review robots.txt for sensitive path disclosure.",
                             http_code=r.status_code,
+                        )
+                elif rpath == "/sitemap.xml":
+                    # Parse sitemap XML for in-scope URLs and directory structure
+                    _sm_urls = _parse_sitemap_urls(
+                        r.text, sess, _recon_origin,
+                        target["hostname"], timeout)
+                    if _sm_urls:
+                        # Extract unique paths for structure map
+                        _sm_paths: dict = {}
+                        _sm_dirs: set = set()
+                        for _sm_u in _sm_urls:
+                            try:
+                                _sm_p = urllib.parse.urlparse(_sm_u).path
+                                if _sm_p:
+                                    _sm_p = _sm_p.split("?")[0].split("#")[0]
+                                    _sm_paths[_sm_p] = None
+                                    # Also extract parent directories
+                                    _sm_parts = _sm_p.rstrip("/").split("/")
+                                    for _di in range(2, len(_sm_parts)):
+                                        _sm_dir = "/".join(_sm_parts[:_di]) + "/"
+                                        if _sm_dir not in _sm_dirs:
+                                            _sm_dirs.add(_sm_dir)
+                                            _sm_paths[_sm_dir] = None
+                            except Exception:
+                                pass
+                        if _sm_paths:
+                            try:
+                                _write_structure_map(
+                                    out, target,
+                                    path_statuses=_sm_paths,
+                                    source="sitemap.xml")
+                            except Exception:
+                                pass
+                        vc.log(
+                            f"[recon] sitemap.xml: {len(_sm_urls)} in-scope "
+                            f"URL(s), {len(_sm_paths)} unique path(s) "
+                            f"extracted",
+                            "SUCCESS",
+                        )
+                        # Feed discovered URLs into the sitemap-discovered list
+                        # — merged into _wp_discovered at phase end
+                        _sitemap_discovered.extend(_sm_urls)
+                        # Build a readable sample for the finding output
+                        _sm_sample_paths = sorted(set(
+                            urllib.parse.urlparse(u).path
+                            for u in _sm_urls[:50]
+                            if urllib.parse.urlparse(u).path
+                        ))
+                        out.add_finding(
+                            title="Application Structure Disclosed via sitemap.xml",
+                            url=url.rstrip("/") + rpath,
+                            port=target["port"], risk="INFO",
+                            description=(
+                                f"sitemap.xml exposes {len(_sm_urls)} "
+                                f"in-scope URL(s) across "
+                                f"{len(_sm_paths)} unique path(s). "
+                                "This reveals the application's page "
+                                "structure, URL patterns, and content "
+                                "hierarchy to attackers before any "
+                                "brute-forcing or crawling."
+                            ),
+                            output="\n".join(_sm_sample_paths[:30]),
+                            sources="fracture-recon",
+                            service=target["scheme"],
+                            output_file=f"{_rf_rq},{_rf_rp}",
+                            affected="\n".join(_sm_sample_paths[:20]),
+                            owasp="A05:2025 Security Misconfiguration",
+                            nist="CM-7",
+                            remediation=(
+                                "Review sitemap.xml for sensitive paths. "
+                                "Restrict access to internal/admin paths "
+                                "via robots.txt noindex or remove them "
+                                "from the sitemap. Consider whether the "
+                                "sitemap should be publicly accessible."
+                            ),
+                            http_code=r.status_code,
+                        )
+                    else:
+                        vc.log(
+                            "[recon] sitemap.xml found but no in-scope "
+                            "URLs extracted (empty or external-only)",
+                            "INFO",
                         )
         except Exception:
             pass
@@ -15186,6 +15345,10 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                  path_redirects=_wp_sm_rd or None,
                                  source="wayback")
         _wp_discovered = [_wu for _wu, *_ in _wp_info.get("discovered_paths", [])]
+
+    # Merge sitemap-discovered URLs (collected earlier in the robots/sitemap loop)
+    if _sitemap_discovered:
+        _wp_discovered.extend(_sitemap_discovered)
 
     # ── Soft-404 detection ──────────────────────────────────────────────────
     _soft_404_info = None
