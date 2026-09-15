@@ -4163,9 +4163,15 @@ def _extract_subprocess_auth(sess: requests.Session) -> "tuple[str, list[tuple[s
                      other non-auth defaults)
     """
     # ── Cookies ──────────────────────────────────────────────────────────────
+    # Iterate the full cookie jar — .get_dict() (no args) silently drops
+    # domain-scoped cookies, which is exactly what browser-assisted login
+    # sets (domain="app.staging.aws.example.com" etc.).  Walking the
+    # jar objects captures every cookie regardless of domain/path scope.
     cookie_str = ""
     try:
-        cookies = sess.cookies.get_dict()
+        cookies: dict[str, str] = {}
+        for _ck in sess.cookies:
+            cookies[_ck.name] = _ck.value
         if cookies:
             cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
     except Exception:
