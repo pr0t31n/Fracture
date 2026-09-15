@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.53.2"
+VERSION = "2.53.3"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -39592,6 +39592,31 @@ def main() -> None:
                         _still_on_login = (
                             _landing_path == _target_path
                             or _last_seg == "login")
+                        # SPA auth cookie bypass — same logic as
+                        # the early check at _early_on_login: when
+                        # auth session cookies look like session
+                        # tokens, skip headless resolution (the app
+                        # is a client-side SPA already authenticated).
+                        if _still_on_login and _as_session:
+                            _spa_auth_names = (
+                                "authtoken", "idtoken", "id_token",
+                                "access_token", "accesstoken",
+                                "refreshtoken", "refresh_token",
+                                "jwt", "bearer", "session_token",
+                                "x-auth", "sid",
+                            )
+                            for _ac in _as_session.cookies:
+                                if any(k in _ac.name.lower()
+                                       for k in _spa_auth_names):
+                                    _still_on_login = False
+                                    vc.log(
+                                        "[auth] Landing URL matches "
+                                        "target URL but auth cookies "
+                                        "present (SPA) — skipping "
+                                        "late headless resolution",
+                                        "INFO",
+                                    )
+                                    break
                         if _still_on_login:
                             vc.log(
                                 "[auth] Landing page is still the login URL "
