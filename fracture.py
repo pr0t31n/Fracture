@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.52.9"
+VERSION = "2.53.0"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -8470,42 +8470,282 @@ return null;
                             timeout=300,
                         ).strip()
 
-                    # 3. Attempt generic MFA code submission
+                    # 3. Attempt MFA code submission
                     if _mfa_code and _mfa_code.lower() != "browser":
                         _mfa_submitted = False
-                        # Try POST to current MFA URL with common OTP
-                        # field names — covers most server-side endpoints
-                        # that accept a code via API even when the form
-                        # is JS-rendered.
-                        for _mf in ("passcode", "otp", "code"):
+
+                        # ── 3a. Okta authn API ────────────────────────
+                        # If the page embeds an Okta Sign-In Widget, the
+                        # stateToken from the JS config allows completing
+                        # MFA via the Okta Authentication API and then
+                        # exchanging the sessionToken for cookies through
+                        # the standard OAuth redirect chain — no browser.
+                        def _js_unesc(s):
+                            """Decode \\xHH JS hex escapes."""
+                            return _re7.sub(
+                                r'\\x([0-9a-fA-F]{2})',
+                                lambda m: chr(int(m.group(1), 16)), s)
+
+                        _okta_st_m = _re7.search(
+                            r'"stateToken"\s*:\s*"([^"]+)"', _html)
+                        _okta_bu_m = _re7.search(
+                            r'"baseUrl"\s*:\s*"([^"]+)"', _html)
+                        _okta_ru_m = _re7.search(
+                            r'"redirectUri"\s*:\s*"([^"]+)"', _html)
+
+                        if _okta_st_m and _okta_bu_m:
+                            _okta_st = _js_unesc(_okta_st_m.group(1))
+                            _okta_base = _js_unesc(
+                                _okta_bu_m.group(1)).rstrip("/")
+                            _okta_redir = (
+                                _js_unesc(_okta_ru_m.group(1))
+                                if _okta_ru_m else _okta_base)
                             try:
-                                _mfa_resp = sess.post(
-                                    _url,
-                                    data={_mf: _mfa_code},
+                                vc.log(
+                                    "[auth] Okta Sign-In Widget detected "
+                                    "— completing MFA via authn API",
+                                    "INFO",
+                                )
+                                # Get current auth state + factors
+                                _authn_r = sess.post(
+                                    f"{_okta_base}/api/v1/authn",
+                                    json={"stateToken": _okta_st},
                                     timeout=timeout,
-                                    allow_redirects=True,
                                 )
-                                _mfa_new_url = _mfa_resp.url or ""
-                                _mfa_new_mfa = _detect_mfa(
-                                    _mfa_resp.text or "", _mfa_new_url)
-                                _mfa_url_changed = (
-                                    _mfa_new_url != _url
-                                    and _mfa_resp.status_code
-                                    not in (401, 403)
-                                )
-                                if _mfa_url_changed and not _mfa_new_mfa:
+                                _authn = _authn_r.json()
+                                _a_status = _authn.get("status", "")
+
+                                if _a_status in (
+                                    "MFA_REQUIRED", "MFA_CHALLENGE",
+                                    "MFA_ENROLL_ACTIVATE",
+                                ):
+                                    _factors = (
+                                        _authn.get("_embedded", {})
+                                        .get("factors", []))
+                                    _st = _authn.get(
+                                        "stateToken", _okta_st)
                                     vc.log(
-                                        f"[auth] MFA code accepted "
-                                        f"(field='{_mf}', redirected "
-                                        f"to {_mfa_new_url})",
-                                        "SUCCESS",
+                                        f"[auth] Okta authn: {_a_status}"
+                                        f", {len(_factors)} factor(s)",
+                                        "INFO",
                                     )
-                                    current_resp = _mfa_resp
-                                    _mfa_submitted = True
-                                    auth["auth_needs_mfa"] = False
-                                    break
-                            except Exception:
-                                continue
+                                    # Pick a factor that accepts passCode
+                                    _factor = None
+                                    for _f in _factors:
+                                        if _f.get("factorType", "") in (
+                                            "token:software:totp",
+                                            "token", "sms", "email",
+                                            "call",
+                                        ):
+                                            _factor = _f
+                                            break
+                                    if not _factor and _factors:
+                                        _factor = _factors[0]
+
+                                    if _factor:
+                                        _fid = _factor["id"]
+                                        _ftype = _factor.get(
+                                            "factorType", "?")
+                                        vc.log(
+                                            f"[auth] Verifying factor: "
+                                            f"{_ftype} ({_fid})",
+                                            "INFO",
+                                        )
+                                        _vfy_url = (
+                                            _factor.get("_links", {})
+                                            .get("verify", {})
+                                            .get("href", "")
+                                        ) or (
+                                            f"{_okta_base}/api/v1/authn"
+                                            f"/factors/{_fid}/verify")
+
+                                        # Email / SMS / call factors
+                                        # require activation before
+                                        # verification: POST with just
+                                        # the stateToken to trigger
+                                        # delivery, then verify with the
+                                        # code the user receives.
+                                        _needs_send = _ftype in (
+                                            "email", "sms", "call")
+                                        if _needs_send:
+                                            _act_r = sess.post(
+                                                _vfy_url,
+                                                json={
+                                                    "stateToken": _st},
+                                                timeout=timeout,
+                                            )
+                                            _act = _act_r.json()
+                                            # stateToken may rotate
+                                            _st = _act.get(
+                                                "stateToken", _st)
+                                            _prof = _factor.get(
+                                                "profile", {})
+                                            _dest = (
+                                                _prof.get("email")
+                                                or _prof.get(
+                                                    "phoneNumber")
+                                                or "?")
+                                            vc.log(
+                                                f"[auth] Okta {_ftype}"
+                                                f" factor activated — "
+                                                f"verification sent to"
+                                                f" {_dest}",
+                                                "INFO",
+                                            )
+                                            # Re-prompt with delivery
+                                            # context (the earlier
+                                            # prompt fired before the
+                                            # factor was activated so
+                                            # the user had no code).
+                                            if ((vc._managed or _is_tty)
+                                                    and not
+                                                    no_interactive):
+                                                _mfa_code = vc.prompt(
+                                                    f"Okta {_ftype} "
+                                                    f"verification sent"
+                                                    f" to {_dest}. "
+                                                    f"Enter the code, "
+                                                    f"or type 'browser'"
+                                                    f" to complete "
+                                                    f"login in a "
+                                                    f"browser window",
+                                                    prompt_type="text",
+                                                    role=role_label,
+                                                    username=auth.get(
+                                                        "username", ""),
+                                                    timeout=300,
+                                                ).strip()
+                                            if (not _mfa_code
+                                                    or _mfa_code.lower()
+                                                    == "browser"):
+                                                raise Exception(
+                                                    "browser fallback "
+                                                    "requested for "
+                                                    f"{_ftype} factor")
+
+                                        _vfy_r = sess.post(
+                                            _vfy_url,
+                                            json={
+                                                "stateToken": _st,
+                                                "passCode": _mfa_code,
+                                            },
+                                            timeout=timeout,
+                                        )
+                                        _vfy = _vfy_r.json()
+                                        _vs = _vfy.get("status", "")
+
+                                        if _vs == "SUCCESS":
+                                            _stok = _vfy.get(
+                                                "sessionToken", "")
+                                            if _stok:
+                                                # Exchange sessionToken
+                                                # for cookies via the
+                                                # OAuth redirect chain.
+                                                _cr = sess.get(
+                                                    f"{_okta_base}/login"
+                                                    f"/sessionCookieRedirect"
+                                                    f"?checkAccountSetup"
+                                                    f"Complete=true"
+                                                    f"&token={_stok}"
+                                                    f"&redirectUrl="
+                                                    f"{_okta_redir}",
+                                                    timeout=timeout,
+                                                    allow_redirects=True,
+                                                )
+                                                vc.log(
+                                                    f"[auth] Okta MFA "
+                                                    f"verified — session "
+                                                    f"established ("
+                                                    f"{len(list(sess.cookies))}"
+                                                    f" cookies, final: "
+                                                    f"{_cr.url})",
+                                                    "SUCCESS",
+                                                )
+                                                current_resp = _cr
+                                                _mfa_submitted = True
+                                                auth["auth_needs_mfa"] = False
+                                        else:
+                                            _err = _vfy.get(
+                                                "errorSummary",
+                                                _vs or "unknown")
+                                            vc.log(
+                                                f"[auth] Okta MFA verify"
+                                                f": {_err}",
+                                                "WARNING",
+                                            )
+                                elif _a_status == "SUCCESS":
+                                    # Already authenticated — the
+                                    # stateToken was consumed by a prior
+                                    # call.  Exchange directly.
+                                    _stok = _authn.get(
+                                        "sessionToken", "")
+                                    if _stok:
+                                        _cr = sess.get(
+                                            f"{_okta_base}/login"
+                                            f"/sessionCookieRedirect"
+                                            f"?checkAccountSetup"
+                                            f"Complete=true"
+                                            f"&token={_stok}"
+                                            f"&redirectUrl="
+                                            f"{_okta_redir}",
+                                            timeout=timeout,
+                                            allow_redirects=True,
+                                        )
+                                        vc.log(
+                                            f"[auth] Okta session "
+                                            f"exchanged ({len(list(sess.cookies))}"
+                                            f" cookies, final: {_cr.url})",
+                                            "SUCCESS",
+                                        )
+                                        current_resp = _cr
+                                        _mfa_submitted = True
+                                        auth["auth_needs_mfa"] = False
+                                else:
+                                    vc.log(
+                                        f"[auth] Okta authn unexpected "
+                                        f"status: {_a_status}",
+                                        "WARNING",
+                                    )
+                            except Exception as _okta_ex:
+                                vc.log(
+                                    f"[auth] Okta API MFA failed: "
+                                    f"{_okta_ex}",
+                                    "INFO",
+                                )
+
+                        # ── 3b. Generic POST fallback ─────────────────
+                        if not _mfa_submitted:
+                            for _mf in ("passcode", "otp", "code"):
+                                try:
+                                    _mfa_resp = sess.post(
+                                        _url,
+                                        data={_mf: _mfa_code},
+                                        timeout=timeout,
+                                        allow_redirects=True,
+                                    )
+                                    _mfa_new_url = (
+                                        _mfa_resp.url or "")
+                                    _mfa_new_mfa = _detect_mfa(
+                                        _mfa_resp.text or "",
+                                        _mfa_new_url)
+                                    _mfa_url_changed = (
+                                        _mfa_new_url != _url
+                                        and _mfa_resp.status_code
+                                        not in (401, 403))
+                                    if (_mfa_url_changed
+                                            and not _mfa_new_mfa):
+                                        vc.log(
+                                            f"[auth] MFA code accepted "
+                                            f"(field='{_mf}', → "
+                                            f"{_mfa_new_url})",
+                                            "SUCCESS",
+                                        )
+                                        current_resp = _mfa_resp
+                                        _mfa_submitted = True
+                                        auth["auth_needs_mfa"] = False
+                                        break
+                                except Exception:
+                                    continue
 
                         if not _mfa_submitted:
                             vc.log(
@@ -38339,6 +38579,32 @@ def main() -> None:
                         _early_on_login = (
                             _early_landing_path == _early_target_path
                             or _last_seg == "login")
+                        # SPA targets keep the same URL for login and
+                        # the authenticated landing page — the routing
+                        # is client-side.  When auth cookies that look
+                        # like session tokens are already on the session,
+                        # skip the expensive headless-browser resolution
+                        # (which would time out for JS-rendered apps).
+                        if _early_on_login and auth_sess:
+                            _spa_auth_names = (
+                                "authtoken", "idtoken", "id_token",
+                                "access_token", "accesstoken",
+                                "refreshtoken", "refresh_token",
+                                "jwt", "bearer", "session_token",
+                                "x-auth", "sid",
+                            )
+                            for _ac in auth_sess.cookies:
+                                if any(k in _ac.name.lower()
+                                       for k in _spa_auth_names):
+                                    _early_on_login = False
+                                    vc.log(
+                                        "[auth] Landing URL matches "
+                                        "target URL but auth cookies "
+                                        "present (SPA) — accepting "
+                                        "as authenticated landing page",
+                                        "INFO",
+                                    )
+                                    break
                         if _early_on_login:
                             vc.log(
                                 "[auth] Landing page is still the login URL "
