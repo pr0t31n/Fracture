@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.52.7"
+VERSION = "2.52.9"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -8413,13 +8413,126 @@ return null;
 
             if not _forms:
                 if _step_mfa:
-                    vc.log(
-                        f"[auth] MFA challenge present at {_url} but no "
-                        f"interactive HTML form was found (likely JavaScript-"
-                        f"rendered or out-of-band push/biometric). Use "
-                        f"--browser-auth to complete the challenge interactively.",
-                        "WARNING",
-                    )
+                    # ── MFA detected but no server-rendered form ──────────
+                    # The MFA challenge is likely JavaScript-rendered (Okta
+                    # Sign-In Widget, Auth0 Lock, etc.) or an out-of-band
+                    # push/biometric.  Prompt the user for an MFA code and
+                    # attempt a generic API submission.  If the code fails
+                    # the browser-auth fallback fires automatically after
+                    # this function returns.
+                    _mfa_code = ""
+                    _mfa_log_providers = ", ".join(_step_mfa)
+
+                    # 1. Auto-generate TOTP if a secret is configured
+                    _totp_sec = auth.get("totp_secret", "").strip()
+                    if _totp_sec:
+                        try:
+                            import hmac as _hm_t, hashlib as _hsh_t
+                            import struct as _st_t, time as _tt_t, base64 as _b6_t
+                            _k = _b6_t.b32decode(
+                                _totp_sec.upper().replace(" ", ""))
+                            _ts = int(_tt_t.time()) // 30
+                            _h = _hm_t.new(
+                                _k, _st_t.pack(">Q", _ts), _hsh_t.sha1
+                            ).digest()
+                            _o = _h[-1] & 0x0F
+                            _mfa_code = str(
+                                (_st_t.unpack(">I", _h[_o:_o + 4])[0]
+                                 & 0x7FFFFFFF) % 1_000_000
+                            ).zfill(6)
+                            vc.log(
+                                "[auth] Auto-generated TOTP code from "
+                                "configured secret",
+                                "INFO",
+                            )
+                        except Exception as _te:
+                            vc.log(
+                                f"[auth] TOTP auto-generate failed: {_te}",
+                                "WARNING",
+                            )
+
+                    # 2. Interactive prompt (when no auto-code)
+                    if (not _mfa_code
+                            and (vc._managed or _is_tty)
+                            and not no_interactive):
+                        _mfa_prompt = (
+                            f"MFA challenge detected "
+                            f"({_mfa_log_providers}). Enter the "
+                            f"verification code, or type 'browser' to "
+                            f"complete login in a browser window"
+                        )
+                        _prompts_issued += 1
+                        _mfa_code = vc.prompt(
+                            _mfa_prompt,
+                            prompt_type="text",
+                            role=role_label,
+                            username=auth.get("username", ""),
+                            timeout=300,
+                        ).strip()
+
+                    # 3. Attempt generic MFA code submission
+                    if _mfa_code and _mfa_code.lower() != "browser":
+                        _mfa_submitted = False
+                        # Try POST to current MFA URL with common OTP
+                        # field names — covers most server-side endpoints
+                        # that accept a code via API even when the form
+                        # is JS-rendered.
+                        for _mf in ("passcode", "otp", "code"):
+                            try:
+                                _mfa_resp = sess.post(
+                                    _url,
+                                    data={_mf: _mfa_code},
+                                    timeout=timeout,
+                                    allow_redirects=True,
+                                )
+                                _mfa_new_url = _mfa_resp.url or ""
+                                _mfa_new_mfa = _detect_mfa(
+                                    _mfa_resp.text or "", _mfa_new_url)
+                                _mfa_url_changed = (
+                                    _mfa_new_url != _url
+                                    and _mfa_resp.status_code
+                                    not in (401, 403)
+                                )
+                                if _mfa_url_changed and not _mfa_new_mfa:
+                                    vc.log(
+                                        f"[auth] MFA code accepted "
+                                        f"(field='{_mf}', redirected "
+                                        f"to {_mfa_new_url})",
+                                        "SUCCESS",
+                                    )
+                                    current_resp = _mfa_resp
+                                    _mfa_submitted = True
+                                    auth["auth_needs_mfa"] = False
+                                    break
+                            except Exception:
+                                continue
+
+                        if not _mfa_submitted:
+                            vc.log(
+                                "[auth] MFA code submission was not "
+                                "accepted — browser-assisted login will "
+                                "be offered as fallback",
+                                "WARNING",
+                            )
+                        else:
+                            # Code worked — re-enter loop to verify the
+                            # post-MFA page.
+                            continue
+                    else:
+                        if _mfa_code.lower() == "browser":
+                            vc.log(
+                                "[auth] User requested browser-assisted "
+                                "login for MFA completion",
+                                "INFO",
+                            )
+                        elif not _mfa_code:
+                            vc.log(
+                                f"[auth] MFA challenge present "
+                                f"({_mfa_log_providers}) but no code "
+                                f"provided — browser-assisted login "
+                                f"will be offered as fallback",
+                                "WARNING",
+                            )
                     break
 
                 # ── 4b. Deferred-MFA probe ───────────────────────────────
@@ -9445,9 +9558,20 @@ return null;
                 or any(k.lower() in _ba_hdr_names for k in sess.headers)
                 or sess.auth is not None
             )
-            _ba_needed = (not _login_post_called) or (not _ba_has_signal)
+            _ba_needed = (
+                (not _login_post_called)
+                or (not _ba_has_signal)
+                or auth.get("auth_needs_mfa")
+            )
             if _ba_needed:
-                if not _login_post_called:
+                if auth.get("auth_needs_mfa"):
+                    vc.log(
+                        "[auth] MFA challenge could not be completed "
+                        "programmatically — opening browser-assisted "
+                        "login for manual MFA completion",
+                        "INFO",
+                    )
+                elif not _login_post_called:
                     vc.log(
                         "[auth] No login form located — browser-assisted login required",
                         "INFO",
@@ -9458,7 +9582,7 @@ return null;
                         "browser-assisted login required",
                         "INFO",
                     )
-                if cfg.get("browser_auth") and not no_interactive:
+                if (cfg.get("browser_auth") or auth.get("auth_needs_mfa")) and not no_interactive:
                     if not auth.get("login_url"):
                         auth["login_url"] = _ba_url
                     return _browser_assisted_login(_ba_url)
@@ -38175,6 +38299,7 @@ def main() -> None:
             if _early_auth_cfg.get("enabled") and auth_sess is not None:
                 _early_label = (
                     _early_auth_cfg.get("role_label", "").strip()
+                    or (_collected_roles[0]["role"] if _collected_roles else "")
                     or "Admin"
                 )
                 _early_username = (
