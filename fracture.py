@@ -8355,6 +8355,23 @@ return null;
                 continue
             if not _h_html and not _h_url:
                 continue
+            # Auto-whitelist every hostname in the redirect
+            # chain — IdP / SSO domains must be reachable by
+            # downstream scoped sessions (login profile replay,
+            # Okta API calls, CSRF harvest, etc.).
+            if scope_hostnames is not None and _h_url:
+                try:
+                    _rh = urllib.parse.urlparse(_h_url).hostname
+                    if _rh and _rh not in scope_hostnames:
+                        scope_hostnames.add(_rh)
+                        vc.log(
+                            f"[scope] Auto-added auth "
+                            f"redirect host to scope: "
+                            f"{_rh}",
+                            "INFO",
+                        )
+                except Exception:
+                    pass
             _h_mfa = _detect_mfa(_h_html, _h_url)
             for _mp in _h_mfa:
                 if _mp not in _redir_mfa:
@@ -8384,6 +8401,20 @@ return null;
                 vc.log(f"[auth] Post-login landing URL: {_url}", "INFO")
             else:
                 vc.log(f"[auth] Post-login step {_step + 1} URL: {_url}", "INFO")
+            # Auto-whitelist the landing hostname for scope so
+            # downstream scoped sessions can reach IdP / SSO.
+            if scope_hostnames is not None and _url:
+                try:
+                    _lh = urllib.parse.urlparse(_url).hostname
+                    if _lh and _lh not in scope_hostnames:
+                        scope_hostnames.add(_lh)
+                        vc.log(
+                            f"[scope] Auto-added auth "
+                            f"landing host to scope: {_lh}",
+                            "INFO",
+                        )
+                except Exception:
+                    pass
 
             # ── 2. HTTP error status ───────────────────────────────────────────
             if current_resp.status_code in (401, 403):
@@ -8701,9 +8732,16 @@ return null;
                                         _mfa_submitted = True
                                         auth["auth_needs_mfa"] = False
                                 else:
+                                    _err_code = _authn.get(
+                                        "errorCode", "")
+                                    _err_sum = _authn.get(
+                                        "errorSummary", "")
                                     vc.log(
                                         f"[auth] Okta authn unexpected "
-                                        f"status: {_a_status}",
+                                        f"status: {_a_status}"
+                                        f"{f' ({_err_code}: {_err_sum})' if _err_code else ''}"
+                                        f" — response keys: "
+                                        f"{list(_authn.keys())[:8]}",
                                         "WARNING",
                                     )
                             except Exception as _okta_ex:
