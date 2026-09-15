@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.53.1"
+VERSION = "2.53.2"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -6437,6 +6437,11 @@ document.addEventListener('submit', function(e) {
             f"(browser was at {captured_url})",
             "SUCCESS",
         )
+        # Browser-auth completed — override the programmatic
+        # verification flags that were set based on the initial
+        # credential POST response (before the browser step).
+        auth["auth_verified"]  = True
+        auth["auth_needs_mfa"] = False
         return new_sess
 
     # ── Login URL discovery ───────────────────────────────────────────────────
