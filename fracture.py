@@ -45,7 +45,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.53.8"
+VERSION = "2.53.10"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -600,6 +600,18 @@ _INFRA_COOKIE_RE = re.compile(
     r'incap_ses|visid_incap|nlbi_|GCLB|SERVERID|HAProxy|'
     r'route|__RequestVerificationToken|__AntiXsrf|'
     r'AWSALBCORS|AWSELBCORS|__cflb|__cfruid)',
+    re.I,
+)
+
+# Analytics, tracking, and redirect cookies — NOT session-sensitive.
+# Missing security flags on these is a configuration hygiene issue at
+# most, not a session-hijack vector.  Kept separate from _INFRA_COOKIE_RE
+# so infra detection remains narrow (CDN/LB/WAF only).
+_TRACKING_COOKIE_RE = re.compile(
+    r'^(_pk_|stg_|_ga$|_gid$|_gat|__utm|_fbp$|_gcl|__hstc$|__hssc$|'
+    r'hubspot|DT$|dtSa$|dtPC$|dtCookie$|dtLatC$|rxVisitor$|rxvt$|'
+    r'login[-_]?redirect$|return[-_]?(?:url|to)$|next$|redirect$|'
+    r'back[-_]?url$|goto$|continue$|referer$|origin[-_]?url$)',
     re.I,
 )
 
@@ -28888,10 +28900,29 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
     )
 
     # 1. Analyse session token entropy
+    # Non-session cookies that should never trigger entropy/predictability
+    # findings: redirect/navigation cookies whose values are URL paths,
+    # tracking/analytics cookies, and infrastructure cookies.
+    _ENTROPY_SKIP_NAME_RE = re.compile(
+        r'(?i)^(login[-_]?redirect|return[-_]?(?:url|to)|next|redirect|'
+        r'back[-_]?url|goto|continue|referer|origin[-_]?url|'
+        r'_pk_|_ga|_gid|_gat|__utm|_fbp|_gcl|__hstc|__hssc|hubspot)')
     for cookie in auth_sess.cookies:
         val = cookie.value or ""
         if len(val) < 8:
             continue
+        # Skip infrastructure and non-session cookies
+        if _INFRA_COOKIE_RE.match(cookie.name):
+            continue
+        if _ENTROPY_SKIP_NAME_RE.match(cookie.name):
+            continue
+        # Skip cookies whose value is a URL path or URL (redirect cookies)
+        try:
+            _decoded_val = urllib.parse.unquote(val)
+            if _decoded_val.startswith("/") or _decoded_val.startswith("http"):
+                continue
+        except Exception:
+            pass
         # Check for low-entropy tokens
         unique_chars = len(set(val))
         if unique_chars < 8 and len(val) < 20:
@@ -28992,18 +29023,69 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                     session=fix_sess)
 
                 if _sf_sess is not None:
-                    _post_val = ""
+                    # Collect ALL values for the target cookie — the jar
+                    # may hold both the old injected value AND a server-
+                    # regenerated one (different domain/path attrs).  If
+                    # any value differs from fixed_id, the server DID
+                    # regenerate regardless of jar ordering.
+                    _post_vals = set()
                     for _ck in _sf_sess.cookies:
                         if _ck.name == session_cookie_name:
-                            _post_val = _ck.value
-                            break
+                            _post_vals.add(_ck.value)
+                    _post_val = next(iter(_post_vals), "")
+                    # If the jar holds ANY value besides fixed_id, the
+                    # server regenerated — not vulnerable.
+                    _jar_regenerated = (_post_vals and _post_vals != {fixed_id})
+                    if _jar_regenerated:
+                        vc.log(f"[session] Session ID regenerated after auth "
+                               f"(jar contains {len(_post_vals)} distinct values "
+                               f"for '{session_cookie_name}') — not vulnerable",
+                               "INFO")
+                    # Also check Set-Cookie headers from the auth response
+                    # for regeneration evidence — the server may have sent
+                    # a new value even if the cookie jar retained the old one
+                    # (e.g. duplicate cookies, Okta-style indirect auth flows).
+                    _regenerated_via_setcookie = False
+                    if not _jar_regenerated:
+                        if hasattr(_sf_sess, '_fracture_last_response'):
+                            _sc_resp = _sf_sess._fracture_last_response
+                        else:
+                            _sc_resp = None
+                        if _sc_resp is not None:
+                            for _sc_hdr in _sc_resp.headers.getlist(
+                                    "Set-Cookie") if hasattr(
+                                    _sc_resp.headers, "getlist") else (
+                                    _sc_resp.headers.get("Set-Cookie", ""),):
+                                if (session_cookie_name + "=" in _sc_hdr
+                                        and fixed_id not in _sc_hdr):
+                                    _regenerated_via_setcookie = True
+                                    break
 
-                    if _post_val == fixed_id:
-                        # Cookie still holds the fixed value.  Verify the
+                    if (fixed_id in _post_vals
+                            and not _jar_regenerated
+                            and not _regenerated_via_setcookie):
+                        # Cookie still holds the fixed value and no Set-Cookie
+                        # with a regenerated value was observed.  Verify the
                         # session is actually authenticated — a stale cookie
                         # in the jar that the server ignores is NOT fixation.
+                        # SPA-aware: also check if the response is just the
+                        # SPA shell (identical to an unauth request), which
+                        # does NOT prove the session is authed.
                         _verify_r = _sf_sess.get(url, timeout=timeout)
+                        _spa_shell = False
+                        try:
+                            _unauth_chk = _make_session(cfg)
+                            _unauth_r = _unauth_chk.get(url, timeout=timeout)
+                            if (_unauth_r and _unauth_r.status_code == 200
+                                    and _verify_r and _verify_r.status_code == 200):
+                                if (_p20_body_hash((_verify_r.text or "").strip())
+                                        == _p20_body_hash(
+                                            (_unauth_r.text or "").strip())):
+                                    _spa_shell = True
+                        except Exception:
+                            pass
                         if (_verify_r
+                                and not _spa_shell
                                 and not _inj_is_login_page(_verify_r)
                                 and not _matches_error_fingerprint(
                                     _verify_r.text)):
@@ -29054,13 +29136,24 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                                    "survived authentication AND session is authed",
                                    "SUCCESS")
                         else:
-                            vc.log("[session] Fixed session ID in cookie jar but "
-                                   "server is not using it (response is a login "
-                                   "page) — not vulnerable (stale cookie)", "INFO")
+                            if _spa_shell:
+                                vc.log("[session] Fixed session ID in cookie jar but "
+                                       "response is the SPA shell (same body as unauth) "
+                                       "— cannot confirm auth, not vulnerable", "INFO")
+                            else:
+                                vc.log("[session] Fixed session ID in cookie jar but "
+                                       "server is not using it (response is a login "
+                                       "page) — not vulnerable (stale cookie)", "INFO")
                     else:
-                        vc.log(f"[session] Session ID regenerated after auth "
-                               f"({_post_val[:20]}… ≠ {fixed_id[:20]}…) — "
-                               f"not vulnerable", "INFO")
+                        if _regenerated_via_setcookie:
+                            vc.log(f"[session] Set-Cookie header regenerated "
+                                   f"'{session_cookie_name}' during auth "
+                                   f"(fixed ID replaced) — not vulnerable "
+                                   f"(regeneration via Set-Cookie)", "INFO")
+                        else:
+                            vc.log(f"[session] Session ID regenerated after auth "
+                                   f"({_post_val[:20]}… ≠ {fixed_id[:20]}…) — "
+                                   f"not vulnerable", "INFO")
                 else:
                     vc.log("[session] Could not authenticate for fixation "
                            "verification — skipping", "INFO")
@@ -29209,6 +29302,10 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         # session-hijack vector.
         if _INFRA_COOKIE_RE.match(_ck.name):
             continue
+        # Skip analytics, tracking, and redirect cookies — missing flags
+        # on these are not session-hijack vectors.
+        if _TRACKING_COOKIE_RE.match(_ck.name):
+            continue
 
         # Secure flag (standard http.cookiejar attribute)
         if not _ck.secure:
@@ -29238,6 +29335,39 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             # SameSite=None requires Secure; without it modern browsers reject
             # the attribute and fall back to SameSite=Lax — a misconfiguration.
             _bad_samesite_none.append(_ck.name)
+
+    # Cross-reference authentication_status.json for cookies invisible to the
+    # requests jar.  OAuth/OIDC flows often set auth tokens (authToken, idToken,
+    # refreshToken) via JavaScript or during redirect callbacks that the requests
+    # library doesn't capture.  authentication_status.json records ALL cookies
+    # observed during the auth phase, so any cookie present there but absent from
+    # auth_sess.cookies was set outside the requests flow.
+    _jar_names = {_ck.name for _ck in auth_sess.cookies}
+    try:
+        _as_path = out.root / "authentication_status.json"
+        if _as_path.exists():
+            _as_entries = json.loads(_as_path.read_text(encoding="utf-8"))
+            for _as_entry in _as_entries:
+                if _as_entry.get("role") in ("unauthenticated", ""):
+                    continue
+                for _as_ck in _as_entry.get("cookies", []):
+                    _as_name = _as_ck.get("name", "")
+                    if not _as_name or _as_name in _jar_names:
+                        continue  # already audited via jar
+                    if _INFRA_COOKIE_RE.match(_as_name):
+                        continue
+                    if _TRACKING_COOKIE_RE.match(_as_name):
+                        continue
+                    _jar_names.add(_as_name)  # avoid duplicates across roles
+                    if not _as_ck.get("secure", True):
+                        _miss_secure.append(_as_name)
+                    if not _as_ck.get("httpOnly", True):
+                        _miss_httponly.append(_as_name)
+                    # SameSite is not reliably captured in authentication_status
+                    # (requests can't read SameSite from the jar) — skip for
+                    # auth_status-only cookies to avoid false positives.
+    except Exception:
+        pass
 
     # Build evidence file with full cookie flag details for all findings
     _ck_evidence = out.output_path(phase, "cookie_flags_" + hostname)
@@ -29395,7 +29525,22 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                 # Save the follow-up protected-endpoint request + response too
                 _follow_rq, _follow_rp = _save_http_evidence(
                     out, phase, f"logout_followup_{hostname}", r2)
+                # SPA-aware: if the follow-up body is identical to an
+                # unauth request (same normalized hash), the 200 is just
+                # the SPA shell — not proof the session is still valid.
+                _logout_spa_shell = False
+                try:
+                    _logout_unauth = _make_session(cfg)
+                    _logout_ur = _logout_unauth.get(url, timeout=timeout)
+                    if (_logout_ur and _logout_ur.status_code == 200
+                            and r2.status_code == 200):
+                        if (_p20_body_hash((_logout_ur.text or "").strip())
+                                == _p20_body_hash((r2.text or "").strip())):
+                            _logout_spa_shell = True
+                except Exception:
+                    pass
                 if (r2.status_code == 200
+                        and not _logout_spa_shell
                         and not re.search(r'login|sign.?in|auth', r2.url, re.I)
                         and not _matches_error_fingerprint(r2.text)
                         and not _response_is_error_page(r2.text)):
@@ -29445,6 +29590,10 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                         http_code=r2.status_code,
                     )
                     vc.log("[session] Session not invalidated after logout", "SUCCESS")
+                elif _logout_spa_shell:
+                    vc.log("[session] Post-logout follow-up returned SPA shell "
+                           "(same body as unauth) — cannot determine session "
+                           "validity from HTML response alone", "INFO")
             break
         except Exception:
             pass
@@ -29503,8 +29652,10 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
             try:
                 _ag_r = _logout_src_sess.get(url, timeout=timeout, allow_redirects=True)
                 if (_ag_r.status_code == 200
-                        and abs(len(_ag_r.text) - len(_ug_r.text)) < max(200, int(len(_ag_r.text) * 0.1))):
+                        and (_p20_body_hash((_ag_r.text or "").strip())
+                             == _p20_body_hash((_ug_r.text or "").strip()))):
                     vc.log("[logout] Target URL returns same response authed and unauthed "
+                           "(normalized body hash match) "
                            "— page is not behind auth, skipping session tests", "INFO")
                     return
             except Exception:
@@ -29936,8 +30087,25 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                 time.sleep(1)   # allow server to process logout before probing
                 _r_old = _old_sess.get(_auth_probe_url, timeout=timeout, allow_redirects=True)
 
+                # SPA-aware: if the probe body is identical to an unauth
+                # request (same normalized hash), the 200 is just the SPA
+                # shell and does not prove the session is still valid.
+                _sslo_spa = False
+                try:
+                    _sslo_ua = _make_session(cfg)
+                    _sslo_ua_r = _sslo_ua.get(
+                        _auth_probe_url, timeout=timeout, allow_redirects=True)
+                    if (_sslo_ua_r and _sslo_ua_r.status_code == 200
+                            and _r_old.status_code == 200):
+                        if (_p20_body_hash((_sslo_ua_r.text or "").strip())
+                                == _p20_body_hash((_r_old.text or "").strip())):
+                            _sslo_spa = True
+                except Exception:
+                    pass
+
                 _still_valid = (
                     _r_old.status_code == 200
+                    and not _sslo_spa
                     and not _REDIR_LOGIN_RE.search(_r_old.url or "")
                     and not _REDIR_LOGIN_RE.search(_r_old.text[:3000])
                     and not _matches_error_fingerprint(_r_old.text)
@@ -30003,10 +30171,17 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                         "SUCCESS"
                     )
                 else:
-                    vc.log(
-                        f"[logout] Server-side invalidation confirmed — old session rejected "
-                        f"(HTTP {_r_old.status_code})", "INFO"
-                    )
+                    if _sslo_spa:
+                        vc.log(
+                            "[logout] Post-logout probe returned SPA shell "
+                            "(same body as unauth) — cannot determine session "
+                            "validity from HTML; not flagging", "INFO"
+                        )
+                    else:
+                        vc.log(
+                            f"[logout] Server-side invalidation confirmed — old session "
+                            f"rejected (HTTP {_r_old.status_code})", "INFO"
+                        )
             except Exception as _ve:
                 vc.log(f"[logout] Old-session validation probe failed: {_ve}", "WARNING")
 
@@ -30511,7 +30686,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
     try:
         _bl = sess.get(url.rstrip("/"), timeout=timeout, allow_redirects=False)
         if _bl.status_code == 200:
-            _lm_baseline_body = _bl.text[:2000]
+            _lm_baseline_body = _p20_normalize_body(_bl.text[:2000])
             _lm_baseline_len  = len(_bl.text)
     except Exception:
         pass
@@ -30519,7 +30694,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
         _bad = sess.get(url.rstrip("/") + "/_fracture_nonexistent_probe_",
                         timeout=timeout, allow_redirects=False)
         if _bad.status_code == 200:
-            _lm_bad_body = _bad.text[:2000]
+            _lm_bad_body = _p20_normalize_body(_bad.text[:2000])
             _lm_bad_len  = len(_bad.text)
     except Exception:
         pass
@@ -30530,7 +30705,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
             if r and r.status_code == 200:
                 # Catch-all / SPA / soft-404 detection: skip if the response
                 # body matches the base URL or the known-bad path.
-                _r_body = r.text[:2000]
+                _r_body = _p20_normalize_body(r.text[:2000])
                 _r_len  = len(r.text)
                 _is_catchall = False
                 for _ref_body, _ref_len in ((_lm_baseline_body, _lm_baseline_len),
@@ -31031,7 +31206,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
     for spath in _sensitive_paths_cc:
         surl = url.rstrip("/") + spath
         try:
-            r = sess.get(surl, timeout=timeout, allow_redirects=True)
+            r = sess.get(surl, timeout=timeout, allow_redirects=False)
             if r and r.status_code == 200:
                 cc = r.headers.get("Cache-Control", "")
                 pragma = r.headers.get("Pragma", "")
@@ -33709,6 +33884,32 @@ _P20_LOGIN_FORM_RE = re.compile(
 _P20_LOGIN_PATH_RE = re.compile(
     r'(?:^|/)(?:login|log[-_]in|signin|sign[-_]in|auth(?:enticate)?'
     r'|sso|cas|adfs)/?$', re.I)
+# ── Per-request entropy normalization (CSP nonces, CSRF tokens) ──────────────
+# Some SPAs embed a per-request 32-char hex CSP nonce in <meta>, <script>,
+# and <style> tags.  This rotates every response, making every body hash unique
+# even when the HTML structure is identical.  These regexes strip such entropy
+# before hashing/comparing, so identical pages produce the same fingerprint.
+_P20_NONCE_ATTR_RE = re.compile(
+    r'(\bnonce=["\'"]?)[0-9a-fA-F]{24,64}')
+_P20_CSP_META_RE = re.compile(
+    r'(csp-nonce["\'"][^>]{0,80}content=["\'"])[0-9a-fA-F]{24,64}')
+_P20_CSRF_TOKEN_RE = re.compile(
+    r'(\bcsrf[-_]?token["\'":=\s]+)[0-9a-fA-F]{24,64}', re.I)
+_P20_VIEWSTATE_RE = re.compile(
+    r'(__VIEWSTATE[^>]*value=["\'"])[A-Za-z0-9+/=]{32,}')
+
+def _p20_normalize_body(body: str) -> str:
+    """Strip per-request entropy from an HTML body for consistent comparison."""
+    s = _P20_NONCE_ATTR_RE.sub(r'\1_NONCE_', body)
+    s = _P20_CSP_META_RE.sub(r'\1_NONCE_', s)
+    s = _P20_CSRF_TOKEN_RE.sub(r'\1_TOKEN_', s)
+    s = _P20_VIEWSTATE_RE.sub(r'\1_VS_', s)
+    return s
+
+def _p20_body_hash(body: str) -> str:
+    """Hash body after stripping per-request entropy (CSP nonces etc.)."""
+    return hashlib.md5(
+        _p20_normalize_body(body).encode("utf-8", "replace")).hexdigest()
 
 
 def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
@@ -33766,7 +33967,17 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         if _p not in _seen_paths:
             _seen_paths.add(_p)
             _sm_path_keys.append(_p)
-    crawled_paths = _sm_path_keys
+    # Filter out static asset paths — these are public by design and testing
+    # them wastes time + generates false-positive "Unauthenticated Access"
+    # findings.  Reuses the _SPA_ROUTE_EXCLUDE pattern from the crawl phase
+    # (covers .js, .css, .png, .jpg, .gif, .svg, .ico, .woff2, .ttf, .eot,
+    # .map, .json, .xml, /static/, /assets/, /node_modules/, /favicon).
+    _pre_filter_count = len(_sm_path_keys)
+    crawled_paths = [p for p in _sm_path_keys if not _SPA_ROUTE_EXCLUDE.search(p)]
+    _filtered_count = _pre_filter_count - len(crawled_paths)
+    if _filtered_count:
+        vc.log(f"[access-matrix/p20] Filtered {_filtered_count} static asset "
+               f"path(s) from {_pre_filter_count} total", "INFO")
 
     # Only skip if truly no paths discovered anywhere
     if not crawled_paths:
@@ -33876,8 +34087,8 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                     _sp_landing, timeout=timeout, allow_redirects=False,
                     headers={"Accept": "text/html,application/json"})
                 if _sp_ur.status_code == 200:
-                    _sp_ah = _p20_hl.md5((_sp_ar.text or "").strip().encode("utf-8", "replace")).hexdigest()
-                    _sp_uh = _p20_hl.md5((_sp_ur.text or "").strip().encode("utf-8", "replace")).hexdigest()
+                    _sp_ah = _p20_body_hash((_sp_ar.text or "").strip())
+                    _sp_uh = _p20_body_hash((_sp_ur.text or "").strip())
                     if _sp_ah == _sp_uh:
                         _p20_spa_public[_sp_role] = True
                         vc.log(
@@ -34002,7 +34213,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             headers={"Accept": "text/html,application/json"})
         if _bl_r.status_code == 200:
             _bl_body = (_bl_r.text or "").strip()
-            _p20_baseline_hashes.add(_p20_hl.md5(_bl_body.encode("utf-8", "replace")).hexdigest())
+            _p20_baseline_hashes.add(_p20_body_hash(_bl_body))
     except Exception:
         pass
     # Also hash well-known SPA shell paths to catch catchall routers
@@ -34013,7 +34224,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 headers={"Accept": "text/html,application/json"})
             if _bl_r2.status_code == 200:
                 _bl_body2 = (_bl_r2.text or "").strip()
-                _p20_baseline_hashes.add(_p20_hl.md5(_bl_body2.encode("utf-8", "replace")).hexdigest())
+                _p20_baseline_hashes.add(_p20_body_hash(_bl_body2))
         except Exception:
             pass
 
@@ -34027,38 +34238,43 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         r'(?:[/\-_?#.]|$)'
     )
 
-    def _classify_response(resp, rel_path: str) -> str:
-        """Classify a 200 response body beyond the bare status code."""
+    def _classify_response(resp, rel_path: str) -> "tuple[str, str]":
+        """Classify a 200 response body beyond the bare status code.
+
+        Returns (classification, body_hash).  The body_hash is the MD5 of
+        the stripped response body; empty string when the body is too short
+        to fingerprint or classification was determined by URL pattern alone.
+        """
         body = (resp.text or "").strip()
         if len(body) < 50:
-            return "empty"
+            return ("empty", "")
         # URL-path heuristic: paths whose final segment IS a login endpoint
         # should never be flagged as real access — SPAs render the form via
         # JS so the static HTML won't contain <input type=password>.
         if _P20_LOGIN_PATH_RE.search(rel_path):
-            return "login_form"
+            return ("login_form", "")
         # URL-path heuristic: paths that ARE error pages or route through
         # an error handler (e.g. /omt/ErrorPage.aspx/anything).  SPAs
         # render error content client-side — the raw HTML shell has no
         # body markers, so the URL is the only reliable signal.
         if _P20_ERROR_PATH_RE.search(rel_path):
-            return "error_page"
-        body_hash = _p20_hl.md5(body.encode("utf-8", "replace")).hexdigest()
+            return ("error_page", "")
+        body_hash = _p20_body_hash(body)
         # Strip tags for text matching
         visible = re.sub(r'<[^>]+>', ' ', body[:8000])
         if _P20_LOGIN_FORM_RE.search(body[:8000]):
-            return "login_form"
+            return ("login_form", body_hash)
         if _P20_BODY_DENIED_RE.search(visible):
-            return "access_denied"
+            return ("access_denied", body_hash)
         if _P20_BODY_ERR_RE.search(visible):
-            return "soft_404"
+            return ("soft_404", body_hash)
         if _P20_BODY_ERR_GENERIC_RE.search(visible):
-            return "error_page"
+            return ("error_page", body_hash)
         if _matches_error_fingerprint(body):
-            return "error_page"
+            return ("error_page", body_hash)
         if body_hash in _p20_baseline_hashes:
-            return "spa_shell"
-        return "unique"
+            return ("spa_shell", body_hash)
+        return ("unique", body_hash)
 
     while idx < len(_am_paths):
         path = _am_paths[idx]
@@ -34071,6 +34287,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             url = base_url + rel
         access = {}
         body_class = {}
+        _body_hash_map = {}
         _prior = _existing_by_path.get(rel, {})
         for role, r_sess in role_sessions.items():
             _prior_code = _prior.get(role)
@@ -34082,7 +34299,10 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                                headers={"Accept": "text/html,application/json"})
                 access[role] = r.status_code
                 if r.status_code == 200:
-                    body_class[role] = _classify_response(r, rel)
+                    _cls_result, _cls_hash = _classify_response(r, rel)
+                    body_class[role] = _cls_result
+                    if _cls_hash:
+                        _body_hash_map[role] = _cls_hash
 
                 # ── Mid-loop session expiry detection ─────────────
                 # SKIP for SPA-public roles (see _probe_role_paths comment).
@@ -34201,8 +34421,82 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         _pa_entry = {"path": rel, "url": url, "access": access}
         if body_class:
             _pa_entry["body_class"] = body_class
+        if _body_hash_map:
+            _pa_entry["body_hash"] = _body_hash_map
         path_access.append(_pa_entry)
         vc.status(phase, "Access Matrix", "running", f"Path {idx}/{len(_am_paths)}", idx, len(_am_paths))
+
+    # ── Per-directory SPA catch-all detection ────────────────────────────
+    # The root-level baseline (/ and /nonexistent-*) catches server-wide
+    # SPAs.  Multi-app deployments often have SEPARATE SPA shells per route
+    # prefix (e.g. /receipt/*, /results/*, /portal/*) — each returns a
+    # different HTML shell from the root, so the root baseline misses them.
+    #
+    # Group probed paths by parent directory.  For any parent where ≥ N
+    # paths returned HTTP 200 with the SAME body hash (not already in the
+    # root baseline), probe the parent with random sub-paths.  If random
+    # probes also return 200 with the same hash → confirmed per-directory
+    # SPA catch-all → reclassify all matching paths as spa_shell.
+    _AM_DIR_WC_THRESHOLD = 3
+    from collections import defaultdict as _dd_am
+    _dir_hash_groups: dict = _dd_am(lambda: _dd_am(list))
+    for _dix, _dep in enumerate(path_access):
+        _dpath = _dep.get("path", "/")
+        _dparts = _dpath.rstrip("/").rsplit("/", 1)
+        _dparent = _dparts[0] if (len(_dparts) > 1 and _dparts[0]) else "/"
+        for _drole, _dhash in _dep.get("body_hash", {}).items():
+            if _dhash and _dep.get("body_class", {}).get(_drole) == "unique":
+                _dir_hash_groups[(_dparent, _drole)][_dhash].append(_dix)
+
+    _p20_dir_catchall_hashes: set = set()
+    _p20_dir_wc_total = 0
+    for (_dparent, _drole), _hash_buckets in _dir_hash_groups.items():
+        for _dhash, _dindices in _hash_buckets.items():
+            if len(_dindices) < _AM_DIR_WC_THRESHOLD:
+                continue
+            if _dhash in _p20_baseline_hashes:
+                continue
+            if _dhash in _p20_dir_catchall_hashes:
+                for _dix in _dindices:
+                    path_access[_dix].setdefault("body_class", {})[_drole] = "spa_shell"
+                _p20_dir_wc_total += len(_dindices)
+                continue
+            # Probe: random sub-paths under this parent directory
+            _probe_hits = 0
+            _probe_sess = role_sessions.get(_drole, unauth_sess)
+            for _ in range(3):
+                _probe_slug = secrets.token_hex(10) + "-notfound"
+                _probe_path = _dparent.rstrip("/") + "/" + _probe_slug
+                try:
+                    _pr = _probe_sess.get(
+                        base_url + _probe_path, timeout=timeout,
+                        allow_redirects=False,
+                        headers={"Accept": "text/html,application/json"})
+                    if _pr.status_code == 200:
+                        _pr_body = (_pr.text or "").strip()
+                        _pr_hash = _p20_body_hash(_pr_body)
+                        if _pr_hash == _dhash:
+                            _probe_hits += 1
+                except Exception:
+                    pass
+            if _probe_hits >= 2:
+                _p20_dir_catchall_hashes.add(_dhash)
+                _p20_baseline_hashes.add(_dhash)
+                vc.log(
+                    f"[access-matrix/p20] Per-directory SPA catch-all: "
+                    f"{_dparent}/* (role={_drole}, {len(_dindices)} matching "
+                    f"paths, hash={_dhash[:8]}…) — reclassifying as spa_shell",
+                    "INFO")
+                for _dix in _dindices:
+                    path_access[_dix].setdefault("body_class", {})[_drole] = "spa_shell"
+                _p20_dir_wc_total += len(_dindices)
+
+    if _p20_dir_wc_total:
+        vc.log(
+            f"[access-matrix/p20] Per-directory SPA detection reclassified "
+            f"{_p20_dir_wc_total} path(s) across "
+            f"{len(_p20_dir_catchall_hashes)} catch-all director(y/ies)",
+            "INFO")
 
     # Body classes that do NOT represent genuine access — status 200 is
     # misleading; the page is a SPA shell, catchall, error, or login form.
@@ -34244,6 +34538,14 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             # Defence in depth: skip error-page URLs even if body
             # classification missed them (SPA shell hides error markers).
             if _P20_ERROR_PATH_RE.search(_ep_lower):
+                continue
+            # Skip static assets — favicons, stylesheets, JS bundles,
+            # images, fonts, robots.txt etc. are expected to be public.
+            if _SPA_ROUTE_EXCLUDE.search(_ep_lower):
+                continue
+            if re.search(r'robots\.txt$|sitemap\.xml$|apple-touch-icon'
+                         r'|browserconfig\.xml$|manifest\.json$'
+                         r'|service-?worker\.js$|sw\.js$', _ep_lower):
                 continue
             _unauth_ev = ""
             try:
