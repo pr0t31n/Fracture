@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.53.4"
+VERSION = "2.53.5"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -14172,6 +14172,12 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             cmd += ["--cookie", _ww_cookie_str]
         for _ah_name, _ah_val in _ww_auth_headers:
             cmd += ["--header", f"{_ah_name}:{_ah_val}"]
+        # Forward the session's User-Agent — whatweb's default
+        # "WhatWeb/x.x.x" triggers WAF/bot detection on many
+        # targets, producing 403s that mask the real response.
+        _ww_ua = sess.headers.get("User-Agent", "")
+        if _ww_ua:
+            cmd += ["--user-agent", _ww_ua]
         cmd.append(url)
         _ww_authed = bool(_ww_cookie_str or _ww_auth_headers)
         vc.log("[recon] Running whatweb" + (" (authenticated)" if _ww_authed else "") + " ...", "INFO")
