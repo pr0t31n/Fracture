@@ -38947,6 +38947,14 @@ def main() -> None:
                     _alive_ck_names.update(c.name for c in sess.cookies)
                 except Exception:
                     pass
+                # Also check the authenticated session — browser-assisted
+                # login captures WAF cookies (e.g. __cf_bm on a parent
+                # domain like example.com) into auth_sess, not the bare sess.
+                if auth_sess is not None and auth_sess is not sess:
+                    try:
+                        _alive_ck_names.update(c.name for c in auth_sess.cookies)
+                    except Exception:
+                        pass
                 _waf_cookies = " ".join(_alive_ck_names).lower()
                 _waf_hdr_blob = " ".join(
                     f"{k}:{v}" for k, v in _alive_r.headers.items()
