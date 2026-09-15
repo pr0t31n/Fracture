@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.53.5"
+VERSION = "2.53.6"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -4197,6 +4197,16 @@ def _extract_subprocess_auth(sess: requests.Session) -> "tuple[str, list[tuple[s
     except Exception:
         pass
     return cookie_str, auth_headers
+
+
+def _subprocess_ua(sess: "requests.Session") -> str:
+    """Return the session's User-Agent for subprocess --user-agent flags.
+
+    The session carries a Chrome UA set at _make_session() time.  Forwarding
+    it to subprocess tools avoids their default scanner UAs (WhatWeb/x.x.x,
+    gobuster/x.x.x, Nuclei/x.x.x, etc.) which trigger WAF bot-detection.
+    """
+    return sess.headers.get("User-Agent", "")
 
 
 def _build_auth_session(cfg: dict, auth_key: str = "auth",
@@ -10875,7 +10885,7 @@ _CMS_PATTERNS = {
     "WordPress":   [re.compile(r'wp-content|wp-includes|wordpress', re.I)],
     "Drupal":      [re.compile(r'Drupal|drupal\.js|sites/default', re.I)],
     "Joomla":      [re.compile(r'Joomla|/components/com_', re.I)],
-    "Magento":     [re.compile(r'mage/|Magento|/skin/frontend/|/pub/static/frontend/', re.I)],
+    "Magento":     [re.compile(r'(?<!\w)mage/|Magento|/skin/frontend/|/pub/static/frontend/', re.I)],
     "Shopify":     [re.compile(r'cdn\.shopify\.com|shopify\.com/s/files|Shopify\.theme', re.I)],
     "TYPO3":       [re.compile(r'typo3|TYPO3 CMS', re.I)],
     "Ghost":       [re.compile(r'content/themes/casper|ghost\.io|ghostcms|\/ghost\/api\/', re.I)],
@@ -14901,6 +14911,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             cmd = [gobuster, "dir", "-u", _gob_base, "-w", wordlist, "-t", _buster_threads,
                    "-q", "-k", "-o", str(_gob_out)]
             cmd += _gob_auth
+            _gob_ua = _subprocess_ua(sess)
+            if _gob_ua:
+                cmd += ["--useragent", _gob_ua]
             vc.log(
                 f"[recon] Running gobuster ({_gob_idx + 1}/{len(_recon_bases)}) "
                 f"against {_gob_base} ...",
@@ -15002,6 +15015,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         if _recon_cdn:
             cmd += ["--rate-limit", "25"]
         cmd += _buster_auth_flags(sess)
+        _fer_ua = _subprocess_ua(sess)
+        if _fer_ua:
+            cmd += ["--user-agent", _fer_ua]
         vc.log("[recon] Running feroxbuster ...", "INFO")
         _fer_proc = None
         try:
@@ -16268,6 +16284,9 @@ def _phase_endpoint_tools(
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_dir,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob)]
             cmd += _buster_auth_flags(sess)
+            _ep_gob_ua = _subprocess_ua(sess)
+            if _ep_gob_ua:
+                cmd += ["--useragent", _ep_gob_ua]
             vc.log(f"[endpoint_tools] gobuster on {ep_url}", "INFO")
             _gobuster_run(cmd, ep_gob, "endpoint_tools", out, timeout=180)
             if ep_gob.exists():
@@ -16293,6 +16312,9 @@ def _phase_endpoint_tools(
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_file,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob_f)]
             cmd += _buster_auth_flags(sess)
+            _epf_gob_ua = _subprocess_ua(sess)
+            if _epf_gob_ua:
+                cmd += ["--useragent", _epf_gob_ua]
             _gobuster_run(cmd, ep_gob_f, "endpoint_tools", out, timeout=180)
             if ep_gob_f.exists():
                 try:
@@ -17913,6 +17935,9 @@ def _build_gobuster_dir_cmd(gobuster_bin: str, url: str, wordlist: str,
     cmd = [gobuster_bin, "dir", "-u", url, "-w", wordlist, "-t", str(threads),
             "-q", "-k", "-o", str(out_f)]
     cmd += _buster_auth_flags(sess)
+    _gob_ua = _subprocess_ua(sess)
+    if _gob_ua:
+        cmd += ["--useragent", _gob_ua]
     return cmd
 
 
@@ -17934,6 +17959,9 @@ def _build_feroxbuster_dir_cmd(feroxbuster_bin: str, url: str, wordlist: str,
     if cdn:
         cmd += ["--rate-limit", "25"]
     cmd += _buster_auth_flags(sess)
+    _fer_ua = _subprocess_ua(sess)
+    if _fer_ua:
+        cmd += ["--user-agent", _fer_ua]
     return cmd
 
 
@@ -19449,6 +19477,15 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
             cmd += ["-fw", _fw_arg]
         if _fl_arg:
             cmd += ["-fl", _fl_arg]
+        # Forward session auth context — ffuf has NO built-in session
+        _ffuf_ck, _ffuf_ah = _extract_subprocess_auth(sess)
+        if _ffuf_ck:
+            cmd += ["-H", f"Cookie: {_ffuf_ck}"]
+        for _fah_name, _fah_val in _ffuf_ah:
+            cmd += ["-H", f"{_fah_name}: {_fah_val}"]
+        _ffuf_ua = _subprocess_ua(sess)
+        if _ffuf_ua:
+            cmd += ["-H", f"User-Agent: {_ffuf_ua}"]
 
         vc.log(
             f"[ffuf] vhost discovery on {host} "
@@ -19562,6 +19599,15 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
             cmd += ["-fw", _p_fw]
         if _p_fl:
             cmd += ["-fl", _p_fl]
+        # Forward session auth context — ffuf has NO built-in session
+        _pf_ck, _pf_ah = _extract_subprocess_auth(sess)
+        if _pf_ck:
+            cmd += ["-H", f"Cookie: {_pf_ck}"]
+        for _pfh_name, _pfh_val in _pf_ah:
+            cmd += ["-H", f"{_pfh_name}: {_pfh_val}"]
+        _pf_ua = _subprocess_ua(sess)
+        if _pf_ua:
+            cmd += ["-H", f"User-Agent: {_pf_ua}"]
 
         vc.log(
             f"[ffuf] param discovery on {url} "
@@ -26338,6 +26384,9 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
             cmd += ["-H", f"Cookie: {_vs_cookie_str}"]
         for _ah_name, _ah_val in _vs_auth_headers:
             cmd += ["-H", f"{_ah_name}: {_ah_val}"]
+        _nuc_ua = _subprocess_ua(sess)
+        if _nuc_ua:
+            cmd += ["-H", f"User-Agent: {_nuc_ua}"]
         if _vs_cookie_str or _vs_auth_headers:
             vc.log("[vulnscan] nuclei: passing session auth for authenticated scanning", "INFO")
         if Path(_nuc_templates_dir).is_dir():
@@ -26382,6 +26431,9 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
                 cmd += ["-Add-header", f"Cookie: {_vs_cookie_str}"]
             for _ah_name, _ah_val in _vs_auth_headers:
                 cmd += ["-Add-header", f"{_ah_name}: {_ah_val}"]
+            _nik_ua = _subprocess_ua(sess)
+            if _nik_ua:
+                cmd += ["-useragent", _nik_ua]
             _nik_authed = bool(_vs_cookie_str or _vs_auth_headers)
             vc.log(
                 f"[vulnscan] Launching nikto ({_nik_idx + 1}/{len(_vs_parents)}) "
@@ -26874,6 +26926,45 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
                     )
                 except Exception:
                     pass
+
+    # Pass auth headers (e.g. Authorization: Bearer) to ZAP via replacer rules
+    for _zah_idx, (_zah_name, _zah_val) in enumerate(auth_headers):
+        try:
+            _zap_req.get(
+                f"{_zap_base}/JSON/replacer/action/addRule/",
+                params={
+                    "description": f"FractureAuth_{_zah_name}",
+                    "enabled": "true",
+                    "matchType": "REQ_HEADER",
+                    "matchRegex": "false",
+                    "matchString": _zah_name,
+                    "replacement": _zah_val,
+                },
+                timeout=10,
+            )
+        except Exception:
+            pass
+    # Forward session UA via replacer rule
+    _zap_ua = _subprocess_ua(sess)
+    if _zap_ua:
+        try:
+            _zap_req.get(
+                f"{_zap_base}/JSON/replacer/action/addRule/",
+                params={
+                    "description": "FractureUA",
+                    "enabled": "true",
+                    "matchType": "REQ_HEADER",
+                    "matchRegex": "false",
+                    "matchString": "User-Agent",
+                    "replacement": _zap_ua,
+                },
+                timeout=10,
+            )
+        except Exception:
+            pass
+    if auth_headers or _zap_ua:
+        vc.log(f"[zap] Forwarded {len(auth_headers)} auth header(s)"
+               + (" + session UA" if _zap_ua else "") + " via replacer rules", "INFO")
 
     # Start ZAP spider
     spider_id = None
@@ -38847,7 +38938,16 @@ def main() -> None:
                 from urllib.parse import urlparse as _up_waf
                 _waf_host = (_up_waf(target["url"]).netloc or "").lower()
                 _waf_server = (_alive_r.headers.get("Server") or "").lower()
-                _waf_cookies = " ".join(_alive_r.cookies.keys()).lower()
+                # Check both alive-response Set-Cookie AND session cookie
+                # jar — browser-assisted login may have picked up __cf_bm
+                # on a parent domain (e.g. example.com) that the alive
+                # response to the subdomain doesn't re-send.
+                _alive_ck_names = set(_alive_r.cookies.keys())
+                try:
+                    _alive_ck_names.update(c.name for c in sess.cookies)
+                except Exception:
+                    pass
+                _waf_cookies = " ".join(_alive_ck_names).lower()
                 _waf_hdr_blob = " ".join(
                     f"{k}:{v}" for k, v in _alive_r.headers.items()
                 ).lower()
@@ -40143,6 +40243,9 @@ def main() -> None:
                                     "-q", "-k",
                                     "-o", str(_lnd_gob_out),
                                 ] + _buster_auth_flags(effective_auth)
+                                _lnd_gob_ua = _subprocess_ua(effective_auth)
+                                if _lnd_gob_ua:
+                                    _lnd_cmd += ["--useragent", _lnd_gob_ua]
                                 vc.log(
                                     f"[recon] Landing-root gobuster: {_lnd_base}",
                                     "INFO")
