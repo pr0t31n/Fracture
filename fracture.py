@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.52.6"
+VERSION = "2.52.7"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -30920,7 +30920,8 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
             r = sess.post(url, data=b"\xac\xed\x00\x05", timeout=timeout,
                           headers={"Content-Type": ct})
             if r and _DESER_RESP_RE.search(r.text):
-                _rq, _rp = _save_http_evidence(out, phase, f"deser_ct_{re.sub(r'[^\\w]', '_', ct)[:20]}", r)
+                _ct_safe = re.sub(r'[^\w]', '_', ct)[:20]
+                _rq, _rp = _save_http_evidence(out, phase, f"deser_ct_{_ct_safe}", r)
                 out.add_finding(
                     title="Insecure Deserialization — Serialized Object Accepted",
                     url=url, port=target["port"], risk="CRITICAL",
@@ -31110,7 +31111,8 @@ def _phase_request_smuggling(target: dict, cfg: dict, pm: ProgressManager,
         try:
             d = out.root / phase
             d.mkdir(parents=True, exist_ok=True)
-            fp = d / f"{re.sub(r'[^a-zA-Z0-9_]', '_', label)[:50]}.txt"
+            _safe_label = re.sub(r'[^a-zA-Z0-9_]', '_', label)[:50]
+            fp = d / f"{_safe_label}.txt"
             fp.write_text(content)
             return str(fp.relative_to(out.root))
         except Exception:
@@ -33572,8 +33574,9 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 continue
             _unauth_ev = ""
             try:
+                _safe_ep = re.sub(r'[^a-zA-Z0-9_-]', '_', ep['path'])[:40]
                 _unauth_path = out.output_path("auth_walk",
-                    f"unauth_access_{re.sub(r'[^a-zA-Z0-9_-]', '_', ep['path'])[:40]}")
+                    f"unauth_access_{_safe_ep}")
                 _unauth_lines = [f"URL: {ep['url']}",
                     f"Unauthenticated: HTTP {unauth_st}"]
                 for _r in cred_roles:
@@ -35697,7 +35700,8 @@ def _phase_websocket(target: dict, cfg: dict, pm: ProgressManager,
                 try:
                     d = out.root / phase
                     d.mkdir(parents=True, exist_ok=True)
-                    fp = d / f"ws_noauth_{re.sub(r'[^a-zA-Z0-9_]', '_', ep['path'])[:40]}.txt"
+                    _safe_ep = re.sub(r'[^a-zA-Z0-9_]', '_', ep['path'])[:40]
+                    fp = d / f"ws_noauth_{_safe_ep}.txt"
                     fp.write_text(_ev_content)
                     _ev_path = str(fp.relative_to(out.root))
                 except Exception:
@@ -35755,7 +35759,8 @@ def _phase_websocket(target: dict, cfg: dict, pm: ProgressManager,
                 try:
                     d = out.root / phase
                     d.mkdir(parents=True, exist_ok=True)
-                    fp = d / f"ws_origin_{re.sub(r'[^a-zA-Z0-9_]', '_', ep['path'])[:40]}.txt"
+                    _safe_ep = re.sub(r'[^a-zA-Z0-9_]', '_', ep['path'])[:40]
+                    fp = d / f"ws_origin_{_safe_ep}.txt"
                     fp.write_text(_ev_content)
                     _ev_path = str(fp.relative_to(out.root))
                 except Exception:
@@ -35832,7 +35837,8 @@ def _phase_websocket(target: dict, cfg: dict, pm: ProgressManager,
                         try:
                             d = out.root / phase
                             d.mkdir(parents=True, exist_ok=True)
-                            fp = d / f"ws_xss_{re.sub(r'[^a-zA-Z0-9_]', '_', ep['path'])[:40]}.txt"
+                            _safe_ep = re.sub(r'[^a-zA-Z0-9_]', '_', ep['path'])[:40]
+                            fp = d / f"ws_xss_{_safe_ep}.txt"
                             fp.write_text(_ev_content)
                             _ev_path = str(fp.relative_to(out.root))
                         except Exception:
@@ -37540,7 +37546,8 @@ def _test_h2c_smuggling(target: dict, cfg: dict, out: "OutputManager",
         try:
             d = out.root / phase
             d.mkdir(parents=True, exist_ok=True)
-            fp = d / f"{re.sub(r'[^a-zA-Z0-9_]', '_', label)[:50]}.txt"
+            _safe_label = re.sub(r'[^a-zA-Z0-9_]', '_', label)[:50]
+            fp = d / f"{_safe_label}.txt"
             fp.write_text(content)
             return str(fp.relative_to(out.root))
         except Exception:
