@@ -107,6 +107,38 @@ def run(cmd, check=True, capture=False, env=None, cwd=None):
 
 
 # ---------------------------------------------------------------------------
+# Pre-install guards
+# ---------------------------------------------------------------------------
+def _pip_installed(pkg_spec):
+    import importlib.util
+    name = pkg_spec.split(">=")[0].split("==")[0].split("[")[0].split("<")[0].strip()
+    _IMPORT_MAP = {
+        "python-nmap": "nmap", "beautifulsoup4": "bs4", "python-docx": "docx",
+        "python-whois": "whois", "Pillow": "PIL", "pyOpenSSL": "OpenSSL",
+        "dnspython": "dns", "pyyaml": "yaml", "scikit-learn": "sklearn",
+        "python-dateutil": "dateutil", "python-magic": "magic",
+        "flask-socketio": "flask_socketio", "flask-cors": "flask_cors",
+        "python-engineio": "engineio", "python-socketio": "socketio",
+        "charset-normalizer": "charset_normalizer",
+        "ruamel.yaml": "ruamel", "lxml-html-clean": "lxml_html_clean",
+        "pyserial": "serial", "python-can": "can",
+        "python-multipart": "multipart", "graphql-core": "graphql",
+        "sqlmap": "sqlmap",
+    }
+    mod = _IMPORT_MAP.get(name, name.replace("-", "_"))
+    return importlib.util.find_spec(mod) is not None
+
+
+def _brew_installed_set():
+    try:
+        r = subprocess.run(["brew", "list", "--formula", "-1"],
+                           capture_output=True, text=True, timeout=15)
+        return set(r.stdout.split())
+    except Exception:
+        return set()
+
+
+# ---------------------------------------------------------------------------
 # brew helper — NEVER run as root
 # ---------------------------------------------------------------------------
 def brew_install(pkg):
@@ -235,8 +267,23 @@ def install_system():
     elif OS == "zypper":
         zypper_install(["nikto", "python3-pip", "git", "golang", "ruby"])
     elif OS == "macos":
-        for pkg in BREW_PACKAGES:
-            brew_install(pkg)
+        try:
+            _brew_path = shutil.which("brew") or "/opt/homebrew/bin/brew"
+            _installed = set(subprocess.run(
+                [_brew_path, "list", "--formula", "-1"],
+                capture_output=True, text=True, check=True).stdout.strip().splitlines())
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            _installed = set()
+        _missing = [p for p in BREW_PACKAGES if p not in _installed]
+        for p in BREW_PACKAGES:
+            if p in _installed:
+                info(f"✓ {p} already installed")
+        if _missing:
+            info(f"Installing brew packages: {' '.join(_missing)}")
+            for pkg in _missing:
+                brew_install(pkg)
+        else:
+            info("All brew packages already installed.")
     elif OS == "windows":
         warn("Windows: install tools manually — gobuster, nikto, sqlmap, sslscan.")
     else:
@@ -412,7 +459,16 @@ def _install_from_bundle(pkg_name: str, url: str) -> bool:
 
 def install_pip():
     banner("Phase: pip packages")
+    _to_install = []
     for _pkg in PIP_PACKAGES:
+        if _pip_installed(_pkg):
+            info(f"✓ {_pkg} already installed")
+        else:
+            _to_install.append(_pkg)
+    if not _to_install:
+        info("All pip packages already installed.")
+        return
+    for _pkg in _to_install:
         _r = subprocess.run(
             [sys.executable, "-m", "pip", "install", "--break-system-packages", _pkg],
             check=False,
