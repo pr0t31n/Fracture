@@ -45,7 +45,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.53.11"
+VERSION = "2.53.12"
 
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
@@ -30683,6 +30683,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
     _lm_baseline_len  = 0
     _lm_bad_body      = ""
     _lm_bad_len       = 0
+    _lm_bad_probe     = "/_fracture_nonexistent_probe_"
     try:
         _bl = sess.get(url.rstrip("/"), timeout=timeout, allow_redirects=False)
         if _bl.status_code == 200:
@@ -30691,13 +30692,41 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
     except Exception:
         pass
     try:
-        _bad = sess.get(url.rstrip("/") + "/_fracture_nonexistent_probe_",
+        _bad = sess.get(url.rstrip("/") + _lm_bad_probe,
                         timeout=timeout, allow_redirects=False)
-        if _bad.status_code == 200:
-            _lm_bad_body = _p20_normalize_body(_bad.text[:2000])
-            _lm_bad_len  = len(_bad.text)
+        # Capture body even on non-200 — servers that return 200 for
+        # nonexistent paths are soft-404; those returning 404 give us a
+        # reference body to catch path-templated error pages.
+        _lm_bad_body = _p20_normalize_body(_bad.text[:2000])
+        _lm_bad_len  = len(_bad.text)
     except Exception:
         pass
+
+    def _lm_strip_path(body, path):
+        """Strip the probe path from body so path-templated pages compare equal."""
+        s = body
+        for token in (path, path.lstrip("/"), path.replace("/", " ").strip()):
+            s = s.replace(token, "")
+        return s
+
+    def _lm_is_similar(probe_body, probe_len, ref_body, ref_len, path):
+        """Soft-404 similarity: tolerant of path being embedded in the page."""
+        if ref_len <= 0:
+            return False
+        p_stripped = _lm_strip_path(probe_body, path)
+        r_stripped = _lm_strip_path(ref_body, path)
+        if abs(probe_len - ref_len) < max(200, int(ref_len * 0.15)):
+            if p_stripped[:500] == r_stripped[:500]:
+                return True
+        p_words = set(p_stripped.split())
+        r_words = set(r_stripped.split())
+        if p_words and r_words:
+            intersection = len(p_words & r_words)
+            union = len(p_words | r_words)
+            if union > 0 and intersection / union > 0.85:
+                return True
+        return False
+
     for path in probe_paths:
         probe_url = url.rstrip("/") + path
         try:
@@ -30710,9 +30739,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                 _is_catchall = False
                 for _ref_body, _ref_len in ((_lm_baseline_body, _lm_baseline_len),
                                              (_lm_bad_body, _lm_bad_len)):
-                    if (_ref_len > 0
-                            and abs(_r_len - _ref_len) < max(100, int(_ref_len * 0.05))
-                            and _r_body[:500] == _ref_body[:500]):
+                    if _lm_is_similar(_r_body, _r_len, _ref_body, _ref_len, path):
                         _is_catchall = True
                         break
                 if _is_catchall:
@@ -30721,6 +30748,18 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                     continue   # custom error page catch-all
                 if _response_is_error_page(r.text, path):
                     continue   # secondary error-page guard
+                # Content-type guard: Spring actuator, .env, and /config
+                # serve JSON or plain text when real.  HTML = catch-all.
+                _ct = (r.headers.get("Content-Type") or "").lower()
+                _json_only_paths = ("/actuator", "/.env", "/config",
+                                    "/debug", "/trace")
+                if ("text/html" in _ct
+                        and any(path.startswith(jp) for jp in _json_only_paths)):
+                    _stripped = r.text.lstrip()
+                    if (_stripped.startswith("<!") or _stripped.startswith("<html")
+                            or _stripped.startswith("<HTML")
+                            or "<head" in r.text[:500].lower()):
+                        continue
                 _adm_ev = ""
                 try:
                     _adm_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', path)[:30]
