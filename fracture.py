@@ -38973,8 +38973,7 @@ def main() -> None:
         vc.log("No target URL specified. Use --url or set target_url in settings.", "ERROR")
         sys.exit(1)
 
-    if not vc.managed:
-        _print_banner()
+    _print_banner()
 
     vc.log(f"Fracture v{VERSION} starting", "INFO")
     vc.log(f"Target(s): {', '.join(target_urls)}", "INFO")
