@@ -38,6 +38,7 @@ import statistics
 import tempfile
 import time
 import hashlib
+import ipaddress
 import urllib.parse
 import warnings
 import xml.etree.ElementTree as _ET
@@ -11212,6 +11213,39 @@ def _matches_error_fingerprint(body: str) -> bool:
     return any(_fp.search(_sample) for _fp in _SOFT_404_FINGERPRINTS)
 
 
+# ── Internal IP disclosure in HTTP response bodies ────────────────────────────
+_RFC1918_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+]
+
+_RE_RFC1918_IN_TEXT = re.compile(
+    r'\b('
+    r'10\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+    r'|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}'
+    r'|192\.168\.\d{1,3}\.\d{1,3}'
+    r')\b'
+)
+
+
+def _find_rfc1918_in_text(text: str, exclude_ips: "set[str] | None" = None) -> "set[str]":
+    """Return RFC 1918 IPs found in *text*, minus any in *exclude_ips*."""
+    exclude = exclude_ips or set()
+    found: set[str] = set()
+    for m in _RE_RFC1918_IN_TEXT.finditer(text):
+        candidate = m.group(1)
+        if candidate in exclude:
+            continue
+        try:
+            addr = ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+        if any(addr in net for net in _RFC1918_NETWORKS):
+            found.add(candidate)
+    return found
+
+
 # ── F5 BIG-IP backend analysis helpers ────────────────────────────────────────
 _F5_PROBE_COUNT     = 10
 _F5_RFC1918_RANGES  = [
@@ -13829,6 +13863,37 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 remediation=_hdr_remed,
                 http_code=resp.status_code,
             )
+
+    # ── Internal IP disclosure in response body / headers ──
+    _excl_ips = {target["ip"], target.get("hostname", "")}
+    _leaked_ips = _find_rfc1918_in_text(all_text, _excl_ips)
+    if _leaked_ips:
+        _ip_list = ", ".join(sorted(_leaked_ips))
+        out.add_finding(
+            title="Internal IP Address Disclosed in HTTP Response",
+            url=url, port=target["port"],
+            risk="MEDIUM",
+            description=(
+                f"The HTTP response from {url} contains RFC 1918 private IP "
+                f"address(es): {_ip_list}. This discloses internal network "
+                f"topology to external attackers, aiding reconnaissance and "
+                f"lateral-movement planning."
+            ),
+            output=f"Internal IPs found: {_ip_list}\nSource: initial HTTP probe body + headers",
+            affected=_url_rel_path(url, target["url"]),
+            sources="fracture-recon", service=target["scheme"],
+            output_file=_probe_files,
+            owasp="A05:2025 Security Misconfiguration",
+            remediation=(
+                "Remove internal IP addresses from HTTP response bodies, "
+                "error messages, and headers. Configure application error "
+                "handling to suppress internal details. Review proxy and "
+                "load-balancer configurations to strip internal addresses "
+                "from forwarded headers."
+            ),
+            http_code=resp.status_code,
+        )
+        vc.log(f"[recon] Internal IP disclosure: {_ip_list}", "SUCCESS")
 
     detected_cms = [n for n, pats in _CMS_PATTERNS.items()
                     if any(p.search(all_text) for p in pats)]
@@ -21040,6 +21105,8 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     _root_html:            str  = ""  # captured for SPA detection after BFS
     _spa_roots:            set  = set()  # sub-paths with SPA signals (micro-frontends)
     _checked_spa_prefixes: set  = set()  # path prefixes already tested to avoid redundant checks
+    _crawl_leaked_ips:     dict = {}     # {ip: first_url} — RFC 1918 IPs found in crawled pages
+    _crawl_excl_ips = {target["ip"], target.get("hostname", "")}
 
     # Path-prefix scoping: when the target URL has a non-trivial first path
     # segment (e.g. /OMT in https://host/OMT/Client/Login), only follow links
@@ -21074,6 +21141,10 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                 _pg_html = _cr.text
             except Exception:
                 _pg_html = ""
+            if _pg_html:
+                for _lip in _find_rfc1918_in_text(_pg_html, _crawl_excl_ips):
+                    if _lip not in _crawl_leaked_ips:
+                        _crawl_leaked_ips[_lip] = current_url
             if page_count == 1:
                 _root_html = _pg_html
             elif _pg_html and _BS4_AVAILABLE:
@@ -21110,6 +21181,36 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                     queue_urls.append((js_url, depth + 1))
 
     vc.log(f"[crawl] Visited {page_count} pages, {len(all_forms)} forms, {len(all_js)} JS files", "INFO")
+
+    # ── Aggregated internal IP disclosure from crawl ──────────────────────────
+    if _crawl_leaked_ips:
+        _cl_ips = sorted(_crawl_leaked_ips)
+        _cl_details = "\n".join(
+            f"  {ip}  (first seen: {_crawl_leaked_ips[ip]})" for ip in _cl_ips
+        )
+        out.add_finding(
+            title="Internal IP Address Disclosed in HTTP Response",
+            url=url, port=target["port"],
+            risk="MEDIUM",
+            description=(
+                f"RFC 1918 private IP address(es) found in crawled page "
+                f"content: {', '.join(_cl_ips)}. This discloses internal "
+                f"network topology to external attackers, aiding "
+                f"reconnaissance and lateral-movement planning."
+            ),
+            output=f"Internal IPs found during crawl ({len(_cl_ips)}):\n{_cl_details}",
+            affected=_url_rel_path(url, target["url"]),
+            sources="fracture-crawl", service=target["scheme"],
+            owasp="A05:2025 Security Misconfiguration",
+            remediation=(
+                "Remove internal IP addresses from HTTP response bodies, "
+                "error messages, and headers. Configure application error "
+                "handling to suppress internal details. Review proxy and "
+                "load-balancer configurations to strip internal addresses "
+                "from forwarded headers."
+            ),
+        )
+        vc.log(f"[crawl] Internal IP disclosure: {', '.join(_cl_ips)}", "SUCCESS")
 
     # ── SPA detection and headless augmentation ──────────────────────────────
     # Check root page first; also merge any micro-frontend SPA roots found

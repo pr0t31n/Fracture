@@ -2,7 +2,7 @@
   "version": "1.7.0",
   "tool": "fracture",
   "generated": "(complete: upgraded existing + scaffolded missing)",
-  "total": 454,
+  "total": 455,
   "from_existing": 340,
   "newly_scaffolded": 64,
   "findings": [
@@ -20740,6 +20740,67 @@
       "validation_tools": [
         "h2csmuggler",
         "curl"
+      ]
+    },
+    {
+      "id": "FR-455",
+      "title": "Internal IP Address Disclosed in HTTP Response",
+      "aliases": [
+        "Internal IP disclosure",
+        "RFC 1918 IP leakage",
+        "Private IP in response body"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "The HTTP response body or headers contain one or more RFC 1918 private IP addresses (10/8, 172.16/12, 192.168/16), disclosing internal network topology.",
+      "impact": "An attacker learns internal addressing, which aids lateral-movement planning, infrastructure mapping, and targeted exploitation of internal services.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 5.3,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+      "nessus_plugin_ids": [
+        10759
+      ],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-02"
+      ],
+      "nist_800_53": [
+        "SC-8",
+        "SI-11"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "6.5.10"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1018",
+          "tactic": "Discovery",
+          "name": "Remote System Discovery"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Remove internal IP addresses from HTTP response bodies, error messages, and headers. Configure application error handling to suppress internal details. Review proxy and load-balancer configurations to strip internal addresses from forwarded headers.",
+      "remediation_component": "Application",
+      "remediation_category": "Configuration",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "curl",
+        "browser"
       ]
     }
   ]
