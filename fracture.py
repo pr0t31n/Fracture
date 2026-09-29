@@ -11312,6 +11312,153 @@ def _detect_exception_disclosure(body: str) -> "list[str]":
     return matches
 
 
+# ── GAP-15: Log file exposure paths (FR-466) ────────────────────────────────
+_LOG_FILE_PATHS = [
+    "/debug.log", "/error.log", "/access.log", "/application.log",
+    "/app.log", "/server.log", "/system.log",
+    "/wp-content/debug.log",
+    "/storage/logs/laravel.log",
+    "/logs/", "/log/",
+    "/var/log/", "/tmp/logs/",
+    "/rails/log/production.log", "/rails/log/development.log",
+    "/WEB-INF/logs/", "/catalina.out",
+]
+
+_RE_LOG_LINE = re.compile(
+    r'(?:'
+    r'\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2}:\d{2}'   # ISO / common timestamps
+    r'|\[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2}'           # Apache CLF timestamp
+    r'|(?:ERROR|WARN|INFO|DEBUG|FATAL|CRITICAL)\s'        # log-level keywords
+    r'|Traceback \(most recent call last\)'                # Python stack traces
+    r'|at (?:com|org|net|java)\.\w+\.\w+\('               # Java stack traces
+    r'|Stack Trace:\s'                                     # .NET stack traces
+    r')', re.IGNORECASE
+)
+
+
+def _check_log_exposure(base_url: str, sess: "requests.Session",
+                        timeout: int) -> "list[tuple[str, str, str]]":
+    """Probe common log file paths; return [(path, status_hint, snippet)]."""
+    hits: list[tuple[str, str, str]] = []
+    for path in _LOG_FILE_PATHS:
+        probe_url = base_url.rstrip("/") + path
+        try:
+            r = sess.get(probe_url, timeout=min(timeout, 6),
+                         allow_redirects=True, stream=True)
+            if r.status_code != 200:
+                continue
+            ct = r.headers.get("Content-Type", "").lower()
+            # Accept text/plain, application/octet-stream, or text/html
+            # only when the body genuinely looks like a log
+            chunk = r.text[:8192] if hasattr(r, 'text') else ""
+            if not chunk:
+                continue
+            log_matches = _RE_LOG_LINE.findall(chunk)
+            if len(log_matches) >= 2:
+                # Looks like a real log file
+                snippet = chunk[:300].replace("\n", " | ")
+                hits.append((path, ct, snippet))
+        except Exception:
+            continue
+    return hits
+
+
+# ── GAP-17: Cloud credentials file paths (FR-468) ───────────────────────────
+_CLOUD_CRED_PATHS = [
+    ("/.aws/credentials",     r'\[(?:default|profile)',  "AWS credentials"),
+    ("/.aws/config",          r'\[(?:default|profile)',  "AWS config"),
+    ("/aws/credentials",      r'\[(?:default|profile)',  "AWS credentials"),
+    ("/.docker/config.json",  r'"auths"',                "Docker config"),
+    ("/.kube/config",         r'apiVersion:',            "Kubernetes config"),
+    ("/.npmrc",               r'//registry\.',           "NPM config"),
+    ("/.git-credentials",     r'https?://',              "Git credentials"),
+    ("/.pgpass",              r':',                      "PostgreSQL password file"),
+]
+
+
+def _check_cloud_cred_exposure(base_url: str, sess: "requests.Session",
+                               timeout: int) -> "list[tuple[str, str, str]]":
+    """Probe for exposed cloud/CI credential files.
+    Returns [(path, cred_type, snippet)]."""
+    hits: list[tuple[str, str, str]] = []
+    for path, pattern, cred_type in _CLOUD_CRED_PATHS:
+        probe_url = base_url.rstrip("/") + path
+        try:
+            r = sess.get(probe_url, timeout=min(timeout, 6),
+                         allow_redirects=True)
+            if r.status_code != 200:
+                continue
+            body = r.text[:4096] if hasattr(r, 'text') else ""
+            if not body:
+                continue
+            if re.search(pattern, body, re.I):
+                snippet = body[:300].replace("\n", " | ")
+                hits.append((path, cred_type, snippet))
+        except Exception:
+            continue
+    return hits
+
+
+# ── GAP-18: Terraform state file paths (FR-469) ─────────────────────────────
+_TERRAFORM_STATE_PATHS = [
+    "/terraform.tfstate",
+    "/.terraform/terraform.tfstate",
+    "/tfstate",
+    "/terraform.tfstate.backup",
+]
+
+
+def _check_terraform_state_exposure(base_url: str, sess: "requests.Session",
+                                    timeout: int) -> "list[tuple[str, str]]":
+    """Probe for exposed Terraform state files.
+    Returns [(path, snippet)]."""
+    hits: list[tuple[str, str]] = []
+    for path in _TERRAFORM_STATE_PATHS:
+        probe_url = base_url.rstrip("/") + path
+        try:
+            r = sess.get(probe_url, timeout=min(timeout, 6),
+                         allow_redirects=True)
+            if r.status_code != 200:
+                continue
+            body = r.text[:8192] if hasattr(r, 'text') else ""
+            if not body:
+                continue
+            if ('"terraform_version"' in body or '"serial":' in body
+                    or '"lineage":' in body):
+                snippet = body[:300].replace("\n", " | ")
+                hits.append((path, snippet))
+        except Exception:
+            continue
+    return hits
+
+
+# ── GAP-35: Permissions-Policy permissive value check (FR-481) ───────────────
+_PERMISSIONS_POLICY_SENSITIVE_FEATURES = [
+    "camera", "microphone", "geolocation", "payment",
+    "usb", "magnetometer", "gyroscope", "accelerometer",
+    "display-capture", "autoplay", "fullscreen",
+]
+
+
+def _check_permissions_policy_permissive(headers: dict) -> "list[str]":
+    """Check if Permissions-Policy or Feature-Policy grants overly permissive
+    access. Returns list of permissive features found."""
+    permissive: list[str] = []
+    pp_val = headers.get("Permissions-Policy", "") or headers.get("Feature-Policy", "")
+    if not pp_val:
+        return []
+    for feature in _PERMISSIONS_POLICY_SENSITIVE_FEATURES:
+        # Look for patterns like  feature=*  or  feature *
+        # Overly permissive = allows all origins via * or self+*
+        pat = re.compile(
+            rf'{re.escape(feature)}\s*[=\s]\s*\*'
+            rf'|{re.escape(feature)}\s*=\s*\([^)]*\*[^)]*\)',
+            re.I)
+        if pat.search(pp_val):
+            permissive.append(feature)
+    return permissive
+
+
 # ── Internal hostname exposure patterns (#8) ───────────────────────────────
 _INTERNAL_HOSTNAME_SUFFIXES = (
     '.local', '.internal', '.corp', '.lan', '.intranet',
@@ -14199,6 +14346,284 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             http_code=resp.status_code,
         )
         vc.log(f"[recon] Outdated website: {len(_outdated_signals)} indicator(s)", "SUCCESS")
+
+    # ── GAP-36: ETag inode disclosure (native check) ──
+    _etag_val = resp.headers.get("ETag", "")
+    if _etag_val:
+        _etag_parts = _etag_val.strip('"').split("-")
+        if len(_etag_parts) == 3:
+            _inode_hex, _size_hex, _mtime_hex = _etag_parts
+            if (len(_inode_hex) >= 2 and len(_size_hex) >= 1
+                    and all(c in "0123456789abcdefABCDEF" for c in _inode_hex)
+                    and all(c in "0123456789abcdefABCDEF" for c in _size_hex)):
+                try:
+                    _inode_dec = int(_inode_hex, 16)
+                    if _inode_dec > 0:
+                        out.add_finding(
+                            title="Header Data Leakage: ETag Inode Disclosure",
+                            url=url, port=target["port"], risk="LOW",
+                            description=(
+                                f"The ETag header ({_etag_val}) follows the Apache "
+                                f"inode-size-mtime format, disclosing filesystem inode "
+                                f"number {_inode_dec}. Inode values reveal file identity "
+                                f"and can aid in fingerprinting shared hosting. CWE-200."
+                            ),
+                            output=f"ETag: {_etag_val}\nParsed inode: {_inode_dec}",
+                            affected=_url_rel_path(url, target["url"]),
+                            sources="fracture-recon", service=target["scheme"],
+                            output_file=_probe_files,
+                            owasp="A05:2025 Security Misconfiguration",
+                            remediation=(
+                                "Configure Apache: FileETag MTime Size (remove INode). "
+                                "For nginx, ETag is based on modification time and size "
+                                "by default and does not leak inodes."
+                            ),
+                            http_code=resp.status_code,
+                        )
+                        vc.log(f"[recon] ETag inode disclosure: {_etag_val}", "SUCCESS")
+                except (ValueError, TypeError):
+                    pass
+
+    # ── GAP-15: Log file exposure probes (FR-466) ──
+    try:
+        _log_hits = _check_log_exposure(url, sess, timeout)
+        if _log_hits:
+            _log_output = "\n".join(
+                f"  {path}  (Content-Type: {ct})\n    Preview: {snip}"
+                for path, ct, snip in _log_hits[:10]
+            )
+            out.add_finding(
+                title="Log File Publicly Accessible",
+                url=url, port=target["port"], risk="HIGH",
+                description=(
+                    f"The web server at {url} exposes log file(s) to "
+                    f"unauthenticated users. Log files commonly contain "
+                    f"internal IP addresses, stack traces, usernames, session "
+                    f"tokens, SQL queries, and file system paths. An attacker "
+                    f"can use this information for reconnaissance and targeted "
+                    f"exploitation. CWE-532, CWE-200."
+                ),
+                output=f"Exposed log files ({len(_log_hits)}):\n{_log_output}",
+                affected=", ".join(p for p, _, _ in _log_hits),
+                sources="fracture-recon", service=target["scheme"],
+                output_file=_probe_files,
+                owasp="A05:2025 Security Misconfiguration",
+                remediation=(
+                    "Remove log files from the web-accessible directory structure. "
+                    "Configure the web server to deny access to log directories "
+                    "and common log file extensions (.log). Move log storage "
+                    "outside the document root. In Apache: <FilesMatch \"\\.log$\"> "
+                    "Require all denied </FilesMatch>. In nginx: location ~* "
+                    "\\.log$ { deny all; }."
+                ),
+                http_code=200,
+            )
+            vc.log(f"[recon] Log file exposure: {len(_log_hits)} file(s)", "SUCCESS")
+    except Exception:
+        pass
+
+    # ── GAP-17: Cloud credentials file exposure probes (FR-468) ──
+    try:
+        _cred_hits = _check_cloud_cred_exposure(url, sess, timeout)
+        if _cred_hits:
+            _cred_output = "\n".join(
+                f"  {path}  ({ctype})\n    Preview: {snip}"
+                for path, ctype, snip in _cred_hits[:10]
+            )
+            out.add_finding(
+                title="Cloud Credentials File Exposed",
+                url=url, port=target["port"], risk="CRITICAL",
+                description=(
+                    f"The web server at {url} exposes cloud or CI/CD credential "
+                    f"file(s) to unauthenticated users. These files typically "
+                    f"contain API keys, access tokens, database passwords, and "
+                    f"service account credentials that grant direct access to "
+                    f"cloud infrastructure. CWE-540, CWE-200."
+                ),
+                output=f"Exposed credential files ({len(_cred_hits)}):\n{_cred_output}",
+                affected=", ".join(p for p, _, _ in _cred_hits),
+                sources="fracture-recon", service=target["scheme"],
+                output_file=_probe_files,
+                owasp="A05:2025 Security Misconfiguration",
+                remediation=(
+                    "Immediately rotate all credentials found in exposed files. "
+                    "Remove credential files from the web-accessible directory. "
+                    "Add dot-files and credential paths to the web server deny "
+                    "list (e.g., location ~ /\\. { deny all; } in nginx). "
+                    "Review IAM audit logs for unauthorized access using the "
+                    "exposed credentials. Never store credential files in the "
+                    "document root."
+                ),
+                http_code=200,
+            )
+            vc.log(f"[recon] Cloud credentials exposed: {len(_cred_hits)} file(s)", "SUCCESS")
+    except Exception:
+        pass
+
+    # ── GAP-18: Terraform state file exposure probes (FR-469) ──
+    try:
+        _tf_hits = _check_terraform_state_exposure(url, sess, timeout)
+        if _tf_hits:
+            _tf_output = "\n".join(
+                f"  {path}\n    Preview: {snip}"
+                for path, snip in _tf_hits[:5]
+            )
+            out.add_finding(
+                title="Terraform State File Exposed",
+                url=url, port=target["port"], risk="CRITICAL",
+                description=(
+                    f"The web server at {url} exposes Terraform state file(s) "
+                    f"to unauthenticated users. Terraform state files contain "
+                    f"the complete infrastructure configuration including all "
+                    f"resource attributes, secrets, database passwords, API keys, "
+                    f"private keys, and cloud provider credentials in plaintext. "
+                    f"This is equivalent to full infrastructure compromise. "
+                    f"CWE-540, CWE-200."
+                ),
+                output=f"Exposed Terraform state files ({len(_tf_hits)}):\n{_tf_output}",
+                affected=", ".join(p for p, _ in _tf_hits),
+                sources="fracture-recon", service=target["scheme"],
+                output_file=_probe_files,
+                owasp="A05:2025 Security Misconfiguration",
+                remediation=(
+                    "Immediately remove Terraform state files from the web server. "
+                    "Rotate ALL credentials and secrets referenced in the state file. "
+                    "Migrate state storage to a secure backend (S3 + DynamoDB, "
+                    "Terraform Cloud, or Azure Blob with encryption). Never store "
+                    ".tfstate files in the document root. Add *.tfstate to "
+                    ".gitignore and web server deny rules."
+                ),
+                http_code=200,
+            )
+            vc.log(f"[recon] Terraform state exposed: {len(_tf_hits)} file(s)", "SUCCESS")
+    except Exception:
+        pass
+
+    # ── GAP-35: Overly permissive Permissions-Policy check (FR-481) ──
+    try:
+        _pp_permissive = _check_permissions_policy_permissive(headers)
+        if _pp_permissive:
+            _pp_list = ", ".join(_pp_permissive)
+            _pp_val = headers.get("Permissions-Policy", "") or headers.get("Feature-Policy", "")
+            out.add_finding(
+                title="Overly Permissive Permissions-Policy Header",
+                url=url, port=target["port"], risk="LOW",
+                description=(
+                    f"The Permissions-Policy (or Feature-Policy) header on {url} "
+                    f"grants wildcard (*) access to sensitive browser features: "
+                    f"{_pp_list}. This allows any third-party iframe or embedded "
+                    f"content to access these device capabilities, increasing the "
+                    f"risk of privacy violations and data exfiltration. CWE-16."
+                ),
+                output=f"Permissions-Policy: {_pp_val}\nOverly permissive features: {_pp_list}",
+                affected=_url_rel_path(url, target["url"]),
+                sources="fracture-recon", service=target["scheme"],
+                output_file=_probe_files,
+                owasp="A05:2025 Security Misconfiguration",
+                remediation=(
+                    "Restrict sensitive features in the Permissions-Policy header "
+                    "to self only or disable them entirely. Replace wildcard (*) "
+                    "values with specific origins or empty allowlists: "
+                    "Permissions-Policy: camera=(), microphone=(), geolocation=(), "
+                    "payment=(), usb=()."
+                ),
+                http_code=resp.status_code,
+            )
+            vc.log(f"[recon] Permissive Permissions-Policy: {_pp_list}", "SUCCESS")
+    except Exception:
+        pass
+
+    # ── GAP-50: Unsafe HTTP methods via OPTIONS ──
+    try:
+        _opt_r = sess.options(url, timeout=min(timeout, 8))
+        _allow_hdr = _opt_r.headers.get("Allow", "")
+        if _allow_hdr:
+            _methods = {m.strip().upper() for m in _allow_hdr.split(",")}
+            _unsafe = _methods & {"PUT", "DELETE", "TRACE", "PATCH", "PROPFIND",
+                                   "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK",
+                                   "UNLOCK"}
+            if _unsafe:
+                out.add_finding(
+                    title="Unsafe HTTP Methods Enabled",
+                    url=url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"The server at {url} advertises potentially dangerous "
+                        f"HTTP methods via OPTIONS: {', '.join(sorted(_unsafe))}. "
+                        f"These methods may allow file upload (PUT), file deletion "
+                        f"(DELETE), or cross-site tracing (TRACE). CWE-16."
+                    ),
+                    output=f"OPTIONS {url}\nAllow: {_allow_hdr}",
+                    affected=_url_rel_path(url, target["url"]),
+                    sources="fracture-recon", service=target["scheme"],
+                    output_file=_probe_files,
+                    owasp="A05:2025 Security Misconfiguration",
+                    remediation=(
+                        "Disable unnecessary HTTP methods in the web server "
+                        "configuration. Only allow GET, POST, HEAD, and OPTIONS. "
+                        "Restrict WebDAV methods (PROPFIND, MKCOL, etc.) unless "
+                        "explicitly required."
+                    ),
+                    http_code=_opt_r.status_code,
+                )
+                vc.log(f"[recon] Unsafe HTTP methods: {', '.join(sorted(_unsafe))}", "SUCCESS")
+            # GAP-32: WebDAV enabled detection
+            _webdav_methods = _methods & {"PROPFIND", "PROPPATCH", "MKCOL",
+                                           "COPY", "MOVE", "LOCK", "UNLOCK"}
+            if _webdav_methods:
+                out.add_finding(
+                    title="WebDAV Methods Enabled",
+                    url=url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"The server advertises WebDAV methods: "
+                        f"{', '.join(sorted(_webdav_methods))}. WebDAV can enable "
+                        f"remote file manipulation if not properly secured. "
+                        f"Historical WebDAV vulnerabilities include CVE-2017-7269 "
+                        f"(IIS 6.0 RCE). CWE-16."
+                    ),
+                    output=f"WebDAV methods: {', '.join(sorted(_webdav_methods))}",
+                    affected=_url_rel_path(url, target["url"]),
+                    sources="fracture-recon", service=target["scheme"],
+                    output_file=_probe_files,
+                    owasp="A05:2025 Security Misconfiguration",
+                    remediation=(
+                        "Disable WebDAV unless explicitly required. If required, "
+                        "enforce authentication and restrict to authorized users only."
+                    ),
+                    http_code=_opt_r.status_code,
+                )
+                vc.log(f"[recon] WebDAV methods: {', '.join(sorted(_webdav_methods))}", "SUCCESS")
+    except Exception:
+        pass
+
+    # ── GAP-31: PROPFIND response disclosure ──
+    try:
+        _pf_r = sess.request("PROPFIND", url, timeout=min(timeout, 8),
+                             headers={"Depth": "0"})
+        if _pf_r.status_code in (207, 200) and "<D:" in _pf_r.text[:2000]:
+            out.add_finding(
+                title="WebDAV PROPFIND Response Discloses Server Information",
+                url=url, port=target["port"], risk="MEDIUM",
+                description=(
+                    f"The server responds to PROPFIND requests with WebDAV "
+                    f"property data (HTTP {_pf_r.status_code}). This can "
+                    f"disclose file metadata, directory structure, and server "
+                    f"internals to unauthenticated users. CWE-200."
+                ),
+                output=f"PROPFIND {url}\nHTTP {_pf_r.status_code}\n{_pf_r.text[:1000]}",
+                affected=_url_rel_path(url, target["url"]),
+                sources="fracture-recon", service=target["scheme"],
+                output_file=_probe_files,
+                owasp="A05:2025 Security Misconfiguration",
+                remediation=(
+                    "Disable WebDAV on the web server unless required. If required, "
+                    "restrict PROPFIND to authenticated users. Block PROPFIND at "
+                    "the reverse proxy level."
+                ),
+                http_code=_pf_r.status_code,
+            )
+            vc.log(f"[recon] PROPFIND disclosure: HTTP {_pf_r.status_code}", "SUCCESS")
+    except Exception:
+        pass
 
     detected_cms = [n for n, pats in _CMS_PATTERNS.items()
                     if any(p.search(all_text) for p in pats)]
@@ -18014,6 +18439,33 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                             "in the Subject Alternative Name extension."
                         ),
                     )
+                # GAP-37: Check SANs for internal hostnames
+                _san_internal = []
+                for _san_name in _ts_cert_san:
+                    _sn = _san_name.strip().lstrip("*.")
+                    if _INTERNAL_HOSTNAME_RE.search(_sn):
+                        _san_internal.append(_sn)
+                if _san_internal:
+                    out.add_finding(
+                        title="Internal Hostname Exposed in TLS Certificate SAN",
+                        url=target["url"], port=port, risk="LOW",
+                        description=(
+                            f"The TLS certificate for {hostname} includes internal "
+                            f"hostnames in its Subject Alternative Names: "
+                            f"{', '.join(_san_internal[:5])}. This discloses "
+                            f"internal naming conventions and network topology. CWE-200."
+                        ),
+                        output=f"Internal SANs: {', '.join(_san_internal[:10])}",
+                        sources="testssl.sh", service="https",
+                        output_file=str(out_f),
+                        owasp="A05:2025 Security Misconfiguration", nist="SC-8",
+                        remediation=(
+                            "Issue separate certificates for internal and external "
+                            "services. Remove internal hostnames from externally "
+                            "visible certificate SANs."
+                        ),
+                    )
+                    vc.log(f"[tls] Internal hostname in cert SAN: {', '.join(_san_internal[:3])}", "SUCCESS")
         except Exception as e:
             out.log_error("testssl.sh", cmd, str(e))
     else:
@@ -18522,6 +18974,9 @@ _SECURITY_HEADERS = [
     ("Cache-Control",             "LOW",    "Missing Cache-Control Header",
      "Without Cache-Control, sensitive responses may be stored by browser or proxy caches.",
      "SI-12", "Add: Cache-Control: no-store, no-cache to sensitive endpoint responses."),
+    ("Permissions-Policy",        "LOW",    "Missing Permissions-Policy Header",
+     "Without Permissions-Policy (or Feature-Policy), the browser grants the page access to sensitive device features (camera, microphone, geolocation, payment). CWE-16.",
+     "SI-10", "Add: Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()"),
 ]
 _SEC_HDR_RISK  = {h: r for h, r, *_ in _SECURITY_HEADERS}
 
@@ -18530,6 +18985,7 @@ _SHCHECK_ALLOWED_HEADERS = {
     "Strict-Transport-Security", "Content-Security-Policy",
     "X-Frame-Options", "X-Content-Type-Options",
     "Referrer-Policy", "Cache-Control",
+    "Permissions-Policy",
 }
 
 
@@ -21418,6 +21874,9 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     _crawl_500_pages:      list = []     # [(url, status, snippet)] — 500-series errors
     _crawl_https_to_http:  list = []     # [(from_url, to_url, chain)] — protocol downgrades
     _crawl_mixed_forms:    list = []     # [(page_url, form_action)] — HTTP form action on HTTPS page
+    _crawl_html_secrets:   dict = {}     # {snippet: first_url} — secrets found in HTML comments
+    _crawl_bucket_urls:    dict = {}     # {bucket_url: first_url} — cloud storage bucket URLs
+    _crawl_pw_autocomplete: list = []    # [(page_url, field_name)] — password fields with autocomplete
 
     # Path-prefix scoping: when the target URL has a non-trivial first path
     # segment (e.g. /OMT in https://host/OMT/Client/Login), only follow links
@@ -21466,6 +21925,45 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                     _es_key = _es[:40].lower()
                     if _es_key not in _crawl_exceptions:
                         _crawl_exceptions[_es_key] = (current_url, _es)
+                # GAP-33: Secrets in HTML comments (FR-470)
+                for _cm in re.finditer(r'<!--(.*?)-->', _pg_html, re.S):
+                    _cmt = _cm.group(1).strip()
+                    if len(_cmt) < 8 or len(_cmt) > 4000:
+                        continue
+                    _cmt_lo = _cmt.lower()
+                    if any(kw in _cmt_lo for kw in (
+                        "password", "passwd", "api_key", "apikey", "api-key",
+                        "secret", "token", "credential", "private_key",
+                        "aws_access", "aws_secret", "jdbc:", "mysql://",
+                        "postgres://", "mongodb://", "redis://",
+                    )):
+                        _cmt_key = _cmt[:60].lower()
+                        if _cmt_key not in _crawl_html_secrets:
+                            _crawl_html_secrets[_cmt_key] = (current_url, _cmt[:200])
+                # GAP-46: Cloud storage bucket URLs
+                for _bm in re.finditer(
+                    r'https?://(?:'
+                    r'([a-z0-9][a-z0-9.\-]{2,62})\.s3[.\-]amazonaws\.com'
+                    r'|s3[.\-]amazonaws\.com/([a-z0-9][a-z0-9.\-]{2,62})'
+                    r'|storage\.googleapis\.com/([a-z0-9][a-z0-9.\-_]{2,222})'
+                    r'|([a-z0-9][a-z0-9.\-]{2,62})\.blob\.core\.windows\.net'
+                    r')', _pg_html, re.I):
+                    _bucket_name = next((g for g in _bm.groups() if g), "")
+                    _bucket_url = _bm.group(0)
+                    if _bucket_url not in _crawl_bucket_urls:
+                        _crawl_bucket_urls[_bucket_url] = current_url
+                # GAP-16: Password fields without autocomplete=off (FR-467)
+                for _pw_m in re.finditer(
+                    r'<input[^>]+type=["\']password["\'][^>]*>', _pg_html, re.I):
+                    _pw_tag = _pw_m.group(0)
+                    if 'autocomplete=' not in _pw_tag.lower() or \
+                       re.search(r'autocomplete=["\'](?:on|)["\']', _pw_tag, re.I):
+                        _pw_name = ""
+                        _pn_m = re.search(r'(?:name|id)=["\']([^"\']+)', _pw_tag, re.I)
+                        if _pn_m:
+                            _pw_name = _pn_m.group(1)
+                        if len(_crawl_pw_autocomplete) < 30:
+                            _crawl_pw_autocomplete.append((current_url, _pw_name))
                 # 500-series error collection (#5)
                 if _cr.status_code >= 500 and len(_crawl_500_pages) < 20:
                     _crawl_500_pages.append((
@@ -21684,6 +22182,88 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             ),
         )
         vc.log(f"[crawl] Mixed-content forms: {len(_crawl_mixed_forms)}", "SUCCESS")
+
+    # ── GAP-33: Aggregated secrets in HTML comments (FR-470) ────────────────
+    if _crawl_html_secrets:
+        _hs_entries = list(_crawl_html_secrets.values())
+        _hs_output = "\n".join(
+            f"  • {snip}  (page: {u})" for u, snip in _hs_entries[:15]
+        )
+        out.add_finding(
+            title="Sensitive Data Exposed in HTML Comments",
+            url=url, port=target["port"], risk="MEDIUM",
+            description=(
+                f"HTML comments on {len(_hs_entries)} crawled page(s) contain "
+                f"sensitive keywords (passwords, API keys, connection strings, "
+                f"tokens). CWE-615. Developers may leave credentials, TODO "
+                f"notes with secrets, or deprecated code with hardcoded values "
+                f"in comments that are visible to any user viewing page source."
+            ),
+            output=f"Sensitive HTML comments ({len(_hs_entries)}):\n{_hs_output}",
+            affected=_url_rel_path(url, target["url"]),
+            sources="fracture-crawl", service=target["scheme"],
+            owasp="A05:2025 Security Misconfiguration",
+            remediation=(
+                "Remove all sensitive data from HTML comments before deployment. "
+                "Implement a build process that strips comments from production "
+                "HTML output. Conduct code reviews focused on comment hygiene."
+            ),
+        )
+        vc.log(f"[crawl] Secrets in HTML comments: {len(_hs_entries)} pattern(s)", "SUCCESS")
+
+    # ── GAP-46: Aggregated cloud storage bucket URLs ───────────────────────
+    if _crawl_bucket_urls:
+        _bu_list = sorted(_crawl_bucket_urls)
+        _bu_output = "\n".join(
+            f"  {bu}  (first seen: {_crawl_bucket_urls[bu]})" for bu in _bu_list[:20]
+        )
+        out.add_finding(
+            title="Cloud Storage Bucket URL Exposed",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"Cloud storage bucket URL(s) found in crawled page content: "
+                f"{', '.join(_bu_list[:5])}. Exposed bucket URLs enable "
+                f"reconnaissance of cloud infrastructure. Misconfigured buckets "
+                f"may allow unauthorized data access. CWE-200."
+            ),
+            output=f"Cloud bucket URLs found during crawl ({len(_bu_list)}):\n{_bu_output}",
+            affected=_url_rel_path(url, target["url"]),
+            sources="fracture-crawl", service=target["scheme"],
+            owasp="A05:2025 Security Misconfiguration",
+            remediation=(
+                "Serve static assets through a CDN with a custom domain rather than "
+                "exposing raw bucket URLs. Restrict bucket access policies. Ensure "
+                "no sensitive data is stored in publicly referenced buckets."
+            ),
+        )
+        vc.log(f"[crawl] Cloud bucket URLs: {len(_bu_list)}", "SUCCESS")
+
+    # ── GAP-16: Aggregated password autocomplete findings (FR-467) ─────────
+    if _crawl_pw_autocomplete:
+        _pa_output = "\n".join(
+            f"  {u}  (field: {fn or '(unnamed)'})"
+            for u, fn in _crawl_pw_autocomplete[:15]
+        )
+        out.add_finding(
+            title="Password Field With Autocomplete Enabled",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"Password input fields on {len(_crawl_pw_autocomplete)} page(s) "
+                f"do not set autocomplete=\"off\" or autocomplete=\"new-password\". "
+                f"Browsers may cache the entered password, exposing it to shared "
+                f"workstation attacks. CWE-525."
+            ),
+            output=f"Password fields with autocomplete ({len(_crawl_pw_autocomplete)}):\n{_pa_output}",
+            affected=_url_rel_path(url, target["url"]),
+            sources="fracture-crawl", service=target["scheme"],
+            owasp="A04:2025 Insecure Design",
+            remediation=(
+                "Set autocomplete=\"off\" or autocomplete=\"new-password\" on all "
+                "password input fields. This prevents browsers from storing and "
+                "auto-filling sensitive credentials."
+            ),
+        )
+        vc.log(f"[crawl] Password autocomplete: {len(_crawl_pw_autocomplete)} field(s)", "SUCCESS")
 
     # ── SPA detection and headless augmentation ──────────────────────────────
     # Check root page first; also merge any micro-frontend SPA roots found
@@ -25619,6 +26199,34 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                     remediation="Ensure password reset returns a consistent message regardless of whether the email exists.",
                     http_code=r.status_code,
                 )
+                # GAP-34: Check if reset link puts token in URL query
+                _reset_body = r.text or ""
+                _reset_token_url = re.search(
+                    r'(?:href|action)=["\']([^"\']*(?:token|reset|key|code)=[^"\']{8,})',
+                    _reset_body, re.I)
+                if _reset_token_url:
+                    out.add_finding(
+                        title="Password Reset Token Exposed in URL",
+                        url=url + rpath, port=target["port"], risk="MEDIUM",
+                        description=(
+                            f"The password reset page at {rpath} includes a reset "
+                            f"token in the URL query string. Tokens in URLs are "
+                            f"logged in server access logs, browser history, proxy "
+                            f"caches, and Referer headers. CWE-598."
+                        ),
+                        output=f"Token URL pattern: {_reset_token_url.group(1)[:120]}",
+                        sources="fracture-auth-bypass", service=target["scheme"],
+                        affected=url + rpath, output_file=str(auth_out),
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="IA-5",
+                        remediation=(
+                            "Transmit password reset tokens via POST body or HTTP "
+                            "headers, not URL query parameters. Implement short-lived, "
+                            "single-use tokens with cryptographic randomness."
+                        ),
+                        http_code=r.status_code,
+                    )
+                    vc.log(f"[auth_bypass] Reset token in URL at {rpath}", "SUCCESS")
                 break
         except Exception:
             pass
@@ -26311,6 +26919,28 @@ _SENSITIVE_FILES: list = [
     ("/clientaccesspolicy.xml", "LOW",      "clientaccesspolicy.xml exposed — Silverlight cross-domain policy file. CWE-200."),
     ("/.DS_Store",              "LOW",      ".DS_Store file exposed — macOS metadata reveals directory structure. CWE-200."),
     ("/Dockerfile",             "LOW",      "Dockerfile exposed — discloses base image, build steps, and environment configuration. CWE-200."),
+
+    # GAP-15: Log file exposure
+    ("/error.log",              "MEDIUM",   "Error log exposed — may contain stack traces, file paths, SQL queries, and internal hostnames. CWE-532."),
+    ("/errors.log",             "MEDIUM",   "Error log exposed — may contain stack traces, file paths, SQL queries, and internal hostnames. CWE-532."),
+    ("/debug.log",              "MEDIUM",   "Debug log exposed — may contain verbose application internals, credentials, and PII. CWE-532."),
+    ("/access.log",             "LOW",      "Access log exposed — discloses client IPs, user agents, and request patterns. CWE-532."),
+    ("/app.log",                "MEDIUM",   "Application log exposed — may contain stack traces, internal paths, and secrets. CWE-532."),
+    ("/laravel.log",            "MEDIUM",   "Laravel log exposed — contains stack traces with file paths, database queries, and environment details. CWE-532."),
+    ("/storage/logs/laravel.log", "MEDIUM", "Laravel storage log exposed — full framework debug output. CWE-532."),
+    ("/logs/error.log",         "MEDIUM",   "Error log exposed in /logs/ directory — may contain stack traces and internal details. CWE-532."),
+    ("/log/error.log",          "MEDIUM",   "Error log exposed in /log/ directory — may contain stack traces and internal details. CWE-532."),
+    ("/npm-debug.log",          "MEDIUM",   "npm debug log exposed — contains build commands, paths, and potentially env variables. CWE-532."),
+    ("/yarn-error.log",         "LOW",      "Yarn error log exposed — contains build errors and internal paths. CWE-532."),
+
+    # GAP-17: AWS credentials file exposure
+    ("/.aws/credentials",       "CRITICAL", "AWS credentials file exposed — contains IAM access key ID and secret access key. CWE-312, CWE-798."),
+    ("/.aws/config",            "HIGH",     "AWS config file exposed — reveals region, output format, and possibly role ARNs. CWE-200."),
+
+    # GAP-18: Terraform state file exposure
+    ("/terraform.tfstate",      "CRITICAL", "Terraform state file exposed — contains infrastructure secrets, API keys, database passwords, and full cloud resource inventory. CWE-312."),
+    ("/terraform.tfstate.backup", "CRITICAL", "Terraform state backup exposed — same exposure as primary state file. CWE-312."),
+    ("/.terraform/terraform.tfstate", "CRITICAL", "Terraform local state exposed — infrastructure secrets. CWE-312."),
 ]
 
 
@@ -27883,7 +28513,7 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                             description=_nik_msg or f"Nikto finding {_nik_id}",
                             output=_nik_output,
                             sources="nikto", service=target["scheme"],
-                            output_file=str(_nik_out),
+                            output_file=str(_nik_json_path),
                             affected=_nik_full_url,
                             owasp=_norm["owasp"],
                             nist=_norm["nist"],
@@ -31665,6 +32295,13 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
         "/debug", "/trace", "/.env", "/config",
         "/admin/logs", "/logs", "/log", "/error-log",
         "/server-status", "/server-info",
+        # GAP-29: Spatie Ray debug tool
+        "/_ray/api/health",
+        "/_ignition/health-check",
+        # GAP-49: Laravel Ignition error page
+        "/_ignition/execute-solution",
+        # GAP-30: Express.js default error handler (trigger via bad path)
+        "/express_fracture_debug_%00test",
     ]
     # Baseline for catch-all / SPA / soft-404 detection: fetch the base URL
     # and a known-bad path.  If probe responses match either, the server is
