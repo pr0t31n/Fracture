@@ -11246,6 +11246,165 @@ def _find_rfc1918_in_text(text: str, exclude_ips: "set[str] | None" = None) -> "
     return found
 
 
+# ── Exception / stack-trace disclosure patterns (#5 + #12) ─────────────────
+_EXCEPTION_PATTERNS = re.compile(
+    r'(?:'
+    # Python
+    r'Traceback \(most recent call last\)'
+    r'|(?:TypeError|ValueError|AttributeError|KeyError|ImportError|'
+      r'NameError|IndexError|RuntimeError|ZeroDivisionError|'
+      r'UnboundLocalError|FileNotFoundError|PermissionError|'
+      r'ModuleNotFoundError|StopIteration|RecursionError|'
+      r'AssertionError|SyntaxError|IndentationError):'
+    r'|File ".*", line \d+'
+    r'|django\.(?:core|db|template|utils)\.'
+    # Java / Kotlin
+    r'|(?:NullPointerException|ClassCastException|ArrayIndexOutOfBoundsException|'
+      r'NumberFormatException|IllegalArgumentException|IllegalStateException|'
+      r'ConcurrentModificationException|StackOverflowError|OutOfMemoryError)'
+    r'|at (?:com|org|net|io|java|javax|sun|jdk)\.\w+\.\w+\('
+    r'|java\.lang\.(?:Exception|Error|Throwable|Runtime)'
+    # .NET / ASP.NET
+    r'|System\.(?:Exception|NullReferenceException|ArgumentException|'
+      r'InvalidOperationException|IO\.IOException|FormatException)'
+    r'|Stack Trace:\s'
+    r'|Server Error in .* Application'
+    r'|at \w+\.\w+\.\w+\(.*\) in .*:\d+'
+    r'|\[(?:SqlException|OleDbException|OdbcException)\]'
+    # PHP
+    r'|Fatal error:\s'
+    r'|(?:Parse|Compile) error:\s'
+    r'|(?:Warning|Notice|Deprecated):\s.*(?:on line \d+|in /)'
+    r'|Uncaught (?:Exception|Error|TypeError|ValueError)'
+    # Node.js / JavaScript
+    r'|(?:ReferenceError|SyntaxError|TypeError|RangeError|URIError|EvalError):'
+    r'|at Object\.<anonymous>'
+    r'|at Module\._compile'
+    # Ruby / Rails
+    r'|ActionController::RoutingError'
+    r'|NoMethodError:?\s'
+    r'|ActiveRecord::(?:RecordNotFound|StatementInvalid)'
+    # SQL / Database
+    r'|SQLSTATE\[[\dA-Z]+\]'
+    r'|(?:MySQL|MariaDB) (?:server|syntax)'
+    r'|ORA-\d{5}'
+    r'|PG::(?:Error|UndefinedTable|SyntaxError)'
+    r'|sqlite3\.(?:OperationalError|IntegrityError)'
+    r'|Microsoft OLE DB Provider'
+    r'|ODBC (?:SQL Server|Driver)'
+    r')', re.IGNORECASE
+)
+
+
+def _detect_exception_disclosure(body: str) -> "list[str]":
+    """Return distinct exception/stack-trace snippets found in *body*."""
+    if not body:
+        return []
+    sample = body[:16384]
+    matches: list[str] = []
+    seen: set[str] = set()
+    for m in _EXCEPTION_PATTERNS.finditer(sample):
+        snip = m.group(0)[:120]
+        key = snip[:40].lower()
+        if key not in seen:
+            seen.add(key)
+            matches.append(snip)
+    return matches
+
+
+# ── Internal hostname exposure patterns (#8) ───────────────────────────────
+_INTERNAL_HOSTNAME_SUFFIXES = (
+    '.local', '.internal', '.corp', '.lan', '.intranet',
+    '.private', '.home', '.localdomain', '.localhost',
+    '.staging', '.dev', '.test', '.example',
+)
+
+_RE_HOSTNAME_IN_TEXT = re.compile(
+    r'\b([a-zA-Z][a-zA-Z0-9\-]{1,62}\.(?:'
+    r'local|internal|corp|lan|intranet|private|home|'
+    r'localdomain|localhost|staging|dev|test|example'
+    r'))\b', re.IGNORECASE
+)
+
+_HOSTNAME_LEAK_HEADERS = (
+    "Server", "X-Powered-By", "Via", "X-Forwarded-For",
+    "X-Backend-Server", "X-Served-By", "X-Host",
+    "X-Upstream", "X-Real-IP", "X-Forwarded-Host",
+)
+
+
+def _find_internal_hostnames(text: str, headers: "dict | None" = None,
+                             exclude: "set[str] | None" = None) -> "set[str]":
+    """Return internal hostnames found in *text* and *headers*."""
+    excl = {h.lower() for h in (exclude or set()) if h}
+    found: set[str] = set()
+    for m in _RE_HOSTNAME_IN_TEXT.finditer(text[:16384]):
+        hostname = m.group(1).lower()
+        if hostname not in excl:
+            found.add(hostname)
+    if headers:
+        for hdr_name in _HOSTNAME_LEAK_HEADERS:
+            hdr_val = headers.get(hdr_name, "")
+            if not hdr_val:
+                continue
+            for m in _RE_HOSTNAME_IN_TEXT.finditer(hdr_val):
+                hostname = m.group(1).lower()
+                if hostname not in excl:
+                    found.add(hostname)
+    return found
+
+
+# ── Outdated / unnecessary website indicators (#13) ────────────────────────
+_RE_COPYRIGHT_YEAR = re.compile(
+    r'(?:©|\bcopyright\b|\(c\))\s*(?:(?:\d{4}\s*[-–]\s*)?(\d{4}))',
+    re.IGNORECASE,
+)
+
+_UNDER_CONSTRUCTION_PHRASES = re.compile(
+    r'\b(?:under construction|coming soon|site maintenance|'
+    r'website is under development|this site is under maintenance|'
+    r'pardon our dust|check back soon|launching soon|'
+    r'website coming soon|page under construction)\b',
+    re.IGNORECASE,
+)
+
+_DEFAULT_PAGE_SIGS = (
+    "apache2 debian default page",
+    "apache2 ubuntu default page",
+    "welcome to nginx",
+    "iis windows server",
+    "test page for the apache http server",
+    "it works!",
+    "congratulations! your iis",
+    "welcome to your new site",
+    "wordpress.org",
+    "just another wordpress site",
+    "sample page",
+)
+
+
+# ── 200-always site helper ─────────────────────────────────────────────────
+_SOFT_AUTH_KEYWORDS = frozenset({
+    'login', 'sign in', 'log in', 'authenticate',
+    'username', 'password', 'unauthorized', 'access denied',
+    'forbidden', 'not found', 'error', 'invalid credentials',
+    'incorrect password', 'try again',
+})
+
+
+def _is_soft_error_page(body: str, baseline_len: int = 0) -> bool:
+    """Check if a 200 response is actually an error/login redirect page."""
+    if not body:
+        return False
+    lower = body[:4000].lower()
+    auth_score = sum(1 for kw in _SOFT_AUTH_KEYWORDS if kw in lower)
+    if auth_score >= 2:
+        return True
+    if baseline_len > 0 and abs(len(body) - baseline_len) / max(baseline_len, 1) > 0.5:
+        return True
+    return False
+
+
 # ── F5 BIG-IP backend analysis helpers ────────────────────────────────────────
 _F5_PROBE_COUNT     = 10
 _F5_RFC1918_RANGES  = [
@@ -13894,6 +14053,152 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             http_code=resp.status_code,
         )
         vc.log(f"[recon] Internal IP disclosure: {_ip_list}", "SUCCESS")
+
+    # ── Internal hostname exposure in response headers / body (#8 FR-461) ──
+    _excl_hosts = {target.get("hostname", "").lower(), target["ip"]}
+    _leaked_hosts = _find_internal_hostnames(
+        all_text, headers=dict(resp.headers), exclude=_excl_hosts)
+    if _leaked_hosts:
+        _host_list = ", ".join(sorted(_leaked_hosts))
+        out.add_finding(
+            title="Internal Hostname Exposed in HTTP Response",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"The HTTP response from {url} reveals internal hostname(s): "
+                f"{_host_list}. Internal hostnames disclose naming conventions "
+                f"and network topology, aiding reconnaissance and potentially "
+                f"enabling blind SSRF attacks if callback parameters exist."
+            ),
+            output=f"Internal hostnames found: {_host_list}\nSource: initial HTTP probe headers + body",
+            affected=_url_rel_path(url, target["url"]),
+            sources="fracture-recon", service=target["scheme"],
+            output_file=_probe_files,
+            owasp="A05:2025 Security Misconfiguration",
+            remediation=(
+                "Remove internal hostnames from HTTP response headers (Server, "
+                "Via, X-Powered-By, X-Backend-Server) and response bodies. "
+                "Configure reverse proxies to strip internal routing headers."
+            ),
+            http_code=resp.status_code,
+        )
+        vc.log(f"[recon] Internal hostname exposure: {_host_list}", "SUCCESS")
+
+    # ── Exception disclosure in initial probe (#12 FR-464) ──
+    _exc_snips = _detect_exception_disclosure(resp.text)
+    if _exc_snips:
+        out.add_finding(
+            title="Unhandled Application Exception Disclosed",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"The initial HTTP response from {url} contains exception or "
+                f"stack trace patterns. This discloses implementation details "
+                f"(language, framework, file paths, database type) that aid "
+                f"targeted exploitation."
+            ),
+            output="Exception patterns found:\n" + "\n".join(f"  • {s}" for s in _exc_snips[:10]),
+            affected=_url_rel_path(url, target["url"]),
+            sources="fracture-recon", service=target["scheme"],
+            output_file=_probe_files,
+            owasp="A05:2025 Security Misconfiguration",
+            remediation=(
+                "Implement custom error pages that suppress stack traces and "
+                "exception details. Disable debug mode in production. Log "
+                "exceptions server-side only."
+            ),
+            http_code=resp.status_code,
+        )
+        vc.log(f"[recon] Exception disclosure: {len(_exc_snips)} pattern(s)", "SUCCESS")
+
+    # ── 500-series error in initial probe (#5 FR-459) ──
+    if resp.status_code >= 500:
+        _err_snips = _detect_exception_disclosure(resp.text)
+        _err_detail = ""
+        if _err_snips:
+            _err_detail = " Detailed error output includes: " + "; ".join(_err_snips[:5])
+        out.add_finding(
+            title="Improper Error Handling — Server Error Exposed",
+            url=url, port=target["port"], risk="MEDIUM",
+            description=(
+                f"The initial HTTP probe to {url} returned HTTP {resp.status_code}. "
+                f"Server error responses indicate improper input validation or "
+                f"unhandled exceptions.{_err_detail}"
+            ),
+            output=f"HTTP {resp.status_code}\n{resp.text[:2000]}",
+            affected=_url_rel_path(url, target["url"]),
+            sources="fracture-recon", service=target["scheme"],
+            output_file=_probe_files,
+            owasp="A05:2025 Security Misconfiguration",
+            remediation=(
+                "Implement proper error handling that returns generic error pages "
+                "to clients. Log detailed errors server-side. Never expose stack "
+                "traces, database errors, or internal paths in HTTP responses."
+            ),
+            http_code=resp.status_code,
+        )
+        vc.log(f"[recon] Server error: HTTP {resp.status_code}", "SUCCESS")
+
+    # ── Outdated / unnecessary website indicators (#13 FR-465) ──
+    _outdated_signals: list = []
+    _body_lower = (resp.text or "")[:16384].lower()
+    # Copyright year check
+    for _cy_m in _RE_COPYRIGHT_YEAR.finditer(resp.text[:16384]):
+        try:
+            _cy = int(_cy_m.group(1))
+            _current_year = int(time.strftime("%Y"))
+            if _cy < _current_year - 2:
+                _outdated_signals.append(f"Copyright year {_cy} (>{_current_year - 2} years old)")
+                break
+        except (ValueError, TypeError):
+            pass
+    # Under construction / coming soon
+    _uc_m = _UNDER_CONSTRUCTION_PHRASES.search(resp.text[:16384])
+    if _uc_m:
+        _outdated_signals.append(f"Placeholder text: \"{_uc_m.group(0)}\"")
+    # Default CMS / server page
+    for _dsig in _DEFAULT_PAGE_SIGS:
+        if _dsig in _body_lower:
+            _outdated_signals.append(f"Default page signature: \"{_dsig}\"")
+            break
+    # Last-Modified header older than 2 years
+    _lm = resp.headers.get("Last-Modified", "")
+    if _lm:
+        try:
+            from email.utils import parsedate_to_datetime
+            _lm_dt = parsedate_to_datetime(_lm)
+            _age_days = (datetime.now(_lm_dt.tzinfo or None) - _lm_dt).days
+            if _age_days > 730:
+                _outdated_signals.append(f"Last-Modified: {_lm} ({_age_days} days ago)")
+        except Exception:
+            pass
+    # Meta generator with old version
+    _gen_m = re.search(r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']([^"\']+)', resp.text[:8192], re.I)
+    if _gen_m:
+        _gen_val = _gen_m.group(1)
+        _gen_ver = re.search(r'(\d+\.\d+)', _gen_val)
+        if _gen_ver:
+            _outdated_signals.append(f"Meta generator: {_gen_val}")
+    if _outdated_signals:
+        out.add_finding(
+            title="Outdated or Unnecessary Website Detected",
+            url=url, port=target["port"], risk="INFO",
+            description=(
+                f"The website at {url} shows indicators of being outdated, "
+                f"abandoned, or unnecessary. Outdated sites may contain "
+                f"unpatched vulnerabilities and expand the attack surface."
+            ),
+            output="Indicators:\n" + "\n".join(f"  • {s}" for s in _outdated_signals),
+            affected=_url_rel_path(url, target["url"]),
+            sources="fracture-recon", service=target["scheme"],
+            output_file=_probe_files,
+            owasp="A05:2025 Security Misconfiguration",
+            remediation=(
+                "Review whether this website is still needed. If not, decommission "
+                "it. If it is needed, update its content and underlying software. "
+                "Ensure all CMS installations are current and default pages are removed."
+            ),
+            http_code=resp.status_code,
+        )
+        vc.log(f"[recon] Outdated website: {len(_outdated_signals)} indicator(s)", "SUCCESS")
 
     detected_cms = [n for n, pats in _CMS_PATTERNS.items()
                     if any(p.search(all_text) for p in pats)]
@@ -21107,6 +21412,12 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     _checked_spa_prefixes: set  = set()  # path prefixes already tested to avoid redundant checks
     _crawl_leaked_ips:     dict = {}     # {ip: first_url} — RFC 1918 IPs found in crawled pages
     _crawl_excl_ips = {target["ip"], target.get("hostname", "")}
+    _crawl_leaked_hosts:   dict = {}     # {hostname: first_url} — internal hostnames
+    _crawl_excl_hosts = {target.get("hostname", "").lower(), target["ip"]}
+    _crawl_exceptions:     dict = {}     # {snippet: first_url} — exception disclosures
+    _crawl_500_pages:      list = []     # [(url, status, snippet)] — 500-series errors
+    _crawl_https_to_http:  list = []     # [(from_url, to_url, chain)] — protocol downgrades
+    _crawl_mixed_forms:    list = []     # [(page_url, form_action)] — HTTP form action on HTTPS page
 
     # Path-prefix scoping: when the target URL has a non-trivial first path
     # segment (e.g. /OMT in https://host/OMT/Client/Login), only follow links
@@ -21145,6 +21456,41 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                 for _lip in _find_rfc1918_in_text(_pg_html, _crawl_excl_ips):
                     if _lip not in _crawl_leaked_ips:
                         _crawl_leaked_ips[_lip] = current_url
+                # Internal hostname collection (#8)
+                for _lh in _find_internal_hostnames(
+                        _pg_html, headers=dict(_cr.headers), exclude=_crawl_excl_hosts):
+                    if _lh not in _crawl_leaked_hosts:
+                        _crawl_leaked_hosts[_lh] = current_url
+                # Exception disclosure collection (#12)
+                for _es in _detect_exception_disclosure(_pg_html):
+                    _es_key = _es[:40].lower()
+                    if _es_key not in _crawl_exceptions:
+                        _crawl_exceptions[_es_key] = (current_url, _es)
+                # 500-series error collection (#5)
+                if _cr.status_code >= 500 and len(_crawl_500_pages) < 20:
+                    _crawl_500_pages.append((
+                        current_url, _cr.status_code,
+                        (_pg_html[:200] if _pg_html else "")))
+            # HTTPS→HTTP redirect downgrade detection (#6)
+            if hasattr(_cr, 'history') and _cr.history:
+                for _hi, _hr in enumerate(_cr.history):
+                    _hr_loc = _hr.headers.get("Location", "")
+                    if (_hr.url.startswith("https://")
+                            and (_hr_loc.startswith("http://")
+                                 or (len(_cr.history) > _hi + 1
+                                     and _cr.history[_hi + 1].url.startswith("http://")))):
+                        _chain = " → ".join(r.url for r in _cr.history) + f" → {_cr.url}"
+                        if len(_crawl_https_to_http) < 10:
+                            _crawl_https_to_http.append((
+                                _hr.url, _hr_loc or _cr.history[_hi + 1].url
+                                if len(_cr.history) > _hi + 1 else _cr.url, _chain))
+                        break
+            # Mixed content form action detection (#6 extension)
+            if current_url.startswith("https://") and _pg_html:
+                for _fa_m in re.finditer(
+                        r'<form[^>]+action=["\']?(http://[^"\'>\s]+)', _pg_html, re.I):
+                    if len(_crawl_mixed_forms) < 20:
+                        _crawl_mixed_forms.append((current_url, _fa_m.group(1)))
             if page_count == 1:
                 _root_html = _pg_html
             elif _pg_html and _BS4_AVAILABLE:
@@ -21211,6 +21557,133 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             ),
         )
         vc.log(f"[crawl] Internal IP disclosure: {', '.join(_cl_ips)}", "SUCCESS")
+
+    # ── Aggregated internal hostname exposure from crawl (#8 FR-461) ────────
+    if _crawl_leaked_hosts:
+        _ch_list = sorted(_crawl_leaked_hosts)
+        _ch_details = "\n".join(
+            f"  {h}  (first seen: {_crawl_leaked_hosts[h]})" for h in _ch_list
+        )
+        out.add_finding(
+            title="Internal Hostname Exposed in HTTP Response",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"Internal hostname(s) found across crawled pages: "
+                f"{', '.join(_ch_list)}. These reveal naming conventions "
+                f"and internal topology, aiding reconnaissance."
+            ),
+            output=f"Internal hostnames found during crawl ({len(_ch_list)}):\n{_ch_details}",
+            affected=_url_rel_path(url, target["url"]),
+            sources="fracture-crawl", service=target["scheme"],
+            owasp="A05:2025 Security Misconfiguration",
+            remediation=(
+                "Remove internal hostnames from HTTP responses and headers. "
+                "Configure reverse proxies to strip internal routing headers."
+            ),
+        )
+        vc.log(f"[crawl] Internal hostname exposure: {', '.join(_ch_list)}", "SUCCESS")
+
+    # ── Aggregated exception disclosure from crawl (#12 FR-464) ─────────────
+    if _crawl_exceptions:
+        _exc_entries = list(_crawl_exceptions.values())
+        _exc_output = "\n".join(
+            f"  • {snip}  (first seen: {u})" for u, snip in _exc_entries[:15]
+        )
+        out.add_finding(
+            title="Unhandled Application Exception Disclosed",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"Exception or stack trace patterns found on {len(_exc_entries)} "
+                f"crawled page(s). This discloses implementation details "
+                f"(language, framework, file paths) that aid targeted attacks."
+            ),
+            output=f"Exception patterns found during crawl:\n{_exc_output}",
+            affected=_url_rel_path(url, target["url"]),
+            sources="fracture-crawl", service=target["scheme"],
+            owasp="A05:2025 Security Misconfiguration",
+            remediation=(
+                "Implement custom error pages. Disable debug mode in production. "
+                "Log exceptions server-side only."
+            ),
+        )
+        vc.log(f"[crawl] Exception disclosure: {len(_exc_entries)} pattern(s)", "SUCCESS")
+
+    # ── Aggregated 500-series errors from crawl (#5 FR-459) ─────────────────
+    if _crawl_500_pages:
+        _500_output = "\n".join(
+            f"  HTTP {status} — {u}  ({snip[:80]}...)"
+            for u, status, snip in _crawl_500_pages[:15]
+        )
+        out.add_finding(
+            title="Improper Error Handling — Server Errors During Crawl",
+            url=url, port=target["port"], risk="MEDIUM",
+            description=(
+                f"{len(_crawl_500_pages)} page(s) returned HTTP 5xx responses "
+                f"during crawling. Server errors indicate improper error handling "
+                f"or input validation issues that may be exploitable."
+            ),
+            output=f"Server errors during crawl ({len(_crawl_500_pages)}):\n{_500_output}",
+            affected="\n".join(u for u, _, _ in _crawl_500_pages[:10]),
+            sources="fracture-crawl", service=target["scheme"],
+            owasp="A05:2025 Security Misconfiguration",
+            remediation=(
+                "Investigate and fix the root causes of server errors. "
+                "Implement proper error handling. Return generic error pages "
+                "to clients while logging details server-side."
+            ),
+        )
+        vc.log(f"[crawl] Server errors: {len(_crawl_500_pages)} page(s)", "SUCCESS")
+
+    # ── HTTPS→HTTP redirect downgrades from crawl (#6 FR-460) ───────────────
+    if _crawl_https_to_http:
+        _rd_output = "\n".join(
+            f"  {frm} → {to}\n    Chain: {chain}"
+            for frm, to, chain in _crawl_https_to_http[:10]
+        )
+        out.add_finding(
+            title="Insecure HTTPS to HTTP Redirect Detected",
+            url=url, port=target["port"], risk="MEDIUM",
+            description=(
+                f"{len(_crawl_https_to_http)} redirect chain(s) downgrade from "
+                f"HTTPS to HTTP, exposing session tokens, credentials, and "
+                f"sensitive data to network-level interception."
+            ),
+            output=f"HTTPS→HTTP downgrades ({len(_crawl_https_to_http)}):\n{_rd_output}",
+            affected="\n".join(frm for frm, _, _ in _crawl_https_to_http[:10]),
+            sources="fracture-crawl", service=target["scheme"],
+            owasp="A02:2025 Cryptographic Failures",
+            remediation=(
+                "Ensure all redirects maintain HTTPS. Configure HSTS to prevent "
+                "protocol downgrades. Review server and application redirect "
+                "configurations to use https:// in all Location headers."
+            ),
+        )
+        vc.log(f"[crawl] HTTPS→HTTP downgrades: {len(_crawl_https_to_http)}", "SUCCESS")
+
+    # ── Mixed content form actions on HTTPS pages (#6 extension) ────────────
+    if _crawl_mixed_forms:
+        _mf_output = "\n".join(
+            f"  Page: {pu}\n    Action: {fa}"
+            for pu, fa in _crawl_mixed_forms[:10]
+        )
+        out.add_finding(
+            title="Form Submits to HTTP from HTTPS Page",
+            url=url, port=target["port"], risk="MEDIUM",
+            description=(
+                f"{len(_crawl_mixed_forms)} form(s) on HTTPS pages submit data "
+                f"to HTTP endpoints, exposing form data (potentially including "
+                f"credentials) to network interception."
+            ),
+            output=f"Mixed-content form actions ({len(_crawl_mixed_forms)}):\n{_mf_output}",
+            affected="\n".join(pu for pu, _ in _crawl_mixed_forms[:10]),
+            sources="fracture-crawl", service=target["scheme"],
+            owasp="A02:2025 Cryptographic Failures",
+            remediation=(
+                "Change all form action URLs to use HTTPS. Enable HSTS. "
+                "Ensure no downgrade paths exist in form submissions."
+            ),
+        )
+        vc.log(f"[crawl] Mixed-content forms: {len(_crawl_mixed_forms)}", "SUCCESS")
 
     # ── SPA detection and headless augmentation ──────────────────────────────
     # Check root page first; also merge any micro-frontend SPA roots found
@@ -23944,7 +24417,112 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             http_code=_first_ev.status_code,
         )
 
-    vc.status(phase, "Injection Testing", "complete", "Done", 23, 23)
+    # ── HTTP Parameter Pollution (#4 FR-458) ──────────────────────────────────
+    vc.status(phase, "Injection Testing", "running", "HTTP Parameter Pollution", 23, 24)
+    _hpp_canary = "fr4ctur3_hpp_" + str(int(time.time()))[-6:]
+    _hpp_found: list = []
+    for entry in params[:30]:
+        purl = entry["url"]
+        for param_name in entry["params"][:5]:
+            try:
+                _parsed = urllib.parse.urlparse(purl)
+                _qs = urllib.parse.parse_qs(_parsed.query, keep_blank_values=True)
+                _orig_val = _qs.get(param_name, [""])[0]
+                # Duplicate the parameter: ?param=original&param=canary
+                _hpp_qs = _parsed.query + f"&{urllib.parse.quote(param_name)}={_hpp_canary}"
+                _hpp_url = urllib.parse.urlunparse(
+                    _parsed._replace(query=_hpp_qs))
+                _hpp_r = sess.get(_hpp_url, timeout=timeout, allow_redirects=True)
+                if _hpp_r and _hpp_canary in (_hpp_r.text or ""):
+                    _hpp_ev: list = []
+                    try:
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, f"hpp_{param_name}",
+                            _hpp_r, endpoint_url=purl, method="GET")
+                        _hpp_ev.extend([str(_rq), str(_rp)])
+                    except Exception:
+                        pass
+                    _hpp_found.append({
+                        "url": purl,
+                        "param": param_name,
+                        "evidence": _hpp_ev,
+                        "http_code": _hpp_r.status_code,
+                    })
+                    vc.log(f"[injection] HPP reflected: {param_name} on {purl}", "SUCCESS")
+                    break
+            except Exception:
+                pass
+    # POST form HPP
+    for form in forms[:15]:
+        _f_action = form.get("action", url)
+        _f_method = form.get("method", "POST").upper()
+        if _f_method != "POST":
+            continue
+        _f_inputs = form.get("inputs", [])
+        for inp in _f_inputs[:5]:
+            _inp_name = inp.get("name", "")
+            if not _inp_name or inp.get("type", "").lower() in ("hidden", "submit", "button"):
+                continue
+            try:
+                _post_data = {i["name"]: i.get("value", "") for i in _f_inputs if i.get("name")}
+                _post_data[_inp_name] = "safe_value"
+                _hpp_body = urllib.parse.urlencode(_post_data)
+                _hpp_body += f"&{urllib.parse.quote(_inp_name)}={_hpp_canary}"
+                _hpp_r = sess.post(
+                    _f_action, data=_hpp_body, timeout=timeout,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    allow_redirects=True)
+                if _hpp_r and _hpp_canary in (_hpp_r.text or ""):
+                    _hpp_ev = []
+                    try:
+                        _rq, _rp = _save_http_evidence(
+                            out, phase, f"hpp_post_{_inp_name}",
+                            _hpp_r, endpoint_url=_f_action, method="POST")
+                        _hpp_ev.extend([str(_rq), str(_rp)])
+                    except Exception:
+                        pass
+                    _hpp_found.append({
+                        "url": _f_action,
+                        "param": _inp_name,
+                        "evidence": _hpp_ev,
+                        "http_code": _hpp_r.status_code,
+                    })
+                    vc.log(f"[injection] HPP POST reflected: {_inp_name} on {_f_action}", "SUCCESS")
+                    break
+            except Exception:
+                pass
+    if _hpp_found:
+        _hpp_out = "\n".join(
+            f"  {h['url']}  param={h['param']}" for h in _hpp_found
+        )
+        _hpp_all_ev: list = []
+        for h in _hpp_found:
+            _hpp_all_ev.extend(h["evidence"])
+        out.add_finding(
+            title="HTTP Parameter Pollution (Reflected)",
+            url=_hpp_found[0]["url"], port=target["port"], risk="MEDIUM",
+            description=(
+                f"Duplicate HTTP parameters are processed and reflected in "
+                f"responses. When a server accepts duplicate parameter names, "
+                f"an attacker can inject a second value that overrides or "
+                f"appends to the first, potentially bypassing input validation "
+                f"or injecting malicious content. {len(_hpp_found)} instance(s)."
+            ),
+            output=f"HPP reflection confirmed ({len(_hpp_found)}):\n{_hpp_out}",
+            output_file=",".join(_hpp_all_ev) if _hpp_all_ev else "",
+            sources="fracture-injection", service=target["scheme"],
+            affected="\n".join(h["url"] for h in _hpp_found),
+            owasp="A03:2025 Injection",
+            nist="SI-10",
+            remediation=(
+                "Validate and reject duplicate parameters. Use framework-level "
+                "parameter parsing that selects only the first occurrence. "
+                "Encode all reflected user input in responses."
+            ),
+            http_code=_hpp_found[0]["http_code"],
+        )
+
+    vc.status(phase, "Injection Testing", "complete", "Done", 24, 24)
     vc.log("[injection] Phase complete", "SUCCESS")
 
 
@@ -25252,7 +25830,145 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
 
-    vc.status(phase, "Auth Bypass", "running", "Jenkins console probes", 7, 8)
+    # ── User enumeration via response differential (#1 FR-456) ──────────────
+    vc.status(phase, "Auth Bypass", "running", "User enumeration differential", 7, 9)
+    _ENUM_PLAUSIBLE_USERS = ("admin", "administrator", "user", "test", "root",
+                             "guest", "info", "support", "webmaster")
+    _enum_results: list = []
+    for form in login_forms[:3]:
+        action = form.get("action", url)
+        method = form.get("method", "POST").upper()
+        inputs = form.get("inputs", [])
+        user_f = next((i["name"] for i in inputs
+                       if re.search(r'user|email|login|name|account', i.get("name", ""), re.I)), None)
+        pass_f = next((i["name"] for i in inputs
+                       if i.get("type", "").lower() == "password"
+                       or re.search(r'pass|pwd|secret', i.get("name", ""), re.I)), None)
+        if not user_f or not pass_f:
+            continue
+        # Harvest hidden fields for stateful forms
+        _enum_hidden: dict = {}
+        try:
+            _enum_fp = sess.get(action, timeout=timeout)
+            if _enum_fp.status_code == 200:
+                for _hm in re.finditer(
+                        r'<input[^>]+type=["\']?hidden["\']?[^>]*>', _enum_fp.text, re.I):
+                    _htag = _hm.group(0)
+                    _hn = re.search(r'name=["\']([^"\']+)["\']', _htag)
+                    _hv = re.search(r'value=["\']([^"\']*)["\']', _htag)
+                    if _hn:
+                        _enum_hidden[_hn.group(1)] = _hv.group(1) if _hv else ""
+        except Exception:
+            pass
+        # Probe: definitely-invalid username
+        _invalid_user = "fracture_no_such_user_xz9q"
+        _invalid_data = {**_enum_hidden, user_f: _invalid_user, pass_f: "wrong_pass_abc"}
+        _r_invalid = None
+        _t_invalid = 0.0
+        try:
+            import time as _t_enum
+            _t0 = _t_enum.monotonic()
+            _r_invalid = (sess.post(action, data=_invalid_data, timeout=timeout, allow_redirects=True)
+                          if method == "POST"
+                          else sess.get(action, params=_invalid_data, timeout=timeout))
+            _t_invalid = _t_enum.monotonic() - _t0
+        except Exception:
+            continue
+        if _r_invalid is None:
+            continue
+        _invalid_body = _r_invalid.text or ""
+        _invalid_status = _r_invalid.status_code
+        _invalid_len = len(_invalid_body)
+        # Strip dynamic tokens from body for comparison
+        _invalid_stripped = re.sub(r'value=["\'][^"\']*["\']', 'value=""', _invalid_body[:8000])
+        # Probe: plausible usernames
+        for _pu in _ENUM_PLAUSIBLE_USERS:
+            _valid_data = {**_enum_hidden, user_f: _pu, pass_f: "wrong_pass_abc"}
+            _r_valid = None
+            _t_valid = 0.0
+            try:
+                _t0 = _t_enum.monotonic()
+                _r_valid = (sess.post(action, data=_valid_data, timeout=timeout, allow_redirects=True)
+                            if method == "POST"
+                            else sess.get(action, params=_valid_data, timeout=timeout))
+                _t_valid = _t_enum.monotonic() - _t0
+            except Exception:
+                continue
+            if _r_valid is None:
+                continue
+            _valid_body = _r_valid.text or ""
+            _valid_status = _r_valid.status_code
+            _valid_len = len(_valid_body)
+            _valid_stripped = re.sub(r'value=["\'][^"\']*["\']', 'value=""', _valid_body[:8000])
+            # Differential checks
+            _diffs: list = []
+            if _invalid_status != _valid_status:
+                _diffs.append(f"Status code: {_invalid_status} vs {_valid_status}")
+            if _invalid_len > 0 and abs(_valid_len - _invalid_len) / max(_invalid_len, 1) > 0.10:
+                _diffs.append(f"Body length: {_invalid_len} vs {_valid_len} ({abs(_valid_len - _invalid_len)} diff)")
+            if _invalid_stripped != _valid_stripped:
+                _diff_ratio = sum(1 for a, b in zip(_invalid_stripped[:2000], _valid_stripped[:2000]) if a != b)
+                if _diff_ratio > 20:
+                    _diffs.append(f"Body content differs ({_diff_ratio} char differences in first 2000)")
+            if _diffs:
+                _enum_evidence: list = []
+                try:
+                    _rq1, _rp1 = _save_http_evidence(
+                        out, phase, f"enum_invalid_{_invalid_user}",
+                        _r_invalid, endpoint_url=action, method=method)
+                    _enum_evidence.extend([_rq1, _rp1])
+                    _rq2, _rp2 = _save_http_evidence(
+                        out, phase, f"enum_plausible_{_pu}",
+                        _r_valid, endpoint_url=action, method=method)
+                    _enum_evidence.extend([_rq2, _rp2])
+                except Exception:
+                    pass
+                _enum_results.append({
+                    "action": action,
+                    "invalid_user": _invalid_user,
+                    "plausible_user": _pu,
+                    "diffs": _diffs,
+                    "evidence": _enum_evidence,
+                    "http_code": _valid_status,
+                })
+                vc.log(f"[auth_bypass] User enumeration: {action} — '{_pu}' differs from invalid user", "SUCCESS")
+                break
+    if _enum_results:
+        _all_ev: list = []
+        _out_lines: list = []
+        for _er in _enum_results:
+            _out_lines.append(
+                f"Endpoint: {_er['action']}\n"
+                f"  Invalid user: {_er['invalid_user']}\n"
+                f"  Plausible user: {_er['plausible_user']}\n"
+                f"  Differentials: " + "; ".join(_er['diffs'])
+            )
+            _all_ev.extend(_er['evidence'])
+        out.add_finding(
+            title="Application Responses Identify Valid Accounts",
+            url=_enum_results[0]["action"], port=target["port"], risk="MEDIUM",
+            description=(
+                f"Login endpoint responses differ between invalid and plausible "
+                f"usernames, allowing an attacker to enumerate valid accounts. "
+                f"Differentials include status code, body length, or content "
+                f"changes. {len(_enum_results)} endpoint(s) affected."
+            ),
+            output="\n\n".join(_out_lines)[:3000],
+            output_file=",".join(str(e) for e in _all_ev) if _all_ev else "",
+            sources="fracture-auth-bypass", service=target["scheme"],
+            affected="\n".join(r["action"] for r in _enum_results),
+            owasp="A07:2025 Identification and Authentication Failures",
+            nist="IA-5",
+            remediation=(
+                "Return identical responses (status code, body length, content, "
+                "and timing) for all login attempts regardless of whether the "
+                "username exists. Use generic error messages like 'Invalid "
+                "credentials' for all failure cases."
+            ),
+            http_code=_enum_results[0]["http_code"],
+        )
+
+    vc.status(phase, "Auth Bypass", "running", "Jenkins console probes", 8, 9)
     # 8. Jenkins unauthenticated console probes
     # Detect Jenkins from target_profile.json technologies, Server header, or
     # crawl_data fingerprints.  If Jenkins is identified, probe for RCE-level
@@ -25540,7 +26256,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
     else:
         vc.log("[auth_bypass] Jenkins not detected — skipping console probes", "INFO")
 
-    vc.status(phase, "Auth Bypass", "complete", "Done", 8, 8)
+    vc.status(phase, "Auth Bypass", "complete", "Done", 9, 9)
     vc.log("[auth_bypass] Phase complete", "SUCCESS")
     return _discovered
 
@@ -29069,6 +29785,90 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
                         "SUCCESS" if _mt_functional else "INFO")
             except Exception:
                 pass
+
+    # ── Forced browsing / authorization gaps (#3 FR-457) ───────────────────────
+    _ADMIN_PATHS = (
+        "/admin", "/admin/", "/administrator", "/dashboard", "/manage",
+        "/settings", "/config", "/configuration", "/panel", "/control",
+        "/console", "/manager", "/management", "/cms", "/cpanel",
+        "/webadmin", "/sysadmin", "/maintenance", "/setup", "/install",
+        "/api/admin", "/api/config", "/api/settings", "/api/users",
+        "/api/management", "/api/system", "/internal", "/debug",
+        "/server-status", "/server-info", "/_admin", "/wp-admin",
+        "/phpmyadmin", "/adminer",
+    )
+    _fb_found: list = []
+    _unauth_fb = _make_session(cfg)
+    for _fb_path in _ADMIN_PATHS:
+        try:
+            _fb_url = url.rstrip("/") + _fb_path
+            _fb_r = _unauth_fb.get(_fb_url, timeout=min(timeout, 8), allow_redirects=True)
+            if _fb_r.status_code in (200, 201):
+                _fb_body = _fb_r.text or ""
+                if len(_fb_body) < 100:
+                    continue
+                # Check if this is a soft error / login page (200-always)
+                if _is_soft_error_page(_fb_body):
+                    continue
+                _fb_is_le, _ = _is_login_or_error_page(_fb_r)
+                if _fb_is_le:
+                    continue
+                if _matches_error_fingerprint(_fb_body):
+                    continue
+                if _response_is_error_page(_fb_body):
+                    continue
+                # Confirmed: real content accessible unauthenticated
+                _fb_ev: list = []
+                try:
+                    _rq, _rp = _save_http_evidence(
+                        out, phase, f"forced_browse_{_fb_path.strip('/').replace('/', '_')}",
+                        _fb_r, endpoint_url=_fb_url, method="GET")
+                    _fb_ev.extend([str(_rq), str(_rp)])
+                except Exception:
+                    pass
+                _fb_found.append({
+                    "url": _fb_url, "path": _fb_path,
+                    "status": _fb_r.status_code,
+                    "evidence": _fb_ev,
+                    "title_snip": re.search(r'<title>([^<]{0,80})</title>',
+                                            _fb_body[:4000], re.I),
+                })
+        except Exception:
+            pass
+    if _fb_found:
+        _fb_output = "\n".join(
+            f"  {f['path']}  → HTTP {f['status']}"
+            + (f"  title=\"{f['title_snip'].group(1)}\""
+               if f['title_snip'] else "")
+            for f in _fb_found
+        )
+        _fb_all_ev: list = []
+        for f in _fb_found:
+            _fb_all_ev.extend(f["evidence"])
+        out.add_finding(
+            title="Authorization Gaps — Unauthenticated Access to Restricted Paths",
+            url=_fb_found[0]["url"], port=target["port"], risk="HIGH",
+            description=(
+                f"{len(_fb_found)} administrative or restricted path(s) are "
+                f"accessible without authentication. This indicates missing "
+                f"or misconfigured access controls that could allow unauthorized "
+                f"access to sensitive functionality or data."
+            ),
+            output=f"Accessible restricted paths ({len(_fb_found)}):\n{_fb_output}",
+            output_file=",".join(_fb_all_ev) if _fb_all_ev else "",
+            sources="fracture-authorization", service=target["scheme"],
+            affected="\n".join(f["url"] for f in _fb_found),
+            owasp="A01:2025 Broken Access Control",
+            nist="AC-3",
+            remediation=(
+                "Implement proper access controls on all administrative and "
+                "restricted paths. Deny access by default and require "
+                "authentication and appropriate authorization for all "
+                "sensitive endpoints."
+            ),
+            http_code=_fb_found[0]["status"],
+        )
+        vc.log(f"[authorization] Forced browsing: {len(_fb_found)} path(s) accessible", "SUCCESS")
 
     vc.status(phase, "Authorization Testing", "complete", "Done", len(resource_ids), len(resource_ids))
     vc.log("[authorization] Phase complete", "SUCCESS")

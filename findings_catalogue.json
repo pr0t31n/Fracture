@@ -2,7 +2,7 @@
   "version": "1.7.0",
   "tool": "fracture",
   "generated": "(complete: upgraded existing + scaffolded missing)",
-  "total": 455,
+  "total": 464,
   "from_existing": 340,
   "newly_scaffolded": 64,
   "findings": [
@@ -4017,7 +4017,7 @@
     },
     {
       "id": "FR-087",
-      "title": "Cross-Site Scripting (XSS) — Reflected",
+      "title": "Cross-Site Scripting (XSS) \u2014 Reflected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4063,7 +4063,7 @@
     },
     {
       "id": "FR-088",
-      "title": "Cross-Site Scripting (XSS) — Stored",
+      "title": "Cross-Site Scripting (XSS) \u2014 Stored",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4109,7 +4109,7 @@
     },
     {
       "id": "FR-089",
-      "title": "Cross-Site Scripting (XSS) — DOM-Based",
+      "title": "Cross-Site Scripting (XSS) \u2014 DOM-Based",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4799,7 +4799,7 @@
     },
     {
       "id": "FR-104",
-      "title": "Broken Authentication — Default Credentials",
+      "title": "Broken Authentication \u2014 Default Credentials",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5030,7 +5030,7 @@
     },
     {
       "id": "FR-109",
-      "title": "Sensitive File Exposed — /etc/passwd",
+      "title": "Sensitive File Exposed \u2014 /etc/passwd",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5076,7 +5076,7 @@
     },
     {
       "id": "FR-110",
-      "title": "Sensitive File Exposed — .env",
+      "title": "Sensitive File Exposed \u2014 .env",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5122,7 +5122,7 @@
     },
     {
       "id": "FR-111",
-      "title": "Sensitive File Exposed — Private Key",
+      "title": "Sensitive File Exposed \u2014 Private Key",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5168,7 +5168,7 @@
     },
     {
       "id": "FR-112",
-      "title": "Sensitive File Exposed — phpinfo()",
+      "title": "Sensitive File Exposed \u2014 phpinfo()",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5214,7 +5214,7 @@
     },
     {
       "id": "FR-113",
-      "title": "Sensitive File Exposed — Composer/NPM Metadata",
+      "title": "Sensitive File Exposed \u2014 Composer/NPM Metadata",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5260,7 +5260,7 @@
     },
     {
       "id": "FR-114",
-      "title": "Vulnerability Scanner Finding — Known CVE",
+      "title": "Vulnerability Scanner Finding \u2014 Known CVE",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5306,7 +5306,7 @@
     },
     {
       "id": "FR-115",
-      "title": "Vulnerability Scanner Finding — Exposed Panel",
+      "title": "Vulnerability Scanner Finding \u2014 Exposed Panel",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5352,7 +5352,7 @@
     },
     {
       "id": "FR-116",
-      "title": "Vulnerability Scanner Finding — Misconfiguration",
+      "title": "Vulnerability Scanner Finding \u2014 Misconfiguration",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6641,7 +6641,7 @@
     },
     {
       "id": "FR-144",
-      "title": "Unrestricted File Upload — Executable File",
+      "title": "Unrestricted File Upload \u2014 Executable File",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6687,7 +6687,7 @@
     },
     {
       "id": "FR-145",
-      "title": "Unrestricted File Upload — MIME Type Bypass",
+      "title": "Unrestricted File Upload \u2014 MIME Type Bypass",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6733,7 +6733,7 @@
     },
     {
       "id": "FR-146",
-      "title": "File Upload — Path Traversal in Filename",
+      "title": "File Upload \u2014 Path Traversal in Filename",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6825,7 +6825,7 @@
     },
     {
       "id": "FR-148",
-      "title": "Mass Assignment — Privilege Escalation via Role Field",
+      "title": "Mass Assignment \u2014 Privilege Escalation via Role Field",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7011,7 +7011,7 @@
     },
     {
       "id": "FR-152",
-      "title": "CORS Misconfiguration — Arbitrary Origin Reflected",
+      "title": "CORS Misconfiguration \u2014 Arbitrary Origin Reflected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7058,7 +7058,7 @@
     },
     {
       "id": "FR-153",
-      "title": "CORS Misconfiguration — Null Origin Allowed",
+      "title": "CORS Misconfiguration \u2014 Null Origin Allowed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7104,7 +7104,7 @@
     },
     {
       "id": "FR-154",
-      "title": "Business Logic Flaw — Negative Value Accepted",
+      "title": "Business Logic Flaw \u2014 Negative Value Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7150,7 +7150,7 @@
     },
     {
       "id": "FR-155",
-      "title": "Business Logic Flaw — Price Manipulation",
+      "title": "Business Logic Flaw \u2014 Price Manipulation",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7196,7 +7196,7 @@
     },
     {
       "id": "FR-156",
-      "title": "Business Logic Flaw — Coupon/Discount Abuse",
+      "title": "Business Logic Flaw \u2014 Coupon/Discount Abuse",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7242,7 +7242,7 @@
     },
     {
       "id": "FR-157",
-      "title": "Business Logic Flaw — Workflow Step Bypass",
+      "title": "Business Logic Flaw \u2014 Workflow Step Bypass",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7288,7 +7288,7 @@
     },
     {
       "id": "FR-158",
-      "title": "Business Logic Flaw — Race Condition",
+      "title": "Business Logic Flaw \u2014 Race Condition",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7428,7 +7428,7 @@
     },
     {
       "id": "FR-161",
-      "title": "Screenshot Captured — Web Application Surface",
+      "title": "Screenshot Captured \u2014 Web Application Surface",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7520,7 +7520,7 @@
     },
     {
       "id": "FR-163",
-      "title": "FFUF — Administrative Path Discovered",
+      "title": "FFUF \u2014 Administrative Path Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7566,7 +7566,7 @@
     },
     {
       "id": "FR-164",
-      "title": "shcheck — Missing Security Header",
+      "title": "shcheck \u2014 Missing Security Header",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7612,7 +7612,7 @@
     },
     {
       "id": "FR-165",
-      "title": "Crawl — Undocumented Endpoint Discovered",
+      "title": "Crawl \u2014 Undocumented Endpoint Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7658,7 +7658,7 @@
     },
     {
       "id": "FR-166",
-      "title": "Crawl — External Domain Reference Found",
+      "title": "Crawl \u2014 External Domain Reference Found",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7751,7 +7751,7 @@
     },
     {
       "id": "FR-168",
-      "title": "Authentication — Concurrent Session Not Restricted",
+      "title": "Authentication \u2014 Concurrent Session Not Restricted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7797,7 +7797,7 @@
     },
     {
       "id": "FR-169",
-      "title": "HTTP Methods — Dangerous Methods Enabled (PUT/DELETE/TRACE)",
+      "title": "HTTP Methods \u2014 Dangerous Methods Enabled (PUT/DELETE/TRACE)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7829,7 +7829,7 @@
       "remediation_category": "",
       "remediation_effort": "",
       "validation_tools": [],
-      "description": "The web server responds to dangerous HTTP methods including PUT (file upload), DELETE (file deletion), or TRACE (XST — Cross-Site Tracing). These methods may enable unauthorized modification of server content or session token theft.",
+      "description": "The web server responds to dangerous HTTP methods including PUT (file upload), DELETE (file deletion), or TRACE (XST \u2014 Cross-Site Tracing). These methods may enable unauthorized modification of server content or session token theft.",
       "impact": "",
       "_x_owasp": "A05:2025",
       "_x_nist": "CM-7,AC-3",
@@ -7889,7 +7889,7 @@
     },
     {
       "id": "FR-171",
-      "title": "Sensitive Data Exposure — PII in Response",
+      "title": "Sensitive Data Exposure \u2014 PII in Response",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7983,7 +7983,7 @@
     },
     {
       "id": "FR-173",
-      "title": "Subdomain Takeover — S3 Bucket Not Found",
+      "title": "Subdomain Takeover \u2014 S3 Bucket Not Found",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8029,7 +8029,7 @@
     },
     {
       "id": "FR-174",
-      "title": "Subdomain Takeover — GitHub Pages",
+      "title": "Subdomain Takeover \u2014 GitHub Pages",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8075,7 +8075,7 @@
     },
     {
       "id": "FR-175",
-      "title": "Subdomain Takeover — Heroku",
+      "title": "Subdomain Takeover \u2014 Heroku",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8305,7 +8305,7 @@
     },
     {
       "id": "FR-180",
-      "title": "Information Disclosure — Internal Path in Response",
+      "title": "Information Disclosure \u2014 Internal Path in Response",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8352,7 +8352,7 @@
     },
     {
       "id": "FR-181",
-      "title": "Access Matrix — Unauthenticated Access to Authenticated Endpoint",
+      "title": "Access Matrix \u2014 Unauthenticated Access to Authenticated Endpoint",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8398,7 +8398,7 @@
     },
     {
       "id": "FR-182",
-      "title": "Access Matrix — Lower-Role Access to Higher-Role Endpoint",
+      "title": "Access Matrix \u2014 Lower-Role Access to Higher-Role Endpoint",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8444,7 +8444,7 @@
     },
     {
       "id": "FR-183",
-      "title": "Access Matrix — User A Can Read User B Data",
+      "title": "Access Matrix \u2014 User A Can Read User B Data",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8490,7 +8490,7 @@
     },
     {
       "id": "FR-184",
-      "title": "Access Matrix — User A Can Modify User B Data",
+      "title": "Access Matrix \u2014 User A Can Modify User B Data",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8536,7 +8536,7 @@
     },
     {
       "id": "FR-185",
-      "title": "Access Matrix — Admin Functionality Accessible by Regular User",
+      "title": "Access Matrix \u2014 Admin Functionality Accessible by Regular User",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8582,7 +8582,7 @@
     },
     {
       "id": "FR-186",
-      "title": "HTTP Security Header — X-Frame-Options Incorrectly Configured",
+      "title": "HTTP Security Header \u2014 X-Frame-Options Incorrectly Configured",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8628,7 +8628,7 @@
     },
     {
       "id": "FR-187",
-      "title": "Content-Security-Policy — Unsafe-Eval Allowed",
+      "title": "Content-Security-Policy \u2014 Unsafe-Eval Allowed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9122,12 +9122,12 @@
       "searchsploit_terms": [],
       "metasploit_modules": [],
       "kev": false,
-      "remediation_brief": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection — fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform.",
+      "remediation_brief": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection \u2014 fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform.",
       "remediation_component": "",
       "remediation_category": "",
       "remediation_effort": "",
       "validation_tools": [],
-      "description": "A WAF or edge security platform was identified in front of the target via response headers or body signatures. WAF rules may suppress injection probes — absence of a finding does not confirm absence of the vulnerability. Bot-protection may interrupt automated probes.",
+      "description": "A WAF or edge security platform was identified in front of the target via response headers or body signatures. WAF rules may suppress injection probes \u2014 absence of a finding does not confirm absence of the vulnerability. Bot-protection may interrupt automated probes.",
       "impact": "",
       "_x_owasp": "A05:2025",
       "_x_nist": "SC-7",
@@ -9137,7 +9137,7 @@
       "_x_cves": [],
       "_x_service": "http",
       "_x_phase": "recon",
-      "_x_remediation": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection — fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform."
+      "_x_remediation": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection \u2014 fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform."
     },
     {
       "id": "FR-198",
@@ -9403,7 +9403,7 @@
       "remediation_category": "",
       "remediation_effort": "",
       "validation_tools": [],
-      "description": "A wildcard/catch-all response was detected — the server returns the same response for all unknown paths. Directory brute-forcing may be unreliable; all path-based findings are validated against the wildcard baseline.",
+      "description": "A wildcard/catch-all response was detected \u2014 the server returns the same response for all unknown paths. Directory brute-forcing may be unreliable; all path-based findings are validated against the wildcard baseline.",
       "impact": "",
       "_x_owasp": "A05:2025",
       "_x_nist": "CM-7",
@@ -9975,7 +9975,7 @@
     },
     {
       "id": "FR-216",
-      "title": "Subdomain Takeover — Dangling CNAME",
+      "title": "Subdomain Takeover \u2014 Dangling CNAME",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13375,7 +13375,7 @@
     },
     {
       "id": "FR-289",
-      "title": "Blind SSRF — Internal Network Probing",
+      "title": "Blind SSRF \u2014 Internal Network Probing",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13421,7 +13421,7 @@
     },
     {
       "id": "FR-290",
-      "title": "Insecure Deserialization — Serialized Object Accepted",
+      "title": "Insecure Deserialization \u2014 Serialized Object Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13467,7 +13467,7 @@
     },
     {
       "id": "FR-291",
-      "title": "Insecure Deserialization — YAML Tag Injection",
+      "title": "Insecure Deserialization \u2014 YAML Tag Injection",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13513,7 +13513,7 @@
     },
     {
       "id": "FR-292",
-      "title": "Insecure Deserialization — Error Disclosure",
+      "title": "Insecure Deserialization \u2014 Error Disclosure",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13559,7 +13559,7 @@
     },
     {
       "id": "FR-293",
-      "title": "Verbose Error Messages — Stack Trace Disclosed",
+      "title": "Verbose Error Messages \u2014 Stack Trace Disclosed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13837,7 +13837,7 @@
     },
     {
       "id": "FR-299",
-      "title": "Timing Attack — Non-Constant-Time Authentication",
+      "title": "Timing Attack \u2014 Non-Constant-Time Authentication",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -14021,7 +14021,7 @@
     },
     {
       "id": "FR-303",
-      "title": "JWT — Missing Expiry Claim (No exp)",
+      "title": "JWT \u2014 Missing Expiry Claim (No exp)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -14856,7 +14856,7 @@
     },
     {
       "id": "FR-321",
-      "title": "JSONP Endpoint — Cross-Origin Data Leakage",
+      "title": "JSONP Endpoint \u2014 Cross-Origin Data Leakage",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -14903,7 +14903,7 @@
     },
     {
       "id": "FR-322",
-      "title": "Cross-Site Request Forgery (CSRF) — Missing Token",
+      "title": "Cross-Site Request Forgery (CSRF) \u2014 Missing Token",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -15369,7 +15369,7 @@
     },
     {
       "id": "FR-332",
-      "title": "Business Logic — Hidden Price/Value Field Tampering",
+      "title": "Business Logic \u2014 Hidden Price/Value Field Tampering",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -15416,7 +15416,7 @@
     },
     {
       "id": "FR-333",
-      "title": "Business Logic — Numeric Field Accepts Negative/Zero Value",
+      "title": "Business Logic \u2014 Numeric Field Accepts Negative/Zero Value",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -15463,7 +15463,7 @@
     },
     {
       "id": "FR-334",
-      "title": "Business Logic — Potential Race Condition (Duplicate Submission)",
+      "title": "Business Logic \u2014 Potential Race Condition (Duplicate Submission)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -15509,7 +15509,7 @@
     },
     {
       "id": "FR-335",
-      "title": "Business Logic — Workflow Step Directly Accessible",
+      "title": "Business Logic \u2014 Workflow Step Directly Accessible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -16719,7 +16719,7 @@
     },
     {
       "id": "FR-365",
-      "title": "Server-Side Request Forgery (SSRF) — {ssrf_desc}",
+      "title": "Server-Side Request Forgery (SSRF) \u2014 {ssrf_desc}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -16953,7 +16953,7 @@
     },
     {
       "id": "FR-371",
-      "title": "Subdomain Takeover — Dangling CNAME ({service})",
+      "title": "Subdomain Takeover \u2014 Dangling CNAME ({service})",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -18424,7 +18424,7 @@
     },
     {
       "id": "FR-408",
-      "title": "HTTP Request Smuggling — CL.0 Client-Side Desync",
+      "title": "HTTP Request Smuggling \u2014 CL.0 Client-Side Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -18472,7 +18472,7 @@
     },
     {
       "id": "FR-409",
-      "title": "HTTP Request Smuggling — CL.TE Desync",
+      "title": "HTTP Request Smuggling \u2014 CL.TE Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -18514,7 +18514,7 @@
     },
     {
       "id": "FR-410",
-      "title": "HTTP Request Smuggling — TE Obfuscation Desync",
+      "title": "HTTP Request Smuggling \u2014 TE Obfuscation Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -18556,7 +18556,7 @@
     },
     {
       "id": "FR-411",
-      "title": "HTTP Request Smuggling — TE.CL Desync",
+      "title": "HTTP Request Smuggling \u2014 TE.CL Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -18737,7 +18737,7 @@
     },
     {
       "id": "FR-415",
-      "title": "Missing Subresource Integrity — {entry['tag']} from {entry['host']}",
+      "title": "Missing Subresource Integrity \u2014 {entry['tag']} from {entry['host']}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -18867,7 +18867,7 @@
     },
     {
       "id": "FR-418",
-      "title": "Reflected Cross-Site Scripting (XSS) — POST Parameter",
+      "title": "Reflected Cross-Site Scripting (XSS) \u2014 POST Parameter",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -20287,7 +20287,7 @@
     },
     {
       "id": "FR-446",
-      "title": "MFA Bypass — Direct Navigation",
+      "title": "MFA Bypass \u2014 Direct Navigation",
       "aliases": [
         "2FA bypass",
         "MFA skip"
@@ -20684,7 +20684,7 @@
     },
     {
       "id": "FR-454",
-      "title": "h2c Smuggling — Internal Endpoint Accessible",
+      "title": "h2c Smuggling \u2014 Internal Endpoint Accessible",
       "aliases": [
         "h2c bypass",
         "h2c internal access"
@@ -20800,6 +20800,512 @@
       "remediation_effort": "Easy",
       "validation_tools": [
         "curl",
+        "browser"
+      ]
+    },
+    {
+      "id": "FR-456",
+      "title": "Application Responses Identify Valid Accounts",
+      "aliases": [
+        "User enumeration via response differential",
+        "Username enumeration",
+        "Account enumeration via login"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "Login endpoint responses differ between valid and invalid usernames, allowing attackers to enumerate valid accounts through status codes, body length, error messages, or timing differences.",
+      "impact": "An attacker can confirm which usernames exist in the system, enabling targeted credential attacks (brute force, credential stuffing) and social engineering.",
+      "cwe": [
+        "CWE-204"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 5.3,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A07:2025 Identification and Authentication Failures",
+      "owasp_api": "API2:2023 Broken Authentication",
+      "nist_csf2": [
+        "PR.AC-07"
+      ],
+      "nist_800_53": [
+        "IA-5"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "6.2.4"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1078",
+          "tactic": "Initial Access",
+          "name": "Valid Accounts"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Return identical responses (status code, body length, content, and timing) for all login attempts regardless of whether the username exists. Use generic error messages like 'Invalid credentials'.",
+      "remediation_component": "Application",
+      "remediation_category": "Authentication",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "burp",
+        "curl"
+      ]
+    },
+    {
+      "id": "FR-457",
+      "title": "Authorization Gaps \u2014 Unauthenticated Access to Restricted Paths",
+      "aliases": [
+        "Forced browsing",
+        "Missing access control on admin paths",
+        "Broken access control"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "description": "Administrative or restricted paths are accessible without authentication, indicating missing or misconfigured access controls.",
+      "impact": "An attacker can access administrative functions, sensitive data, or configuration interfaces without valid credentials, potentially leading to full application compromise.",
+      "cwe": [
+        "CWE-425",
+        "CWE-862"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 8.6,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:L",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A01:2025 Broken Access Control",
+      "owasp_api": "API1:2023 Broken Object Level Authorization",
+      "nist_csf2": [
+        "PR.AC-01"
+      ],
+      "nist_800_53": [
+        "AC-3"
+      ],
+      "nist_800_171": [
+        "3.1.1"
+      ],
+      "pci_dss_4": [
+        "7.2.1"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Implement proper access controls on all administrative and restricted paths. Deny access by default and require authentication and appropriate authorization.",
+      "remediation_component": "Application",
+      "remediation_category": "Access Control",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "curl",
+        "browser",
+        "burp"
+      ]
+    },
+    {
+      "id": "FR-458",
+      "title": "HTTP Parameter Pollution (Reflected)",
+      "aliases": [
+        "HPP",
+        "Duplicate parameter injection",
+        "Client-side HTTP Parameter Pollution"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "Duplicate HTTP parameters are processed and reflected in responses, potentially allowing attackers to bypass input validation or inject malicious content.",
+      "impact": "An attacker can inject a second parameter value that overrides or appends to the first, bypassing WAF rules, input filters, or business logic validation.",
+      "cwe": [
+        "CWE-235"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 5.4,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A03:2025 Injection",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-02"
+      ],
+      "nist_800_53": [
+        "SI-10"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "6.2.4"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Validate and reject duplicate parameters. Use framework-level parameter parsing that selects only the first occurrence. Encode all reflected user input.",
+      "remediation_component": "Application",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "burp",
+        "curl"
+      ]
+    },
+    {
+      "id": "FR-459",
+      "title": "Improper Error Handling \u2014 Server Error Exposed",
+      "aliases": [
+        "500 error exposed",
+        "Internal server error disclosure",
+        "Improper input validation"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "Server returns HTTP 5xx error responses with detailed error information including stack traces, database errors, or debug output.",
+      "impact": "Detailed error messages disclose implementation details (language, framework, file paths, database type, SQL queries) that aid targeted exploitation.",
+      "cwe": [
+        "CWE-209",
+        "CWE-388"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 5.3,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-02"
+      ],
+      "nist_800_53": [
+        "SI-11"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "6.5.5"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Implement custom error pages that suppress stack traces. Disable debug mode in production. Log detailed errors server-side only.",
+      "remediation_component": "Application",
+      "remediation_category": "Configuration",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "curl",
+        "browser"
+      ]
+    },
+    {
+      "id": "FR-460",
+      "title": "Insecure HTTPS to HTTP Redirect Detected",
+      "aliases": [
+        "HTTPS-HTTP state transition",
+        "Protocol downgrade redirect",
+        "Mixed content redirect"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "Redirect chains downgrade from HTTPS to HTTP, exposing session tokens, credentials, and sensitive data to network-level interception.",
+      "impact": "An attacker performing a man-in-the-middle attack can intercept credentials, session tokens, and sensitive data transmitted over the unencrypted HTTP connection.",
+      "cwe": [
+        "CWE-319"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 5.9,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-02"
+      ],
+      "nist_800_53": [
+        "SC-8"
+      ],
+      "nist_800_171": [
+        "3.13.8"
+      ],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1557",
+          "tactic": "Credential Access",
+          "name": "Adversary-in-the-Middle"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Ensure all redirects maintain HTTPS. Configure HSTS to prevent protocol downgrades. Review server redirect configurations.",
+      "remediation_component": "Network",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "curl",
+        "browser"
+      ]
+    },
+    {
+      "id": "FR-460b",
+      "title": "Form Submits to HTTP from HTTPS Page",
+      "aliases": [
+        "Mixed content form action",
+        "HTTP form on HTTPS page"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "Forms on HTTPS pages submit data to HTTP endpoints, exposing form data (potentially including credentials) to network interception.",
+      "impact": "Credentials or sensitive data submitted through the form travel over unencrypted HTTP, vulnerable to man-in-the-middle interception.",
+      "cwe": [
+        "CWE-319"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 5.9,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-02"
+      ],
+      "nist_800_53": [
+        "SC-8"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Change all form action URLs to use HTTPS. Enable HSTS.",
+      "remediation_component": "Application",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "browser",
+        "curl"
+      ]
+    },
+    {
+      "id": "FR-461",
+      "title": "Internal Hostname Exposed in HTTP Response",
+      "aliases": [
+        "Internal hostname exposure",
+        "Hostname leakage",
+        "Internal naming convention disclosure"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "LOW",
+      "description": "HTTP response headers or body contain internal hostnames (.local, .internal, .corp, .lan, etc.), disclosing naming conventions and network topology.",
+      "impact": "Internal hostnames reveal infrastructure naming patterns and topology, aiding reconnaissance and potentially enabling blind SSRF attacks when callback parameters exist.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 3.7,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-02"
+      ],
+      "nist_800_53": [
+        "SC-8",
+        "SI-11"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "6.5.10"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1018",
+          "tactic": "Discovery",
+          "name": "Remote System Discovery"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Remove internal hostnames from HTTP response headers (Server, Via, X-Powered-By, X-Backend-Server) and response bodies. Configure reverse proxies to strip internal routing headers.",
+      "remediation_component": "Application",
+      "remediation_category": "Configuration",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "curl",
+        "browser"
+      ]
+    },
+    {
+      "id": "FR-464",
+      "title": "Unhandled Application Exception Disclosed",
+      "aliases": [
+        "Stack trace disclosure",
+        "Exception leak",
+        "Debug output in production",
+        "Verbose error message"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "LOW",
+      "description": "HTTP responses contain exception class names, stack traces, or debug output patterns from various frameworks (Python, Java, .NET, PHP, Node.js, Ruby, SQL).",
+      "impact": "Exception details disclose implementation language, framework version, file paths, database type, and SQL queries, significantly reducing the effort needed for targeted exploitation.",
+      "cwe": [
+        "CWE-209",
+        "CWE-497"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 5.3,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-02"
+      ],
+      "nist_800_53": [
+        "SI-11"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "6.5.5"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Implement custom error pages. Disable debug mode in production. Log exceptions server-side only. Never expose stack traces in HTTP responses.",
+      "remediation_component": "Application",
+      "remediation_category": "Configuration",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "curl",
+        "browser",
+        "burp"
+      ]
+    },
+    {
+      "id": "FR-465",
+      "title": "Outdated or Unnecessary Website Detected",
+      "aliases": [
+        "Abandoned website",
+        "Under construction page",
+        "Default web server page",
+        "Stale website"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "INFO",
+      "description": "The website shows indicators of being outdated, abandoned, or unnecessary: old copyright dates, 'under construction' text, default CMS/server pages, or stale Last-Modified headers.",
+      "impact": "Outdated or unnecessary websites expand the attack surface with unpatched software and forgotten configurations that are less likely to be monitored.",
+      "cwe": [
+        "CWE-1104"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 0.0,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-01"
+      ],
+      "nist_800_53": [
+        "CM-8"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Review whether this website is still needed. If not, decommission it. If needed, update its content and underlying software.",
+      "remediation_component": "Network",
+      "remediation_category": "Configuration",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
         "browser"
       ]
     }
