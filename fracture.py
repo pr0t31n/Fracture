@@ -2980,6 +2980,31 @@ def _sanitize_ip(ip_or_url):
 
 
 
+def _timeout_action_item(out, tool_name, target, timeout_s, priority="MEDIUM"):
+    """Emit an action item when a tool times out — lost coverage needs re-scan."""
+    _ip = target.get("ip", "")
+    _port = target.get("port", 0)
+    _hn = target.get("hostname", "")
+    _tgt = f"{_ip}:{_port}" if _port else _ip
+    out.log_action_item(
+        type="scan_timeout",
+        recommended_tool=tool_name,
+        target=_tgt,
+        ip=_ip,
+        port=int(_port) if _port else 0,
+        hostname=_hn,
+        title=f"{tool_name} Timed Out — Re-Scan Required",
+        description=(
+            f"{tool_name} timed out after {timeout_s}s on {_tgt}"
+            f"{f' ({_hn})' if _hn else ''}. "
+            f"Re-run manually with adjusted timeout or reduced scope."
+        ),
+        source_finding=f"{tool_name} timeout",
+        priority=priority,
+        scope="webapp",
+    )
+
+
 _VANTAGE_MANAGED = os.environ.get("CRUCIBLE_MANAGED", "") == "1"
 
 _VP_LOG    = "__CRUCIBLE_LOG__:"
@@ -13718,6 +13743,7 @@ def _probe_iis_aspnet(target: dict, cfg: dict, out: "OutputManager",
 
             except requests.exceptions.Timeout:
                 _evidence_lines.append(f"  Result: Timeout\n")
+                _timeout_action_item(out, "IIS probes", target, timeout, priority="LOW")
             except Exception as _pe:
                 vc.error(f"[iis-probes] Error probing {_probe_url}: {_pe}")
                 _evidence_lines.append(f"  Result: Error — {_pe}\n")
@@ -16086,6 +16112,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             _deregister_proc(_fer_proc)
             vc.log("[recon] feroxbuster timed out after 300s — killed", "WARNING")
             out.log_error("feroxbuster", cmd, "timed out after 300s")
+            _timeout_action_item(out, "feroxbuster", target, 300)
         except Exception as e:
             if _fer_proc:
                 try: _fer_proc.kill(); _fer_proc.communicate()
@@ -16176,6 +16203,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _deregister_proc(_fer_files_proc)
                 vc.log("[recon] feroxbuster (files) timed out after 300s — killed", "WARNING")
                 out.log_error("feroxbuster", cmd, "timed out after 300s")
+                _timeout_action_item(out, "feroxbuster", target, 300)
             except Exception as e:
                 if _fer_files_proc:
                     try: _fer_files_proc.kill(); _fer_files_proc.communicate()
@@ -17417,6 +17445,7 @@ def _phase_endpoint_tools(
                 _deregister_proc(_ep_fer_proc)
                 vc.log(f"[endpoint_tools] feroxbuster timed out after 180s — killed", "WARNING")
                 out.log_error("feroxbuster", cmd, "timed out after 180s")
+                _timeout_action_item(out, "feroxbuster", target, 180)
             except Exception as e:
                 if _ep_fer_proc:
                     try: _ep_fer_proc.kill(); _ep_fer_proc.communicate()
@@ -18068,6 +18097,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
 
         except Exception as e:
             out.log_error("sslscan", cmd, str(e))
+            _timeout_action_item(out, "sslscan", target, 0)
     else:
         vc.error("[tls] sslscan not found — install sslscan for full TLS analysis",
                  source="tls", category="Tool")
@@ -18468,6 +18498,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     vc.log(f"[tls] Internal hostname in cert SAN: {', '.join(_san_internal[:3])}", "SUCCESS")
         except Exception as e:
             out.log_error("testssl.sh", cmd, str(e))
+            _timeout_action_item(out, "testssl.sh", target, 0)
     else:
         vc.log("[tls] testssl.sh not found — basic socket TLS check", "WARNING")
         import ssl as _ssl
@@ -20037,6 +20068,7 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
         except subprocess.TimeoutExpired:
             vc.log(f"[shcheck] Timed out on {hostname}:{port}", "WARNING")
             out.log_error("shcheck", cmd, f"timed out on {hostname}:{port}")
+            _timeout_action_item(out, "shcheck", tgt, timeout)
             # Do not store a timeout placeholder — delete the file immediately
             # so no useless artifact is left in the headers/ directory.
             try:
@@ -23153,6 +23185,22 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
                             "in use; consider switching to RS256/ES256 with key "
                             "management via KMS/HSM."),
                     )
+                    out.log_action_item(
+                        type="cross_tool_credential",
+                        recommended_tool="isotope",
+                        target=f"{target['ip']}:{target['port']}",
+                        ip=target["ip"], port=target["port"],
+                        hostname=target.get("hostname", ""),
+                        title="JWT Secret Reuse — Cross-Service Credential Test",
+                        description=(
+                            f"Fracture recovered JWT signing secret ({cracked!r}) "
+                            f"at {url}. Run Isotope to test if this secret is "
+                            f"reused across other services, forge tokens for "
+                            f"privilege escalation, and validate JWT "
+                            f"implementation across the environment."),
+                        source_finding="jwt_brute_force",
+                        priority="CRITICAL", scope="webapp",
+                    )
                     break   # one finding per phase is enough
         except Exception as exc:
             vc.log(f"[jwt] HS256 brute pass error: {exc}", "WARNING")
@@ -26065,6 +26113,21 @@ def _probe_login_default_creds(login_url: str, target: dict,
             )
             vc.log(f"[auth_bypass] Default creds accepted: {uname!r}/{pwd!r}",
                    "SUCCESS")
+            out.log_action_item(
+                type="cross_tool_credential",
+                recommended_tool="isotope",
+                target=f"{target['ip']}:{target['port']}",
+                ip=target["ip"], port=target["port"],
+                hostname=target.get("hostname", ""),
+                title="Credential Validation — Default Creds Confirmed",
+                description=(
+                    f"Fracture confirmed default credentials ({uname}) accepted "
+                    f"at {login_url}. Run Isotope to test credential reuse "
+                    f"across other services on this host and network, and to "
+                    f"validate password policy enforcement."),
+                source_finding="default_credentials",
+                priority="HIGH", scope="webapp",
+            )
             return {"username": uname, "password": pwd,
                     "auth_method": _method_used, "login_url": login_url}
 
@@ -26168,6 +26231,22 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                     http_code=r.status_code,
                 )
                 vc.log(f"[auth_bypass] Login SQLi bypass at {action}", "SUCCESS")
+                out.log_action_item(
+                    type="cross_tool_credential",
+                    recommended_tool="isotope",
+                    target=f"{target['ip']}:{target['port']}",
+                    ip=target["ip"], port=target["port"],
+                    hostname=target.get("hostname", ""),
+                    title="Auth Bypass Confirmed — Credential Extraction",
+                    description=(
+                        f"Fracture bypassed authentication via SQLi at "
+                        f"{action}. Run Isotope to extract credentials from "
+                        f"the backend database, test credential reuse across "
+                        f"services, and validate other authentication "
+                        f"mechanisms on this host."),
+                    source_finding="sqli_auth_bypass",
+                    priority="CRITICAL", scope="webapp",
+                )
                 break
             except Exception:
                 pass
@@ -26271,6 +26350,22 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                             http_code=r.status_code,
                         )
                         vc.log("[auth_bypass] JWT none algorithm accepted!", "SUCCESS")
+                        out.log_action_item(
+                            type="cross_tool_credential",
+                            recommended_tool="isotope",
+                            target=f"{target['ip']}:{target['port']}",
+                            ip=target["ip"], port=target["port"],
+                            hostname=target.get("hostname", ""),
+                            title="JWT None-Alg Bypass — Token Forging",
+                            description=(
+                                f"Fracture confirmed JWT alg:none bypass at "
+                                f"{url}. Run Isotope to forge tokens for "
+                                f"privilege escalation, test admin access, "
+                                f"and enumerate protected endpoints with "
+                                f"forged JWT credentials."),
+                            source_finding="jwt_none_alg_bypass",
+                            priority="CRITICAL", scope="webapp",
+                        )
             except Exception:
                 pass
 
@@ -26999,6 +27094,23 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 vc.log(f"[files] Found: {fpath} (risk={risk})", "SUCCESS")
+                if risk == "CRITICAL" and any(kw in fpath.lower() for kw in
+                        ("credentials", "tfstate", ".env", "secret")):
+                    out.log_action_item(
+                        type="cross_tool_credential",
+                        recommended_tool="isotope",
+                        target=f"{target['ip']}:{target['port']}",
+                        ip=target["ip"], port=target["port"],
+                        hostname=target.get("hostname", ""),
+                        title=f"Credential File Exposed — Validate Access ({fpath})",
+                        description=(
+                            f"Fracture found {fpath} exposed at "
+                            f"{_fpath_full_url}. Run Isotope to extract and "
+                            f"validate exposed credentials against target "
+                            f"services (AWS, databases, SSH, etc.)."),
+                        source_finding="credential_file_exposure",
+                        priority="CRITICAL", scope="webapp",
+                    )
         except Exception:
             pass
 
@@ -28225,6 +28337,7 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                 nuc_stderr = nuc_stderr or ""
             except Exception:
                 pass
+            _timeout_action_item(out, "nuclei", target, timeout + 120)
         _deregister_proc(_nuc_proc)
         _nuc_ended = datetime.now().astimezone()
 
@@ -28459,6 +28572,7 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                 _nik_stdout, _nik_stderr = _nik_proc.communicate(timeout=10)
             except Exception:
                 pass
+            _timeout_action_item(out, "nikto", target, 600)
         _deregister_proc(_nik_proc)
         _nik_ended = datetime.now().astimezone()
         out.log_command(
@@ -29244,6 +29358,7 @@ def _check_viewstate(target: dict, cfg: dict, out: "OutputManager",
 
         except requests.exceptions.Timeout:
             vc.log(f"[viewstate] Timeout fetching {page_url}", "WARNING")
+            _timeout_action_item(out, "ViewState analysis", target, 0, priority="LOW")
         except Exception as _vs_err:
             vc.error(f"[viewstate] Error analyzing {page_url}: {_vs_err}")
 
@@ -29519,6 +29634,7 @@ def _validate_telerik(target: dict, cfg: dict, out: "OutputManager",
 
             except requests.exceptions.Timeout:
                 vc.log(f"[telerik] Timeout probing {_probe_url}", "WARNING")
+                _timeout_action_item(out, "Telerik probes", target, 0, priority="LOW")
             except Exception as _te:
                 vc.error(f"[telerik] Error probing {_probe_url}: {_te}")
 
@@ -35347,6 +35463,7 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
             _fer_proc.kill(); _fer_proc.communicate(); _deregister_proc(_fer_proc)
             vc.log("[recon] feroxbuster (dirs) timed out after 300s — killed", "WARNING")
             out.log_error("feroxbuster", cmd, "timed out after 300s")
+            _timeout_action_item(out, "feroxbuster", target, 300)
         except Exception as e:
             if _fer_proc:
                 try: _fer_proc.kill(); _fer_proc.communicate()
@@ -35424,6 +35541,7 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
             _fer_files_proc.kill(); _fer_files_proc.communicate(); _deregister_proc(_fer_files_proc)
             vc.log("[recon] feroxbuster (files) timed out after 300s — killed", "WARNING")
             out.log_error("feroxbuster", cmd, "timed out after 300s")
+            _timeout_action_item(out, "feroxbuster", target, 300)
         except Exception as e:
             if _fer_files_proc:
                 try: _fer_files_proc.kill(); _fer_files_proc.communicate()
@@ -44142,6 +44260,96 @@ def main() -> None:
                 f"(total: {len(_root_findings)})", "SUCCESS")
     except Exception as _merge_err:
         vc.error(f"[merge] Failed to merge host findings: {_merge_err}")
+
+    # ── Post-scan: cross-tool action items (Isotope) ─────────────────────
+    _generate_cross_tool_action_items(_root_proj)
+
+
+def _generate_cross_tool_action_items(project_dir: Path) -> None:
+    """Emit action items recommending Isotope for downloadable files found."""
+    _ISOTOPE_FILE_PATTERNS = (
+        ".bak", ".sql", ".gz", ".tar", ".zip", ".7z", ".rar",
+        ".config", ".env", ".ini", ".key", ".pem", ".p12", ".pfx",
+        ".dat", ".db", ".sqlite", ".mdb",
+    )
+    _ISOTOPE_TITLE_PATTERNS = (
+        "backup", "export", "database", "dump",
+        "sensitive file exposed", "config file",
+    )
+    fj = project_dir / "findings.json"
+    aij = project_dir / "action_items.json"
+    if not fj.exists():
+        return
+    try:
+        findings = json.loads(fj.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    try:
+        items = json.loads(aij.read_text(encoding="utf-8")) if aij.exists() else []
+    except Exception:
+        items = []
+    seen = {(e.get("recommended_tool", "").lower(),
+             e.get("target", "").lower(),
+             e.get("title", "").strip().lower()) for e in items}
+
+    added = 0
+    for f in findings:
+        title = f.get("title", "")
+        title_l = title.lower()
+        url = f.get("url", "") or f.get("affected", "")
+        ip = f.get("ip", "")
+        port = int(f.get("port", 0))
+        hostname = f.get("hostname", "")
+        output_file = f.get("output_file", "")
+        if not url:
+            continue
+        is_file_match = any(ext in url.lower() for ext in _ISOTOPE_FILE_PATTERNS)
+        is_title_match = any(pat in title_l for pat in _ISOTOPE_TITLE_PATTERNS)
+        if not (is_file_match or is_title_match):
+            continue
+        key = ("isotope", url.lower(), f"file analysis: {title_l}")
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = {
+            "id": str(_uuid.uuid4()),
+            "type": "file_analysis",
+            "recommended_tool": "Isotope",
+            "target": url,
+            "ip": ip,
+            "port": port,
+            "hostname": hostname,
+            "title": f"File analysis: {title}",
+            "description": (
+                f"Fracture discovered a downloadable file at {url}. "
+                f"Isotope can perform deep binary analysis including "
+                f"secret extraction (API keys, connection strings, "
+                f"private keys), string analysis, IOC detection, "
+                f"and certificate inspection."
+            ),
+            "source_finding": title,
+            "priority": "HIGH",
+            "scope": "ext",
+            "status": "pending",
+            "datetime": datetime.now().isoformat(),
+            "metadata": {"source_category": "fracture_file_discovery",
+                          "output_file": output_file},
+        }
+        items.append(entry)
+        vc.action_item(entry)
+        added += 1
+
+    if added:
+        try:
+            tmp = aij.with_suffix(".tmp")
+            tmp.write_text(json.dumps(items, indent=2, default=str), encoding="utf-8")
+            os.replace(str(tmp), str(aij))
+        except Exception:
+            try:
+                aij.write_text(json.dumps(items, indent=2, default=str), encoding="utf-8")
+            except Exception:
+                pass
+        vc.log(f"[cross-tool] {added} Isotope action item(s) generated", "SUCCESS")
 
 
 if __name__ == "__main__":
