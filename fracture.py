@@ -2967,6 +2967,18 @@ def _tprint(*args, **kwargs):
 import queue as _queue
 import uuid as _uuid
 
+def _sanitize_ip(ip_or_url):
+    """Clean an IP/hostname: strip scheme, port, trailing protocol text."""
+    if not ip_or_url:
+        return ip_or_url or ""
+    import re as _re
+    cleaned = _re.sub(r'^https?://', '', str(ip_or_url)).rstrip('/')
+    cleaned = _re.sub(r':\d+$', '', cleaned)
+    cleaned = _re.sub(r'(https?|ftp)$', '', cleaned)
+    return cleaned.strip()
+
+
+
 _VANTAGE_MANAGED = os.environ.get("CRUCIBLE_MANAGED", "") == "1"
 
 _VP_LOG    = "__CRUCIBLE_LOG__:"
@@ -3487,7 +3499,7 @@ class OutputManager:
                 "type":            type,
                 "recommended_tool": recommended_tool,
                 "target":          target,
-                "ip":              ip,
+                "ip":              _sanitize_ip(ip),
                 "port":            port,
                 "hostname":        hostname,
                 "title":           title,
@@ -3820,7 +3832,7 @@ class OutputManager:
         entry = {
             "title":          title,
             "datetime":       ts,
-            "ip":             hostname,
+            "ip":             _sanitize_ip(hostname),
             "port":           int(port) if port else 0,
             "hostname":       hostname,
             "risk":           risk or "",
