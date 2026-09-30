@@ -28702,15 +28702,20 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
         "-config", "api.addrs.addr.regex=true",
         "-config", "connection.timeoutInSecs=120",
     ]
-    os.environ["JAVA_TOOL_OPTIONS"] = "-Xmx512m"
-    vc.log(f"[zap] Launching ZAP daemon on port {api_port} (heap capped at 512 MB)", "INFO")
+    _zap_env = os.environ.copy()
+    _zap_env["JAVA_TOOL_OPTIONS"] = "-Xmx1024m"
+    vc.log(f"[zap] Launching ZAP daemon on port {api_port} (heap capped at 1024 MB)", "INFO")
     vc.status(phase, "ZAP Scan", "running", "starting daemon", 0, 4)
 
+    _zap_log = Path(out.root) / "zap_daemon.log"
+    _zap_log_fh = open(_zap_log, "w")
     started = datetime.now().astimezone()
     try:
-        proc = _popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = _popen(cmd, stdout=_zap_log_fh, stderr=subprocess.STDOUT,
+                       env=_zap_env)
         _register_proc(proc)
     except Exception as e:
+        _zap_log_fh.close()
         vc.error(f"[zap] Failed to launch ZAP daemon: {e}")
         out.log_error("zap", " ".join(cmd), str(e))
         return None
@@ -28719,7 +28724,7 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
     import requests as _zap_req
     _zap_base = f"http://127.0.0.1:{api_port}"
     _zap_ready = False
-    for _attempt in range(30):
+    for _attempt in range(40):
         try:
             _r = _zap_req.get(f"{_zap_base}/JSON/core/view/version/", timeout=5)
             if _r.status_code == 200:
@@ -28730,16 +28735,17 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
         import time as _zap_time
-        _zap_time.sleep(2)
+        _zap_time.sleep(3)
 
     if not _zap_ready:
-        vc.log("[zap] ZAP daemon did not become ready within 60s — aborting", "WARNING")
-        out.log_error("zap", " ".join(cmd), "daemon startup timeout (60s)")
+        vc.log("[zap] ZAP daemon did not become ready within 120s — aborting", "WARNING")
+        out.log_error("zap", " ".join(cmd), "daemon startup timeout (120s)")
         try:
             proc.kill()
             proc.wait(timeout=10)
         except Exception:
             pass
+        _zap_log_fh.close()
         _deregister_proc(proc)
         return None
 
@@ -28826,7 +28832,7 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
     handle = {
         "zap_proc": proc, "zap_port": api_port, "zap_cmd": cmd,
         "spider_id": spider_id, "target": target, "out": out,
-        "started": started, "phase": phase,
+        "started": started, "phase": phase, "log_fh": _zap_log_fh,
     }
     return handle
 
@@ -29001,6 +29007,9 @@ def _collect_zap_bg(handle: dict) -> None:
     except Exception:
         pass
     _deregister_proc(proc)
+    _lfh = handle.get("log_fh")
+    if _lfh and not _lfh.closed:
+        _lfh.close()
 
     vc.status(phase, "ZAP Scan", "complete", "Done", 4, 4)
     vc.log(f"[zap] Phase complete — {_finding_count} finding(s)", "SUCCESS")
@@ -44200,10 +44209,24 @@ def main() -> None:
             except Exception as _inc_err:
                 vc.error(f"[merge] Incremental merge failed: {_inc_err}")
 
-        # Queue any in-scope redirect-discovered URLs for full scanning
+        # Queue any in-scope redirect-discovered URLs for full scanning,
+        # but only if the HOST is not already covered by an existing target.
+        # Paths on already-targeted hosts are already tested by the host's
+        # own scan phases — re-scanning them as new targets wastes resources.
+        _covered_hosts = {
+            urllib.parse.urlparse(u if "://" in u else "http://" + u).hostname.lower()
+            for u in _pending_urls if u
+        }
         for _new_url in _in_scope_new:
             _norm_new = _new_url.rstrip("/")
             if _norm_new not in _processed_urls and _norm_new not in _pending_urls:
+                _np = urllib.parse.urlparse(_norm_new)
+                if _np.hostname and _np.hostname.lower() in _covered_hosts:
+                    vc.log(
+                        f"[redirect] Skipping path on already-targeted host: {_norm_new}",
+                        "INFO",
+                    )
+                    continue
                 _pending_urls.append(_norm_new)
                 _redirect_discovered.add(_norm_new)
                 vc.log(
