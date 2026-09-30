@@ -10672,6 +10672,7 @@ def _parse_target(url: str) -> dict:
         "url":      url.rstrip("/"),
         "scheme":   scheme,
         "hostname": hostname,
+        "ip":       hostname,
         "port":     port,
         "is_https": is_https,
         "host_port": f"{hostname}:{port}",
@@ -28200,7 +28201,7 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
         cmd = [nuclei, "-l", str(_nuc_list_file),
                "-s", "critical,high,medium,low,info",
                "-silent", "-jsonl", "-no-interactsh",
-               "-stats",
+               "-stats", "-c", "25",
                "-o", str(nuc_out)]
         if _vs_cookie_str:
             cmd += ["-H", f"Cookie: {_vs_cookie_str}"]
@@ -40634,6 +40635,17 @@ def main() -> None:
     target_urls = [u.rstrip("/") for u in cfg.get("target_urls", []) if u]
     if target_url:
         target_urls = [target_url] + [u for u in target_urls if u != target_url]
+    # Ensure every target has a scheme (bare ip:port → https:// or http://)
+    _normed: list = []
+    for _tu in target_urls:
+        if _tu and "://" not in _tu:
+            _tp = _parse_target(_tu)
+            _tu = f"{_tp['scheme']}://{_tp['hostname']}:{_tp['port']}"
+            if (_tp["scheme"] == "https" and _tp["port"] == 443) or \
+                    (_tp["scheme"] == "http" and _tp["port"] == 80):
+                _tu = f"{_tp['scheme']}://{_tp['hostname']}"
+        _normed.append(_tu)
+    target_urls = _normed
     # Deduplicate while preserving order
     _seen_urls: set = set()
     target_urls = [u for u in target_urls if u not in _seen_urls and not _seen_urls.add(u)]
