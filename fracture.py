@@ -10655,19 +10655,25 @@ return null;
 _TLS_PORTS_WEB = {443, 8443, 4443, 9443, 7443}
 
 def _parse_target(url: str) -> dict:
+    _had_scheme = "://" in url
+    if not _had_scheme and url:
+        url = "http://" + url
     p = urllib.parse.urlparse(url)
-    if p.scheme:
-        scheme = p.scheme
-    elif p.port and p.port in _TLS_PORTS_WEB:
-        # Why: an input like "host:443" with no scheme used to silently become
-        # http://host:443/, which sends plain HTTP to a TLS-only service and
-        # causes shcheck / gobuster / etc. to report every header missing.
+    if not _had_scheme and p.port and p.port in _TLS_PORTS_WEB:
         scheme = "https"
+    elif p.scheme in ("http", "https"):
+        scheme = p.scheme
     else:
         scheme = "http"
     hostname = p.hostname or url
     port     = p.port or (443 if scheme == "https" else 80)
     is_https = scheme == "https"
+    if not _had_scheme:
+        if (scheme == "https" and port == 443) or \
+                (scheme == "http" and port == 80):
+            url = f"{scheme}://{hostname}"
+        else:
+            url = f"{scheme}://{hostname}:{port}"
     return {
         "url":      url.rstrip("/"),
         "scheme":   scheme,
@@ -40639,11 +40645,7 @@ def main() -> None:
     _normed: list = []
     for _tu in target_urls:
         if _tu and "://" not in _tu:
-            _tp = _parse_target(_tu)
-            _tu = f"{_tp['scheme']}://{_tp['hostname']}:{_tp['port']}"
-            if (_tp["scheme"] == "https" and _tp["port"] == 443) or \
-                    (_tp["scheme"] == "http" and _tp["port"] == 80):
-                _tu = f"{_tp['scheme']}://{_tp['hostname']}"
+            _tu = _parse_target(_tu)["url"]
         _normed.append(_tu)
     target_urls = _normed
     # Deduplicate while preserving order
