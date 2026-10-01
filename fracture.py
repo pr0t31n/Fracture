@@ -1222,7 +1222,10 @@ _WAF_BODY_RE = re.compile(
     r"access to this (?:site|page|resource) has been (?:blocked|denied)|"
     r"security service.*(?:block|protect)|"
     r"automated (?:tool|scan|request|access|bot)\b|"
-    r"suspicious (?:activity|request|traffic)",
+    r"suspicious (?:activity|request|traffic)|"
+    # F5 BigIP ASM / APM block pages
+    r"request(?:ed (?:url|page))?\s+(?:was\s+)?rejected|"
+    r"<title>Request Rejected</title>",
     re.I,
 )
 
@@ -11132,6 +11135,15 @@ def _parse_args() -> argparse.Namespace:
 # ─────────────────────────────────────────────
 # Phase 0: Recon
 # ─────────────────────────────────────────────
+_CMS_SCANNER_MAP = {
+    "wordpress": "wpscan", "drupal": "droopescan",
+    "joomla": "joomscan", "magento": None,
+    "shopify": None, "typo3": None, "ghost": None,
+    "woocommerce": "wpscan", "prestashop": None,
+    "opencart": None, "dotnetnuke": None, "umbraco": None,
+    "django": None, "laravel": None, "rails": None, "express": None,
+}
+
 _CMS_PATTERNS = {
     "WordPress":   [re.compile(r'wp-content|wp-includes|wordpress', re.I)],
     "Drupal":      [re.compile(r'Drupal|drupal\.js|sites/default', re.I)],
@@ -11461,6 +11473,8 @@ def _check_cloud_cred_exposure(base_url: str, sess: "requests.Session",
             r = sess.get(probe_url, timeout=min(timeout, 6),
                          allow_redirects=True)
             if r.status_code != 200:
+                continue
+            if _is_waf_block(r):
                 continue
             body = r.text[:4096] if hasattr(r, 'text') else ""
             if not body:
@@ -14764,6 +14778,24 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             owasp="A05:2025 Security Misconfiguration", nist="CM-8",
             remediation="Ensure the CMS and all plugins/themes are kept up to date.",
             http_code=resp.status_code,
+        )
+        _cms_scanner = _CMS_SCANNER_MAP.get(cms.lower())
+        out.log_action_item(
+            type="deeper_scan",
+            recommended_tool=_cms_scanner or "manual",
+            target=url,
+            ip=target["ip"], port=target["port"],
+            hostname=target.get("hostname", ""),
+            title=f"Run CMS-specific scanner for {cms} on {url}",
+            description=(
+                f"CMS '{cms}' was detected. A targeted CMS scanner can "
+                "identify version-specific vulnerabilities, insecure "
+                "plugins/themes, and misconfigurations."
+            ),
+            source_finding=f"CMS Detected: {cms}",
+            priority="MEDIUM",
+            scope=target.get("scope", "external"),
+            metadata={"cms": cms, "recommended_scanner": _cms_scanner or "manual"},
         )
 
     # ── CDN, web structure, and BI tool detection ─────────────────────────────
@@ -27377,6 +27409,55 @@ _NIKTO_NORM: "list[tuple]" = [
      "CGI Directory / Scripts Accessible", "LOW",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Remove or restrict access to CGI directories in production."),
+    # ── Apache mod_status / mod_info ──
+    (r"mod_status|server-status|/server-status",
+     "Apache mod_status Exposed", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Restrict access to /server-status by IP allowlist or disable mod_status."),
+    (r"mod_info|server-info|/server-info",
+     "Apache mod_info Exposed", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Restrict access to /server-info by IP allowlist or disable mod_info."),
+    # ── phpMyAdmin ──
+    (r"phpMyAdmin|phpmyadmin|pma",
+     "phpMyAdmin Panel Accessible", "HIGH",
+     "A05:2025 Security Misconfiguration", "AC-3",
+     "Restrict phpMyAdmin access to internal IPs only or remove from production."),
+    # ── .htaccess / .htpasswd readable ──
+    (r"\.htaccess|\.htpasswd",
+     "Sensitive File Exposed: .htaccess/.htpasswd", "HIGH",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Block public access to .htaccess and .htpasswd files."),
+    # ── Password field autocomplete ──
+    (r"(?:password|passwd).*autocomplete|autocomplete.*(?:password|passwd)",
+     "Password Field with Autocomplete Enabled", "LOW",
+     "A05:2025 Security Misconfiguration", "SC-23",
+     "Disable autocomplete on password input fields."),
+    # ── File upload form detected ──
+    (r"(?:file\s+upload|upload\s+form|multipart.*form)",
+     "File Upload Form Detected", "INFO",
+     "A04:2025 Insecure Design", "CM-7",
+     "Validate uploaded file types, sizes, and content; store outside the web root."),
+    # ── Cross-domain policy ──
+    (r"crossdomain\.xml|clientaccesspolicy\.xml",
+     "Cross-Domain Policy File Accessible", "LOW",
+     "A05:2025 Security Misconfiguration", "AC-4",
+     "Review cross-domain policy for overly permissive access."),
+    # ── Multiple index files ──
+    (r"multiple\s+index\s+files",
+     "Multiple Index Files Detected", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Remove unnecessary index files from the web root."),
+    # ── .DS_Store / Thumbs.db ──
+    (r"\.DS_Store|Thumbs\.db|desktop\.ini",
+     "OS Metadata File Accessible", "LOW",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Block access to OS metadata files (.DS_Store, Thumbs.db, desktop.ini)."),
+    # ── WP-specific paths ──
+    (r"wp-login|wp-admin|wp-content|wp-includes",
+     "WordPress Path Accessible", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Review WordPress installation for security hardening."),
     # ── Shellshock ──
     (r"[Ss]hellshock|CVE-2014-6271",
      "Remote Code Execution: Shellshock (CVE-2014-6271)", "CRITICAL",
