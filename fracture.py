@@ -146,9 +146,10 @@ _SUBPROCESS_MEM_LIMIT_BYTES = int(2 * 1024 ** 3)  # 2 GB per child process
 _GO_SUBPROCESS_MEM_LIMIT_BYTES = int(8 * 1024 ** 3)  # 8 GB for Go binaries (need large virtual arenas)
 
 def _mem_limit_preexec():
-    """preexec_fn: cap each child's virtual address space to prevent OOM."""
+    """preexec_fn: set process group + cap virtual address space."""
     if sys.platform == "win32":
         return
+    os.setsid()
     try:
         import resource as _rlim
         _rlim.setrlimit(_rlim.RLIMIT_AS,
@@ -156,13 +157,22 @@ def _mem_limit_preexec():
     except (AttributeError, ValueError, OSError):
         pass
 
+
+def _kill_proc_tree(proc):
+    """Kill the entire process group spawned by proc, not just the leader."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            _kill_proc_tree(proc)
+        except OSError:
+            pass
+
 def _go_mem_limit_preexec():
-    """preexec_fn for Go binaries — higher RLIMIT_AS because Go's runtime
-    reserves large virtual address arenas (2 GB+) even when actual heap
-    usage is low.  A 2 GB RLIMIT_AS kills Go's mmap before real memory
-    pressure exists."""
+    """preexec_fn for Go binaries — set process group + higher RLIMIT_AS."""
     if sys.platform == "win32":
         return
+    os.setsid()
     try:
         import resource as _rlim
         _rlim.setrlimit(_rlim.RLIMIT_AS,
@@ -224,7 +234,7 @@ def _start_oom_watchdog(threshold_pct=90, interval=15):
                         pass
                 if biggest and biggest_rss > 100 * 1024 * 1024:
                     try:
-                        biggest.kill()
+                        _kill_proc_tree(biggest)
                     except OSError:
                         pass
             except Exception:
@@ -4270,7 +4280,7 @@ def _atexit_kill_procs() -> None:
     with _procs_lock:
         for p in list(_active_procs):
             try:
-                p.kill()
+                _kill_proc_tree(p)
             except Exception:
                 pass
 
@@ -16188,7 +16198,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             _deregister_proc(_fer_proc)
             out.log_command("feroxbuster", cmd, fer_out)
         except subprocess.TimeoutExpired:
-            _fer_proc.kill()
+            _kill_proc_tree(_fer_proc)
             _fer_proc.communicate()
             _deregister_proc(_fer_proc)
             vc.log("[recon] feroxbuster timed out after 300s — killed", "WARNING")
@@ -16196,7 +16206,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             _timeout_action_item(out, "feroxbuster", target, 300)
         except Exception as e:
             if _fer_proc:
-                try: _fer_proc.kill(); _fer_proc.communicate()
+                try: _kill_proc_tree(_fer_proc); _fer_proc.communicate()
                 except Exception: pass
                 _deregister_proc(_fer_proc)
             out.log_error("feroxbuster", cmd, str(e))
@@ -16279,7 +16289,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _deregister_proc(_fer_files_proc)
                 out.log_command("feroxbuster", cmd, fer_files_out)
             except subprocess.TimeoutExpired:
-                _fer_files_proc.kill()
+                _kill_proc_tree(_fer_files_proc)
                 _fer_files_proc.communicate()
                 _deregister_proc(_fer_files_proc)
                 vc.log("[recon] feroxbuster (files) timed out after 300s — killed", "WARNING")
@@ -16287,7 +16297,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 _timeout_action_item(out, "feroxbuster", target, 300)
             except Exception as e:
                 if _fer_files_proc:
-                    try: _fer_files_proc.kill(); _fer_files_proc.communicate()
+                    try: _kill_proc_tree(_fer_files_proc); _fer_files_proc.communicate()
                     except Exception: pass
                     _deregister_proc(_fer_files_proc)
                 out.log_error("feroxbuster", cmd, str(e))
@@ -17521,7 +17531,7 @@ def _phase_endpoint_tools(
                 _deregister_proc(_ep_fer_proc)
                 out.log_command("feroxbuster", cmd, ep_fer)
             except subprocess.TimeoutExpired:
-                _ep_fer_proc.kill()
+                _ep_kill_proc_tree(_fer_proc)
                 _ep_fer_proc.communicate()
                 _deregister_proc(_ep_fer_proc)
                 vc.log(f"[endpoint_tools] feroxbuster timed out after 180s — killed", "WARNING")
@@ -17529,7 +17539,7 @@ def _phase_endpoint_tools(
                 _timeout_action_item(out, "feroxbuster", target, 180)
             except Exception as e:
                 if _ep_fer_proc:
-                    try: _ep_fer_proc.kill(); _ep_fer_proc.communicate()
+                    try: _kill_proc_tree(_ep_fer_proc); _ep_fer_proc.communicate()
                     except Exception: pass
                     _deregister_proc(_ep_fer_proc)
                 out.log_error("feroxbuster", cmd, str(e))
@@ -28533,7 +28543,7 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                 f"— killing process (streamed output already on disk)",
                 "WARNING",
             )
-            _nuc_proc.kill()
+            _kill_proc_tree(_nuc_proc)
             try:
                 _, nuc_stderr = _nuc_proc.communicate(timeout=10)
                 nuc_stderr = nuc_stderr or ""
@@ -28769,7 +28779,7 @@ def _collect_vulnscan_bg(handle: dict) -> None:
             _nik_stdout, _nik_stderr = _nik_proc.communicate(timeout=600)
         except subprocess.TimeoutExpired:
             vc.log(f"[vulnscan] nikto ({_nik_label}): timeout — killing", "WARNING")
-            _nik_proc.kill()
+            _kill_proc_tree(_nik_proc)
             try:
                 _nik_stdout, _nik_stderr = _nik_proc.communicate(timeout=10)
             except Exception:
@@ -28939,7 +28949,7 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
         vc.log("[zap] ZAP daemon did not become ready within 120s — aborting", "WARNING")
         out.log_error("zap", " ".join(cmd), "daemon startup timeout (120s)")
         try:
-            proc.kill()
+            _kill_proc_tree(proc)
             proc.wait(timeout=10)
         except Exception:
             pass
@@ -29200,7 +29210,7 @@ def _collect_zap_bg(handle: dict) -> None:
     try:
         proc.wait(timeout=15)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _kill_proc_tree(proc)
         proc.wait(timeout=5)
     except Exception:
         pass
@@ -35674,13 +35684,13 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
             _deregister_proc(_fer_proc)
             out.log_command("feroxbuster", cmd, fer_out)
         except subprocess.TimeoutExpired:
-            _fer_proc.kill(); _fer_proc.communicate(); _deregister_proc(_fer_proc)
+            _kill_proc_tree(_fer_proc); _fer_proc.communicate(); _deregister_proc(_fer_proc)
             vc.log("[recon] feroxbuster (dirs) timed out after 300s — killed", "WARNING")
             out.log_error("feroxbuster", cmd, "timed out after 300s")
             _timeout_action_item(out, "feroxbuster", target, 300)
         except Exception as e:
             if _fer_proc:
-                try: _fer_proc.kill(); _fer_proc.communicate()
+                try: _kill_proc_tree(_fer_proc); _fer_proc.communicate()
                 except Exception: pass
                 _deregister_proc(_fer_proc)
             out.log_error("feroxbuster", cmd, str(e))
@@ -35752,13 +35762,13 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
             _deregister_proc(_fer_files_proc)
             out.log_command("feroxbuster", cmd, fer_files_out)
         except subprocess.TimeoutExpired:
-            _fer_files_proc.kill(); _fer_files_proc.communicate(); _deregister_proc(_fer_files_proc)
+            _kill_proc_tree(_fer_files_proc); _fer_files_proc.communicate(); _deregister_proc(_fer_files_proc)
             vc.log("[recon] feroxbuster (files) timed out after 300s — killed", "WARNING")
             out.log_error("feroxbuster", cmd, "timed out after 300s")
             _timeout_action_item(out, "feroxbuster", target, 300)
         except Exception as e:
             if _fer_files_proc:
-                try: _fer_files_proc.kill(); _fer_files_proc.communicate()
+                try: _kill_proc_tree(_fer_files_proc); _fer_files_proc.communicate()
                 except Exception: pass
                 _deregister_proc(_fer_files_proc)
             out.log_error("feroxbuster", cmd, str(e))
