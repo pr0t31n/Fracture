@@ -143,6 +143,7 @@ _SCAN_SEM           = _AdaptiveSemaphore(_SCAN_CONCURRENCY)
 
 # ── Per-subprocess memory limit ──────────────────────────────────────────────
 _SUBPROCESS_MEM_LIMIT_BYTES = int(2 * 1024 ** 3)  # 2 GB per child process
+_GO_SUBPROCESS_MEM_LIMIT_BYTES = int(8 * 1024 ** 3)  # 8 GB for Go binaries (need large virtual arenas)
 
 def _mem_limit_preexec():
     """preexec_fn: cap each child's virtual address space to prevent OOM."""
@@ -154,6 +155,29 @@ def _mem_limit_preexec():
                         (_SUBPROCESS_MEM_LIMIT_BYTES, _SUBPROCESS_MEM_LIMIT_BYTES))
     except (AttributeError, ValueError, OSError):
         pass
+
+def _go_mem_limit_preexec():
+    """preexec_fn for Go binaries — higher RLIMIT_AS because Go's runtime
+    reserves large virtual address arenas (2 GB+) even when actual heap
+    usage is low.  A 2 GB RLIMIT_AS kills Go's mmap before real memory
+    pressure exists."""
+    if sys.platform == "win32":
+        return
+    try:
+        import resource as _rlim
+        _rlim.setrlimit(_rlim.RLIMIT_AS,
+                        (_GO_SUBPROCESS_MEM_LIMIT_BYTES,
+                         _GO_SUBPROCESS_MEM_LIMIT_BYTES))
+    except (AttributeError, ValueError, OSError):
+        pass
+
+_GO_BINARIES = frozenset({
+    "nuclei", "subfinder", "dnsx", "tlsx", "httpx", "katana",
+    "cdncheck", "asnmap", "uncover", "cloudlist", "shuffledns",
+    "naabu", "interactsh-client", "puredns", "gobuster", "ffuf",
+    "gau", "hakrawler", "dalfox", "gospider", "meg", "anew",
+    "waybackurls", "xurlfind3r",
+})
 
 # ── OOM watchdog ─────────────────────────────────────────────────────────────
 _tracked_procs: list = []
@@ -3384,14 +3408,32 @@ if platform.system() == "Windows":
 def _run(cmd: list, **kwargs) -> subprocess.CompletedProcess:
     """Run a subprocess with memory limits, suppressing console windows on Windows."""
     if "preexec_fn" not in kwargs and sys.platform != "win32":
-        kwargs["preexec_fn"] = _mem_limit_preexec
+        _bin = Path(cmd[0]).name if cmd else ""
+        if _bin in _GO_BINARIES:
+            kwargs["preexec_fn"] = _go_mem_limit_preexec
+            _env = kwargs.get("env")
+            if _env is None:
+                _env = os.environ.copy()
+            _env.setdefault("GOMEMLIMIT", "2GiB")
+            kwargs["env"] = _env
+        else:
+            kwargs["preexec_fn"] = _mem_limit_preexec
     return subprocess.run(cmd, **{**_POPEN_FLAGS, **kwargs})
 
 
 def _popen(cmd: list, **kwargs) -> subprocess.Popen:
     """Open a subprocess with memory limits, suppressing console windows on Windows."""
     if "preexec_fn" not in kwargs and sys.platform != "win32":
-        kwargs["preexec_fn"] = _mem_limit_preexec
+        _bin = Path(cmd[0]).name if cmd else ""
+        if _bin in _GO_BINARIES:
+            kwargs["preexec_fn"] = _go_mem_limit_preexec
+            _env = kwargs.get("env")
+            if _env is None:
+                _env = os.environ.copy()
+            _env.setdefault("GOMEMLIMIT", "2GiB")
+            kwargs["env"] = _env
+        else:
+            kwargs["preexec_fn"] = _mem_limit_preexec
     proc = subprocess.Popen(cmd, **{**_POPEN_FLAGS, **kwargs})
     _track_proc(proc)
     return proc
@@ -27306,6 +27348,35 @@ _NIKTO_NORM: "list[tuple]" = [
      "HTTP/3 (Alt-Svc) Advertised", "INFO",
      "A05:2025 Security Misconfiguration", "CM-7",
      "HTTP/3 advertisement noted — verify configuration is secure."),
+    # ── Junk / unusual HTTP methods accepted ──
+    (r"(?:PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK).*(?:method|WebDAV|enabled)",
+     "WebDAV Methods Enabled", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Disable WebDAV if not required; restrict methods to GET/POST/HEAD."),
+    (r"(?:junk|random|bogus|invalid)\s+(?:HTTP\s+)?method",
+     "HTTP Methods: Server Accepts Junk Methods", "LOW",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Configure the web server to reject unknown HTTP methods."),
+    # ── Basic auth over HTTP (cleartext credentials) ──
+    (r"(?:basic\s+auth|authorization.*basic).*(?:HTTP\b|clear.?text|unencrypted|insecure)|transmits?\s+credentials\s+in\s+clear",
+     "Basic Authentication Over Unencrypted HTTP", "HIGH",
+     "A02:2025 Cryptographic Failures", "SC-8",
+     "Enforce HTTPS for all endpoints requiring authentication; avoid HTTP Basic Auth without TLS."),
+    # ── Open redirect ──
+    (r"open\s+redirect|redirect.*arbitrary|URL\s+redirect",
+     "Open Redirect Detected", "MEDIUM",
+     "A01:2025 Broken Access Control", "SC-23",
+     "Validate and whitelist redirect destinations; do not reflect user-supplied URLs."),
+    # ── Host header injection ──
+    (r"host\s+header.*(?:inject|poison|attack)",
+     "Host Header Injection", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Configure the web server to reject requests with unexpected Host headers."),
+    # ── CGI ──
+    (r"CGI.*(?:found|accessible|directory)",
+     "CGI Directory / Scripts Accessible", "LOW",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Remove or restrict access to CGI directories in production."),
     # ── Shellshock ──
     (r"[Ss]hellshock|CVE-2014-6271",
      "Remote Code Execution: Shellshock (CVE-2014-6271)", "CRITICAL",
@@ -27331,19 +27402,61 @@ _NIKTO_DYN_HEADER = re.compile(
     r"[Ss]uggested security header (?:is )?missing:\s*([A-Za-z0-9_-]+)", re.IGNORECASE)
 _NIKTO_DYN_UNCOMMON = re.compile(
     r"[Uu]ncommon header\(?s?\)?\s+['\"]?([A-Za-z0-9_-]+)['\"]?\s+found", re.IGNORECASE)
+_NIKTO_DYN_CERT_MISMATCH = re.compile(
+    r"[Hh]ostname\s+['\"]?([^'\"]+?)['\"]?\s+does\s+not\s+match\s+certificate'?s?\s+names?:\s*(.+)",
+    re.IGNORECASE)
+_NIKTO_DYN_OUTDATED = re.compile(
+    r"([A-Za-z][A-Za-z0-9_.+-]*/[\d][\w.+-]*)\s+appears?\s+to\s+be\s+outdated",
+    re.IGNORECASE)
+_NIKTO_DYN_IP_DISCLOSURE = re.compile(
+    r"(?:IP\s+address\s+found\s+in\s+the\s+['\"]?([^'\"]+?)['\"]?\s+header|"
+    r"(?:internal|private)\s+IP\s+(?:address\s+)?(?:found|leaked|disclosed))",
+    re.IGNORECASE)
 
 
 def _normalize_nikto(vuln: dict) -> dict:
-    """Map a nikto vulnerability dict to a Fracture-convention finding dict."""
+    """Map a nikto vulnerability dict to a Fracture-convention finding dict.
+
+    Returns a dict with at minimum title/risk/owasp/nist/remediation.
+    May also return 'affected' when the normaliser extracts structured
+    location data (e.g. hostname vs certificate names).
+    """
     msg = vuln.get("msg", "").strip()
     _nik_id = vuln.get("id", "")
 
     # Dynamic extractions checked first — these build the title from
     # captured groups so the table can't handle them statically.
+    _m = _NIKTO_DYN_CERT_MISMATCH.search(msg)
+    if _m:
+        _host = _m.group(1).strip()
+        _certs = _m.group(2).strip().rstrip(".")
+        return {
+            "title": "Hostname Does Not Match Certificate Name",
+            "risk": "LOW",
+            "owasp": "A02:2025 Cryptographic Failures", "nist": "SC-17",
+            "remediation": (
+                "Obtain an SSL/TLS certificate that covers the hostname "
+                "used to access the service, or add a Subject Alternative "
+                "Name (SAN) entry for it."
+            ),
+            "affected": f"Hostname: {_host} / Certificate: {_certs}",
+        }
+    _m = _NIKTO_DYN_OUTDATED.search(msg)
+    if _m:
+        _sw = _m.group(1).strip()
+        return {"title": f"Outdated Software: {_sw}", "risk": "MEDIUM",
+                "owasp": "A06:2025 Vulnerable and Outdated Components", "nist": "SI-2",
+                "remediation": f"Update {_sw.split('/')[0]} to the latest stable version.",
+                "affected": _sw}
+    _m = _NIKTO_DYN_IP_DISCLOSURE.search(msg)
+    if _m:
+        _hdr = _m.group(1)
+        _loc = f" (header: {_hdr.strip()})" if _hdr else ""
+        return {"title": f"Internal IP Address Disclosed{_loc}", "risk": "LOW",
+                "owasp": "A05:2025 Security Misconfiguration", "nist": "SI-11",
+                "remediation": "Configure the web server or reverse proxy to suppress internal IP addresses from response headers and error pages."}
     _m = _NIKTO_DYN_HEADER.search(msg)
     if _m:
-        # Title-Case the header name: "strict-transport-security" →
-        # "Strict-Transport-Security" so it matches shcheck / Fracture native.
         _hdr = "-".join(w.capitalize() for w in _m.group(1).strip().split("-"))
         return {"title": f"Missing Security Header: {_hdr}", "risk": "LOW",
                 "owasp": "A05:2025 Security Misconfiguration", "nist": "SC-8",
@@ -28232,7 +28345,8 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
         vc.log(f"[vulnscan] Launching nuclei in background (max-time {_nuc_max_time}) ...", "INFO")
         try:
             _nuc_started = datetime.now().astimezone()
-            proc = _popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            proc = _popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                          preexec_fn=_go_mem_limit_preexec)
             _register_proc(proc)
             handle["nuclei_proc"]    = proc
             handle["nuclei_cmd"]     = cmd
@@ -28610,7 +28724,10 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                     break
         if _nik_json_path.exists():
             try:
-                ndata = json.loads(_nik_json_path.read_text(encoding="utf-8"))
+                _nik_raw = _nik_json_path.read_text(encoding="utf-8").strip()
+                if not _nik_raw:
+                    raise ValueError("nikto produced empty output file")
+                ndata = json.loads(_nik_raw)
                 _nik_hosts = ndata if isinstance(ndata, list) else [ndata]
                 _nik_count = 0
                 for _nik_host in _nik_hosts:
@@ -28635,7 +28752,7 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                             output=_nik_output,
                             sources="nikto", service=target["scheme"],
                             output_file=str(_nik_json_path),
-                            affected=_nik_full_url,
+                            affected=_norm.get("affected", _nik_full_url),
                             owasp=_norm["owasp"],
                             nist=_norm["nist"],
                             remediation=_norm["remediation"],
