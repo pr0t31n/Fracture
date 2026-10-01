@@ -28899,6 +28899,28 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
         vc.log("[zap] ZAP not found — skipping", "WARNING")
         return None
 
+    # ZAP requires Java 17+. Pre-check to avoid a 120s timeout waiting
+    # for a daemon that exits immediately.
+    _java = shutil.which("java")
+    if not _java:
+        vc.log("[zap] Java not installed — skipping ZAP", "WARNING")
+        return None
+    try:
+        _jv = subprocess.run(
+            [_java, "-version"], capture_output=True, text=True, timeout=10)
+        _jv_out = (_jv.stderr + _jv.stdout).strip()
+        import re as _jre
+        _jv_m = _jre.search(r'"(\d+)[\._]', _jv_out)
+        _jv_major = int(_jv_m.group(1)) if _jv_m else 0
+        if _jv_major < 17:
+            vc.log(
+                f"[zap] Java {_jv_major} found but ZAP requires Java 17+ — skipping",
+                "WARNING")
+            return None
+    except Exception:
+        vc.log("[zap] Could not determine Java version — skipping ZAP", "WARNING")
+        return None
+
     import random as _zap_rnd
     api_port = 8090 + _zap_rnd.randint(0, 900)
 

@@ -223,6 +223,8 @@ APT_PACKAGES = [
     "git", "golang-go",
     "ruby", "ruby-dev", "ruby-bundler",
     "libssl-dev", "libcurl4-openssl-dev",
+    # Java 17+ runtime required by OWASP ZAP (21 is current on Kali)
+    "openjdk-21-jre-headless",
     # Headless browser for SPA crawl (chromium-driver provides chromedriver)
     "chromium", "chromium-driver",
 ]
@@ -238,6 +240,8 @@ DNF_PACKAGES = [
     "git", "golang",
     "ruby", "ruby-devel",
     "openssl-devel", "libcurl-devel",
+    # Java 17+ runtime required by OWASP ZAP
+    "java-21-openjdk-headless",
     # Headless browser for SPA crawl
     "chromium", "chromedriver",
 ]
@@ -247,6 +251,8 @@ DNF_PACKAGES_OPTIONAL = [
 BREW_PACKAGES = [
     "gobuster", "nikto", "sslscan", "git",
     "ffuf", "feroxbuster", "exploitdb",
+    # Java 17+ runtime required by OWASP ZAP
+    "openjdk",
     # Headless browser for SPA crawl (chromedriver auto-managed via webdriver-manager)
     "chromium",
     # Firefox fallback for SPA crawl
@@ -770,6 +776,27 @@ def install_git():
         os.chmod(testssl_bin, 0o755)
         symlink_force(testssl_bin, "/usr/local/bin/testssl.sh")
         info("testssl.sh symlinked to /usr/local/bin/testssl.sh")
+
+    # OWASP ZAP — automated web vulnerability scanner
+    _zap_bin = shutil.which("zaproxy") or shutil.which("zap.sh")
+    if _zap_bin:
+        info(f"  ✓ ZAP already installed: {_zap_bin}")
+    else:
+        info("Installing OWASP ZAP …")
+        if OS == "apt":
+            try:
+                run(["apt-get", "install", "-y", "zaproxy"])
+                info("  ✓ ZAP installed via apt")
+            except Exception as _ze:
+                warn(f"ZAP install failed (non-fatal): {_ze}")
+        elif OS == "brew":
+            try:
+                run(["brew", "install", "--cask", "zap"])
+                info("  ✓ ZAP installed via brew")
+            except Exception as _ze:
+                warn(f"ZAP install failed (non-fatal): {_ze}")
+        else:
+            warn("ZAP: install manually from https://www.zaproxy.org/download/")
 
     # tplmap
     git_clone_or_update("https://github.com/epinna/tplmap.git", "/opt/tplmap")
