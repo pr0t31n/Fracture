@@ -3065,6 +3065,9 @@ class VantageConsole:
         self._managed = _VANTAGE_MANAGED
         self._lock    = threading.Lock()
         self._error_log_path: "pathlib.Path | None" = None
+        self._current_target: str = ""
+        self._target_index: int = 0
+        self._target_total: int = 0
 
     def set_error_log(self, path: "pathlib.Path") -> None:
         """Set the on-disk errors.log path for persistent error logging."""
@@ -3153,6 +3156,10 @@ class VantageConsole:
                 }
                 if tools is not None:
                     entry["tools"] = tools
+                if self._current_target:
+                    entry["target"] = self._current_target
+                    entry["target_index"] = self._target_index
+                    entry["target_total"] = self._target_total
                 sys.stdout.write(_VP_STATUS + json.dumps(entry) + "\n")
                 sys.stdout.flush()
         # §14j: persist the phase transition to scan.log + scan.log.json with a
@@ -41182,6 +41189,7 @@ def main() -> None:
     _print_banner()
 
     vc.log(f"Fracture v{VERSION} starting", "INFO")
+    vc._target_total = len(target_urls)
     vc.log(f"Target(s): {', '.join(target_urls)}", "INFO")
     vc.log(f"Project:   {cfg['project']}", "INFO")
     vc.log(f"Phases:    {', '.join(k for k, v in cfg['phases'].items() if v)}", "INFO")
@@ -41303,6 +41311,8 @@ def main() -> None:
         if not raw_url or raw_url in _processed_urls:
             continue
         _processed_urls.add(raw_url)
+        vc._current_target = raw_url
+        vc._target_index = _pending_idx
         _is_redirect_target = raw_url in _redirect_discovered
         # Reset per-target discovery state for non-redirect (genuine new primary targets).
         # Redirect-discovered secondaries inherit the leader from their parent scan so
