@@ -18420,7 +18420,10 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         _tsf_cve_inline  = ",".join(re.findall(r'CVE-\d{4}-\d+', _tsf_finding))
                         # Deprecated protocol IDs
                         if _tsf_id in _TESTSSL_PROTO_IDS:
-                            if "not offered" in _tsf_finding_lo:
+                            if ("not offered" in _tsf_finding_lo
+                                    or "connect problem" in _tsf_finding_lo
+                                    or "couldn't open socket" in _tsf_finding_lo
+                                    or "connect timeout" in _tsf_finding_lo):
                                 continue
                             _tsf_proto = _TESTSSL_PROTO_IDS[_tsf_id]
                             _tsf_title = f"Deprecated Protocol Enabled: {_tsf_proto}"
@@ -27799,6 +27802,13 @@ _NIKTO_DYN_IP_DISCLOSURE = re.compile(
     re.IGNORECASE)
 
 
+_ADMIN_PATH_KEYWORDS = frozenset({
+    "admin", "administrator", "adm", "cpanel", "webadmin", "sysadmin",
+    "manager", "console", "dashboard", "backend", "controlpanel",
+    "phpmyadmin", "adminer", "wp-admin", "wp-login",
+})
+
+
 def _normalize_nikto(vuln: dict) -> dict:
     """Map a nikto vulnerability dict to a Fracture-convention finding dict.
 
@@ -27808,6 +27818,7 @@ def _normalize_nikto(vuln: dict) -> dict:
     """
     msg = vuln.get("msg", "").strip()
     _nik_id = vuln.get("id", "")
+    _nik_url = vuln.get("url", "")
 
     # Dynamic extractions checked first — these build the title from
     # captured groups so the table can't handle them statically.
@@ -27856,6 +27867,12 @@ def _normalize_nikto(vuln: dict) -> dict:
     # Table-driven normalisation — first match wins.
     for _rx, _title, _risk, _owasp, _nist, _remed in _NIKTO_NORM_COMPILED:
         if _rx.search(msg):
+            if _title == "Admin Panel Exposed" and _nik_url:
+                _url_parts = _nik_url.lower().replace("/", " ").replace("-", " ").replace("_", " ").split()
+                if not (_ADMIN_PATH_KEYWORDS & set(_url_parts)):
+                    return {"title": "Login Page Identified",
+                            "risk": "INFO", "owasp": _owasp, "nist": _nist,
+                            "remediation": "Informational — login pages are expected on web applications."}
             return {"title": _title, "risk": _risk, "owasp": _owasp,
                     "nist": _nist, "remediation": _remed}
 
