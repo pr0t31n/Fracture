@@ -829,10 +829,16 @@ def install_git():
             os.chmod(ss_bin, 0o755)
             symlink_force(ss_bin, "/usr/local/bin/searchsploit")
             info("searchsploit symlinked to /usr/local/bin/searchsploit")
+    elif os.path.isdir("/opt/exploitdb"):
+        info("searchsploit installed — pulling latest exploitdb…")
+        git_clone_or_update("https://github.com/exploit-db/exploitdb.git", "/opt/exploitdb")
 
     # shcheck
     if not shutil.which("shcheck") and not shutil.which("shcheck.py") \
             and not os.path.isfile("/opt/shcheck/shcheck.py"):
+        git_clone_or_update("https://github.com/santoru/shcheck.git", "/opt/shcheck")
+    elif os.path.isdir("/opt/shcheck"):
+        info("shcheck installed — pulling latest…")
         git_clone_or_update("https://github.com/santoru/shcheck.git", "/opt/shcheck")
     shcheck_bin = "/opt/shcheck/shcheck.py"
     if os.path.isfile(shcheck_bin):

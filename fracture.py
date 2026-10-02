@@ -41209,6 +41209,82 @@ def main() -> None:
     _start_concurrency_monitor(_SCAN_SEM)
     _start_oom_watchdog()
 
+    # ── Plugin / database updates ────────────────────────────────────────────
+    vc.status("init_updates", label="INIT: Plugin Updates", status="running")
+    _update_results: dict = {}
+
+    _nuclei_bin = _find_tool("nuclei")
+    if _nuclei_bin:
+        vc.status("init_updates", label="INIT: Plugin Updates", status="running",
+                  step="nuclei -update-templates")
+        print(f"{Fore.CYAN}[*] Updating nuclei templates...{Style.RESET_ALL}", flush=True)
+        _nuc_r = "failed"
+        try:
+            _nuc_upd = subprocess.run(
+                [_nuclei_bin, "-update-templates"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=300)
+            _nuc_r = "updated" if _nuc_upd.returncode == 0 else "skipped"
+        except subprocess.TimeoutExpired:
+            _nuc_r = "timed out"
+        except Exception:
+            pass
+        _update_results["nuclei"] = _nuc_r
+        print(f"{Fore.GREEN if _nuc_r == 'updated' else Fore.YELLOW}"
+              f"[{'+'if _nuc_r=='updated' else '~'}] nuclei templates: {_nuc_r}"
+              f"{Style.RESET_ALL}")
+    else:
+        _update_results["nuclei"] = "not-installed"
+
+    _wpscan_bin = _find_tool("wpscan")
+    if _wpscan_bin:
+        vc.status("init_updates", label="INIT: Plugin Updates", status="running",
+                  step="wpscan --update")
+        print(f"{Fore.CYAN}[*] Updating wpscan database...{Style.RESET_ALL}", flush=True)
+        _wp_r = "failed"
+        try:
+            _wp_upd = subprocess.run(
+                [_wpscan_bin, "--update"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=180)
+            _wp_r = "updated" if _wp_upd.returncode == 0 else "skipped"
+        except subprocess.TimeoutExpired:
+            _wp_r = "timed out"
+        except Exception:
+            pass
+        _update_results["wpscan"] = _wp_r
+        print(f"{Fore.GREEN if _wp_r == 'updated' else Fore.YELLOW}"
+              f"[{'+'if _wp_r=='updated' else '~'}] wpscan database: {_wp_r}"
+              f"{Style.RESET_ALL}")
+    else:
+        _update_results["wpscan"] = "not-installed"
+
+    _ss_bin = _find_tool("searchsploit")
+    if _ss_bin:
+        vc.status("init_updates", label="INIT: Plugin Updates", status="running",
+                  step="searchsploit -u")
+        print(f"{Fore.CYAN}[*] Updating searchsploit database...{Style.RESET_ALL}", flush=True)
+        _ss_r = "failed"
+        try:
+            _ss_upd = subprocess.run(
+                [_ss_bin, "-u"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=300)
+            _ss_r = "updated" if _ss_upd.returncode == 0 else "skipped"
+        except subprocess.TimeoutExpired:
+            _ss_r = "timed out"
+        except Exception:
+            pass
+        _update_results["searchsploit"] = _ss_r
+        print(f"{Fore.GREEN if _ss_r == 'updated' else Fore.YELLOW}"
+              f"[{'+'if _ss_r=='updated' else '~'}] searchsploit: {_ss_r}"
+              f"{Style.RESET_ALL}")
+    else:
+        _update_results["searchsploit"] = "not-installed"
+
+    vc.status("init_updates", label="INIT: Plugin Updates", status="complete",
+              tools=_update_results)
+
     # ── Multi-role testing setup ─────────────────────────────────────────────
     # _n_roles: number of authenticated roles to test (0 = unauthenticated only)
     # _collected_roles: grows as the user provides credentials during the scan;
