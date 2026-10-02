@@ -15260,6 +15260,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     # banners + screenshot via the cheap curl probe; WhatWeb's extra value
     # isn't worth the IP block.
     _ww_stealth = bool(cfg.get("_waf_stealth_applied"))
+    _ww_skipped_stealth = False
     if whatweb and _ww_stealth:
         vc.log(
             "[recon] Skipping WhatWeb — stealth mode active (WAF/CDN "
@@ -15268,6 +15269,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             "INFO",
         )
         whatweb = None
+        _ww_skipped_stealth = True
     if whatweb:
         ww_out = out.output_path(phase, "whatweb_" + target["hostname"])
         cmd = [whatweb, f"--log-json={ww_out}", "-a", "3", "--quiet", "--no-errors"]
@@ -15679,7 +15681,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                         )
         except Exception as e:
             out.log_error("whatweb", cmd, str(e))
-    else:
+    elif not _ww_skipped_stealth:
         vc.log("[recon] whatweb not found — skipping tech fingerprint", "WARNING")
 
     # Write target profile — server, technology stack, CMS, WAF, CDN, structure, BI
@@ -43439,15 +43441,12 @@ def main() -> None:
             if not _skip("shcheck"):
                 pm.set_phase_status(f"shcheck#{_ctx_label}", "running", "shcheck Header Check")
                 try:
-                    _extra = [u for u in target_urls if u != raw_url]
-                    # Also check discovered endpoints (gobuster / feroxbuster / wordpress)
                     _ep_shcheck = [
                         u for u in _ep_base
-                        if u.rstrip("/") != raw_url.rstrip("/") and u not in _extra
+                        if u.rstrip("/") != raw_url.rstrip("/")
                     ]
-                    _all_shcheck_extra = _extra + _ep_shcheck
                     _phase_shcheck(target, _ctx_cfg, pm, out, effective_auth,
-                                   extra_urls=_all_shcheck_extra if _all_shcheck_extra else None,
+                                   extra_urls=_ep_shcheck if _ep_shcheck else None,
                                    wc_baseline=wc_baseline)
                     pm.set_phase_status(f"shcheck#{_ctx_label}", "complete", "shcheck Header Check")
                     _save_checkpoint()
