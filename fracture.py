@@ -1398,7 +1398,7 @@ def _waf_session_health(
         )
         out.add_finding(
             title=f"WAF/CDN IP Block Detected: {waf_cdn}",
-            url=target_url, port=target.get("port", 443), risk="HIGH",
+            url=target_url, port=target.get("port", 443), risk="INFO",
             description=_msg,
             output=f"HTTP {_status}\n{_body[:512]}",
             affected=target_url, sources="fracture-waf-health",
@@ -17672,7 +17672,7 @@ _TESTSSL_PROTO_IDS = {
 }
 # testssl JSON ids that produce no useful pentest finding — skip entirely
 _TS_SKIP_IDS = frozenset({
-    "overall_grade", "cert_revocation", "cert_trust",
+    "overall_grade", "cert_revocation", "cert_trust", "cert_trust_wildcard",
     "security_headers",
     "TLS1_2",
 })
@@ -18411,7 +18411,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     _ts_findings = []
                 for _tsf in _ts_findings:
                     try:
-                        _tsf_id          = _tsf.get("id", "")
+                        _tsf_id          = re.sub(r'\s*<hostCert#\d+>', '', _tsf.get("id", ""))
                         _tsf_sev         = (_tsf.get("severity") or "INFO").upper()
                         _tsf_risk        = _TESTSSL_RISK_MAP.get(_tsf_sev, "INFO")
                         _tsf_finding     = _tsf.get("finding") or ""
