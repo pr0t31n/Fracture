@@ -18777,12 +18777,297 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
 
+    # ── tlsx: fast TLS handshake + certificate extraction ────────────────────
+    _tlsx_bin = _find_tool("tlsx")
+    if _tlsx_bin:
+        vc.status(phase, "TLS Analysis", "running", "tlsx", 3, 4)
+        vc.log(f"[tls] Running tlsx on {host_port}", "INFO")
+        _tlsx_out = out.output_path(phase, f"tlsx_{hostname}_{port}.json")
+        _tlsx_cmd = [
+            _tlsx_bin, "-u", host_port,
+            "-json", "-cert", "-so",
+            "-expired", "-mismatched", "-revoked", "-self-signed",
+            "-san", "-tps", "-silent",
+        ]
+        try:
+            _tlsx_started = datetime.now().astimezone()
+            _tlsx_proc = _popen(_tlsx_cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+            _register_proc(_tlsx_proc)
+            _tlsx_stdout, _tlsx_stderr = _tlsx_proc.communicate(timeout=60)
+            _deregister_proc(_tlsx_proc)
+            _tlsx_ended = datetime.now().astimezone()
+            _tlsx_out.write_text(_tlsx_stdout, encoding="utf-8")
+            out.log_command(
+                "tlsx", _tlsx_cmd, _tlsx_out,
+                tool_path=_tlsx_bin,
+                stdout=_tlsx_stdout, stderr=_tlsx_stderr,
+                started=_tlsx_started, ended=_tlsx_ended,
+                exit_code=_tlsx_proc.returncode,
+            )
+
+            for _tl_line in _tlsx_stdout.splitlines():
+                _tl_line = _tl_line.strip()
+                if not _tl_line:
+                    continue
+                try:
+                    _tl = json.loads(_tl_line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+                _tl_host = _tl.get("host", hostname)
+                _tl_port_n = _tl.get("port", port)
+
+                # Expired certificate
+                if _tl.get("expired", False):
+                    out.add_finding(
+                        title="Expired TLS Certificate Detected",
+                        url=target["url"], port=_tl_port_n,
+                        risk="HIGH",
+                        description=(
+                            f"The TLS certificate on {_tl_host}:{_tl_port_n} has expired. "
+                            "Expired certificates break trust validation and may indicate "
+                            "a forgotten or unmaintained service."
+                        ),
+                        sources="tlsx", service="https",
+                        output_file=str(_tlsx_out),
+                        affected=f"{_tl_host}:{_tl_port_n}",
+                        owasp="A02:2025 Cryptographic Failures",
+                        nist="SC-8",
+                        remediation="Renew the TLS certificate and configure automatic renewal.",
+                        command=" ".join(str(c) for c in _tlsx_cmd),
+                    )
+
+                # Self-signed certificate
+                if _tl.get("self_signed", False):
+                    out.add_finding(
+                        title="Self-Signed TLS Certificate",
+                        url=target["url"], port=_tl_port_n,
+                        risk="MEDIUM",
+                        description=(
+                            f"The TLS certificate on {_tl_host}:{_tl_port_n} is self-signed. "
+                            "Self-signed certificates are not trusted by default and indicate "
+                            "the service may not be production-hardened."
+                        ),
+                        sources="tlsx", service="https",
+                        output_file=str(_tlsx_out),
+                        affected=f"{_tl_host}:{_tl_port_n}",
+                        owasp="A02:2025 Cryptographic Failures",
+                        nist="SC-8",
+                        remediation="Replace with a certificate from a trusted CA.",
+                        command=" ".join(str(c) for c in _tlsx_cmd),
+                    )
+
+                # Mismatched hostname
+                if _tl.get("mismatched", False):
+                    out.add_finding(
+                        title="TLS Certificate Hostname Mismatch",
+                        url=target["url"], port=_tl_port_n,
+                        risk="MEDIUM",
+                        description=(
+                            f"The TLS certificate on {_tl_host}:{_tl_port_n} does not match "
+                            "the hostname being accessed. This may indicate a misconfiguration "
+                            "or a shared/reused certificate."
+                        ),
+                        sources="tlsx", service="https",
+                        output_file=str(_tlsx_out),
+                        affected=f"{_tl_host}:{_tl_port_n}",
+                        owasp="A02:2025 Cryptographic Failures",
+                        nist="SC-8",
+                        remediation="Ensure the certificate's CN or SAN entries match the served hostname.",
+                        command=" ".join(str(c) for c in _tlsx_cmd),
+                    )
+
+                # Revoked certificate
+                if _tl.get("revoked", False):
+                    out.add_finding(
+                        title="Revoked TLS Certificate Detected",
+                        url=target["url"], port=_tl_port_n,
+                        risk="HIGH",
+                        description=(
+                            f"The TLS certificate on {_tl_host}:{_tl_port_n} has been revoked "
+                            "by the issuing CA. This may indicate a key compromise or "
+                            "administrative decommission."
+                        ),
+                        sources="tlsx", service="https",
+                        output_file=str(_tlsx_out),
+                        affected=f"{_tl_host}:{_tl_port_n}",
+                        owasp="A02:2025 Cryptographic Failures",
+                        nist="SC-8",
+                        remediation="Replace the certificate immediately and investigate the revocation reason.",
+                        command=" ".join(str(c) for c in _tlsx_cmd),
+                    )
+
+                # SAN enumeration
+                _sans = _tl.get("san", []) or _tl.get("subject_an", [])
+                if _sans and len(_sans) > 1:
+                    out.add_finding(
+                        title="TLS Certificate SAN Enumeration",
+                        url=target["url"], port=_tl_port_n,
+                        risk="INFO",
+                        description=(
+                            f"The TLS certificate on {_tl_host}:{_tl_port_n} lists "
+                            f"{len(_sans)} Subject Alternative Names: {', '.join(_sans[:20])}"
+                            + (f" (and {len(_sans)-20} more)" if len(_sans) > 20 else "")
+                            + ". SANs reveal additional hostnames and services on this infrastructure."
+                        ),
+                        sources="tlsx", service="https",
+                        output_file=str(_tlsx_out),
+                        affected=f"{_tl_host}:{_tl_port_n}",
+                        owasp="A02:2025 Cryptographic Failures",
+                        nist="SC-8",
+                        remediation="Review SAN entries to ensure no unintended hostnames are exposed.",
+                        command=" ".join(str(c) for c in _tlsx_cmd),
+                    )
+
+                # Appliance detection from cert fields
+                _tl_cn = _tl.get("subject_cn", "") or ""
+                _tl_org = _tl.get("subject_org", "") or ""
+                _tl_issuer = _tl.get("issuer_cn", "") or ""
+                _cert_text = f"{_tl_cn} {_tl_org} {_tl_issuer}".lower()
+                for _ap_pat, _ap_name, _ap_sev, _ap_desc, _ap_cves in _TLSX_APPLIANCE_FINGERPRINTS:
+                    if re.search(_ap_pat, _cert_text, re.IGNORECASE):
+                        out.add_finding(
+                            title=f"{_ap_name} Detected",
+                            url=target["url"], port=_tl_port_n,
+                            risk=_ap_sev,
+                            description=_ap_desc,
+                            cves=_ap_cves,
+                            sources="tlsx", service="https",
+                            output_file=str(_tlsx_out),
+                            affected=f"{_tl_host}:{_tl_port_n}",
+                            remediation=f"Verify {_ap_name} is running the latest patched firmware/software version.",
+                            command=" ".join(str(c) for c in _tlsx_cmd),
+                        )
+                        break
+
+        except subprocess.TimeoutExpired:
+            _deregister_proc(_tlsx_proc)
+            _tlsx_proc.kill()
+            vc.log("[tls] tlsx timed out", "WARNING")
+        except Exception as _tlsx_e:
+            vc.log(f"[tls] tlsx error: {_tlsx_e}", "WARNING")
+
+    # ── webanalyze (Wappalyzer-equivalent technology detection) ────────────
+    _wa_bin = _find_tool("webanalyze")
+    if _wa_bin:
+        vc.log(f"[tls] Running webanalyze on {target['url']}", "INFO")
+        _wa_out = out.output_path("recon", f"webanalyze_{hostname}.json")
+        _wa_cmd = [_wa_bin, "-host", target["url"], "-output", "json",
+                   "-crawl", "1", "-silent"]
+        try:
+            _wa_started = datetime.now().astimezone()
+            _wa_proc = _popen(_wa_cmd, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+            _register_proc(_wa_proc)
+            _wa_stdout, _wa_stderr = _wa_proc.communicate(timeout=90)
+            _deregister_proc(_wa_proc)
+            _wa_ended = datetime.now().astimezone()
+            _wa_out.write_text(_wa_stdout, encoding="utf-8")
+            out.log_command(
+                "webanalyze", _wa_cmd, _wa_out,
+                tool_path=_wa_bin,
+                stdout=_wa_stdout, stderr=_wa_stderr,
+                started=_wa_started, ended=_wa_ended,
+                exit_code=_wa_proc.returncode,
+            )
+            _wa_techs = []
+            for _wa_line in _wa_stdout.splitlines():
+                try:
+                    _wa_entry = json.loads(_wa_line.strip())
+                    for _wa_m in _wa_entry.get("matches", []):
+                        _wa_tech = _wa_m.get("app_name", _wa_m.get("app", ""))
+                        _wa_ver = _wa_m.get("version", "")
+                        if _wa_tech:
+                            _wa_techs.append(
+                                f"{_wa_tech} {_wa_ver}".strip() if _wa_ver else _wa_tech
+                            )
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            if _wa_techs:
+                _wa_unique = list(dict.fromkeys(_wa_techs))
+                out.add_finding(
+                    title="Technology Stack Identified (Wappalyzer)",
+                    url=target["url"], port=port,
+                    risk="INFO",
+                    description=(
+                        f"Webanalyze (Wappalyzer engine) identified {len(_wa_unique)} "
+                        f"technologies: {', '.join(_wa_unique[:30])}"
+                        + (f" (+{len(_wa_unique)-30} more)" if len(_wa_unique) > 30 else "")
+                        + ". Technology fingerprinting aids in identifying version-specific vulnerabilities."
+                    ),
+                    sources="webanalyze", service="https" if target["is_https"] else "http",
+                    output_file=str(_wa_out),
+                    affected=target["url"],
+                    remediation="Ensure all identified technologies are running current, patched versions.",
+                    command=" ".join(str(c) for c in _wa_cmd),
+                )
+        except subprocess.TimeoutExpired:
+            _deregister_proc(_wa_proc)
+            _wa_proc.kill()
+            vc.log("[tls] webanalyze timed out", "WARNING")
+        except Exception as _wa_e:
+            vc.log(f"[tls] webanalyze error: {_wa_e}", "WARNING")
+
     try:
         _write_target_profile(out, tls_enabled=True, **_tls_profile_info)
     except Exception:
         pass
     vc.status(phase, "TLS Analysis", "complete", "Done", 4, 4)
     vc.log("[tls] Phase complete", "SUCCESS")
+
+
+# ─── Appliance fingerprints for tlsx cert detection ──────────────────────────
+_TLSX_APPLIANCE_FINGERPRINTS: list[tuple] = [
+    (r"cloud\s*services?\s*appliance|ivanti.*csa",
+     "Ivanti Cloud Services Appliance (CSA)", "HIGH",
+     "The TLS certificate identifies this host as an Ivanti Cloud Services Appliance (CSA). "
+     "Ivanti CSA has been targeted by multiple critical actively-exploited vulnerabilities "
+     "(CVE-2024-8963, CVE-2024-9379, CVE-2024-8190, CVE-2024-9380).",
+     "CVE-2024-8963,CVE-2024-9379,CVE-2024-8190,CVE-2024-9380"),
+    (r"pulse\s*secure|ivanti\s*connect\s*secure|ivanti.*pulse",
+     "Pulse Secure / Ivanti Connect Secure VPN", "HIGH",
+     "The TLS certificate identifies this host as a Pulse Secure / Ivanti Connect Secure VPN appliance. "
+     "This product line has had critical zero-day exploitation (CVE-2024-21887, CVE-2023-46805).",
+     "CVE-2024-21887,CVE-2023-46805"),
+    (r"f5.*big.?ip|big.?ip.*f5",
+     "F5 BIG-IP", "MEDIUM",
+     "The TLS certificate identifies this host as an F5 BIG-IP appliance. "
+     "F5 BIG-IP has had critical RCE vulnerabilities (CVE-2023-46747, CVE-2022-1388).",
+     "CVE-2023-46747,CVE-2022-1388"),
+    (r"citrix.*netscaler|netscaler.*citrix|citrix\s*adc|citrix\s*gateway",
+     "Citrix NetScaler / ADC", "HIGH",
+     "The TLS certificate identifies this host as a Citrix NetScaler or ADC appliance. "
+     "Citrix ADC has had critical zero-day exploitation (CVE-2023-4966 'Citrix Bleed', CVE-2023-3519).",
+     "CVE-2023-4966,CVE-2023-3519"),
+    (r"fortinet|fortigate|forti\s*os|forti\s*web",
+     "Fortinet FortiGate", "MEDIUM",
+     "The TLS certificate identifies this host as a Fortinet appliance. "
+     "FortiOS has had critical zero-day exploitation (CVE-2024-21762, CVE-2023-27997).",
+     "CVE-2024-21762,CVE-2023-27997"),
+    (r"palo\s*alto|pan.?os|global\s*protect",
+     "Palo Alto Networks", "MEDIUM",
+     "The TLS certificate identifies this host as a Palo Alto Networks appliance. "
+     "PAN-OS has had critical exploitation (CVE-2024-3400).",
+     "CVE-2024-3400"),
+    (r"sonicwall|sonic\s*wall",
+     "SonicWall", "MEDIUM",
+     "The TLS certificate identifies this host as a SonicWall appliance. "
+     "SonicWall has had critical vulnerabilities including CVE-2024-40766.",
+     "CVE-2024-40766"),
+    (r"cisco\s*asa|adaptive\s*security",
+     "Cisco ASA", "MEDIUM",
+     "The TLS certificate identifies this host as a Cisco ASA appliance.",
+     ""),
+    (r"vmware|vcenter|vsphere|esxi",
+     "VMware vSphere / ESXi", "MEDIUM",
+     "The TLS certificate identifies this host as a VMware vSphere or ESXi host.",
+     ""),
+    (r"sophos\s*xg|sophos\s*firewall|cyberoam",
+     "Sophos Firewall", "MEDIUM",
+     "The TLS certificate identifies this host as a Sophos firewall appliance.",
+     ""),
+]
 
 
 # ─────────────────────────────────────────────
@@ -41031,7 +41316,7 @@ def main() -> None:
         project_dir = Path(cfg["project"]).resolve()
         if len(target_urls) > 1 or _is_redirect_target:
             # Sub-directory per target
-            safe_host = _RE_UNSAFE_FNAME.sub("_", target["hostname"])
+            safe_host = _RE_UNSAFE_FNAME.sub("_", f"{target['hostname']}_{target['port']}")
             project_dir = project_dir / safe_host
 
         out = OutputManager(str(project_dir))
@@ -44574,21 +44859,23 @@ def _generate_cross_tool_action_items(project_dir: Path) -> None:
         is_title_match = any(pat in title_l for pat in _ISOTOPE_TITLE_PATTERNS)
         if not (is_file_match or is_title_match):
             continue
-        key = ("isotope", url.lower(), f"file analysis: {title_l}")
+        key = ("isotope", (output_file or url).lower(), f"file analysis: {title_l}")
         if key in seen:
             continue
         seen.add(key)
+        if not output_file or not Path(output_file).is_file():
+            continue
         entry = {
             "id": str(_uuid.uuid4()),
             "type": "file_analysis",
             "recommended_tool": "Isotope",
-            "target": url,
+            "target": output_file,
             "ip": ip,
             "port": port,
             "hostname": hostname,
             "title": f"File analysis: {title}",
             "description": (
-                f"Fracture discovered a downloadable file at {url}. "
+                f"Fracture downloaded {url} to {output_file}. "
                 f"Isotope can perform deep binary analysis including "
                 f"secret extraction (API keys, connection strings, "
                 f"private keys), string analysis, IOC detection, "
@@ -44600,7 +44887,7 @@ def _generate_cross_tool_action_items(project_dir: Path) -> None:
             "status": "pending",
             "datetime": datetime.now().isoformat(),
             "metadata": {"source_category": "fracture_file_discovery",
-                          "output_file": output_file},
+                          "source_url": url},
         }
         items.append(entry)
         vc.action_item(entry)

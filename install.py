@@ -623,6 +623,8 @@ GO_TOOLS = [
     ("github.com/hahwul/dalfox/v2@latest",                      "dalfox"),
     ("github.com/OJ/gobuster/v3@latest",                        "gobuster"),
     ("github.com/ffuf/ffuf/v2@latest",                          "ffuf"),
+    ("github.com/projectdiscovery/tlsx/cmd/tlsx@latest",       "tlsx"),
+    ("github.com/rverton/webanalyze/cmd/webanalyze@latest",    "webanalyze"),
 ]
 
 

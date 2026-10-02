@@ -2,7 +2,7 @@
   "version": "1.7.0",
   "tool": "fracture",
   "generated": "(complete: upgraded existing + scaffolded missing)",
-  "total": 480,
+  "total": 496,
   "from_existing": 340,
   "newly_scaffolded": 64,
   "findings": [
@@ -22239,6 +22239,1194 @@
         "shcheck",
         "securityheaders.com",
         "observatory.mozilla.org"
+      ]
+    },
+    {
+      "id": "FR-482",
+      "title": "Expired TLS Certificate Detected",
+      "aliases": [
+        "Expired SSL Certificate",
+        "Certificate Expired"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "description": "The TLS certificate presented by the server has passed its notAfter date and is no longer valid. Expired certificates break trust chain validation and cause browser warnings, which train users to bypass security prompts. An expired certificate may also indicate a forgotten or unmaintained service.",
+      "impact": "Users encounter certificate warnings and may click through them, normalizing the bypass of TLS trust validation. An attacker could perform a man-in-the-middle attack more easily when users are conditioned to ignore certificate errors. The expired certificate may also indicate the service is unmaintained and potentially vulnerable.",
+      "cwe": [
+        "CWE-295",
+        "CWE-324"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 6.5,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
+      "nessus_plugin_ids": [
+        15901
+      ],
+      "qualys_qids": [
+        38169
+      ],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-02"
+      ],
+      "nist_800_53": [
+        "SC-8",
+        "SC-12",
+        "SC-17"
+      ],
+      "nist_800_171": [
+        "3.13.8"
+      ],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [
+        "A.8.24"
+      ],
+      "iso_27002": [
+        "8.24"
+      ],
+      "soc2": [
+        "CC6.1",
+        "CC6.7"
+      ],
+      "hitrust": [],
+      "gdpr": [
+        "Art.32"
+      ],
+      "mitre_attack": [
+        {
+          "technique": "T1557",
+          "tactic": "Credential Access",
+          "name": "Adversary-in-the-Middle"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Renew the TLS certificate immediately through the issuing Certificate Authority. Configure automated certificate renewal (e.g. via certbot/ACME) and monitoring alerts for certificates approaching expiration.",
+      "remediation_component": "Configuration",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "tlsx",
+        "sslscan",
+        "testssl.sh",
+        "openssl"
+      ]
+    },
+    {
+      "id": "FR-483",
+      "title": "Self-Signed TLS Certificate",
+      "aliases": [
+        "Self-Signed SSL Certificate",
+        "Untrusted Certificate Authority"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "The server presents a self-signed TLS certificate that is not issued by a trusted Certificate Authority. Self-signed certificates are not validated by browsers or TLS clients by default, indicating the service may not be production-hardened or is using a private PKI without proper trust distribution.",
+      "impact": "Users must manually trust the certificate or bypass browser warnings, which normalizes ignoring TLS errors and makes man-in-the-middle attacks feasible. A self-signed certificate on an internet-facing service suggests it may be a development, staging, or unmaintained system with weaker security controls.",
+      "cwe": [
+        "CWE-295"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 5.3,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+      "nessus_plugin_ids": [
+        57582
+      ],
+      "qualys_qids": [
+        38170
+      ],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-02"
+      ],
+      "nist_800_53": [
+        "SC-8",
+        "SC-12"
+      ],
+      "nist_800_171": [
+        "3.13.8"
+      ],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [
+        "A.8.24"
+      ],
+      "iso_27002": [
+        "8.24"
+      ],
+      "soc2": [
+        "CC6.1"
+      ],
+      "hitrust": [],
+      "gdpr": [
+        "Art.32"
+      ],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Replace the self-signed certificate with one issued by a trusted public Certificate Authority (e.g. Let's Encrypt, DigiCert). If a private CA is required, ensure its root certificate is distributed to all intended clients.",
+      "remediation_component": "Configuration",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "tlsx",
+        "sslscan",
+        "testssl.sh",
+        "openssl"
+      ]
+    },
+    {
+      "id": "FR-484",
+      "title": "TLS Certificate Hostname Mismatch",
+      "aliases": [
+        "SSL Certificate Name Mismatch",
+        "Certificate CN Mismatch"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "The TLS certificate presented by the server does not match the hostname being accessed. The certificate's Common Name (CN) and Subject Alternative Name (SAN) entries do not include the domain name used to reach the service. This may indicate a misconfiguration, a shared certificate, or a reused certificate from a different service.",
+      "impact": "Browsers and TLS clients will reject the connection or display warnings, which users may bypass. A hostname mismatch can indicate the service was deployed hastily, is using a certificate intended for another domain, or is sharing infrastructure with other services \u2014 all of which leak information about the environment.",
+      "cwe": [
+        "CWE-295",
+        "CWE-297"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 5.3,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+      "nessus_plugin_ids": [
+        45411
+      ],
+      "qualys_qids": [
+        38171
+      ],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-02"
+      ],
+      "nist_800_53": [
+        "SC-8",
+        "SC-12"
+      ],
+      "nist_800_171": [
+        "3.13.8"
+      ],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [
+        "A.8.24"
+      ],
+      "iso_27002": [
+        "8.24"
+      ],
+      "soc2": [
+        "CC6.1"
+      ],
+      "hitrust": [],
+      "gdpr": [
+        "Art.32"
+      ],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Ensure the TLS certificate's Common Name (CN) or Subject Alternative Name (SAN) entries include all hostnames the server is accessed by. Reissue the certificate with the correct domain names if needed.",
+      "remediation_component": "Configuration",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "tlsx",
+        "sslscan",
+        "testssl.sh",
+        "openssl"
+      ]
+    },
+    {
+      "id": "FR-485",
+      "title": "Revoked TLS Certificate Detected",
+      "aliases": [
+        "Revoked SSL Certificate",
+        "Certificate Revocation"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "description": "The TLS certificate presented by the server has been revoked by its issuing Certificate Authority. Certificate revocation typically occurs due to key compromise, CA compromise, or administrative decommission. A revoked certificate should not be trusted for any purpose.",
+      "impact": "A revoked certificate may indicate that the private key was compromised, potentially allowing an attacker to impersonate the server. Clients that check CRL/OCSP will reject the connection, but not all clients perform revocation checking, leaving some users vulnerable to man-in-the-middle attacks using the compromised key.",
+      "cwe": [
+        "CWE-295",
+        "CWE-299"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 7.4,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N",
+      "nessus_plugin_ids": [
+        35291
+      ],
+      "qualys_qids": [
+        38172
+      ],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-02"
+      ],
+      "nist_800_53": [
+        "SC-8",
+        "SC-12",
+        "SC-17"
+      ],
+      "nist_800_171": [
+        "3.13.8"
+      ],
+      "pci_dss_4": [
+        "4.2.1"
+      ],
+      "iso_27001": [
+        "A.8.24"
+      ],
+      "iso_27002": [
+        "8.24"
+      ],
+      "soc2": [
+        "CC6.1",
+        "CC6.7"
+      ],
+      "hitrust": [],
+      "gdpr": [
+        "Art.32"
+      ],
+      "mitre_attack": [
+        {
+          "technique": "T1557",
+          "tactic": "Credential Access",
+          "name": "Adversary-in-the-Middle"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Replace the revoked certificate immediately with a new certificate from a trusted CA. Investigate the reason for revocation \u2014 if key compromise is suspected, generate a new key pair. Rotate any credentials or secrets that may have been exposed.",
+      "remediation_component": "Configuration",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "tlsx",
+        "sslscan",
+        "testssl.sh",
+        "openssl"
+      ]
+    },
+    {
+      "id": "FR-486",
+      "title": "TLS Certificate SAN Enumeration",
+      "aliases": [
+        "Subject Alternative Name Enumeration",
+        "SAN Discovery"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "INFO",
+      "description": "The TLS certificate presented by the server contains multiple Subject Alternative Name (SAN) entries, revealing additional hostnames and services hosted on this infrastructure. SAN enumeration is a passive reconnaissance technique that exposes the scope of services behind a single certificate.",
+      "impact": "An attacker can enumerate additional attack surface by reviewing SAN entries, discovering internal hostnames, staging environments, or related services that may have weaker security controls. Shared certificates also indicate infrastructure relationships between the listed domains.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 0.0,
+      "cvss_vector": "N/A",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SC-8"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1596.003",
+          "tactic": "Reconnaissance",
+          "name": "Search Open Technical Databases: Digital Certificates"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Review SAN entries to ensure no unintended hostnames (internal names, staging environments, decommissioned services) are exposed. Use separate certificates for services that should not be associated publicly.",
+      "remediation_component": "Configuration",
+      "remediation_category": "Cryptography",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "tlsx",
+        "sslscan",
+        "openssl"
+      ]
+    },
+    {
+      "id": "FR-487",
+      "title": "Ivanti Cloud Services Appliance (CSA) Detected",
+      "aliases": [
+        "Ivanti CSA Detected",
+        "Ivanti CSA Appliance"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "description": "The TLS certificate fingerprint identifies this host as an Ivanti Cloud Services Appliance (CSA). Ivanti CSA has been the target of multiple critical actively-exploited zero-day vulnerabilities including path traversal (CVE-2024-8963), SQL injection (CVE-2024-9379), OS command injection (CVE-2024-8190), and another OS command injection (CVE-2024-9380).",
+      "impact": "An attacker can chain these vulnerabilities to achieve unauthenticated remote code execution on the CSA appliance. Successful exploitation provides full administrative access to the appliance and the ability to pivot into the internal network. CISA has issued emergency directives for these vulnerabilities.",
+      "cwe": [
+        "CWE-22",
+        "CWE-89",
+        "CWE-78"
+      ],
+      "cve_examples": [
+        "CVE-2024-8963",
+        "CVE-2024-9379",
+        "CVE-2024-8190",
+        "CVE-2024-9380"
+      ],
+      "cvss_v3_base": 9.8,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-01",
+        "PR.PS-01"
+      ],
+      "nist_800_53": [
+        "SI-2",
+        "RA-5",
+        "CM-8"
+      ],
+      "nist_800_171": [
+        "3.11.2",
+        "3.14.1"
+      ],
+      "pci_dss_4": [
+        "6.3.3"
+      ],
+      "iso_27001": [
+        "A.8.8"
+      ],
+      "iso_27002": [
+        "8.8"
+      ],
+      "soc2": [
+        "CC7.1"
+      ],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        },
+        {
+          "technique": "T1133",
+          "tactic": "Persistence",
+          "name": "External Remote Services"
+        }
+      ],
+      "searchsploit_terms": [
+        "ivanti csa",
+        "ivanti cloud services"
+      ],
+      "metasploit_modules": [],
+      "kev": true,
+      "remediation_brief": "Verify the Ivanti CSA is running the latest patched firmware version. Apply all available security patches immediately. If running CSA 4.6, migrate to CSA 5.0 as version 4.6 has reached end-of-life. Monitor CISA KEV catalogue for new Ivanti advisories.",
+      "remediation_component": "Application",
+      "remediation_category": "Patch Management",
+      "remediation_effort": "Significant",
+      "validation_tools": [
+        "tlsx",
+        "nuclei",
+        "nmap"
+      ]
+    },
+    {
+      "id": "FR-488",
+      "title": "Pulse Secure / Ivanti Connect Secure VPN Detected",
+      "aliases": [
+        "Ivanti Connect Secure Detected",
+        "Pulse Secure VPN Detected",
+        "ICS VPN Detected"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "description": "The TLS certificate fingerprint identifies this host as a Pulse Secure / Ivanti Connect Secure VPN appliance. This product line has been the target of critical zero-day exploitation including authentication bypass (CVE-2023-46805) and command injection (CVE-2024-21887), which were chained for unauthenticated RCE.",
+      "impact": "An attacker can exploit known vulnerabilities to bypass authentication and execute arbitrary commands on the VPN appliance, gaining access to the internal network. VPN appliances are high-value targets as they provide direct access to corporate networks and are internet-facing by design.",
+      "cwe": [
+        "CWE-287",
+        "CWE-78"
+      ],
+      "cve_examples": [
+        "CVE-2024-21887",
+        "CVE-2023-46805",
+        "CVE-2024-21893"
+      ],
+      "cvss_v3_base": 9.8,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-01",
+        "PR.PS-01"
+      ],
+      "nist_800_53": [
+        "SI-2",
+        "RA-5",
+        "CM-8"
+      ],
+      "nist_800_171": [
+        "3.11.2",
+        "3.14.1"
+      ],
+      "pci_dss_4": [
+        "6.3.3"
+      ],
+      "iso_27001": [
+        "A.8.8"
+      ],
+      "iso_27002": [
+        "8.8"
+      ],
+      "soc2": [
+        "CC7.1"
+      ],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        },
+        {
+          "technique": "T1133",
+          "tactic": "Persistence",
+          "name": "External Remote Services"
+        }
+      ],
+      "searchsploit_terms": [
+        "pulse secure",
+        "ivanti connect secure"
+      ],
+      "metasploit_modules": [
+        "exploit/linux/http/ivanti_connect_secure_rce_cve_2024_21887"
+      ],
+      "kev": true,
+      "remediation_brief": "Verify the Ivanti Connect Secure appliance is running the latest patched firmware. Apply vendor mitigation XML and patches as directed by Ivanti advisories. Run the Ivanti Integrity Checker Tool (ICT) to detect signs of compromise. Consider factory-resetting the appliance if compromise is suspected.",
+      "remediation_component": "Application",
+      "remediation_category": "Patch Management",
+      "remediation_effort": "Significant",
+      "validation_tools": [
+        "tlsx",
+        "nuclei",
+        "nmap"
+      ]
+    },
+    {
+      "id": "FR-489",
+      "title": "F5 BIG-IP Detected",
+      "aliases": [
+        "F5 BIG-IP Appliance Detected",
+        "F5 Load Balancer Detected"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "The TLS certificate fingerprint identifies this host as an F5 BIG-IP appliance. F5 BIG-IP has had critical remote code execution vulnerabilities including CVE-2023-46747 (authentication bypass to RCE) and CVE-2022-1388 (iControl REST unauthenticated RCE).",
+      "impact": "An attacker exploiting known F5 BIG-IP vulnerabilities can achieve unauthenticated remote code execution with root privileges on the appliance. As a load balancer/ADC, BIG-IP sits in a privileged network position with visibility into all traffic it proxies, including credentials and session tokens.",
+      "cwe": [
+        "CWE-287",
+        "CWE-78"
+      ],
+      "cve_examples": [
+        "CVE-2023-46747",
+        "CVE-2022-1388",
+        "CVE-2021-22986"
+      ],
+      "cvss_v3_base": 9.8,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-01",
+        "PR.PS-01"
+      ],
+      "nist_800_53": [
+        "SI-2",
+        "RA-5"
+      ],
+      "nist_800_171": [
+        "3.11.2"
+      ],
+      "pci_dss_4": [
+        "6.3.3"
+      ],
+      "iso_27001": [
+        "A.8.8"
+      ],
+      "iso_27002": [
+        "8.8"
+      ],
+      "soc2": [
+        "CC7.1"
+      ],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [
+        "f5 big-ip",
+        "f5 bigip"
+      ],
+      "metasploit_modules": [
+        "exploit/linux/http/f5_bigip_tmui_rce_cve_2022_1388"
+      ],
+      "kev": true,
+      "remediation_brief": "Verify the F5 BIG-IP is running the latest patched firmware version. Restrict management interface access to trusted networks only. Disable iControl REST on external interfaces if not required.",
+      "remediation_component": "Application",
+      "remediation_category": "Patch Management",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "tlsx",
+        "nuclei",
+        "nmap"
+      ]
+    },
+    {
+      "id": "FR-490",
+      "title": "Citrix NetScaler / ADC Detected",
+      "aliases": [
+        "Citrix ADC Detected",
+        "Citrix Gateway Detected",
+        "NetScaler Detected"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "description": "The TLS certificate fingerprint identifies this host as a Citrix NetScaler or ADC appliance. Citrix ADC has been the target of critical zero-day exploitation including CVE-2023-4966 ('Citrix Bleed', session token leakage) and CVE-2023-3519 (unauthenticated RCE).",
+      "impact": "An attacker can exploit Citrix Bleed (CVE-2023-4966) to steal valid session tokens without authentication, bypassing MFA and gaining access to internal resources. CVE-2023-3519 allows unauthenticated remote code execution on the appliance itself. Both were widely exploited in the wild by ransomware operators.",
+      "cwe": [
+        "CWE-119",
+        "CWE-94"
+      ],
+      "cve_examples": [
+        "CVE-2023-4966",
+        "CVE-2023-3519"
+      ],
+      "cvss_v3_base": 9.8,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-01",
+        "PR.PS-01"
+      ],
+      "nist_800_53": [
+        "SI-2",
+        "RA-5"
+      ],
+      "nist_800_171": [
+        "3.11.2"
+      ],
+      "pci_dss_4": [
+        "6.3.3"
+      ],
+      "iso_27001": [
+        "A.8.8"
+      ],
+      "iso_27002": [
+        "8.8"
+      ],
+      "soc2": [
+        "CC7.1"
+      ],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [
+        "citrix netscaler",
+        "citrix adc",
+        "citrix bleed"
+      ],
+      "metasploit_modules": [
+        "auxiliary/gather/citrix_bleed_cve_2023_4966"
+      ],
+      "kev": true,
+      "remediation_brief": "Apply Citrix security patches immediately. After patching Citrix Bleed, terminate all active sessions and rotate all credentials \u2014 the patch does not invalidate stolen session tokens. Run Citrix-provided IoC scanning tools to check for compromise.",
+      "remediation_component": "Application",
+      "remediation_category": "Patch Management",
+      "remediation_effort": "Significant",
+      "validation_tools": [
+        "tlsx",
+        "nuclei",
+        "nmap"
+      ]
+    },
+    {
+      "id": "FR-491",
+      "title": "Fortinet FortiGate Detected",
+      "aliases": [
+        "FortiOS Detected",
+        "FortiWeb Detected",
+        "Fortinet Appliance Detected"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "The TLS certificate fingerprint identifies this host as a Fortinet appliance (FortiGate, FortiWeb, or FortiOS-based). FortiOS has been the target of critical zero-day exploitation including CVE-2024-21762 (out-of-bound write in SSL VPN) and CVE-2023-27997 (heap buffer overflow in SSL VPN, 'XORtigate').",
+      "impact": "An attacker can exploit known FortiOS vulnerabilities to achieve pre-authentication remote code execution on the firewall appliance. As a perimeter firewall/VPN, FortiGate sits at the network boundary with full visibility into traffic and provides a pivot point into the internal network.",
+      "cwe": [
+        "CWE-787",
+        "CWE-122"
+      ],
+      "cve_examples": [
+        "CVE-2024-21762",
+        "CVE-2023-27997",
+        "CVE-2022-42475"
+      ],
+      "cvss_v3_base": 9.8,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-01",
+        "PR.PS-01"
+      ],
+      "nist_800_53": [
+        "SI-2",
+        "RA-5"
+      ],
+      "nist_800_171": [
+        "3.11.2"
+      ],
+      "pci_dss_4": [
+        "6.3.3"
+      ],
+      "iso_27001": [
+        "A.8.8"
+      ],
+      "iso_27002": [
+        "8.8"
+      ],
+      "soc2": [
+        "CC7.1"
+      ],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [
+        "fortinet",
+        "fortigate",
+        "fortios"
+      ],
+      "metasploit_modules": [],
+      "kev": true,
+      "remediation_brief": "Verify the Fortinet appliance is running the latest patched FortiOS firmware. Disable SSL VPN if not required. Restrict management interfaces to trusted networks. Enable logging and monitor for indicators of compromise.",
+      "remediation_component": "Application",
+      "remediation_category": "Patch Management",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "tlsx",
+        "nuclei",
+        "nmap"
+      ]
+    },
+    {
+      "id": "FR-492",
+      "title": "Palo Alto Networks Detected",
+      "aliases": [
+        "PAN-OS Detected",
+        "GlobalProtect Detected",
+        "Palo Alto Firewall Detected"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "The TLS certificate fingerprint identifies this host as a Palo Alto Networks appliance. PAN-OS has been the target of critical zero-day exploitation including CVE-2024-3400 (GlobalProtect command injection with CVSS 10.0), which was actively exploited before a patch was available.",
+      "impact": "An attacker can exploit CVE-2024-3400 to achieve unauthenticated remote code execution with root privileges on the firewall through the GlobalProtect gateway. As a next-generation firewall, Palo Alto devices provide full network visibility and can be used to intercept traffic, modify firewall rules, or pivot into the internal network.",
+      "cwe": [
+        "CWE-77"
+      ],
+      "cve_examples": [
+        "CVE-2024-3400",
+        "CVE-2024-0012",
+        "CVE-2024-9474"
+      ],
+      "cvss_v3_base": 10.0,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-01",
+        "PR.PS-01"
+      ],
+      "nist_800_53": [
+        "SI-2",
+        "RA-5"
+      ],
+      "nist_800_171": [
+        "3.11.2"
+      ],
+      "pci_dss_4": [
+        "6.3.3"
+      ],
+      "iso_27001": [
+        "A.8.8"
+      ],
+      "iso_27002": [
+        "8.8"
+      ],
+      "soc2": [
+        "CC7.1"
+      ],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [
+        "palo alto",
+        "pan-os",
+        "globalprotect"
+      ],
+      "metasploit_modules": [],
+      "kev": true,
+      "remediation_brief": "Verify the Palo Alto appliance is running the latest patched PAN-OS version. Apply hotfixes for CVE-2024-3400 immediately. Restrict management interface access and disable unused GlobalProtect portals. Monitor for indicators of compromise using Palo Alto's threat prevention signatures.",
+      "remediation_component": "Application",
+      "remediation_category": "Patch Management",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "tlsx",
+        "nuclei",
+        "nmap"
+      ]
+    },
+    {
+      "id": "FR-493",
+      "title": "SonicWall Detected",
+      "aliases": [
+        "SonicWall Appliance Detected",
+        "SonicWall Firewall Detected"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "The TLS certificate fingerprint identifies this host as a SonicWall appliance. SonicWall has had critical vulnerabilities including CVE-2024-40766 (improper access control in SonicOS management and SSLVPN) which was actively exploited by ransomware operators.",
+      "impact": "An attacker can exploit known SonicWall vulnerabilities to gain unauthorized access to the firewall management interface or VPN services. SonicWall appliances are perimeter security devices and their compromise provides direct access to the internal network.",
+      "cwe": [
+        "CWE-284"
+      ],
+      "cve_examples": [
+        "CVE-2024-40766",
+        "CVE-2021-20016"
+      ],
+      "cvss_v3_base": 9.3,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-01"
+      ],
+      "nist_800_53": [
+        "SI-2",
+        "RA-5"
+      ],
+      "nist_800_171": [
+        "3.11.2"
+      ],
+      "pci_dss_4": [
+        "6.3.3"
+      ],
+      "iso_27001": [
+        "A.8.8"
+      ],
+      "iso_27002": [
+        "8.8"
+      ],
+      "soc2": [
+        "CC7.1"
+      ],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [
+        "sonicwall"
+      ],
+      "metasploit_modules": [],
+      "kev": true,
+      "remediation_brief": "Verify the SonicWall appliance is running the latest patched firmware version. Restrict SSLVPN and management interface access. Enable MFA for all VPN connections. Monitor for unauthorized access attempts.",
+      "remediation_component": "Application",
+      "remediation_category": "Patch Management",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "tlsx",
+        "nuclei",
+        "nmap"
+      ]
+    },
+    {
+      "id": "FR-494",
+      "title": "Cisco ASA Detected",
+      "aliases": [
+        "Cisco Adaptive Security Appliance Detected",
+        "Cisco ASA Firewall Detected"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "The TLS certificate fingerprint identifies this host as a Cisco Adaptive Security Appliance (ASA). Cisco ASA is a widely-deployed firewall/VPN platform that has had numerous critical vulnerabilities over its lifetime, including path traversal, authentication bypass, and remote code execution flaws.",
+      "impact": "A Cisco ASA appliance at the network perimeter provides firewall, VPN, and NAT services. Its compromise gives an attacker the ability to modify access control rules, intercept VPN traffic, and pivot into the internal network. ASA's WebVPN and AnyConnect components have historically been targeted.",
+      "cwe": [
+        "CWE-287"
+      ],
+      "cve_examples": [
+        "CVE-2024-20353",
+        "CVE-2024-20359"
+      ],
+      "cvss_v3_base": 8.6,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-01"
+      ],
+      "nist_800_53": [
+        "SI-2",
+        "RA-5"
+      ],
+      "nist_800_171": [
+        "3.11.2"
+      ],
+      "pci_dss_4": [
+        "6.3.3"
+      ],
+      "iso_27001": [
+        "A.8.8"
+      ],
+      "iso_27002": [
+        "8.8"
+      ],
+      "soc2": [
+        "CC7.1"
+      ],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [
+        "cisco asa"
+      ],
+      "metasploit_modules": [
+        "auxiliary/scanner/http/cisco_asa_clientless_vpn"
+      ],
+      "kev": true,
+      "remediation_brief": "Verify the Cisco ASA is running the latest patched firmware version. Restrict management access to trusted networks. Disable unused VPN profiles and WebVPN features. Monitor syslog for unauthorized access attempts.",
+      "remediation_component": "Application",
+      "remediation_category": "Patch Management",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "tlsx",
+        "nuclei",
+        "nmap"
+      ]
+    },
+    {
+      "id": "FR-495",
+      "title": "VMware vSphere / ESXi Detected",
+      "aliases": [
+        "VMware ESXi Detected",
+        "VMware vCenter Detected",
+        "ESXi Host Detected"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "The TLS certificate fingerprint identifies this host as a VMware vSphere, vCenter, or ESXi host. VMware hypervisor products have been targeted by critical vulnerabilities and are high-value targets for ransomware operators who encrypt entire virtual machine datastores.",
+      "impact": "Compromise of a VMware hypervisor gives an attacker control over all virtual machines running on it, including the ability to access VM disks, snapshot memory, and intercept network traffic between VMs. ESXi-targeting ransomware (e.g. ESXiArgs) can encrypt entire datastores, taking down all hosted services simultaneously.",
+      "cwe": [
+        "CWE-287"
+      ],
+      "cve_examples": [
+        "CVE-2024-37085",
+        "CVE-2021-21974"
+      ],
+      "cvss_v3_base": 8.8,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-01"
+      ],
+      "nist_800_53": [
+        "SI-2",
+        "RA-5"
+      ],
+      "nist_800_171": [
+        "3.11.2"
+      ],
+      "pci_dss_4": [
+        "6.3.3"
+      ],
+      "iso_27001": [
+        "A.8.8"
+      ],
+      "iso_27002": [
+        "8.8"
+      ],
+      "soc2": [
+        "CC7.1"
+      ],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [
+        "vmware esxi",
+        "vmware vcenter"
+      ],
+      "metasploit_modules": [
+        "exploit/linux/http/vmware_vcenter_vsan_health_rce"
+      ],
+      "kev": true,
+      "remediation_brief": "Verify VMware ESXi/vCenter is running the latest patched version. Restrict management interfaces (port 443, 902) to a dedicated management VLAN. Disable SSH on ESXi hosts unless actively needed. Enable lockdown mode on ESXi hosts.",
+      "remediation_component": "Application",
+      "remediation_category": "Patch Management",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "tlsx",
+        "nuclei",
+        "nmap"
+      ]
+    },
+    {
+      "id": "FR-496",
+      "title": "Sophos Firewall Detected",
+      "aliases": [
+        "Sophos XG Detected",
+        "Sophos XG Firewall Detected",
+        "Cyberoam Detected"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "The TLS certificate fingerprint identifies this host as a Sophos firewall appliance (XG Firewall, Sophos Firewall OS, or legacy Cyberoam). Sophos firewalls have had critical vulnerabilities including SQL injection and code injection flaws in their user portal and management interfaces.",
+      "impact": "An attacker exploiting Sophos firewall vulnerabilities can gain unauthorized access to the firewall management interface, modify security policies, and potentially achieve remote code execution. As a perimeter device, compromise provides a pivot point into the internal network and visibility into all traversing traffic.",
+      "cwe": [
+        "CWE-89",
+        "CWE-78"
+      ],
+      "cve_examples": [
+        "CVE-2022-3236",
+        "CVE-2020-12271"
+      ],
+      "cvss_v3_base": 9.8,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A02:2025 Cryptographic Failures",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-01"
+      ],
+      "nist_800_53": [
+        "SI-2",
+        "RA-5"
+      ],
+      "nist_800_171": [
+        "3.11.2"
+      ],
+      "pci_dss_4": [
+        "6.3.3"
+      ],
+      "iso_27001": [
+        "A.8.8"
+      ],
+      "iso_27002": [
+        "8.8"
+      ],
+      "soc2": [
+        "CC7.1"
+      ],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [
+        "sophos xg",
+        "sophos firewall"
+      ],
+      "metasploit_modules": [],
+      "kev": true,
+      "remediation_brief": "Verify the Sophos firewall is running the latest firmware version. Disable the User Portal on WAN-facing interfaces if not required. Restrict management access to trusted internal networks only. Enable automatic hotfix installation.",
+      "remediation_component": "Application",
+      "remediation_category": "Patch Management",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "tlsx",
+        "nuclei",
+        "nmap"
+      ]
+    },
+    {
+      "id": "FR-497",
+      "title": "Technology Stack Identified (Wappalyzer)",
+      "aliases": [
+        "Web Technology Fingerprint",
+        "Technology Detection",
+        "Webanalyze Technology Stack"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "INFO",
+      "description": "Webanalyze (Wappalyzer engine) identified the technology stack running on the target web application. Technologies detected may include web servers, application frameworks, CMS platforms, JavaScript libraries, analytics tools, CDNs, and other components. Each identified technology can be checked against known vulnerability databases for version-specific issues.",
+      "impact": "Technology fingerprinting reveals the exact software stack in use, enabling targeted vulnerability research. An attacker can search for CVEs, default credentials, and known misconfigurations specific to each detected technology and version. Identifying the CMS, framework, and server version narrows the attack surface to known weaknesses.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 0.0,
+      "cvss_vector": "N/A",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-02"
+      ],
+      "nist_800_53": [
+        "CM-8"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "6.3.2"
+      ],
+      "iso_27001": [
+        "A.8.9"
+      ],
+      "iso_27002": [
+        "8.9"
+      ],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1592.004",
+          "tactic": "Reconnaissance",
+          "name": "Gather Victim Host Information: Client Configurations"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Ensure all identified technologies are running their latest patched versions. Remove version information from HTTP response headers where possible (e.g. ServerTokens Prod, server_tokens off). Remove unused technologies and frameworks to reduce attack surface.",
+      "remediation_component": "Application",
+      "remediation_category": "Configuration",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "webanalyze",
+        "whatweb",
+        "wappalyzer"
       ]
     }
   ]
