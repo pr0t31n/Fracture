@@ -306,6 +306,7 @@ PIP_PACKAGES = [
     "sqlmap",
     "termcolor>=2.0.0",
     "dnspython>=2.4.0",
+    "mitmproxy",
 ]
 
 OFFLINE_BUNDLE_URLS = {
@@ -756,6 +757,14 @@ def install_gems():
     if _r.returncode != 0:
         warn("gem install failed for whatweb — falling back to git ...")
         _install_whatweb_git()
+    # wpscan — WordPress vulnerability scanner
+    if shutil.which("wpscan"):
+        info("wpscan already installed — skipping")
+    elif gem:
+        info("Installing wpscan via gem ...")
+        _wr = run([gem, "install", "wpscan"], check=False)
+        if _wr.returncode != 0:
+            warn("gem install wpscan failed — install manually: gem install wpscan")
 
 
 # ---------------------------------------------------------------------------
@@ -799,14 +808,6 @@ def install_git():
                 warn(f"ZAP install failed (non-fatal): {_ze}")
         else:
             warn("ZAP: install manually from https://www.zaproxy.org/download/")
-
-    # tplmap
-    git_clone_or_update("https://github.com/epinna/tplmap.git", "/opt/tplmap")
-    tplmap_bin = "/opt/tplmap/tplmap.py"
-    if os.path.isfile(tplmap_bin):
-        os.chmod(tplmap_bin, 0o755)
-        symlink_force(tplmap_bin, "/usr/local/bin/tplmap")
-        info("tplmap symlinked to /usr/local/bin/tplmap")
 
     # jwt_tool
     git_clone_or_update("https://github.com/ticarpi/jwt_tool.git", "/opt/jwt_tool")
@@ -947,8 +948,9 @@ def install_symlinks():
 # ---------------------------------------------------------------------------
 VERIFY_TOOLS = [
     "gobuster", "nikto", "sqlmap", "nuclei", "dalfox",
-    "sslscan", "testssl.sh", "tplmap",
-    "whatweb", "ffuf", "feroxbuster", "searchsploit", "jwt_tool", "shcheck",
+    "sslscan", "testssl.sh",
+    "whatweb", "wpscan", "ffuf", "feroxbuster", "searchsploit", "jwt_tool", "shcheck",
+    "mitmdump",
 ]
 VERIFY_PYTHON = ["requests", "colorama", "bs4", "selenium", "termcolor", "dns"]
 
@@ -974,7 +976,6 @@ def run_check():
     print(f"\n{C}Git tools:{W}")
     for path, label in [
         ("/opt/testssl.sh",        "testssl.sh"),
-        ("/opt/tplmap",            "tplmap"),
         ("/opt/jwt_tool",          "jwt_tool"),
         ("/opt/nuclei-templates",  "nuclei-templates"),
         ("/opt/whatweb",           "whatweb (macOS git install)"),
@@ -1018,7 +1019,6 @@ def print_summary(skips):
     print()
     info("Run: fracture --help")
     warn("testssl.sh installed from git (/opt/testssl.sh) — use the git version.")
-    warn("tplmap installed from git (/opt/tplmap) — available as /usr/local/bin/tplmap.")
     warn("jwt_tool installed from git (/opt/jwt_tool) — available as /usr/local/bin/jwt_tool.")
     warn("searchsploit: installed via exploitdb package or git (/opt/exploitdb).")
     warn("shcheck: installed from git (/opt/shcheck) — available as /usr/local/bin/shcheck.")
