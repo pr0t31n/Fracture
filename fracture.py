@@ -383,6 +383,15 @@ _TOOL_PATHS: dict = {
 
 _GEM_TOOLS = {"whatweb", "wpscan"}
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+def _clean_url(scheme, host, port, path="/"):
+    """Build a URL, omitting the port when it is the scheme default."""
+    port = int(port) if port else 0
+    if port and port != _DEFAULT_PORTS.get(scheme, -1):
+        return f"{scheme}://{host}:{port}{path}"
+    return f"{scheme}://{host}{path}"
+
 
 def _find_tool(name: str) -> "str | None":
     """Return path to *name*, checking PATH then known absolute locations."""
@@ -39035,7 +39044,7 @@ def _phase_websocket(target: dict, cfg: dict, pm: ProgressManager,
                     output=f"Path: {ep['path']}\nUpgrade without cookies: HTTP 101 (success)",
                     output_file=_ev_path,
                     sources="fracture-websocket", service=target["scheme"],
-                    affected=f"{scheme}://{hostname}:{port}{ep['path']}",
+                    affected=_clean_url(scheme, hostname, port, ep['path']),
                     owasp="A07:2025 Identification and Authentication Failures",
                     nist="IA-9",
                     cvss_score=7.5,
@@ -39094,7 +39103,7 @@ def _phase_websocket(target: dict, cfg: dict, pm: ProgressManager,
                     output=f"Path: {ep['path']}\nOrigin: https://evil.example.com\nResult: HTTP 101",
                     output_file=_ev_path,
                     sources="fracture-websocket", service=target["scheme"],
-                    affected=f"{scheme}://{hostname}:{port}{ep['path']}",
+                    affected=_clean_url(scheme, hostname, port, ep['path']),
                     owasp="A01:2025 Broken Access Control",
                     nist="SC-23",
                     cvss_score=5.3,
@@ -39172,7 +39181,7 @@ def _phase_websocket(target: dict, cfg: dict, pm: ProgressManager,
                             output=f"Path: {ep['path']}\nSent: {msg}\nReceived: {frame_resp[:500]}",
                             output_file=_ev_path,
                             sources="fracture-websocket", service=target["scheme"],
-                            affected=f"{scheme}://{hostname}:{port}{ep['path']}",
+                            affected=_clean_url(scheme, hostname, port, ep['path']),
                             owasp="A03:2025 Injection",
                             nist="SI-10",
                             cvss_score=7.1,
@@ -41023,7 +41032,7 @@ def _test_h2c_smuggling(target: dict, cfg: dict, out: "OutputManager",
                             f"Body preview: {_body_preview}"),
                         output_file=ev,
                         sources="fracture-h2c-smuggling", service=scheme,
-                        affected=f"{scheme}://{hostname}:{port}{ipath}",
+                        affected=_clean_url(scheme, hostname, port, ipath),
                         cves="",
                         owasp="A01:2025 Broken Access Control",
                         nist="AC-3",
