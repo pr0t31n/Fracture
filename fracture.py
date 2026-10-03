@@ -19380,11 +19380,9 @@ def _check_component_vuln(plugin_name: str, version: str) -> dict | None:
 
 
 _SECURITY_HEADERS = [
-    # Risk lowered MEDIUM→LOW per 2026-06-11 review. Missing security
-    # headers are defensive-depth concerns; they don't enable an attack on
-    # their own. CVSS for "missing HSTS" or "missing CSP" sits at LOW under
-    # most calibration models.
-    ("Strict-Transport-Security", "LOW",  "Missing HSTS Header",
+    # HSTS at MEDIUM — SSL-stripping is a real attack vector. Other missing
+    # headers are defensive-depth concerns rated LOW.
+    ("Strict-Transport-Security", "MEDIUM",  "Missing HSTS Header",
      "Without HSTS, browsers may connect over plain HTTP enabling SSL-stripping downgrade attacks (RFC 6797). CWE-523, CWE-319.",
      "SC-8", "Add: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload"),
     ("Content-Security-Policy",   "LOW", "Missing Content-Security-Policy Header",
@@ -20541,7 +20539,7 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
                     continue   # filter to the canonical 6 security headers only
                 if hdr == _HSTS and not tgt["is_https"]:
                     continue
-                risk = "HIGH" if hdr == _HSTS else ("MEDIUM" if hdr == "Content-Security-Policy" else "LOW")
+                risk = _SEC_HDR_RISK.get(hdr, "LOW")
                 out.add_finding(
                     title=f"Missing Security Header: {hdr}",
                     url=tgt_url, port=port, risk=risk,
