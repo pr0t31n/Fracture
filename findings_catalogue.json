@@ -1976,7 +1976,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "The Common Name or Subject Alternative Names in the TLS certificate do not match the hostname being accessed. This breaks trust validation and may indicate a misconfiguration or MITM condition.",
-      "impact": "",
+      "impact": "A TLS certificate hostname mismatch indicates the certificate was not issued for the requested domain, causing browser warnings. Users who bypass these warnings become vulnerable to MITM attacks, and automated systems may silently accept invalid certificates.",
       "_x_owasp": "A02:2025",
       "_x_nist": "SC-8,SC-17",
       "_x_sources": [
@@ -2666,7 +2666,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "The Strict-Transport-Security (HSTS) header is not present or has an insufficient max-age. Without HSTS, browsers may connect over HTTP, enabling SSL stripping attacks.",
-      "impact": "",
+      "impact": "Without HSTS enforcement, browsers permit plaintext HTTP connections, enabling SSL stripping attacks where an attacker downgrades the connection to intercept credentials and session tokens in transit.",
       "_x_owasp": "A05:2025",
       "_x_nist": "SC-8,SC-23",
       "_x_sources": [
@@ -4017,7 +4017,7 @@
     },
     {
       "id": "FR-087",
-      "title": "Cross-Site Scripting (XSS) \u2014 Reflected",
+      "title": "Cross-Site Scripting (XSS) — Reflected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4063,7 +4063,7 @@
     },
     {
       "id": "FR-088",
-      "title": "Cross-Site Scripting (XSS) \u2014 Stored",
+      "title": "Cross-Site Scripting (XSS) — Stored",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4109,7 +4109,7 @@
     },
     {
       "id": "FR-089",
-      "title": "Cross-Site Scripting (XSS) \u2014 DOM-Based",
+      "title": "Cross-Site Scripting (XSS) — DOM-Based",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4799,7 +4799,7 @@
     },
     {
       "id": "FR-104",
-      "title": "Broken Authentication \u2014 Default Credentials",
+      "title": "Broken Authentication — Default Credentials",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5030,7 +5030,7 @@
     },
     {
       "id": "FR-109",
-      "title": "Sensitive File Exposed \u2014 /etc/passwd",
+      "title": "Sensitive File Exposed — /etc/passwd",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5076,7 +5076,7 @@
     },
     {
       "id": "FR-110",
-      "title": "Sensitive File Exposed \u2014 .env",
+      "title": "Sensitive File Exposed — .env",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5122,7 +5122,7 @@
     },
     {
       "id": "FR-111",
-      "title": "Sensitive File Exposed \u2014 Private Key",
+      "title": "Sensitive File Exposed — Private Key",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5168,7 +5168,7 @@
     },
     {
       "id": "FR-112",
-      "title": "Sensitive File Exposed \u2014 phpinfo()",
+      "title": "Sensitive File Exposed — phpinfo()",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5214,7 +5214,7 @@
     },
     {
       "id": "FR-113",
-      "title": "Sensitive File Exposed \u2014 Composer/NPM Metadata",
+      "title": "Sensitive File Exposed — Composer/NPM Metadata",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5260,7 +5260,7 @@
     },
     {
       "id": "FR-114",
-      "title": "Vulnerability Scanner Finding \u2014 Known CVE",
+      "title": "Vulnerability Scanner Finding — Known CVE",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5306,7 +5306,7 @@
     },
     {
       "id": "FR-115",
-      "title": "Vulnerability Scanner Finding \u2014 Exposed Panel",
+      "title": "Vulnerability Scanner Finding — Exposed Panel",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5352,7 +5352,7 @@
     },
     {
       "id": "FR-116",
-      "title": "Vulnerability Scanner Finding \u2014 Misconfiguration",
+      "title": "Vulnerability Scanner Finding — Misconfiguration",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6641,7 +6641,7 @@
     },
     {
       "id": "FR-144",
-      "title": "Unrestricted File Upload \u2014 Executable File",
+      "title": "Unrestricted File Upload — Executable File",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6687,7 +6687,7 @@
     },
     {
       "id": "FR-145",
-      "title": "Unrestricted File Upload \u2014 MIME Type Bypass",
+      "title": "Unrestricted File Upload — MIME Type Bypass",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6733,7 +6733,7 @@
     },
     {
       "id": "FR-146",
-      "title": "File Upload \u2014 Path Traversal in Filename",
+      "title": "File Upload — Path Traversal in Filename",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6825,7 +6825,7 @@
     },
     {
       "id": "FR-148",
-      "title": "Mass Assignment \u2014 Privilege Escalation via Role Field",
+      "title": "Mass Assignment — Privilege Escalation via Role Field",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7011,7 +7011,7 @@
     },
     {
       "id": "FR-152",
-      "title": "CORS Misconfiguration \u2014 Arbitrary Origin Reflected",
+      "title": "CORS Misconfiguration — Arbitrary Origin Reflected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7058,7 +7058,7 @@
     },
     {
       "id": "FR-153",
-      "title": "CORS Misconfiguration \u2014 Null Origin Allowed",
+      "title": "CORS Misconfiguration — Null Origin Allowed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7104,7 +7104,7 @@
     },
     {
       "id": "FR-154",
-      "title": "Business Logic Flaw \u2014 Negative Value Accepted",
+      "title": "Business Logic Flaw — Negative Value Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7150,7 +7150,7 @@
     },
     {
       "id": "FR-155",
-      "title": "Business Logic Flaw \u2014 Price Manipulation",
+      "title": "Business Logic Flaw — Price Manipulation",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7196,7 +7196,7 @@
     },
     {
       "id": "FR-156",
-      "title": "Business Logic Flaw \u2014 Coupon/Discount Abuse",
+      "title": "Business Logic Flaw — Coupon/Discount Abuse",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7242,7 +7242,7 @@
     },
     {
       "id": "FR-157",
-      "title": "Business Logic Flaw \u2014 Workflow Step Bypass",
+      "title": "Business Logic Flaw — Workflow Step Bypass",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7288,7 +7288,7 @@
     },
     {
       "id": "FR-158",
-      "title": "Business Logic Flaw \u2014 Race Condition",
+      "title": "Business Logic Flaw — Race Condition",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7428,7 +7428,7 @@
     },
     {
       "id": "FR-161",
-      "title": "Screenshot Captured \u2014 Web Application Surface",
+      "title": "Screenshot Captured — Web Application Surface",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7520,7 +7520,7 @@
     },
     {
       "id": "FR-163",
-      "title": "FFUF \u2014 Administrative Path Discovered",
+      "title": "FFUF — Administrative Path Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7566,7 +7566,7 @@
     },
     {
       "id": "FR-164",
-      "title": "shcheck \u2014 Missing Security Header",
+      "title": "shcheck — Missing Security Header",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7612,7 +7612,7 @@
     },
     {
       "id": "FR-165",
-      "title": "Crawl \u2014 Undocumented Endpoint Discovered",
+      "title": "Crawl — Undocumented Endpoint Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7658,7 +7658,7 @@
     },
     {
       "id": "FR-166",
-      "title": "Crawl \u2014 External Domain Reference Found",
+      "title": "Crawl — External Domain Reference Found",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7737,7 +7737,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "Certificate Transparency logs reveal all certificates issued for the target domain and its subdomains. This information exposes the full scope of the application's TLS-protected surface.",
-      "impact": "",
+      "impact": "Certificate Transparency logs reveal all certificates ever issued for the domain, exposing subdomain naming patterns, internal service names, and historical infrastructure that may still be accessible.",
       "_x_owasp": "A05:2025",
       "_x_nist": "SC-17",
       "_x_sources": [
@@ -7751,7 +7751,7 @@
     },
     {
       "id": "FR-168",
-      "title": "Authentication \u2014 Concurrent Session Not Restricted",
+      "title": "Authentication — Concurrent Session Not Restricted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7797,7 +7797,7 @@
     },
     {
       "id": "FR-169",
-      "title": "HTTP Methods \u2014 Dangerous Methods Enabled (PUT/DELETE/TRACE)",
+      "title": "HTTP Methods — Dangerous Methods Enabled (PUT/DELETE/TRACE)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7829,7 +7829,7 @@
       "remediation_category": "",
       "remediation_effort": "",
       "validation_tools": [],
-      "description": "The web server responds to dangerous HTTP methods including PUT (file upload), DELETE (file deletion), or TRACE (XST \u2014 Cross-Site Tracing). These methods may enable unauthorized modification of server content or session token theft.",
+      "description": "The web server responds to dangerous HTTP methods including PUT (file upload), DELETE (file deletion), or TRACE (XST — Cross-Site Tracing). These methods may enable unauthorized modification of server content or session token theft.",
       "impact": "",
       "_x_owasp": "A05:2025",
       "_x_nist": "CM-7,AC-3",
@@ -7889,7 +7889,7 @@
     },
     {
       "id": "FR-171",
-      "title": "Sensitive Data Exposure \u2014 PII in Response",
+      "title": "Sensitive Data Exposure — PII in Response",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7983,7 +7983,7 @@
     },
     {
       "id": "FR-173",
-      "title": "Subdomain Takeover \u2014 S3 Bucket Not Found",
+      "title": "Subdomain Takeover — S3 Bucket Not Found",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8029,7 +8029,7 @@
     },
     {
       "id": "FR-174",
-      "title": "Subdomain Takeover \u2014 GitHub Pages",
+      "title": "Subdomain Takeover — GitHub Pages",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8075,7 +8075,7 @@
     },
     {
       "id": "FR-175",
-      "title": "Subdomain Takeover \u2014 Heroku",
+      "title": "Subdomain Takeover — Heroku",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8305,7 +8305,7 @@
     },
     {
       "id": "FR-180",
-      "title": "Information Disclosure \u2014 Internal Path in Response",
+      "title": "Information Disclosure — Internal Path in Response",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8352,7 +8352,7 @@
     },
     {
       "id": "FR-181",
-      "title": "Access Matrix \u2014 Unauthenticated Access to Authenticated Endpoint",
+      "title": "Access Matrix — Unauthenticated Access to Authenticated Endpoint",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8398,7 +8398,7 @@
     },
     {
       "id": "FR-182",
-      "title": "Access Matrix \u2014 Lower-Role Access to Higher-Role Endpoint",
+      "title": "Access Matrix — Lower-Role Access to Higher-Role Endpoint",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8444,7 +8444,7 @@
     },
     {
       "id": "FR-183",
-      "title": "Access Matrix \u2014 User A Can Read User B Data",
+      "title": "Access Matrix — User A Can Read User B Data",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8490,7 +8490,7 @@
     },
     {
       "id": "FR-184",
-      "title": "Access Matrix \u2014 User A Can Modify User B Data",
+      "title": "Access Matrix — User A Can Modify User B Data",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8536,7 +8536,7 @@
     },
     {
       "id": "FR-185",
-      "title": "Access Matrix \u2014 Admin Functionality Accessible by Regular User",
+      "title": "Access Matrix — Admin Functionality Accessible by Regular User",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8582,7 +8582,7 @@
     },
     {
       "id": "FR-186",
-      "title": "HTTP Security Header \u2014 X-Frame-Options Incorrectly Configured",
+      "title": "HTTP Security Header — X-Frame-Options Incorrectly Configured",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8628,7 +8628,7 @@
     },
     {
       "id": "FR-187",
-      "title": "Content-Security-Policy \u2014 Unsafe-Eval Allowed",
+      "title": "Content-Security-Policy — Unsafe-Eval Allowed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9082,7 +9082,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "A Content Delivery Network (CDN) was identified in front of the target via response headers or Server fingerprinting. TLS findings reflect the CDN edge configuration. Cache poisoning may be in scope. Header values and security posture may differ at the origin server.",
-      "impact": "",
+      "impact": "Active CDN detection reveals the content delivery and security infrastructure protecting the application. An attacker uses this to identify CDN-specific bypass techniques, origin server discovery methods, and CDN configuration weaknesses.",
       "_x_owasp": "A05:2025",
       "_x_nist": "SC-5",
       "_x_sources": [
@@ -9122,12 +9122,12 @@
       "searchsploit_terms": [],
       "metasploit_modules": [],
       "kev": false,
-      "remediation_brief": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection \u2014 fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform.",
+      "remediation_brief": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection — fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform.",
       "remediation_component": "",
       "remediation_category": "",
       "remediation_effort": "",
       "validation_tools": [],
-      "description": "A WAF or edge security platform was identified in front of the target via response headers or body signatures. WAF rules may suppress injection probes \u2014 absence of a finding does not confirm absence of the vulnerability. Bot-protection may interrupt automated probes.",
+      "description": "A WAF or edge security platform was identified in front of the target via response headers or body signatures. WAF rules may suppress injection probes — absence of a finding does not confirm absence of the vulnerability. Bot-protection may interrupt automated probes.",
       "impact": "",
       "_x_owasp": "A05:2025",
       "_x_nist": "SC-7",
@@ -9137,7 +9137,7 @@
       "_x_cves": [],
       "_x_service": "http",
       "_x_phase": "recon",
-      "_x_remediation": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection \u2014 fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform."
+      "_x_remediation": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection — fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform."
     },
     {
       "id": "FR-198",
@@ -9174,7 +9174,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "The WAF or CDN is blocking all requests from the scanner's IP address. All subsequent results from this point forward may be unreliable as every request returns a WAF block page.",
-      "impact": "",
+      "impact": "Detection of WAF/CDN IP ranges confirms that direct access to the origin server is mediated by a security proxy. An attacker targets CDN bypass techniques (IP history, DNS records, misconfigurations) to reach the unprotected origin.",
       "_x_owasp": "A05:2025",
       "_x_nist": "SC-5",
       "_x_sources": [
@@ -9403,7 +9403,7 @@
       "remediation_category": "",
       "remediation_effort": "",
       "validation_tools": [],
-      "description": "A wildcard/catch-all response was detected \u2014 the server returns the same response for all unknown paths. Directory brute-forcing may be unreliable; all path-based findings are validated against the wildcard baseline.",
+      "description": "A wildcard/catch-all response was detected — the server returns the same response for all unknown paths. Directory brute-forcing may be unreliable; all path-based findings are validated against the wildcard baseline.",
       "impact": "",
       "_x_owasp": "A05:2025",
       "_x_nist": "CM-7",
@@ -9636,7 +9636,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "The HTTP Server response header reveals the web server software name and version, reducing the attacker's reconnaissance effort needed to identify version-specific vulnerabilities.",
-      "impact": "",
+      "impact": "The Server header discloses the web server software and version, enabling an attacker to search for known vulnerabilities specific to that version. This information reduces the reconnaissance effort required for targeted exploitation and is a prerequisite for version-specific exploit selection.",
       "_x_owasp": "A05:2025",
       "_x_nist": "SI-2",
       "_x_sources": [
@@ -9682,7 +9682,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "The X-Powered-By response header discloses the application framework, language, or runtime version, reducing the attacker's effort needed to identify version-specific vulnerabilities.",
-      "impact": "",
+      "impact": "The X-Powered-By header reveals the application framework and version (e.g., PHP, ASP.NET), enabling targeted vulnerability research. An attacker uses this to narrow exploit selection to framework-specific attacks.",
       "_x_owasp": "A05:2025",
       "_x_nist": "SI-2",
       "_x_sources": [
@@ -9728,7 +9728,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "The X-AspNet-Version header discloses the exact .NET framework version in use, assisting attackers in identifying version-specific vulnerabilities.",
-      "impact": "",
+      "impact": "The X-AspNet-Version header discloses the exact ASP.NET runtime version, enabling an attacker to identify applicable CVEs and select exploits specific to that runtime version.",
       "_x_owasp": "A05:2025",
       "_x_nist": "SI-2",
       "_x_sources": [
@@ -9775,7 +9775,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "The Via response header discloses internal proxy or gateway infrastructure details, including software versions and internal host names.",
-      "impact": "",
+      "impact": "The Via header reveals proxy infrastructure including reverse proxy software and internal routing topology. This information enables an attacker to identify proxy-specific bypass techniques and map the internal network architecture.",
       "_x_owasp": "A05:2025",
       "_x_nist": "SI-2",
       "_x_sources": [
@@ -9822,7 +9822,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "Debug or trace response headers (e.g., X-Debug-Info, X-Request-Id with sensitive stack details, X-Trace) expose internal application state, timing, or infrastructure details that assist attackers.",
-      "impact": "",
+      "impact": "Debug and trace headers leak internal application state, stack traces, request identifiers, and server-side processing details. This information dramatically accelerates vulnerability discovery by revealing code paths, framework internals, and error handling behavior.",
       "_x_owasp": "A05:2025",
       "_x_nist": "SI-2",
       "_x_sources": [
@@ -9915,7 +9915,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "Software version information was identified in response headers, HTML meta tags, error pages, or JavaScript files. A known version allows attackers to rapidly identify applicable CVEs.",
-      "impact": "",
+      "impact": "Disclosed software versions allow an attacker to search vulnerability databases for known CVEs affecting that specific version, reducing the effort required for targeted exploitation. Version information also reveals the organization's patching cadence and maintenance practices.",
       "_x_owasp": "A05:2025",
       "_x_nist": "SI-2",
       "_x_sources": [
@@ -9975,7 +9975,7 @@
     },
     {
       "id": "FR-216",
-      "title": "Subdomain Takeover \u2014 Dangling CNAME",
+      "title": "Subdomain Takeover — Dangling CNAME",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10100,7 +10100,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "The DNS server permits full zone transfer (AXFR) requests, allowing any external host to retrieve all DNS records for the domain. This exposes internal hostnames, IP addresses, and infrastructure topology.",
-      "impact": "",
+      "impact": "Permitted zone transfers expose the complete DNS zone contents including all hostnames, IP addresses, and service records. This provides an attacker with a comprehensive map of the organization's infrastructure without active scanning.",
       "_x_owasp": "A05:2025",
       "_x_nist": "CM-7",
       "_x_sources": [
@@ -10476,7 +10476,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "A screenshot of the web application was captured using a headless browser. This provides visual context for the application's UI, authentication flows, and security controls.",
-      "impact": "",
+      "impact": "Visual captures of web pages provide immediate insight into application functionality, branding, and potential entry points without active interaction. Screenshots reveal login forms, admin panels, and application state that inform targeted attacks.",
       "_x_owasp": "A05:2025",
       "_x_nist": "CM-8",
       "_x_sources": [
@@ -11632,7 +11632,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "TLS certificate identity and validity metadata was extracted including subject CN, issuer, Subject Alternative Names (SANs), and expiry date. This provides reference context for the certificate lifecycle and scope.",
-      "impact": "",
+      "impact": "Certificate details including issuer, validity period, subject alternative names, and key parameters provide an attacker with infrastructure intelligence. This information reveals hosting relationships, internal hostnames, and certificate management practices that inform targeted attacks.",
       "_x_owasp": "A02:2025",
       "_x_nist": "SC-8",
       "_x_sources": [
@@ -11680,7 +11680,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "The server's TLS certificate has passed its expiry date, causing browser trust errors and indicating a breakdown in certificate lifecycle management.",
-      "impact": "",
+      "impact": "An expired certificate causes browser warnings that train users to bypass security prompts, and in many configurations disables certificate pinning. An attacker can present their own certificate to users conditioned to click through warnings, enabling silent interception of all encrypted traffic.",
       "_x_owasp": "A02:2025",
       "_x_nist": "SC-8",
       "_x_sources": [
@@ -11728,7 +11728,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "The TLS certificate's Subject Alternative Names do not cover the target hostname. Clients will display a certificate mismatch warning, enabling trivial MITM attacks.",
-      "impact": "",
+      "impact": "A hostname mismatch indicates the certificate was issued for a different domain, causing browser warnings and potentially indicating a misconfigured or compromised service. Users who accept the mismatch become vulnerable to MITM attacks.",
       "_x_owasp": "A02:2025",
       "_x_nist": "SC-8",
       "_x_sources": [
@@ -11774,7 +11774,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "The server presented a self-signed TLS certificate not anchored to a publicly trusted CA, preventing clients from verifying the server's identity and enabling trivial MITM attacks.",
-      "impact": "",
+      "impact": "Self-signed certificates are not validated by any trusted certificate authority, meaning clients cannot verify the server's identity. An attacker can trivially generate their own self-signed certificate and perform man-in-the-middle attacks without detection.",
       "_x_owasp": "A02:2025",
       "_x_nist": "SC-8",
       "_x_sources": [
@@ -11822,7 +11822,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "No CAA (Certification Authority Authorization) DNS record exists for the domain. Without CAA, any certificate authority can issue certificates for this domain, increasing mis-issuance risk.",
-      "impact": "",
+      "impact": "Without a CAA (Certificate Authority Authorization) DNS record, any certificate authority can issue certificates for the domain. An attacker who compromises a less-secure CA or exploits a CA validation flaw can obtain a legitimate certificate for the domain, enabling transparent man-in-the-middle attacks that bypass certificate validation.",
       "_x_owasp": "A05:2025",
       "_x_nist": "SC-8",
       "_x_sources": [
@@ -11870,7 +11870,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "3DES cipher suites are accepted, making the server susceptible to the SWEET32 birthday attack (CVE-2016-2183). An attacker can recover plaintext from long-lived sessions using 3DES by collecting enough ciphertext blocks.",
-      "impact": "",
+      "impact": "SWEET32 exploits the birthday bound weakness in 64-bit block ciphers (3DES, Blowfish) used in TLS. After capturing approximately 32GB of ciphertext from a long-lived session, an attacker can recover plaintext blocks, potentially exposing session cookies and authentication tokens.",
       "_x_owasp": "A02:2025",
       "_x_nist": "SC-8",
       "_x_sources": [
@@ -11920,7 +11920,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "TLSv1.0 is enabled with CBC cipher suites, making the server susceptible to the BEAST attack (CVE-2011-3389). BEAST allows an active MITM to partially decrypt TLS-encrypted session data.",
-      "impact": "",
+      "impact": "BEAST (Browser Exploit Against SSL/TLS) exploits a vulnerability in TLS 1.0's CBC-mode cipher initialization to decrypt HTTPS cookies and authentication tokens. An attacker with network access can inject chosen plaintext to recover session secrets, enabling session hijacking.",
       "_x_owasp": "A02:2025",
       "_x_nist": "SC-8",
       "_x_sources": [
@@ -11970,7 +11970,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "CBC cipher suites are accepted, making the server susceptible to the LUCKY13 timing attack (CVE-2013-0169). LUCKY13 allows an attacker to recover plaintext from CBC-mode TLS using timing side-channels.",
-      "impact": "",
+      "impact": "LUCKY13 (CVE-2013-0169) is a timing side-channel attack against CBC-mode cipher suites in TLS. An attacker with network-level access can recover plaintext from encrypted sessions by measuring processing time differences.",
       "_x_owasp": "A02:2025",
       "_x_nist": "SC-8",
       "_x_sources": [
@@ -12161,7 +12161,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "testssl.sh assigned an overall TLS grade to the target. The grade summarises the TLS configuration quality across protocol versions, cipher suites, and certificate strength.",
-      "impact": "",
+      "impact": "The SSL/TLS grade reflects the overall strength of the server's TLS configuration including protocol versions, cipher suites, and certificate properties. A low grade indicates multiple weaknesses that collectively reduce the confidentiality and integrity of encrypted communications.",
       "_x_owasp": "A02:2025",
       "_x_nist": "SC-8",
       "_x_sources": [
@@ -13375,7 +13375,7 @@
     },
     {
       "id": "FR-289",
-      "title": "Blind SSRF \u2014 Internal Network Probing",
+      "title": "Blind SSRF — Internal Network Probing",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13421,7 +13421,7 @@
     },
     {
       "id": "FR-290",
-      "title": "Insecure Deserialization \u2014 Serialized Object Accepted",
+      "title": "Insecure Deserialization — Serialized Object Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13467,7 +13467,7 @@
     },
     {
       "id": "FR-291",
-      "title": "Insecure Deserialization \u2014 YAML Tag Injection",
+      "title": "Insecure Deserialization — YAML Tag Injection",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13513,7 +13513,7 @@
     },
     {
       "id": "FR-292",
-      "title": "Insecure Deserialization \u2014 Error Disclosure",
+      "title": "Insecure Deserialization — Error Disclosure",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13559,7 +13559,7 @@
     },
     {
       "id": "FR-293",
-      "title": "Verbose Error Messages \u2014 Stack Trace Disclosed",
+      "title": "Verbose Error Messages — Stack Trace Disclosed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13837,7 +13837,7 @@
     },
     {
       "id": "FR-299",
-      "title": "Timing Attack \u2014 Non-Constant-Time Authentication",
+      "title": "Timing Attack — Non-Constant-Time Authentication",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -14021,7 +14021,7 @@
     },
     {
       "id": "FR-303",
-      "title": "JWT \u2014 Missing Expiry Claim (No exp)",
+      "title": "JWT — Missing Expiry Claim (No exp)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -14856,7 +14856,7 @@
     },
     {
       "id": "FR-321",
-      "title": "JSONP Endpoint \u2014 Cross-Origin Data Leakage",
+      "title": "JSONP Endpoint — Cross-Origin Data Leakage",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -14903,7 +14903,7 @@
     },
     {
       "id": "FR-322",
-      "title": "Cross-Site Request Forgery (CSRF) \u2014 Missing Token",
+      "title": "Cross-Site Request Forgery (CSRF) — Missing Token",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -15369,7 +15369,7 @@
     },
     {
       "id": "FR-332",
-      "title": "Business Logic \u2014 Hidden Price/Value Field Tampering",
+      "title": "Business Logic — Hidden Price/Value Field Tampering",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -15416,7 +15416,7 @@
     },
     {
       "id": "FR-333",
-      "title": "Business Logic \u2014 Numeric Field Accepts Negative/Zero Value",
+      "title": "Business Logic — Numeric Field Accepts Negative/Zero Value",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -15463,7 +15463,7 @@
     },
     {
       "id": "FR-334",
-      "title": "Business Logic \u2014 Potential Race Condition (Duplicate Submission)",
+      "title": "Business Logic — Potential Race Condition (Duplicate Submission)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -15509,7 +15509,7 @@
     },
     {
       "id": "FR-335",
-      "title": "Business Logic \u2014 Workflow Step Directly Accessible",
+      "title": "Business Logic — Workflow Step Directly Accessible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -15855,7 +15855,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Active CDN detection reveals the content delivery and security infrastructure protecting the application. An attacker uses this to identify CDN-specific bypass techniques, origin server discovery methods, and CDN configuration weaknesses.",
       "_scaffold_from": "fracture.py:10203",
       "_template": true
     },
@@ -16284,7 +16284,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Missing HTTP security headers reduce the browser's ability to enforce security boundaries, potentially exposing the application to client-side attacks. Each absent header represents a defense-in-depth layer that an attacker can bypass.",
       "_scaffold_from": "fracture.py:10020",
       "_template": true
     },
@@ -16323,7 +16323,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Missing HTTP security headers reduce the browser's ability to enforce security boundaries, potentially exposing the application to client-side attacks. Each absent header represents a defense-in-depth layer that an attacker can bypass.",
       "_scaffold_from": "fracture.py:11902",
       "_template": true
     },
@@ -16362,7 +16362,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Missing HTTP security headers reduce the browser's ability to enforce security boundaries, potentially exposing the application to client-side attacks. Each absent header represents a defense-in-depth layer that an attacker can bypass.",
       "_scaffold_from": "fracture.py:13017",
       "_template": true
     },
@@ -16401,7 +16401,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Missing HTTP security headers reduce the browser's ability to enforce security boundaries, potentially exposing the application to client-side attacks. Each absent header represents a defense-in-depth layer that an attacker can bypass.",
       "_scaffold_from": "fracture.py:13551",
       "_template": true
     },
@@ -16719,7 +16719,7 @@
     },
     {
       "id": "FR-365",
-      "title": "Server-Side Request Forgery (SSRF) \u2014 {ssrf_desc}",
+      "title": "Server-Side Request Forgery (SSRF) — {ssrf_desc}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -16791,7 +16791,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Disclosed software versions allow an attacker to search vulnerability databases for known CVEs affecting that specific version, reducing the effort required for targeted exploitation. Version information also reveals the organization's patching cadence and maintenance practices.",
       "_scaffold_from": "fracture.py:11734",
       "_template": true
     },
@@ -16830,7 +16830,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "The SSL/TLS grade reflects the overall strength of the server's TLS configuration including protocol versions, cipher suites, and certificate properties. A low grade indicates multiple weaknesses that collectively reduce the confidentiality and integrity of encrypted communications.",
       "_scaffold_from": "fracture.py:12334",
       "_template": true
     },
@@ -16953,7 +16953,7 @@
     },
     {
       "id": "FR-371",
-      "title": "Subdomain Takeover \u2014 Dangling CNAME ({service})",
+      "title": "Subdomain Takeover — Dangling CNAME ({service})",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -17298,7 +17298,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Detection of WAF/CDN IP ranges confirms that direct access to the origin server is mediated by a security proxy. An attacker targets CDN bypass techniques (IP history, DNS records, misconfigurations) to reach the unprotected origin.",
       "_scaffold_from": "fracture.py:1067",
       "_template": true
     },
@@ -17883,7 +17883,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Missing HTTP security headers reduce the browser's ability to enforce security boundaries, potentially exposing the application to client-side attacks including XSS, clickjacking, and MIME-type confusion. Implementing these headers is a low-effort, high-value hardening measure.",
       "_scaffold_from": "fracture.py:12438",
       "_template": false
     },
@@ -17961,7 +17961,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "The absence of web directory structure may indicate a single-page application, API-only service, or heavily restricted web root. This finding informs testing methodology — the tester should pivot to API enumeration and client-side analysis.",
       "_scaffold_from": "fracture.py:22827",
       "_template": false
     },
@@ -18000,7 +18000,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "An incomplete certificate chain prevents clients from validating the certificate's trust path. Some clients may reject the connection outright, while others silently proceed without full validation, creating inconsistent security posture across the user base.",
       "_scaffold_from": "fracture.py:12417",
       "_template": false
     },
@@ -18039,7 +18039,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Long-lived certificates increase the window of exposure if the private key is compromised. Industry best practice limits certificate lifetime to reduce the impact of key compromise and ensure regular rotation of cryptographic material.",
       "_scaffold_from": "fracture.py:12429",
       "_template": false
     },
@@ -18078,7 +18078,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "A certificate without Subject Alternative Names (SAN) relies solely on the Common Name field for hostname validation. Modern browsers require SAN entries and may reject CN-only certificates, causing service interruptions and security warnings.",
       "_scaffold_from": "fracture.py:12432",
       "_template": false
     },
@@ -18117,7 +18117,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Low entropy in certificate serial numbers indicates weak random number generation in the issuing CA's infrastructure. This can enable serial number prediction attacks that facilitate certificate forgery.",
       "_scaffold_from": "fracture.py:12452",
       "_template": false
     },
@@ -18156,7 +18156,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Certificates signed with weak algorithms (SHA-1, MD5) are vulnerable to collision attacks that allow an attacker to forge a certificate with the same signature, enabling man-in-the-middle attacks that bypass certificate validation entirely.",
       "_scaffold_from": "fracture.py:12450",
       "_template": false
     },
@@ -18195,7 +18195,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Without server-enforced cipher order, the client's cipher preference is used, which may select weaker ciphers over stronger alternatives. An attacker can manipulate the client to negotiate weak ciphers through downgrade attacks.",
       "_scaffold_from": "fracture.py:12424",
       "_template": false
     },
@@ -18234,7 +18234,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Obsolete cipher suites such as RC4 and CBC-mode ciphers are vulnerable to known cryptographic attacks including CVE-2013-2566 (RC4 key stream bias) and CVE-2015-2808 (Bar Mitzvah attack). An attacker performing passive traffic capture can recover plaintext from sessions negotiated with these ciphers, compromising the confidentiality of all transmitted data including credentials and session tokens.",
       "_scaffold_from": "fracture.py:12454",
       "_template": false
     },
@@ -18273,7 +18273,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "",
+      "impact": "Excessively long TLS session lifetimes increase the window for session resumption attacks and reduce the effectiveness of forward secrecy. Compromised session tickets remain valid for the entire session duration.",
       "_scaffold_from": "fracture.py:12459",
       "_template": false
     },
@@ -18424,7 +18424,7 @@
     },
     {
       "id": "FR-408",
-      "title": "HTTP Request Smuggling \u2014 CL.0 Client-Side Desync",
+      "title": "HTTP Request Smuggling — CL.0 Client-Side Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -18472,7 +18472,7 @@
     },
     {
       "id": "FR-409",
-      "title": "HTTP Request Smuggling \u2014 CL.TE Desync",
+      "title": "HTTP Request Smuggling — CL.TE Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -18514,7 +18514,7 @@
     },
     {
       "id": "FR-410",
-      "title": "HTTP Request Smuggling \u2014 TE Obfuscation Desync",
+      "title": "HTTP Request Smuggling — TE Obfuscation Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -18556,7 +18556,7 @@
     },
     {
       "id": "FR-411",
-      "title": "HTTP Request Smuggling \u2014 TE.CL Desync",
+      "title": "HTTP Request Smuggling — TE.CL Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -18737,7 +18737,7 @@
     },
     {
       "id": "FR-415",
-      "title": "Missing Subresource Integrity \u2014 {entry['tag']} from {entry['host']}",
+      "title": "Missing Subresource Integrity — {entry['tag']} from {entry['host']}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -18867,7 +18867,7 @@
     },
     {
       "id": "FR-418",
-      "title": "Reflected Cross-Site Scripting (XSS) \u2014 POST Parameter",
+      "title": "Reflected Cross-Site Scripting (XSS) — POST Parameter",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -20287,7 +20287,7 @@
     },
     {
       "id": "FR-446",
-      "title": "MFA Bypass \u2014 Direct Navigation",
+      "title": "MFA Bypass — Direct Navigation",
       "aliases": [
         "2FA bypass",
         "MFA skip"
@@ -20684,7 +20684,7 @@
     },
     {
       "id": "FR-454",
-      "title": "h2c Smuggling \u2014 Internal Endpoint Accessible",
+      "title": "h2c Smuggling — Internal Endpoint Accessible",
       "aliases": [
         "h2c bypass",
         "h2c internal access"
@@ -20863,7 +20863,7 @@
     },
     {
       "id": "FR-457",
-      "title": "Authorization Gaps \u2014 Unauthenticated Access to Restricted Paths",
+      "title": "Authorization Gaps — Unauthenticated Access to Restricted Paths",
       "aliases": [
         "Forced browsing",
         "Missing access control on admin paths",
@@ -20977,7 +20977,7 @@
     },
     {
       "id": "FR-459",
-      "title": "Improper Error Handling \u2014 Server Error Exposed",
+      "title": "Improper Error Handling — Server Error Exposed",
       "aliases": [
         "500 error exposed",
         "Internal server error disclosure",
@@ -21498,7 +21498,7 @@
       ],
       "risk": "CRITICAL",
       "description": "Terraform state file is accessible via the web, containing infrastructure secrets, API keys, database passwords, and complete cloud resource inventory.",
-      "impact": "Full infrastructure credential compromise \u2014 database passwords, API keys, cloud resource details enabling lateral movement and data exfiltration.",
+      "impact": "Full infrastructure credential compromise — database passwords, API keys, cloud resource details enabling lateral movement and data exfiltration.",
       "cwe": [
         "CWE-312"
       ],
@@ -22398,7 +22398,7 @@
       ],
       "risk": "MEDIUM",
       "description": "The TLS certificate presented by the server does not match the hostname being accessed. The certificate's Common Name (CN) and Subject Alternative Name (SAN) entries do not include the domain name used to reach the service. This may indicate a misconfiguration, a shared certificate, or a reused certificate from a different service.",
-      "impact": "Browsers and TLS clients will reject the connection or display warnings, which users may bypass. A hostname mismatch can indicate the service was deployed hastily, is using a certificate intended for another domain, or is sharing infrastructure with other services \u2014 all of which leak information about the environment.",
+      "impact": "Browsers and TLS clients will reject the connection or display warnings, which users may bypass. A hostname mismatch can indicate the service was deployed hastily, is using a certificate intended for another domain, or is sharing infrastructure with other services — all of which leak information about the environment.",
       "cwe": [
         "CWE-295",
         "CWE-297"
@@ -22521,7 +22521,7 @@
       "searchsploit_terms": [],
       "metasploit_modules": [],
       "kev": false,
-      "remediation_brief": "Replace the revoked certificate immediately with a new certificate from a trusted CA. Investigate the reason for revocation \u2014 if key compromise is suspected, generate a new key pair. Rotate any credentials or secrets that may have been exposed.",
+      "remediation_brief": "Replace the revoked certificate immediately with a new certificate from a trusted CA. Investigate the reason for revocation — if key compromise is suspected, generate a new key pair. Rotate any credentials or secrets that may have been exposed.",
       "remediation_component": "Configuration",
       "remediation_category": "Cryptography",
       "remediation_effort": "Easy",
@@ -22904,7 +22904,7 @@
         "auxiliary/gather/citrix_bleed_cve_2023_4966"
       ],
       "kev": true,
-      "remediation_brief": "Apply Citrix security patches immediately. After patching Citrix Bleed, terminate all active sessions and rotate all credentials \u2014 the patch does not invalidate stolen session tokens. Run Citrix-provided IoC scanning tools to check for compromise.",
+      "remediation_brief": "Apply Citrix security patches immediately. After patching Citrix Bleed, terminate all active sessions and rotate all credentials — the patch does not invalidate stolen session tokens. Run Citrix-provided IoC scanning tools to check for compromise.",
       "remediation_component": "Application",
       "remediation_category": "Patch Management",
       "remediation_effort": "Significant",
