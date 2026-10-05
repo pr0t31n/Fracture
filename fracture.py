@@ -1403,7 +1403,7 @@ def _waf_session_health(
         vc.log(
             f"[waf-health{_lbl}] IP BLOCK — {waf_cdn} returned WAF block page "
             f"(HTTP {_status})",
-            "CRITICAL",
+            "WARNING",
         )
         out.add_finding(
             title=f"WAF/CDN IP Block Detected: {waf_cdn}",
@@ -18497,9 +18497,9 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                                 if ("offered" in _tsf_finding_lo
                                         and "not offered" not in _tsf_finding_lo):
                                     continue
-                                _tsf_title    = "Missing Security Headers"
+                                _tsf_title    = "Missing Security Header: Strict-Transport-Security"
                                 _tsf_affected = "Strict-Transport-Security"
-                                _tsf_risk     = "LOW"
+                                _tsf_risk     = "MEDIUM"
                             elif _tsf_id in ("cert_notAfter", "cert_expirationStatus",
                                              "expiration"):
                                 if any(kw in _tsf_finding_lo
