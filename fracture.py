@@ -18525,6 +18525,11 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                                 # on TLS ≤ 1.2.
                                 _tsf_title = "SSL/TLS Vulnerability: TLS_misses_extension_23"
                                 _tsf_risk  = "MEDIUM"
+                            elif _tsf_id == "secure_client_renego":
+                                if "not vulnerable" in _tsf_finding_lo:
+                                    continue
+                                _tsf_title = "SSL/TLS Vulnerability: Client-Initiated Renegotiation"
+                                _tsf_risk  = "LOW"
                             else:
                                 if _tsf_risk == "INFO":
                                     continue
