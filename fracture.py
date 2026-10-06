@@ -3510,7 +3510,7 @@ class OutputManager:
         # _save_http_evidence() route tool outputs into a per-role subdirectory so that
         # files from different roles do not overwrite each other.
         self._output_role: str = ""
-        # "Header Data Leakage:" findings are server-level — only the first
+        # "Information Disclosure:" header findings are server-level — only the first
         # occurrence per title+hostname is recorded.  Subsequent calls for the
         # same header on different paths are silently dropped.
         self._hdr_disclosure_seen: set = set()
@@ -3750,7 +3750,7 @@ class OutputManager:
 
         # ── Header findings — use full "Name: Value" lines from output ──
         if re.match(
-            r"^(Header Data Leakage|Software Version Disclosed"
+            r"^(Information Disclosure|Software Version Disclosed"
             r"|HTTP Header Fingerprints|Unknown Header Identified"
             r"|Endpoint-Specific Security Header Found"
             r"|Technology Identified|Vulnerable Component):",
@@ -3894,7 +3894,7 @@ class OutputManager:
         # Software version headers (Server, X-Powered-By, X-AspNet-Version) are
         # identical on every response from the same host — recording one per
         # endpoint floods the report with duplicates.
-        if (title.startswith("Header Data Leakage:")
+        if (title.startswith("Information Disclosure:")
                 or title.startswith("Software Version Disclosed:")):
             try:
                 _hdr_host = urllib.parse.urlparse(url).hostname or url
@@ -4001,7 +4001,7 @@ class OutputManager:
                 "directory listing enabled",
                 "http trace method enabled",
                 "http methods",
-                "sensitive paths disclosed in robots.txt",
+                "information disclosure: sensitive path in robots.txt",
                 "verbose error messages",
                 "cors misconfiguration",
                 "cross-site request forgery (csrf)",
@@ -4017,7 +4017,7 @@ class OutputManager:
                 "ssl/tls vulnerability:",
                 "ssl/tls vulnerability (potential):",
                 "ssl/tls: tlsv1.3",
-                "header data leakage:",
+                "information disclosure:",
                 "waf / edge security platform active:",
                 "technology identified:",
                 "permissive security header:",
@@ -12140,7 +12140,7 @@ def _phase_wordpress_scan(
             encoding="utf-8",
         )
         out.add_finding(
-            title=f"WordPress Version Detected: {best_ver}",
+            title=f"Information Disclosure: WordPress Version",
             url=base, port=target["port"], risk="LOW",
             description=(
                 f"WordPress version {best_ver} was identified via {best_src} "
@@ -14294,7 +14294,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     if _leaked_ips:
         _ip_list = ", ".join(sorted(_leaked_ips))
         out.add_finding(
-            title="Internal IP Address Disclosed in HTTP Response",
+            title="Information Disclosure: Internal IP in HTTP Response",
             url=url, port=target["port"],
             risk="MEDIUM",
             description=(
@@ -14326,7 +14326,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     if _leaked_hosts:
         _host_list = ", ".join(sorted(_leaked_hosts))
         out.add_finding(
-            title="Internal Hostname Exposed in HTTP Response",
+            title="Information Disclosure: Internal Hostname in HTTP Response",
             url=url, port=target["port"], risk="LOW",
             description=(
                 f"The HTTP response from {url} reveals internal hostname(s): "
@@ -14478,7 +14478,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     _inode_dec = int(_inode_hex, 16)
                     if _inode_dec > 0:
                         out.add_finding(
-                            title="Header Data Leakage: ETag Inode Disclosure",
+                            title="Information Disclosure: ETag",
                             url=url, port=target["port"], risk="LOW",
                             description=(
                                 f"The ETag header ({_etag_val}) follows the Apache "
@@ -14549,7 +14549,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 for path, ctype, snip in _cred_hits[:10]
             )
             out.add_finding(
-                title="Cloud Credentials File Exposed",
+                title="Information Disclosure: Cloud Credentials in File",
                 url=url, port=target["port"], risk="CRITICAL",
                 description=(
                     f"The web server at {url} exposes cloud or CI/CD credential "
@@ -14774,7 +14774,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
 
     if server_hdr:
         out.add_finding(
-            title="Header Data Leakage: Server",
+            title="Information Disclosure: Server Header",
             url=url, port=target["port"], risk="LOW",
             description="The HTTP Server response header reveals the web server software name and version, reducing the attacker's reconnaissance effort needed to identify version-specific vulnerabilities.",
             output=f"Server: {server_hdr}", sources="fracture-recon",
@@ -14786,7 +14786,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         )
     if powered_by:
         out.add_finding(
-            title="Header Data Leakage: X-Powered-By",
+            title="Information Disclosure: X-Powered-By Header",
             url=url, port=target["port"], risk="LOW",
             description="The X-Powered-By response header discloses the application framework, language, or runtime version, reducing the attacker's effort needed to identify version-specific vulnerabilities.",
             output=f"X-Powered-By: {powered_by}", sources="fracture-recon",
@@ -15841,7 +15841,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             pass
                     if disallowed:
                         out.add_finding(
-                            title="Sensitive Paths Disclosed in robots.txt",
+                            title="Information Disclosure: Sensitive Path in robots.txt",
                             url=url.rstrip("/") + rpath, port=target["port"], risk="INFO",
                             description=f"robots.txt disallows {len(disallowed)} path(s).",
                             output=r.text[:2000], sources="fracture-recon",
@@ -18597,7 +18597,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         _san_internal.append(_sn)
                 if _san_internal:
                     out.add_finding(
-                        title="Internal Hostname Exposed in TLS Certificate SAN",
+                        title="Information Disclosure: Internal Hostname in SAN",
                         url=target["url"], port=port, risk="LOW",
                         description=(
                             f"The TLS certificate for {hostname} includes internal "
@@ -18890,7 +18890,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 # Mismatched hostname
                 if _tl.get("mismatched", False):
                     out.add_finding(
-                        title="TLS Certificate Hostname Mismatch",
+                        title="SSL/TLS Certificate: Hostname Mismatch",
                         url=target["url"], port=_tl_port_n,
                         risk="MEDIUM",
                         description=(
@@ -19722,12 +19722,12 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     except Exception:
         pass
 
-    # Header Data Leakage — record server/technology disclosure headers
+    # Information Disclosure — record server/technology disclosure headers
     _hdr_cmd = f"python3 -c \"import requests; r=requests.get('{url}'); print(dict(r.headers))\""
     server_hdr = headers.get("Server", "")
     if server_hdr:
         out.add_finding(
-            title="Header Data Leakage: Server",
+            title="Information Disclosure: Server Header",
             url=url, port=target["port"], risk="LOW",
             description="The HTTP Server response header reveals the web server software name and version, reducing the attacker's reconnaissance effort needed to identify version-specific vulnerabilities.",
             output=f"Server: {server_hdr}",
@@ -19742,7 +19742,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     powered_by = headers.get("X-Powered-By", "")
     if powered_by:
         out.add_finding(
-            title="Header Data Leakage: X-Powered-By",
+            title="Information Disclosure: X-Powered-By Header",
             url=url, port=target["port"], risk="LOW",
             description="The X-Powered-By response header discloses the application framework, language, or runtime version, reducing the attacker's effort needed to identify version-specific vulnerabilities.",
             output=f"X-Powered-By: {powered_by}",
@@ -19757,7 +19757,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     aspnet_ver = headers.get("X-AspNet-Version", "") or headers.get("X-AspNetMvc-Version", "")
     if aspnet_ver:
         out.add_finding(
-            title="Header Data Leakage: X-AspNet-Version",
+            title="Information Disclosure: X-AspNet-Version Header",
             url=url, port=target["port"], risk="LOW",
             description="The X-AspNet-Version response header reveals the exact ASP.NET framework version, aiding an attacker in identifying applicable CVEs or version-specific attack techniques.",
             output=f"X-AspNet-Version: {aspnet_ver}",
@@ -19772,7 +19772,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     via_hdr = headers.get("Via", "")
     if via_hdr:
         out.add_finding(
-            title="Header Data Leakage: Via",
+            title="Information Disclosure: Via Header",
             url=url, port=target["port"], risk="LOW",
             description=f"The Via header discloses intermediate proxy or CDN infrastructure: '{via_hdr}'. This reveals internal routing topology and proxy software versions.",
             output=f"Via: {via_hdr}",
@@ -22468,7 +22468,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             f"  {ip}  (first seen: {_crawl_leaked_ips[ip]})" for ip in _cl_ips
         )
         out.add_finding(
-            title="Internal IP Address Disclosed in HTTP Response",
+            title="Information Disclosure: Internal IP in HTTP Response",
             url=url, port=target["port"],
             risk="MEDIUM",
             description=(
@@ -22498,7 +22498,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             f"  {h}  (first seen: {_crawl_leaked_hosts[h]})" for h in _ch_list
         )
         out.add_finding(
-            title="Internal Hostname Exposed in HTTP Response",
+            title="Information Disclosure: Internal Hostname in HTTP Response",
             url=url, port=target["port"], risk="LOW",
             description=(
                 f"Internal hostname(s) found across crawled pages: "
@@ -22998,7 +22998,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                     col = m.start()
                     context = js_text[max(0, col - 80):col + 200]
                     out.add_finding(
-                        title=f"Credentials/Secret in JavaScript: {secret_type}",
+                        title="Information Disclosure: Credentials in Javascript",
                         url=js_url, port=target["port"], risk="HIGH",
                         description=f"A {secret_type} was found hardcoded in JavaScript: {js_url}",
                         output=f"Match: {m.group(0)[:120]}\nContext (char {col}): ...{context}...",
@@ -26821,7 +26821,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
             out.add_finding(
-                title="Credentials Transmitted in URL Query Parameters",
+                title="Information Disclosure: Credentials in URL Query Parameters",
                 url=link, port=target["port"], risk="HIGH",
                 description=(f"Sensitive credential parameter '{m.group(1)}' found in URL query string. "
                              f"URLs containing credentials are logged by proxies, referrer headers, "
@@ -27566,15 +27566,15 @@ _NIKTO_NORM: "list[tuple]" = [
      "Add a Referrer-Policy header."),
     # ── Server / technology disclosure ──
     (r"[Rr]etrieved\s+server\s+header|server.*header.*version|retrieved.*server.*banner|(?:Apache|nginx|IIS|Microsoft).*server header",
-     "Header Data Leakage: Server", "LOW",
+     "Information Disclosure: Server Header", "LOW",
      "A05:2025 Security Misconfiguration", "SI-11",
      "Suppress or generalise the Server header."),
     (r"X-Powered-By",
-     "Header Data Leakage: X-Powered-By", "LOW",
+     "Information Disclosure: X-Powered-By Header", "LOW",
      "A05:2025 Security Misconfiguration", "SI-11",
      "Remove the X-Powered-By header."),
     (r"X-AspNet-Version",
-     "Header Data Leakage: X-AspNet-Version", "LOW",
+     "Information Disclosure: X-AspNet-Version Header", "LOW",
      "A05:2025 Security Misconfiguration", "SI-11",
      "Remove the X-AspNet-Version header via web.config."),
     # ── SSL/TLS ──
@@ -27652,6 +27652,11 @@ _NIKTO_NORM: "list[tuple]" = [
      "Sensitive File Exposed", "LOW",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Remove default installation pages from production servers."),
+    # ── Deprecated headers ──
+    (r"Expect-CT.*deprecated|deprecated.*Expect-CT",
+     "Deprecated HTTP Header: Expect-CT", "INFO",
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Remove the Expect-CT header; it is deprecated in favour of Signed Certificate Timestamps (SCTs) delivered via the TLS handshake."),
     # ── Clickjacking ──
     (r"clickjack",
      "Missing Security Header: X-Frame-Options", "MEDIUM",
@@ -27674,7 +27679,7 @@ _NIKTO_NORM: "list[tuple]" = [
      "Implement custom error pages; disable verbose errors in production."),
     # ── robots.txt ──
     (r"robots\.txt.*(?:contains|entry|found|entries|file)",
-     "Sensitive Paths Disclosed in robots.txt", "INFO",
+     "Information Disclosure: Sensitive Path in robots.txt", "INFO",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Review robots.txt for sensitive path disclosure."),
     # ── SSL/TLS — wildcard cert ──
@@ -27694,7 +27699,7 @@ _NIKTO_NORM: "list[tuple]" = [
      "CDN/WAF presence noted — informational."),
     # ── ETag inode leakage ──
     (r"(?:ETag|etag).*(?:inode|leak)|leak.*inode",
-     "Header Data Leakage: ETag", "LOW",
+     "Information Disclosure: ETag", "LOW",
      "A05:2025 Security Misconfiguration", "SI-11",
      "Configure the web server to suppress inode information from ETag headers."),
     # ── HTTP/3 alt-svc ──
@@ -27806,14 +27811,15 @@ _NIKTO_DYN_HEADER = re.compile(
 _NIKTO_DYN_UNCOMMON = re.compile(
     r"[Uu]ncommon header\(?s?\)?\s+['\"]?([A-Za-z0-9_-]+)['\"]?\s+found", re.IGNORECASE)
 _NIKTO_DYN_CERT_MISMATCH = re.compile(
-    r"[Hh]ostname\s+['\"]?([^'\"]+?)['\"]?\s+does\s+not\s+match\s+certificate'?s?\s+names?:\s*(.+)",
+    r"[Hh]ostname\s+['\"]?([^'\"]+?)['\"]?\s+does\s+not\s+match\s+certificate'?s?\s+names?\s*[:(]\s*(.+)",
     re.IGNORECASE)
 _NIKTO_DYN_OUTDATED = re.compile(
     r"([A-Za-z][A-Za-z0-9_.+-]*/[\d][\w.+-]*)\s+appears?\s+to\s+be\s+outdated",
     re.IGNORECASE)
 _NIKTO_DYN_IP_DISCLOSURE = re.compile(
     r"(?:IP\s+address\s+found\s+in\s+the\s+['\"]?([^'\"]+?)['\"]?\s+header|"
-    r"(?:internal|private)\s+IP\s+(?:address\s+)?(?:found|leaked|disclosed))",
+    r"(?:internal|private)\s+IP\s+(?:address\s+)?(?:found|leaked|disclosed)|"
+    r"reveal\s+its\s+(?:internal|real)[\w\s]*IP\s+in\s+the\s+([A-Za-z0-9_-]+)\s+header)",
     re.IGNORECASE)
 
 
@@ -27840,10 +27846,10 @@ def _normalize_nikto(vuln: dict) -> dict:
     _m = _NIKTO_DYN_CERT_MISMATCH.search(msg)
     if _m:
         _host = _m.group(1).strip()
-        _certs = _m.group(2).strip().rstrip(".")
+        _certs = _m.group(2).strip().rstrip(".)")
         return {
-            "title": "Hostname Does Not Match Certificate Name",
-            "risk": "LOW",
+            "title": "SSL/TLS Certificate: Hostname Mismatch",
+            "risk": "HIGH",
             "owasp": "A02:2025 Cryptographic Failures", "nist": "SC-17",
             "remediation": (
                 "Obtain an SSL/TLS certificate that covers the hostname "
@@ -27861,11 +27867,14 @@ def _normalize_nikto(vuln: dict) -> dict:
                 "affected": _sw}
     _m = _NIKTO_DYN_IP_DISCLOSURE.search(msg)
     if _m:
-        _hdr = _m.group(1)
-        _loc = f" (header: {_hdr.strip()})" if _hdr else ""
-        return {"title": f"Internal IP Address Disclosed{_loc}", "risk": "LOW",
-                "owasp": "A05:2025 Security Misconfiguration", "nist": "SI-11",
-                "remediation": "Configure the web server or reverse proxy to suppress internal IP addresses from response headers and error pages."}
+        _hdr = _m.group(1) or _m.group(2)
+        _affected = f"header: {_hdr.strip()}" if _hdr else ""
+        _r = {"title": "Information Disclosure: Internal IP in HTTP Response", "risk": "MEDIUM",
+              "owasp": "A05:2025 Security Misconfiguration", "nist": "SI-11",
+              "remediation": "Configure the web server or reverse proxy to suppress internal IP addresses from response headers and error pages."}
+        if _affected:
+            _r["affected"] = _affected
+        return _r
     _m = _NIKTO_DYN_HEADER.search(msg)
     if _m:
         _hdr = "-".join(w.capitalize() for w in _m.group(1).strip().split("-"))
@@ -27974,15 +27983,15 @@ _NUCLEI_NORM: "list[tuple]" = [
      "A05:2025 Security Misconfiguration", "CM-7",
      "WAF/CDN detected — informational."),
     (r"server-header|apache-version|nginx-version|iis-version",
-     "Header Data Leakage: Server", "LOW",
+     "Information Disclosure: Server Header", "LOW",
      "A05:2025 Security Misconfiguration", "SI-11",
      "Suppress or generalise the Server header."),
     (r"x-powered-by",
-     "Header Data Leakage: X-Powered-By", "LOW",
+     "Information Disclosure: X-Powered-By Header", "LOW",
      "A05:2025 Security Misconfiguration", "SI-11",
      "Remove the X-Powered-By header."),
     (r"aspnet-version",
-     "Header Data Leakage: X-AspNet-Version", "LOW",
+     "Information Disclosure: X-AspNet-Version Header", "LOW",
      "A05:2025 Security Misconfiguration", "SI-11",
      "Remove the X-AspNet-Version header via web.config."),
     # ── Exposed panels / admin ──
@@ -28004,7 +28013,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "A05:2025 Security Misconfiguration", "CM-7",
      "Remove phpinfo() files from production servers."),
     (r"robots\.txt",
-     "Sensitive Paths Disclosed in robots.txt", "INFO",
+     "Information Disclosure: Sensitive Path in robots.txt", "INFO",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Review robots.txt for sensitive path disclosure."),
     (r"backup-file|\.bak|\.old|\.orig",
@@ -33206,7 +33215,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="Header Data Leakage: Debug/Trace Headers",
+                    title="Information Disclosure: Debug/Trace Headers",
                     url=url, port=target["port"], risk="LOW",
                     description=(
                         f"Response headers include diagnostic or debug headers: "
@@ -39642,7 +39651,7 @@ def _test_oauth_flows(target: dict, cfg: dict, out: OutputManager,
                 if "access_token=" in loc or "token=" in loc:
                     _rq, _rp = _save_http_evidence(out, phase, "oauth_token_leak", r)
                     out.add_finding(
-                        title="OAuth Token Leakage via URL (Implicit Flow)",
+                        title="Information Disclosure: OAuth Token via URL",
                         url=_authorize_url, port=target["port"], risk="HIGH",
                         description=(
                             f"The OAuth endpoint supports the implicit flow "
@@ -43719,7 +43728,7 @@ def main() -> None:
                     _ep_svr = _ep_hdrs.get("Server", "")
                     if _ep_svr:
                         out.add_finding(
-                            title="Header Data Leakage: Server",
+                            title="Information Disclosure: Server Header",
                             url=target["url"], port=target["port"], risk="LOW",
                             description="The HTTP Server response header reveals the web server software name and version, reducing the attacker's reconnaissance effort needed to identify version-specific vulnerabilities.",
                             output=f"Server: {_ep_svr}",
@@ -43734,7 +43743,7 @@ def main() -> None:
                     _ep_xpb = _ep_hdrs.get("X-Powered-By", "")
                     if _ep_xpb:
                         out.add_finding(
-                            title="Header Data Leakage: X-Powered-By",
+                            title="Information Disclosure: X-Powered-By Header",
                             url=target["url"], port=target["port"], risk="LOW",
                             description="The X-Powered-By response header discloses the application framework, language, or runtime version, reducing the attacker's effort needed to identify version-specific vulnerabilities.",
                             output=f"X-Powered-By: {_ep_xpb}",
@@ -43752,7 +43761,7 @@ def main() -> None:
                     )
                     if _ep_aspnet:
                         out.add_finding(
-                            title="Header Data Leakage: X-AspNet-Version",
+                            title="Information Disclosure: X-AspNet-Version Header",
                             url=target["url"], port=target["port"], risk="LOW",
                             description="The X-AspNet-Version response header reveals the exact ASP.NET framework version, aiding an attacker in identifying applicable CVEs or version-specific attack techniques.",
                             output=f"X-AspNet-Version: {_ep_aspnet}",
@@ -44760,9 +44769,12 @@ def main() -> None:
         if _vulnscan_handle is not None:
             try:
                 _collect_vulnscan_bg(_vulnscan_handle)
+                pm.set_phase_status("vulnscan", "complete", "Vuln Scan")
+                _save_checkpoint()
             except Exception as e:
                 vc.error(f"[vulnscan] Error collecting background results: {e}")
                 out.log_error("vulnscan", "background collection", str(e))
+                pm.set_phase_status("vulnscan", "error", detail=str(e))
             _vulnscan_handle = None
 
         # ── Collect ZAP results ──────────────────────────────────────────
@@ -44847,7 +44859,7 @@ def main() -> None:
         # own scan phases — re-scanning them as new targets wastes resources.
         _covered_hosts = {
             urllib.parse.urlparse(u if "://" in u else "http://" + u).hostname.lower()
-            for u in _pending_urls if u
+            for u in (*_pending_urls, *_processed_urls) if u
         }
         for _new_url in _in_scope_new:
             _norm_new = _new_url.rstrip("/")
