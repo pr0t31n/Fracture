@@ -11483,8 +11483,8 @@ _CLOUD_CRED_PATHS = [
     ("/.docker/config.json",  r'"auths"',                "Docker config"),
     ("/.kube/config",         r'apiVersion:',            "Kubernetes config"),
     ("/.npmrc",               r'//registry\.',           "NPM config"),
-    ("/.git-credentials",     r'https?://',              "Git credentials"),
-    ("/.pgpass",              r':',                      "PostgreSQL password file"),
+    ("/.git-credentials",     r'https?://[^\s<>]+@',     "Git credentials"),
+    ("/.pgpass",              r'^\S+:\d{1,5}:\S+:\S+:', "PostgreSQL password file"),
 ]
 
 
@@ -11505,7 +11505,10 @@ def _check_cloud_cred_exposure(base_url: str, sess: "requests.Session",
             body = r.text[:4096] if hasattr(r, 'text') else ""
             if not body:
                 continue
-            if re.search(pattern, body, re.I):
+            body_strip = body.lstrip()[:256].lower()
+            if body_strip.startswith(("<!doctype", "<html", "<head", "<?xml")):
+                continue
+            if re.search(pattern, body, re.I | re.M):
                 snippet = body[:300].replace("\n", " | ")
                 hits.append((path, cred_type, snippet))
         except Exception:
