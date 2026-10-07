@@ -42112,6 +42112,7 @@ def main() -> None:
         #   - Unauthenticated: same reduced scan as roles 2..n.
         # When _n_roles == 0: existing auth_matrix behaviour (settings-file driven).
         _vulnscan_handle = None  # set by _launch_vulnscan_bg, collected before summary
+        _vulnscan_ctx_label = "" # ctx label that launched vulnscan, for checkpoint key
         _zap_handle = None       # set by _launch_zap_bg, collected before summary
         _cred_contexts: list = []
         if _n_roles >= 1:
@@ -43617,6 +43618,7 @@ def main() -> None:
                     try:
                         _vulnscan_handle = _launch_vulnscan_bg(
                             target, _ctx_cfg, pm, out, effective_auth, fast=args.fast)
+                        _vulnscan_ctx_label = _ctx_label
                         vc.log("[vulnscan] nuclei + nikto launched in background", "INFO")
                         _save_checkpoint()
                     except Exception as e:
@@ -44767,14 +44769,15 @@ def main() -> None:
         # all subsequent phases.  Join now so their findings land in
         # findings.json before the summary counts them.
         if _vulnscan_handle is not None:
+            _vs_key = f"vulnscan#{_vulnscan_ctx_label}" if _vulnscan_ctx_label else "vulnscan"
             try:
                 _collect_vulnscan_bg(_vulnscan_handle)
-                pm.set_phase_status("vulnscan", "complete", "Vuln Scan")
+                pm.set_phase_status(_vs_key, "complete", "Vuln Scan")
                 _save_checkpoint()
             except Exception as e:
                 vc.error(f"[vulnscan] Error collecting background results: {e}")
                 out.log_error("vulnscan", "background collection", str(e))
-                pm.set_phase_status("vulnscan", "error", detail=str(e))
+                pm.set_phase_status(_vs_key, "error", detail=str(e))
             _vulnscan_handle = None
 
         # ── Collect ZAP results ──────────────────────────────────────────
@@ -44873,6 +44876,8 @@ def main() -> None:
                     continue
                 _pending_urls.append(_norm_new)
                 _redirect_discovered.add(_norm_new)
+                if _np.hostname:
+                    _covered_hosts.add(_np.hostname.lower())
                 vc.log(
                     f"[redirect] Queued in-scope redirect target for scanning: {_norm_new}",
                     "INFO",
