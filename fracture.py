@@ -10863,7 +10863,7 @@ def _attach_redirect_hook(
                 )
             else:
                 out.add_finding(
-                    title="HTTP Redirect to In-Scope URL",
+                    title="Discovery: HTTP Redirect to In-Scope URL",
                     url=target["url"], port=target["port"], risk="INFO",
                     description=(
                         f"A {r.status_code} redirect was observed from {r.url} to {abs_loc}. "
@@ -10917,7 +10917,7 @@ def _attach_redirect_hook(
                 vc.log(f"[redirect] In-scope {r.status_code}: {r.url} → {abs_loc}", "INFO")
         else:
             out.add_finding(
-                title="HTTP Redirect to External URL",
+                title="Discovery: HTTP Redirect to External URL",
                 url=r.url, port=target["port"], risk="INFO",
                 description=(
                     f"A {r.status_code} redirect was observed from {r.url} to {abs_loc}. "
@@ -14442,6 +14442,16 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         _gen_ver = re.search(r'(\d+\.\d+)', _gen_val)
         if _gen_ver:
             _outdated_signals.append(f"Meta generator: {_gen_val}")
+    _LOCKOUT_PAGE_RE = re.compile(
+        r"too many (?:attempts|requests|login|failed)|rate.limit|"
+        r"account (?:locked|lockout|disabled)|temporarily (?:locked|blocked|unavailable)|"
+        r"try again later|please wait|exceeded.{0,20}(?:limit|threshold)|"
+        r"blocked.{0,30}(?:ip|address)|captcha required",
+        re.I,
+    )
+    if _LOCKOUT_PAGE_RE.search(_body_lower):
+        _outdated_signals.clear()
+        vc.log("[recon] Skipping outdated-website — page is a lockout/rate-limit response", "INFO")
     if _outdated_signals:
         out.add_finding(
             title="Outdated or Unnecessary Website Detected",
@@ -14661,29 +14671,53 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                    "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK",
                                    "UNLOCK"}
             if _unsafe:
-                out.add_finding(
-                    title="Unsafe HTTP Methods Enabled",
-                    url=url, port=target["port"], risk="MEDIUM",
-                    description=(
-                        f"The server at {url} advertises potentially dangerous "
-                        f"HTTP methods via OPTIONS: {', '.join(sorted(_unsafe))}. "
-                        f"These methods may allow file upload (PUT), file deletion "
-                        f"(DELETE), or cross-site tracing (TRACE). CWE-16."
-                    ),
-                    output=f"OPTIONS {url}\nAllow: {_allow_hdr}",
-                    affected=_url_rel_path(url, target["url"]),
-                    sources="fracture-recon", service=target["scheme"],
-                    output_file=_probe_files,
-                    owasp="A05:2025 Security Misconfiguration",
-                    remediation=(
-                        "Disable unnecessary HTTP methods in the web server "
-                        "configuration. Only allow GET, POST, HEAD, and OPTIONS. "
-                        "Restrict WebDAV methods (PROPFIND, MKCOL, etc.) unless "
-                        "explicitly required."
-                    ),
-                    http_code=_opt_r.status_code,
+                _opt_body = (_opt_r.text or "")[:4096]
+                _opt_ct = (_opt_r.headers.get("Content-Type") or "").lower()
+                _opt_is_catchall = (
+                    "text/html" in _opt_ct
+                    and len(_opt_body) > 200
+                    and "<html" in _opt_body.lower()
                 )
-                vc.log(f"[recon] Unsafe HTTP methods: {', '.join(sorted(_unsafe))}", "SUCCESS")
+                if _opt_is_catchall:
+                    vc.log(
+                        f"[recon] OPTIONS returned full HTML page — likely catch-all handler, "
+                        f"Allow header unreliable: {_allow_hdr}", "INFO",
+                    )
+                else:
+                    _opt_ev_dir = out.root / "evidence" / "recon"
+                    _opt_ev_dir.mkdir(parents=True, exist_ok=True)
+                    _opt_ev = _opt_ev_dir / f"options_{urllib.parse.urlparse(url).hostname}.txt"
+                    _opt_ev.write_text(
+                        f"OPTIONS {url} HTTP/1.1\n\n"
+                        f"HTTP/{_opt_r.raw.version / 10 if hasattr(_opt_r.raw, 'version') and _opt_r.raw.version else '1.1'} "
+                        f"{_opt_r.status_code} {_opt_r.reason}\n"
+                        + "".join(f"{k}: {v}\n" for k, v in _opt_r.headers.items())
+                        + f"\n{_opt_body}\n",
+                        errors="replace",
+                    )
+                    out.add_finding(
+                        title="Unsafe HTTP Methods Enabled",
+                        url=url, port=target["port"], risk="MEDIUM",
+                        description=(
+                            f"The server at {url} advertises potentially dangerous "
+                            f"HTTP methods via OPTIONS: {', '.join(sorted(_unsafe))}. "
+                            f"These methods may allow file upload (PUT), file deletion "
+                            f"(DELETE), or cross-site tracing (TRACE). CWE-16."
+                        ),
+                        output=f"OPTIONS {url}\nAllow: {_allow_hdr}",
+                        affected=_url_rel_path(url, target["url"]),
+                        sources="fracture-recon", service=target["scheme"],
+                        output_file=str(_opt_ev.relative_to(out.root)),
+                        owasp="A05:2025 Security Misconfiguration",
+                        remediation=(
+                            "Disable unnecessary HTTP methods in the web server "
+                            "configuration. Only allow GET, POST, HEAD, and OPTIONS. "
+                            "Restrict WebDAV methods (PROPFIND, MKCOL, etc.) unless "
+                            "explicitly required."
+                        ),
+                        http_code=_opt_r.status_code,
+                    )
+                    vc.log(f"[recon] Unsafe HTTP methods: {', '.join(sorted(_unsafe))}", "SUCCESS")
             # GAP-32: WebDAV enabled detection
             _webdav_methods = _methods & {"PROPFIND", "PROPPATCH", "MKCOL",
                                            "COPY", "MOVE", "LOCK", "UNLOCK"}
@@ -17160,7 +17194,7 @@ def _phase_endpoint_tools(
         if _ep_screenshot_ok and _capture_screenshot_to(ep_url, ep_shot, target, cfg, auth_session=sess):
             _ep_rel = urllib.parse.urlparse(ep_url).path or "/"
             out.add_finding(
-                title="Web Screenshot Captured",
+                title="Discovery: Web Screenshot Captured",
                 url=ep_url, port=target["port"], risk="INFO",
                 description=f"A screenshot of discovered endpoint {ep_url} was captured. HTTP {_ss_http_code}.",
                 affected=out._rel_affected(_ep_rel),
@@ -17283,7 +17317,7 @@ def _phase_endpoint_tools(
                     )
                 else:
                     out.add_finding(
-                        title="Non-Login Form Detected",
+                        title="Discovery: Non-Login Form Detected",
                         url=ep_url, port=target["port"], risk="INFO",
                         description=(
                             f"A non-authentication form was detected at {ep_url}. "
@@ -20691,7 +20725,7 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             _ss_phase_code = None
         _ss_code_str = f" HTTP {_ss_phase_code}." if _ss_phase_code is not None else ""
         out.add_finding(
-            title="Web Screenshot Captured",
+            title="Discovery: Web Screenshot Captured",
             url=url, port=port, risk="INFO",
             description=f"A screenshot of {url} was captured during reconnaissance.{_ss_code_str}",
             affected=out._rel_affected(_ss_rel),
@@ -20726,7 +20760,7 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                     _root_code = None
                 _root_code_str = f" HTTP {_root_code}." if _root_code is not None else ""
                 out.add_finding(
-                    title="Web Screenshot Captured",
+                    title="Discovery: Web Screenshot Captured",
                     url=_root_url, port=port, risk="INFO",
                     description=(
                         f"A screenshot of the site root {_root_url} was "
@@ -20763,7 +20797,7 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
         if _capture_screenshot_to(_err_url, _err_out, target, cfg):
             _err_code_str = f" HTTP {_err_code}." if _err_code is not None else ""
             out.add_finding(
-                title="Web Screenshot Captured",
+                title="Discovery: Web Screenshot Captured",
                 url=_err_url, port=port, risk="INFO",
                 description=(
                     f"A screenshot of the application's error page was "
@@ -20892,7 +20926,7 @@ def _phase_webfiles(target: dict, cfg: dict, pm: ProgressManager,
 
     for _wf_path, _wf_fpath, _wf_http_code in saved:
         out.add_finding(
-            title="Web Files Downloaded",
+            title="Discovery: Web Files Downloaded",
             url=url, port=port, risk="INFO",
             description=f"File downloaded from {base_url}{_wf_path} during reconnaissance. HTTP {_wf_http_code}.",
             affected=_wf_path,
@@ -22765,7 +22799,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             _spa_ev_path = ""
         out.add_finding(
-            title="Single Page Application Detected",
+            title="Discovery: Single Page Application Detected",
             url=url, port=target["port"], risk="INFO",
             description=(
                 f"The target appears to be a Single Page Application. "
@@ -26670,7 +26704,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                         f"Path: {rpath}\nResponse: {r.status_code}\n{r.text[:2000]}\n\n"
                     )
                 out.add_finding(
-                    title="Password Reset Endpoint Exposed",
+                    title="Discovery: Password Reset Endpoint Exposed",
                     url=url + rpath, port=target["port"], risk="INFO",
                     description=f"Password reset endpoint found at {rpath}. Test for account enumeration by submitting valid/invalid usernames.",
                     output=f"GET {rpath} → {r.status_code}",
@@ -27965,6 +27999,10 @@ _NUCLEI_NORM: "list[tuple]" = [
      "SSL/TLS Certificate: Revoked", "HIGH",
      "A02:2025 Cryptographic Failures", "SC-17",
      "Replace the revoked certificate with a new one from a trusted CA."),
+    (r"untrusted-root-certificate",
+     "SSL/TLS Certificate: Untrusted Root", "LOW",
+     "A02:2025 Cryptographic Failures", "SC-17",
+     "Replace the certificate with one issued by a publicly trusted CA."),
     (r"wildcard-tls",
      "SSL/TLS Certificate: Wildcard", "INFO",
      "A02:2025 Cryptographic Failures", "SC-17",
@@ -28087,7 +28125,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Disable trace.axd in production via web.config."),
     # ── IIS-specific ──
     (r"iis-shortname",
-     "IIS Short File/Directory Name Disclosure (Tilde Enumeration)", "LOW",
+     "Information Disclosure: IIS Short File/Directory Disclosure", "LOW",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Disable 8.3 filename generation via `fsutil behavior set disable8dot3 1` and restart IIS."),
     # ── Crypto wallet FP filter ──
@@ -30519,7 +30557,7 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
                             auth_session=auth_sess):
                         _ar_ss_count += 1
                         out.add_finding(
-                            title="Web Screenshot Captured",
+                            title="Discovery: Web Screenshot Captured",
                             url=link, port=target["port"], risk="INFO",
                             description=(
                                 f"Authenticated screenshot of interesting "
@@ -30596,7 +30634,7 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
                                       auth_session=auth_sess):
                 _lf_rel = urllib.parse.urlparse(_lf_page_url).path or "/"
                 out.add_finding(
-                    title="Web Screenshot Captured",
+                    title="Discovery: Web Screenshot Captured",
                     url=_lf_page_url, port=target["port"], risk="INFO",
                     description=(
                         f"Screenshot of login/password form page discovered "
@@ -33172,7 +33210,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                                                   auth_session=sess):
                             _err_ss_count += 1
                             out.add_finding(
-                                title="Web Screenshot Captured",
+                                title="Discovery: Web Screenshot Captured",
                                 url=eu, port=target["port"], risk="INFO",
                                 description=(
                                     f"Screenshot of verbose error page: {eu} "
@@ -35074,7 +35112,7 @@ def _phase_file_upload_info(target: dict, cfg: dict, pm: ProgressManager,
                                       auth_session=sess):
                 _upl_rel = urllib.parse.urlparse(_upl_page_url).path or "/"
                 out.add_finding(
-                    title="Web Screenshot Captured",
+                    title="Discovery: Web Screenshot Captured",
                     url=_upl_page_url, port=target["port"], risk="INFO",
                     description=(
                         f"Screenshot of file upload page: {_upl_page_url}"
@@ -42801,7 +42839,7 @@ def main() -> None:
                             if _capture_screenshot_to(_ss_login_url, _ss_lp, target, cfg):
                                 _ss_lp_rel = urllib.parse.urlparse(_ss_login_url).path or "/"
                                 out.add_finding(
-                                    title="Web Screenshot Captured",
+                                    title="Discovery: Web Screenshot Captured",
                                     url=_ss_login_url, port=_ss_port, risk="INFO",
                                     description=(
                                         f"Screenshot of login page for role "
@@ -42845,7 +42883,7 @@ def main() -> None:
                                 if _ctx_label != "unauthenticated" else ""
                             )
                             out.add_finding(
-                                title="Web Screenshot Captured",
+                                title="Discovery: Web Screenshot Captured",
                                 url=_as_landing_url, port=_ss_port, risk="INFO",
                                 description=(
                                     f"Screenshot of authenticated landing page"
@@ -44543,7 +44581,7 @@ def main() -> None:
             if not _sm_paths_found:
                 _ns_ev = str(_sm_path_final) if _sm_path_final.exists() else None
                 out.add_finding(
-                    title="No Web Structure Identified",
+                    title="Discovery: No Web Structure Identified",
                     url=target["url"],
                     port=target["port"],
                     risk="INFO",
