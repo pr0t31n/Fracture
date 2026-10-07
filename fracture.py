@@ -3712,15 +3712,28 @@ class OutputManager:
 
     def _rel_affected(self, raw: str) -> str:
         """Convert each line of `raw` that is a same-origin full URL to a
-        relative path, using self.base_url as the origin anchor.
+        host-prefixed relative path, using self.base_url as the origin anchor.
         Lines that are not HTTP URLs (paths, names, cipher strings, etc.)
         are returned unchanged.  Falls back to `raw` if base_url is unset.
-        Paths containing unencoded quote characters or other junk are filtered out."""
+        Paths containing unencoded quote characters or other junk are filtered out.
+        Deduplicates entries that refer to the same host (e.g. host, host:443,
+        https://host all collapse to hostname/path)."""
         _PATH_JUNK = frozenset('"\'<> \t\r\n\x00')
         if not self.base_url or not raw:
             return raw
+        try:
+            _base_p = urllib.parse.urlparse(self.base_url)
+            _base_host = _base_p.hostname or ""
+            _base_port = _base_p.port
+            _base_scheme = _base_p.scheme or "https"
+        except Exception:
+            _base_host = ""
+            _base_port = None
+            _base_scheme = "https"
+        _default_port = 443 if _base_scheme == "https" else 80
         lines = raw.split("\n")
         result = []
+        seen = set()
         for line in lines:
             stripped = line.strip()
             if not stripped:
@@ -3729,11 +3742,57 @@ class OutputManager:
                 rel = _url_rel_path(stripped, self.base_url)
             else:
                 rel = stripped
-            # Drop any entry that resolves to a path with invalid URL characters
             if rel.startswith("/") and any(c in rel for c in _PATH_JUNK):
                 continue
+            if rel.startswith("/") and _base_host:
+                rel = _base_host + rel
+            _norm = rel.lower().rstrip("/") or rel.lower()
+            if _base_host:
+                _bhl = _base_host.lower()
+                if _norm == _bhl or _norm == f"{_bhl}:{_default_port}":
+                    rel = f"{_base_host}/"
+                    _norm = rel.lower().rstrip("/")
+            if _norm in seen:
+                continue
+            seen.add(_norm)
             result.append(rel)
         return "\n".join(result)
+
+    def _dedup_affected(self, entries: set) -> set:
+        """Deduplicate affected location entries that refer to the same host.
+        Collapses bare host, host:default_port, and host/ into one entry.
+        Entries that are not host/URL-shaped (tech names, cipher strings) pass through."""
+        try:
+            _base_p = urllib.parse.urlparse(self.base_url)
+            _base_scheme = _base_p.scheme or "https"
+        except Exception:
+            _base_scheme = "https"
+        _default_port = 443 if _base_scheme == "https" else 80
+        seen_norm = {}
+        result = set()
+        for entry in entries:
+            e = entry.strip()
+            if not e:
+                continue
+            _el = e.lower().rstrip("/") or e.lower()
+            if ":" in _el and not _el.startswith("http"):
+                _parts = _el.rsplit(":", 1)
+                try:
+                    _p = int(_parts[1])
+                    if _p == _default_port:
+                        _el = _parts[0]
+                except (ValueError, IndexError):
+                    pass
+            if _el not in seen_norm:
+                seen_norm[_el] = e
+                result.add(e)
+            else:
+                _existing = seen_norm[_el]
+                if len(e) > len(_existing):
+                    result.discard(_existing)
+                    result.add(e)
+                    seen_norm[_el] = e
+        return result
 
     @staticmethod
     def _auto_highlights(
@@ -3751,8 +3810,9 @@ class OutputManager:
         # ── Header findings — use full "Name: Value" lines from output ──
         if re.match(
             r"^(Information Disclosure|Software Version Disclosed"
-            r"|HTTP Header Fingerprints|Unknown Header Identified"
-            r"|Endpoint-Specific Security Header Found"
+            r"|Unknown Header Identified"
+            r"|Inconsistent Security Header Usage"
+            r"|Endpoint-Specific Header"
             r"|Technology Identified|Vulnerable Component):",
             t,
         ):
@@ -3912,7 +3972,8 @@ class OutputManager:
                 url = f"{_p.scheme}://{_p.netloc}/"
             except Exception:
                 pass
-            affected = "/"
+            if not affected:
+                affected = "/"
 
         ascii_title = title.encode("ascii", errors="replace").decode("ascii")
 
@@ -4103,6 +4164,7 @@ class OutputManager:
                         )
                     _ex_aff.discard("")
                     if _ex_aff:
+                        _ex_aff = self._dedup_affected(_ex_aff)
                         ex["affected"] = "\n".join(sorted(_ex_aff))
                     # ── merge output_file — preserve BOTH formats ──────────
                     # output_file can be in two formats:
@@ -11843,7 +11905,58 @@ _FINGERPRINT_HEADERS: "dict[str, tuple[str, str]]" = {
                                     "by frameworks or APM agents."),
     "x-cobalt":                    ("Cobalt Web Framework",
                                     "Emitted by the Cobalt web publishing framework."),
+    "google-tag-manager":          ("Google Tag Manager",
+                                    "Google Tag Manager analytics/tag management platform detected."),
+    "microsoft-iis":               ("Microsoft IIS",
+                                    "Microsoft Internet Information Services web server identified."),
+    # Azure AD / Application Proxy / telemetry
+    "request-context":             ("Microsoft Azure Application Insights",
+                                    "Distributed tracing correlation header from Azure Application Insights."),
+    "request-id":                  ("Internal Request Correlation",
+                                    "Internal request tracing/correlation identifier that may reveal infrastructure details."),
+    "x-environment-name":          ("Server Environment Identifier",
+                                    "Response header that reveals the server's deployment environment name (e.g., production, staging)."),
+    "x-ms-clientdata":             ("Microsoft Azure AD",
+                                    "Azure Active Directory client data header."),
+    "x-ms-clitelem":               ("Microsoft Azure AD MSAL",
+                                    "Azure AD MSAL client telemetry header containing error codes and performance data."),
+    "x-ms-ests-server":            ("Microsoft Azure AD STS",
+                                    "Azure AD Enterprise Token Service server identifier."),
+    "x-ms-proxy-app-id":           ("Microsoft Azure AD Application Proxy",
+                                    "Azure AD Application Proxy application identifier."),
+    "x-ms-proxy-data-center":      ("Microsoft Azure AD Application Proxy",
+                                    "Azure AD Application Proxy datacenter identifier."),
+    "x-ms-proxy-group-id":         ("Microsoft Azure AD Application Proxy",
+                                    "Azure AD Application Proxy group identifier."),
+    "x-ms-proxy-service-name":     ("Microsoft Azure AD Application Proxy",
+                                    "Azure AD Application Proxy service name."),
+    "x-ms-proxy-subscription-id":  ("Microsoft Azure AD Application Proxy",
+                                    "Azure AD Application Proxy subscription identifier."),
+    "x-ms-proxy-transaction-id":   ("Microsoft Azure AD Application Proxy",
+                                    "Azure AD Application Proxy transaction correlation identifier."),
+    "x-ms-srs":                    ("Microsoft Azure AD",
+                                    "Azure AD session routing service header."),
+    "x-msedge-ref":                ("Microsoft Azure CDN / Front Door",
+                                    "Azure CDN or Front Door reference header for request tracing."),
+    "x-sa-instance":               ("Application Instance Identifier",
+                                    "Response header revealing the application instance name or internal infrastructure identifier."),
 }
+
+_KNOWN_NON_SEC_HEADERS = frozenset({
+    "x-xss-protection",
+    "x-permitted-cross-domain-policies",
+    "x-ua-compatible",
+    "x-download-options",
+    "x-dns-prefetch-control",
+    "user-agent",
+    "x-runtime",
+    "x-powered-by-plesk",
+    "content-security-policy-report-only",
+    "link",
+    "meta-refresh-redirect",
+    "nel",
+    "report-to",
+})
 
 _BI_PATTERNS = {
     "Grafana":         [re.compile(r'grafana|/grafana/|GrafanaApp', re.I)],
@@ -14221,8 +14334,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
         out.add_finding(
-            title=f"Wildcard (*) Detected: {url}",
+            title="DNS: Wildcard (*) Detected",
             url=url, port=target["port"], risk="INFO",
+            affected=url,
             description=(
                 f"A wildcard/catch-all response was detected at {url} — the server returns "
                 f"HTTP {wc_baseline['status']} for all unknown paths"
@@ -15496,9 +15610,13 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                         if _ww_fp:
                                             _fp_tech, _fp_desc = _ww_fp
                                             _ww_hl_uc1 = [f"{hdr_name}: {hdr_value}"] if hdr_value else [hdr_name]
+                                            _ww_fp_title_hdr = "-".join(
+                                                w.capitalize() for w in hdr_name.split("-")
+                                            )
                                             out.add_finding(
-                                                title=f"HTTP Header Fingerprints {_fp_tech}: {hdr_name}",
+                                                title=f"Information Disclosure: {_ww_fp_title_hdr} Header",
                                                 url=url, port=target["port"], risk="INFO",
+                                                affected=_fp_tech,
                                                 description=(
                                                     f"The response header '{hdr_name}' identifies "
                                                     f"{_fp_tech}. {_fp_desc}"
@@ -15519,6 +15637,29 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                                 ),
                                                 http_code=_ww_http_status or 0,
                                                 highlights=_ww_hl_uc1,
+                                            )
+                                            continue
+                                        if _ww_hn_l in _KNOWN_NON_SEC_HEADERS:
+                                            _ww_hl_uc2 = [f"{hdr_name}: {hdr_value}"] if hdr_value else [hdr_name]
+                                            out.add_finding(
+                                                title="Discovery: Known Non-Security Header Detected",
+                                                url=url, port=target["port"], risk="INFO",
+                                                description=(
+                                                    f"The well-known HTTP header '{hdr_name}' "
+                                                    f"was observed in the response{_hs}."
+                                                    + (f" Value: {hdr_value}" if hdr_value else "")
+                                                ),
+                                                output=(f"HTTP Status: {_ww_http_status}\n"
+                                                        if _ww_http_status else "")
+                                                       + f"Header: {hdr_name}"
+                                                       + (f"\nValue: {hdr_value}" if hdr_value else ""),
+                                                sources="whatweb", service=target["scheme"],
+                                                output_file=str(ww_out),
+                                                owasp="A05:2025 Security Misconfiguration",
+                                                nist="CM-7",
+                                                remediation="",
+                                                http_code=_ww_http_status or 0,
+                                                highlights=_ww_hl_uc2,
                                             )
                                             continue
                                         _ww_hl_uc2 = [f"{hdr_name}: {hdr_value}"] if hdr_value else [hdr_name]
@@ -15582,9 +15723,13 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                 if _ww_pn_fp:
                                     _pn_fp_tech, _pn_fp_desc = _ww_pn_fp
                                     _ww_hl_hp1 = [f"{pname}: {version}"] if version else [pname]
+                                    _ww_fp_pn_hdr = "-".join(
+                                        w.capitalize() for w in pname.split("-")
+                                    )
                                     out.add_finding(
-                                        title=f"HTTP Header Fingerprints {_pn_fp_tech}: {pname}",
+                                        title=f"Information Disclosure: {_ww_fp_pn_hdr} Header",
                                         url=url, port=target["port"], risk="INFO",
+                                        affected=_pn_fp_tech,
                                         description=(
                                             f"The response header '{pname}' identifies "
                                             f"{_pn_fp_tech}. {_pn_fp_desc}"
@@ -15604,6 +15749,29 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                         ),
                                         http_code=_ww_http_status or 0,
                                         highlights=_ww_hl_hp1,
+                                    )
+                                    continue
+                                if _ww_pn_l in _KNOWN_NON_SEC_HEADERS:
+                                    _ww_hl_hp2 = [f"{pname}: {version}"] if version else [pname]
+                                    out.add_finding(
+                                        title="Discovery: Known Non-Security Header Detected",
+                                        url=url, port=target["port"], risk="INFO",
+                                        description=(
+                                            f"The well-known HTTP header '{pname}' "
+                                            f"was observed in the response{_hs}."
+                                            + (f" Value: {version}" if version else "")
+                                        ),
+                                        output=((f"HTTP Status: {_ww_http_status}\n"
+                                                 if _ww_http_status else "")
+                                                + f"Header: {pname}"
+                                                + (f"\nValue: {version}" if version else "")),
+                                        sources="whatweb", service=target["scheme"],
+                                        output_file=str(ww_out),
+                                        owasp="A05:2025 Security Misconfiguration",
+                                        nist="CM-7",
+                                        remediation="",
+                                        http_code=_ww_http_status or 0,
+                                        highlights=_ww_hl_hp2,
                                     )
                                     continue
                                 _ww_hl_hp2 = [f"{pname}: {version}"] if version else [pname]
@@ -17171,13 +17339,17 @@ def _phase_endpoint_tools(
     _ie_by_netloc: dict = {}   # netloc -> {"anchor": url, "paths": {rel: full_url}}
     _ie_crawl_out: dict = {}   # netloc -> most-recent crawl output file path
 
+    _EP_TIMEOUT = cfg.get("endpoint_timeout", 600)
+
     for idx, ep_url in enumerate(endpoints):
         ep_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', ep_url.replace("://", "_"))[:50]
+        _ep_t0 = time.monotonic()
         vc.status("endpoint_tools", "Endpoint Tools", "running",
                   f"Endpoint {idx + 1}/{len(endpoints)}", idx, len(endpoints))
-        vc.log(f"[endpoint_tools] {ep_url}", "INFO")
+        vc.log(f"[endpoint_tools] Endpoint {idx + 1}/{len(endpoints)}: {ep_url}", "INFO")
 
         # ── Screenshot ──────────────────────────────────────────────────────
+        vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] screenshot — start", "INFO")
         ep_shot = save_dir / f"screenshot_{ep_safe}.png"
         _ep_path_low = (urllib.parse.urlparse(ep_url).path or "/").lower()
         _ep_scope_ok = (scope_hostnames is None or _is_in_scope_url(ep_url, scope_hostnames))
@@ -17205,10 +17377,18 @@ def _phase_endpoint_tools(
                 owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                 remediation="Review screenshot for exposed sensitive content.",
             )
-            vc.log(f"[endpoint_tools] Screenshot: {ep_shot.name}", "SUCCESS")
+            vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] screenshot — done: {ep_shot.name}", "SUCCESS")
+
+        # ── Per-endpoint timeout guard ──────────────────────────────────────
+        if time.monotonic() - _ep_t0 > _EP_TIMEOUT:
+            vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] per-endpoint timeout ({_EP_TIMEOUT}s) — skipping remaining sub-tasks", "WARNING")
+            continue
 
         # ── Single-page crawl ────────────────────────────────────────────────
+        vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] crawl — start", "INFO")
         page_data = _crawl_page(ep_url, sess, timeout, base_url)
+        if page_data.get("error"):
+            vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] crawl — error: {page_data['error']}", "WARNING")
         if not page_data.get("error"):
             ep_crawl_out = out.output_path("crawl", f"crawl_ep_{ep_safe}")
             ep_crawl_out.write_text(
@@ -17230,6 +17410,8 @@ def _phase_endpoint_tools(
                         _ie_by_netloc[_ie_nl] = {"anchor": link, "paths": {}}
                     _ie_by_netloc[_ie_nl]["paths"][_ie_rel] = link
                     _ie_crawl_out[_ie_nl] = str(ep_crawl_out)
+
+            vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] crawl — done ({len(page_data.get('links',[]))} links, {len(page_data.get('forms',[]))} forms)", "INFO")
 
             # ── Source code download ─────────────────────────────────────────
             _ep_src_resp = page_data.get("response")
@@ -17335,7 +17517,13 @@ def _phase_endpoint_tools(
                         affected=_fm_action,
                     )
 
+        # ── Per-endpoint timeout guard ──────────────────────────────────────
+        if time.monotonic() - _ep_t0 > _EP_TIMEOUT:
+            vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] per-endpoint timeout ({_EP_TIMEOUT}s) — skipping remaining sub-tasks", "WARNING")
+            continue
+
         # ── Security headers + cookie attributes ─────────────────────────────
+        vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] headers + cookies — start", "INFO")
         _ep_resp = page_data.get("response")
         if _ep_resp is not None:
             _ep_hdrs = _ep_resp.headers
@@ -17360,7 +17548,7 @@ def _phase_endpoint_tools(
                     # Absent at base but present at this endpoint — informational
                     _ep_rel_crawl = _url_rel_path(ep_url, target["url"])
                     out.add_finding(
-                        title=f"Endpoint-Specific Security Header Found: {_hn}",
+                        title=f"Inconsistent Security Header Usage: {_hn}",
                         url=target["url"], port=target["port"], risk="INFO",
                         description=(
                             f"The security header '{_hn}' is present at "
@@ -17485,6 +17673,13 @@ def _phase_endpoint_tools(
                             highlights=[f"{_vh}: {_vhv}"],
                         )
 
+        vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] headers + cookies — done", "INFO")
+
+        # ── Per-endpoint timeout guard ──────────────────────────────────────
+        if time.monotonic() - _ep_t0 > _EP_TIMEOUT:
+            vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] per-endpoint timeout ({_EP_TIMEOUT}s) — skipping brute-force", "WARNING")
+            continue
+
         # ── Directory brute-force ────────────────────────────────────────────
         # Inherit the parent wildcard only when this endpoint is on the same
         # hostname as the target.  A different subdomain (e.g. admin.example.com
@@ -17492,6 +17687,7 @@ def _phase_endpoint_tools(
         # independently — it is a distinct host and may not be a wildcard.
         # Skip wildcard detection entirely for file URLs — brute-force will be
         # skipped anyway and probing a CSS/JS/image path for wildcards is pointless.
+        vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] wildcard + brute-force — start", "INFO")
         _ep_host = urllib.parse.urlparse(ep_url).hostname or ""
         _same_host = (_ep_host == target["hostname"])
         if _url_is_file(ep_url):
@@ -17615,6 +17811,9 @@ def _phase_endpoint_tools(
                                              source="feroxbuster")
                 except Exception:
                     pass
+
+        _ep_elapsed = time.monotonic() - _ep_t0
+        vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] endpoint complete ({_ep_elapsed:.1f}s)", "INFO")
 
     # ── Aggregated "Interesting Endpoint Discovered" (one per base domain) ─────
     for _ie_nl, _ie_data in _ie_by_netloc.items():
@@ -18552,7 +18751,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                             elif _tsf_id == "cipherlist_OBSOLETED":
                                 _tsf_title = "SSL/TLS Ciphers: Obsolete Ciphers"
                             elif _tsf_id == "DNS_CAArecord":
-                                _tsf_title = "SSL/TLS DNS: Missing CAA Record"
+                                _tsf_title = "DNS: Missing CAA Record"
                                 _tsf_risk  = "LOW"
                             elif _tsf_id == "TLS_session_ticket":
                                 _tsf_title = "SSL/TLS Session: Long Duration"
@@ -18821,7 +19020,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     encoding="utf-8",
                 )
                 out.add_finding(
-                    title="SSL/TLS DNS: Missing CAA Record",
+                    title="DNS: Missing CAA Record",
                     url=target["url"], port=port, risk="LOW",
                     description=(
                         f"No CAA (Certification Authority Authorization) DNS record "
@@ -27918,6 +28117,20 @@ def _normalize_nikto(vuln: dict) -> dict:
     _m = _NIKTO_DYN_UNCOMMON.search(msg)
     if _m:
         _hdr = _m.group(1).strip()
+        _nik_hn_l = _hdr.lower()
+        if _nik_hn_l in _KNOWN_NON_SEC_HEADERS:
+            return {"title": "Discovery: Known Non-Security Header Detected",
+                    "risk": "INFO",
+                    "owasp": "A05:2025 Security Misconfiguration", "nist": "SI-11",
+                    "affected": _hdr,
+                    "remediation": f"The {_hdr} header is a known non-security header. No action required."}
+        _fp_hit = _FINGERPRINT_HEADERS.get(_nik_hn_l)
+        if _fp_hit:
+            return {"title": f"Discovery: {_fp_hit[0]}",
+                    "risk": "INFO",
+                    "owasp": "A05:2025 Security Misconfiguration", "nist": "CM-7",
+                    "affected": _hdr,
+                    "remediation": _fp_hit[1]}
         return {"title": f"Unknown Header Identified: {_hdr}", "risk": "INFO",
                 "owasp": "A05:2025 Security Misconfiguration", "nist": "SI-11",
                 "remediation": f"Review the {_hdr} header for information disclosure."}
@@ -27974,6 +28187,33 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Missing Security Header: Referrer-Policy", None,
      "A05:2025 Security Misconfiguration", "SC-8",
      "Add a Referrer-Policy header."),
+    # ── DNS record detection (nuclei dns/ templates) ──
+    # Matches both template-id (e.g. "dmarc-detect") and info.name
+    # (e.g. "DNS DMARC - Detect") since _nuc_search_fields includes both.
+    (r"dmarc.detect|dmarc.detection|dns.dmarc",
+     "Discovery: DMARC Record", "INFO",
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Informational — DMARC record detected."),
+    (r"dns.txt.record|txt.record.detect",
+     "Discovery: TXT Record", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Informational — DNS TXT record detected."),
+    (r"mx.fingerprint|mx.record.detect|mx.detection|mx.record.detection",
+     "Discovery: MX Record", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Informational — MX record detected."),
+    (r"ns.record.detect|nameserver.detect|ns.detection|ns.record.detection",
+     "Discovery: NS Record", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Informational — NS record detected."),
+    (r"spf.record.detect|spf.detection|spf.record",
+     "Discovery: SPF Record", "INFO",
+     "A05:2025 Security Misconfiguration", "SC-8",
+     "Informational — SPF record detected."),
+    (r"wildcard.dns|dns.wildcard",
+     "DNS: Wildcard (*) Detected", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "A wildcard DNS configuration was detected."),
     # ── SSL/TLS ──
     (r"expired-ssl|ssl-cert-expired",
      "SSL/TLS Certificate: Expired", "HIGH",
@@ -28368,6 +28608,101 @@ def _build_nuclei_exclude_tags(target_profile_path):
 # Nuclei template-ids that produce a dynamic title embedding the tech/panel
 # name from nuclei's info.name field.
 _NUCLEI_DYN_TECH  = re.compile(r"^tech-detect$|^wappalyzer-", re.IGNORECASE)
+
+_NUCLEI_TECH_DISPLAY = {
+    "awselb": "AWS Elastic Load Balancer",
+    "aws-alb": "AWS Application Load Balancer",
+    "aws-cloudfront": "AWS CloudFront",
+    "aws-s3": "AWS S3",
+    "cloudflare": "Cloudflare",
+    "akamai": "Akamai",
+    "fastly": "Fastly",
+    "nginx": "Nginx",
+    "apache": "Apache HTTP Server",
+    "iis": "Microsoft IIS",
+    "lighttpd": "Lighttpd",
+    "openresty": "OpenResty",
+    "litespeed": "LiteSpeed",
+    "caddy": "Caddy",
+    "tomcat": "Apache Tomcat",
+    "jetty": "Eclipse Jetty",
+    "gunicorn": "Gunicorn",
+    "uvicorn": "Uvicorn",
+    "php": "PHP",
+    "asp-net": "ASP.NET",
+    "aspnet": "ASP.NET",
+    "django": "Django",
+    "flask": "Flask",
+    "express": "Express.js",
+    "laravel": "Laravel",
+    "rails": "Ruby on Rails",
+    "spring": "Spring Framework",
+    "spring-boot": "Spring Boot",
+    "wordpress": "WordPress",
+    "drupal": "Drupal",
+    "joomla": "Joomla",
+    "magento": "Magento",
+    "shopify": "Shopify",
+    "woocommerce": "WooCommerce",
+    "squarespace": "Squarespace",
+    "wix": "Wix",
+    "react": "React",
+    "angular": "Angular",
+    "vue": "Vue.js",
+    "jquery": "jQuery",
+    "bootstrap": "Bootstrap",
+    "tailwind": "Tailwind CSS",
+    "next-js": "Next.js",
+    "nuxt": "Nuxt.js",
+    "gatsby": "Gatsby",
+    "varnish": "Varnish Cache",
+    "redis": "Redis",
+    "memcached": "Memcached",
+    "mysql": "MySQL",
+    "mariadb": "MariaDB",
+    "postgresql": "PostgreSQL",
+    "mongodb": "MongoDB",
+    "elasticsearch": "Elasticsearch",
+    "docker": "Docker",
+    "kubernetes": "Kubernetes",
+    "grafana": "Grafana",
+    "prometheus-io": "Prometheus",
+    "jenkins": "Jenkins",
+    "gitlab": "GitLab",
+    "bitbucket": "Bitbucket",
+    "jira": "Jira",
+    "confluence": "Confluence",
+    "azure": "Microsoft Azure",
+    "google-cloud": "Google Cloud Platform",
+    "heroku": "Heroku",
+    "netlify": "Netlify",
+    "vercel": "Vercel",
+    "cloudflare-pages": "Cloudflare Pages",
+    "f5-bigip": "F5 BIG-IP",
+    "haproxy": "HAProxy",
+    "citrix": "Citrix ADC",
+    "fortinet": "Fortinet",
+    "palo-alto": "Palo Alto Networks",
+    "imperva": "Imperva",
+    "sucuri": "Sucuri",
+    "modsecurity": "ModSecurity",
+    "oracle": "Oracle",
+    "sap": "SAP",
+    "salesforce": "Salesforce",
+    "hubspot": "HubSpot",
+    "marketo": "Marketo",
+    "recaptcha": "Google reCAPTCHA",
+    "google-analytics": "Google Analytics",
+    "google-tag-manager": "Google Tag Manager",
+    "segment": "Segment",
+    "new-relic": "New Relic",
+    "datadog": "Datadog",
+    "sentry": "Sentry",
+    "okta": "Okta",
+    "auth0": "Auth0",
+    "onelogin": "OneLogin",
+    "keycloak": "Keycloak",
+}
 _NUCLEI_DYN_WAF   = re.compile(r"^waf-detect$|^waf-", re.IGNORECASE)
 _NUCLEI_DYN_PANEL = re.compile(
     r"admin-panel|phpmyadmin|adminer|grafana-default|jenkins"
@@ -28511,12 +28846,20 @@ def _normalize_nuclei(item: dict) -> dict:
             }
 
     # ── Priority 2: Dynamic titles from template category ──
-    # Embed the technology/panel name from nuclei's info.name so findings
-    # merge with Fracture's native "Technology Identified: X" etc.
+    # Use matcher-name (the actual detected technology) instead of
+    # info.name (which is just "Wappalyzer Technology Detection").
     if _NUCLEI_DYN_TECH.search(_tid):
+        if _matcher:
+            _tech_display = _NUCLEI_TECH_DISPLAY.get(
+                _matcher, _matcher.replace("-", " ").replace("_", " ").title())
+        elif _name and _name.lower() not in (
+                "wappalyzer technology detection", "tech detect"):
+            _tech_display = _name
+        else:
+            _tech_display = "Unknown Technology"
         return {
-            "title": f"Technology Identified: {_name}", "risk": "INFO",
-            "description": _desc or f"{_name} detected by nuclei ({_tid}).",
+            "title": f"Technology Identified: {_tech_display}", "risk": "INFO",
+            "description": _desc or f"{_tech_display} detected by nuclei ({_tid}).",
             "output": str(_output)[:2000] if _output else f"Template: {_tid}",
             "owasp": "A05:2025 Security Misconfiguration", "nist": "CM-7",
             "remediation": "Review exposed technology stack for known vulnerabilities.",
@@ -43745,7 +44088,7 @@ def main() -> None:
                         elif _hn in _base_absent:
                             # Absent at base but present at this endpoint — informational
                             out.add_finding(
-                                title=f"Endpoint-Specific Security Header Found: {_hn}",
+                                title=f"Inconsistent Security Header Usage: {_hn}",
                                 url=target["url"], port=target["port"], risk="INFO",
                                 description=(
                                     f"The security header '{_hn}' is present at "
