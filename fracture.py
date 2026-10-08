@@ -14810,7 +14810,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                         errors="replace",
                     )
                     out.add_finding(
-                        title="Unsafe HTTP Methods Enabled",
+                        title="HTTP Methods: Unsafe Methods Enabled",
                         url=url, port=target["port"], risk="MEDIUM",
                         description=(
                             f"The server at {url} advertises potentially dangerous "
@@ -20401,7 +20401,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
             out.add_finding(
-                title="HTTP Methods: Dangerous Methods Enabled",
+                title="HTTP Methods: Unsafe Methods Enabled",
                 url=url, port=target["port"], risk="MEDIUM",
                 description=(
                     "The HTTP TRACE method is enabled. TRACE echoes back the request "
@@ -27841,21 +27841,11 @@ _NIKTO_NORM: "list[tuple]" = [
      "Directory Listing Enabled", "MEDIUM",
      "A01:2025 Broken Access Control", "CM-7",
      "Disable directory listing on the web server."),
-    # ── HTTP methods — informational listing FIRST (catches nikto
-    #    "Allowed HTTP Methods:" before TRACE regex can grab it) ──
-    (r"Allowed HTTP Methods?:",
-     "HTTP Methods Allowed", "LOW",
+    # ── HTTP methods — all merge into one finding ──
+    (r"Allowed HTTP Methods?:|Public HTTP Methods?:|(?:OPTIONS|PUT|DELETE|TRACE|TRACK).*method|cross.site.tracing|XST",
+     "HTTP Methods: Unsafe Methods Enabled", "MEDIUM",
      "A05:2025 Security Misconfiguration", "CM-7",
-     "Review allowed HTTP methods and disable unnecessary ones."),
-    # ── HTTP methods (dangerous — TRACE, PUT, DELETE all merge) ──
-    (r"TRACE.*method|cross.site.tracing|XST",
-     "HTTP Methods: Dangerous Methods Enabled", "MEDIUM",
-     "A05:2025 Security Misconfiguration", "CM-7",
-     "Disable unnecessary HTTP methods (PUT, DELETE, TRACE)."),
-    (r"(?:OPTIONS|PUT|DELETE).*method.*(?:enabled|allowed|active)",
-     "HTTP Methods: Dangerous Methods Enabled", "MEDIUM",
-     "A05:2025 Security Misconfiguration", "CM-7",
-     "Disable unnecessary HTTP methods (PUT, DELETE, TRACE)."),
+     "Disable unnecessary HTTP methods; review and restrict allowed methods to only those required."),
     # ── Exposed files / paths ──
     (r"phpinfo\(\)|\/phpinfo\.php|\/info\.php",
      "Sensitive File Exposed: phpinfo()", "HIGH",
@@ -28307,16 +28297,11 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Directory Listing Enabled", "MEDIUM",
      "A01:2025 Broken Access Control", "CM-7",
      "Disable directory listing on the web server."),
-    # ── HTTP methods — dangerous (PUT/DELETE only) ──
-    (r"put-method|delete-method",
-     "HTTP Methods: Dangerous Methods Enabled", "MEDIUM",
+    # ── HTTP methods — all merge into one finding ──
+    (r"put-method|delete-method|options-method|http-method",
+     "HTTP Methods: Unsafe Methods Enabled", "MEDIUM",
      "A05:2025 Security Misconfiguration", "CM-7",
-     "Disable unnecessary HTTP methods (PUT, DELETE, TRACE)."),
-    # ── HTTP methods — informational discovery ──
-    (r"options-method|http-method",
-     "HTTP Methods Allowed", "LOW",
-     "A05:2025 Security Misconfiguration", "CM-7",
-     "Review allowed HTTP methods and disable unnecessary ones."),
+     "Disable unnecessary HTTP methods; review and restrict allowed methods to only those required."),
     # ── Cookies ──
     (r"cookies-without-httponly|cookie-httponly|httponly-cookie",
      "Missing Secure Cookie Attribute: HttpOnly", "MEDIUM",
@@ -28348,11 +28333,11 @@ _NUCLEI_NORM: "list[tuple]" = [
      "CORS Misconfiguration Allowing Credential Leakage", "HIGH",
      "A01:2025 Broken Access Control", "AC-4",
      "Review CORS configuration; do not reflect arbitrary origins with credentials."),
-    # ── HTTP methods — TRACE merged into Dangerous Methods ──
+    # ── HTTP methods — TRACE ──
     (r"^http-trace$|cross-site-tracing-xss|trace-method",
-     "HTTP Methods: Dangerous Methods Enabled", "MEDIUM",
+     "HTTP Methods: Unsafe Methods Enabled", "MEDIUM",
      "A05:2025 Security Misconfiguration", "CM-7",
-     "Disable unnecessary HTTP methods (PUT, DELETE, TRACE)."),
+     "Disable unnecessary HTTP methods; review and restrict allowed methods to only those required."),
     # ── Debug mode ──
     (r"aspx-debug-mode|werkzeug-debugger|django-debug|laravel-debug",
      "Debug Mode Enabled / Developer Console Exposed", "MEDIUM",

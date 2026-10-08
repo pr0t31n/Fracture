@@ -992,7 +992,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -3889,7 +3889,7 @@
         150024
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "DE.CM-01",
         "PR.DS-02"
@@ -3962,7 +3962,7 @@
           "url": "https://github.com/r0oth3x49/ghauri",
           "install": "pip install ghauri",
           "command": "ghauri -u 'https://TARGET/page?id=1' --dbs --batch",
-          "description": "Advanced SQL injection detection tool \u2014 alternative to sqlmap with improved WAF bypass"
+          "description": "Advanced SQL injection detection tool — alternative to sqlmap with improved WAF bypass"
         },
         {
           "name": "nuclei",
@@ -3978,7 +3978,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "SQL injection was detected. User-supplied input is incorporated into SQL queries without proper parameterization or escaping. An attacker can manipulate database queries to extract, modify, or delete data, bypass authentication, or execute operating system commands.",
@@ -4041,7 +4041,7 @@
         150024
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "DE.CM-01",
         "PR.DS-02"
@@ -4114,7 +4114,7 @@
           "url": "https://github.com/r0oth3x49/ghauri",
           "install": "pip install ghauri",
           "command": "ghauri -u 'https://TARGET/page?id=1' --dbs --batch",
-          "description": "Advanced SQL injection detection tool \u2014 alternative to sqlmap with improved WAF bypass"
+          "description": "Advanced SQL injection detection tool — alternative to sqlmap with improved WAF bypass"
         },
         {
           "name": "nuclei",
@@ -4130,7 +4130,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "Boolean-based blind SQL injection was detected. The application does not return error messages, but its behavior changes based on the truth value of injected conditions, allowing data extraction through binary search.",
@@ -4193,7 +4193,7 @@
         150024
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "DE.CM-01",
         "PR.DS-02"
@@ -4266,7 +4266,7 @@
           "url": "https://github.com/r0oth3x49/ghauri",
           "install": "pip install ghauri",
           "command": "ghauri -u 'https://TARGET/page?id=1' --dbs --batch",
-          "description": "Advanced SQL injection detection tool \u2014 alternative to sqlmap with improved WAF bypass"
+          "description": "Advanced SQL injection detection tool — alternative to sqlmap with improved WAF bypass"
         },
         {
           "name": "nuclei",
@@ -4282,7 +4282,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "Time-based blind SQL injection was detected. The server introduces measurable response delays when injected time-delay SQL functions (e.g., SLEEP, WAITFOR DELAY) are executed, confirming SQL injection without visible output.",
@@ -4329,7 +4329,7 @@
         150044
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -4390,7 +4390,7 @@
           "url": "https://github.com/stampery/mongoaudit",
           "install": "pip install mongoaudit",
           "command": "mongoaudit --host TARGET --port 27017",
-          "description": "Automated MongoDB security auditing tool \u2014 checks authentication, SSL, and authorization"
+          "description": "Automated MongoDB security auditing tool — checks authentication, SSL, and authorization"
         },
         {
           "name": "nuclei",
@@ -4502,7 +4502,7 @@
         150046
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -4595,7 +4595,7 @@
     },
     {
       "id": "FR-087",
-      "title": "Cross-Site Scripting (XSS) \u2014 Reflected",
+      "title": "Cross-Site Scripting (XSS) — Reflected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4641,7 +4641,7 @@
     },
     {
       "id": "FR-088",
-      "title": "Cross-Site Scripting (XSS) \u2014 Stored",
+      "title": "Cross-Site Scripting (XSS) — Stored",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4687,7 +4687,7 @@
     },
     {
       "id": "FR-089",
-      "title": "Cross-Site Scripting (XSS) \u2014 DOM-Based",
+      "title": "Cross-Site Scripting (XSS) — DOM-Based",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4872,7 +4872,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A03:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.DS-02"
       ],
@@ -4975,7 +4975,7 @@
         150041
       ],
       "owasp_web": "A05:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -5391,7 +5391,7 @@
         150061
       ],
       "owasp_web": "A01:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.AA-05",
         "PR.DS-02"
@@ -5552,7 +5552,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A10:2025",
-      "owasp_api": "API7:2023 \u2013 Server Side Request Forgery",
+      "owasp_api": "API7:2023 – Server Side Request Forgery",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -5746,7 +5746,7 @@
     },
     {
       "id": "FR-104",
-      "title": "Broken Authentication \u2014 Default Credentials",
+      "title": "Broken Authentication — Default Credentials",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5977,7 +5977,7 @@
     },
     {
       "id": "FR-109",
-      "title": "Sensitive File Exposed \u2014 /etc/passwd",
+      "title": "Sensitive File Exposed — /etc/passwd",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6069,7 +6069,7 @@
     },
     {
       "id": "FR-111",
-      "title": "Sensitive File Exposed \u2014 Private Key",
+      "title": "Sensitive File Exposed — Private Key",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6115,7 +6115,7 @@
     },
     {
       "id": "FR-112",
-      "title": "Sensitive File Exposed \u2014 phpinfo()",
+      "title": "Sensitive File Exposed — phpinfo()",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6161,7 +6161,7 @@
     },
     {
       "id": "FR-113",
-      "title": "Sensitive File Exposed \u2014 Composer/NPM Metadata",
+      "title": "Sensitive File Exposed — Composer/NPM Metadata",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6207,7 +6207,7 @@
     },
     {
       "id": "FR-114",
-      "title": "Vulnerability Scanner Finding \u2014 Known CVE",
+      "title": "Vulnerability Scanner Finding — Known CVE",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6253,7 +6253,7 @@
     },
     {
       "id": "FR-115",
-      "title": "Vulnerability Scanner Finding \u2014 Exposed Panel",
+      "title": "Vulnerability Scanner Finding — Exposed Panel",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6299,7 +6299,7 @@
     },
     {
       "id": "FR-116",
-      "title": "Vulnerability Scanner Finding \u2014 Misconfiguration",
+      "title": "Vulnerability Scanner Finding — Misconfiguration",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6827,7 +6827,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A07:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AA-01"
       ],
@@ -6885,7 +6885,7 @@
           "url": "https://hashcat.net",
           "install": "apt-get install hashcat  OR  brew install hashcat",
           "command": "hashcat -m 0 hashes.txt /usr/share/wordlists/rockyou.txt  # MD5\nhashcat -m 1000 hashes.txt rockyou.txt  # NTLM",
-          "description": "World's fastest password recovery tool \u2014 GPU-accelerated with 300+ hash types"
+          "description": "World's fastest password recovery tool — GPU-accelerated with 300+ hash types"
         },
         {
           "name": "CrackMapExec",
@@ -6960,7 +6960,7 @@
       "aliases": [
         "Unauthorized Object Access",
         "Sequential ID Enumeration",
-        "BOLA \u2013 Broken Object Level Authorization",
+        "BOLA – Broken Object Level Authorization",
         "Object-Level Authorization Bypass",
         "IDOR"
       ],
@@ -6984,7 +6984,7 @@
         150140
       ],
       "owasp_web": "A01:2025",
-      "owasp_api": "API1:2023 \u2013 Broken Object Level Authorization",
+      "owasp_api": "API1:2023 – Broken Object Level Authorization",
       "nist_csf2": [
         "PR.AA-05",
         "DE.CM-01"
@@ -7039,9 +7039,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "Arjun",
@@ -7049,7 +7049,7 @@
           "url": "https://github.com/s0md3v/Arjun",
           "install": "pip3 install arjun",
           "command": "arjun -u https://TARGET/api/endpoint --stable -t 3",
-          "description": "HTTP parameter discovery scanner \u2014 finds hidden GET/POST/JSON parameters"
+          "description": "HTTP parameter discovery scanner — finds hidden GET/POST/JSON parameters"
         },
         {
           "name": "ffuf",
@@ -7101,7 +7101,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A01:2025",
-      "owasp_api": "API1:2023 \u2013 Broken Object Level Authorization",
+      "owasp_api": "API1:2023 – Broken Object Level Authorization",
       "nist_csf2": [
         "PR.AA-05"
       ],
@@ -7149,9 +7149,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "ffuf",
@@ -7212,7 +7212,7 @@
         150150
       ],
       "owasp_web": "A01:2025",
-      "owasp_api": "API5:2023 \u2013 Broken Function Level Authorization",
+      "owasp_api": "API5:2023 – Broken Function Level Authorization",
       "nist_csf2": [
         "PR.AA-05",
         "DE.CM-03"
@@ -7265,9 +7265,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "ffuf",
@@ -7328,7 +7328,7 @@
         150145
       ],
       "owasp_web": "A01:2025",
-      "owasp_api": "API5:2023 \u2013 Broken Function Level Authorization",
+      "owasp_api": "API5:2023 – Broken Function Level Authorization",
       "nist_csf2": [
         "PR.AA-05"
       ],
@@ -7382,9 +7382,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "ffuf",
@@ -7444,7 +7444,7 @@
         150120
       ],
       "owasp_web": "A07:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AA-01"
       ],
@@ -7864,7 +7864,7 @@
         "Open URL Redirect",
         "Redirect Parameter Manipulation",
         "Unvalidated Redirect",
-        "Unsafe Consumption \u2014 Open Redirect to External URL"
+        "Unsafe Consumption — Open Redirect to External URL"
       ],
       "source_tools": [
         "fracture"
@@ -8166,7 +8166,7 @@
     },
     {
       "id": "FR-144",
-      "title": "Unrestricted File Upload \u2014 Executable File",
+      "title": "Unrestricted File Upload — Executable File",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8212,7 +8212,7 @@
     },
     {
       "id": "FR-145",
-      "title": "Unrestricted File Upload \u2014 MIME Type Bypass",
+      "title": "Unrestricted File Upload — MIME Type Bypass",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8258,7 +8258,7 @@
     },
     {
       "id": "FR-146",
-      "title": "File Upload \u2014 Path Traversal in Filename",
+      "title": "File Upload — Path Traversal in Filename",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8307,7 +8307,7 @@
       "title": "Mass Assignment Vulnerability",
       "aliases": [
         "Over-Posted Parameters",
-        "Mass Assignment \u2014 Accepted",
+        "Mass Assignment — Accepted",
         "Hidden Field Tampering",
         "Auto-Binding Vulnerability",
         "Mass Assignment",
@@ -8334,7 +8334,7 @@
         150146
       ],
       "owasp_web": "A04:2025",
-      "owasp_api": "API6:2023 \u2013 Unrestricted Access to Sensitive Business Flows",
+      "owasp_api": "API6:2023 – Unrestricted Access to Sensitive Business Flows",
       "nist_csf2": [
         "PR.AA-05"
       ],
@@ -8386,7 +8386,7 @@
           "url": "https://github.com/s0md3v/Arjun",
           "install": "pip3 install arjun",
           "command": "arjun -u https://TARGET/api/endpoint --stable -t 3",
-          "description": "HTTP parameter discovery scanner \u2014 finds hidden GET/POST/JSON parameters"
+          "description": "HTTP parameter discovery scanner — finds hidden GET/POST/JSON parameters"
         },
         {
           "name": "ffuf",
@@ -8419,7 +8419,7 @@
     },
     {
       "id": "FR-148",
-      "title": "Mass Assignment \u2014 Privilege Escalation via Role Field",
+      "title": "Mass Assignment — Privilege Escalation via Role Field",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8581,7 +8581,7 @@
       ],
       "qualys_qids": [],
       "owasp_web": "A01:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01"
       ],
@@ -8655,7 +8655,7 @@
     },
     {
       "id": "FR-152",
-      "title": "CORS Misconfiguration \u2014 Arbitrary Origin Reflected",
+      "title": "CORS Misconfiguration — Arbitrary Origin Reflected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8702,7 +8702,7 @@
     },
     {
       "id": "FR-153",
-      "title": "CORS Misconfiguration \u2014 Null Origin Allowed",
+      "title": "CORS Misconfiguration — Null Origin Allowed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8748,7 +8748,7 @@
     },
     {
       "id": "FR-154",
-      "title": "Business Logic Flaw \u2014 Negative Value Accepted",
+      "title": "Business Logic Flaw — Negative Value Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8794,7 +8794,7 @@
     },
     {
       "id": "FR-155",
-      "title": "Business Logic Flaw \u2014 Price Manipulation",
+      "title": "Business Logic Flaw — Price Manipulation",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8840,7 +8840,7 @@
     },
     {
       "id": "FR-156",
-      "title": "Business Logic Flaw \u2014 Coupon/Discount Abuse",
+      "title": "Business Logic Flaw — Coupon/Discount Abuse",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8886,7 +8886,7 @@
     },
     {
       "id": "FR-157",
-      "title": "Business Logic Flaw \u2014 Workflow Step Bypass",
+      "title": "Business Logic Flaw — Workflow Step Bypass",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8932,7 +8932,7 @@
     },
     {
       "id": "FR-158",
-      "title": "Business Logic Flaw \u2014 Race Condition",
+      "title": "Business Logic Flaw — Race Condition",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9072,7 +9072,7 @@
     },
     {
       "id": "FR-161",
-      "title": "Screenshot Captured \u2014 Web Application Surface",
+      "title": "Screenshot Captured — Web Application Surface",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9164,7 +9164,7 @@
     },
     {
       "id": "FR-163",
-      "title": "FFUF \u2014 Administrative Path Discovered",
+      "title": "FFUF — Administrative Path Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9210,7 +9210,7 @@
     },
     {
       "id": "FR-164",
-      "title": "shcheck \u2014 Missing Security Header",
+      "title": "shcheck — Missing Security Header",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9256,7 +9256,7 @@
     },
     {
       "id": "FR-165",
-      "title": "Crawl \u2014 Undocumented Endpoint Discovered",
+      "title": "Crawl — Undocumented Endpoint Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9302,7 +9302,7 @@
     },
     {
       "id": "FR-166",
-      "title": "Crawl \u2014 External Domain Reference Found",
+      "title": "Crawl — External Domain Reference Found",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9395,7 +9395,7 @@
     },
     {
       "id": "FR-168",
-      "title": "Authentication \u2014 Concurrent Session Not Restricted",
+      "title": "Authentication — Concurrent Session Not Restricted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9441,8 +9441,10 @@
     },
     {
       "id": "FR-169",
-      "title": "HTTP Methods \u2014 Dangerous Methods Enabled (PUT/DELETE/TRACE)",
-      "aliases": [],
+      "title": "HTTP Methods: Unsafe Methods Enabled",
+      "aliases": [
+        "HTTP Methods — Dangerous Methods Enabled (PUT/DELETE/TRACE)"
+      ],
       "source_tools": [
         "fracture"
       ],
@@ -9473,7 +9475,7 @@
       "remediation_category": "",
       "remediation_effort": "",
       "validation_tools": [],
-      "description": "The web server responds to dangerous HTTP methods including PUT (file upload), DELETE (file deletion), or TRACE (XST \u2014 Cross-Site Tracing). These methods may enable unauthorized modification of server content or session token theft.",
+      "description": "The web server responds to dangerous HTTP methods including PUT (file upload), DELETE (file deletion), or TRACE (XST — Cross-Site Tracing). These methods may enable unauthorized modification of server content or session token theft.",
       "impact": "",
       "_x_owasp": "A05:2025",
       "_x_nist": "CM-7,AC-3",
@@ -9571,7 +9573,7 @@
     },
     {
       "id": "FR-171",
-      "title": "Sensitive Data Exposure \u2014 PII in Response",
+      "title": "Sensitive Data Exposure — PII in Response",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9665,7 +9667,7 @@
     },
     {
       "id": "FR-173",
-      "title": "Subdomain Takeover \u2014 S3 Bucket Not Found",
+      "title": "Subdomain Takeover — S3 Bucket Not Found",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9711,7 +9713,7 @@
     },
     {
       "id": "FR-174",
-      "title": "Subdomain Takeover \u2014 GitHub Pages",
+      "title": "Subdomain Takeover — GitHub Pages",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9757,7 +9759,7 @@
     },
     {
       "id": "FR-175",
-      "title": "Subdomain Takeover \u2014 Heroku",
+      "title": "Subdomain Takeover — Heroku",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10034,7 +10036,7 @@
     },
     {
       "id": "FR-181",
-      "title": "Access Matrix \u2014 Unauthenticated Access to Authenticated Endpoint",
+      "title": "Access Matrix — Unauthenticated Access to Authenticated Endpoint",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10080,7 +10082,7 @@
     },
     {
       "id": "FR-182",
-      "title": "Access Matrix \u2014 Lower-Role Access to Higher-Role Endpoint",
+      "title": "Access Matrix — Lower-Role Access to Higher-Role Endpoint",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10126,7 +10128,7 @@
     },
     {
       "id": "FR-183",
-      "title": "Access Matrix \u2014 User A Can Read User B Data",
+      "title": "Access Matrix — User A Can Read User B Data",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10172,7 +10174,7 @@
     },
     {
       "id": "FR-184",
-      "title": "Access Matrix \u2014 User A Can Modify User B Data",
+      "title": "Access Matrix — User A Can Modify User B Data",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10218,7 +10220,7 @@
     },
     {
       "id": "FR-185",
-      "title": "Access Matrix \u2014 Admin Functionality Accessible by Regular User",
+      "title": "Access Matrix — Admin Functionality Accessible by Regular User",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10264,7 +10266,7 @@
     },
     {
       "id": "FR-186",
-      "title": "HTTP Security Header \u2014 X-Frame-Options Incorrectly Configured",
+      "title": "HTTP Security Header — X-Frame-Options Incorrectly Configured",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10310,7 +10312,7 @@
     },
     {
       "id": "FR-187",
-      "title": "Content-Security-Policy \u2014 Unsafe-Eval Allowed",
+      "title": "Content-Security-Policy — Unsafe-Eval Allowed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10804,12 +10806,12 @@
       "searchsploit_terms": [],
       "metasploit_modules": [],
       "kev": false,
-      "remediation_brief": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection \u2014 fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform.",
+      "remediation_brief": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection — fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform.",
       "remediation_component": "",
       "remediation_category": "",
       "remediation_effort": "",
       "validation_tools": [],
-      "description": "A WAF or edge security platform was identified in front of the target via response headers or body signatures. WAF rules may suppress injection probes \u2014 absence of a finding does not confirm absence of the vulnerability. Bot-protection may interrupt automated probes.",
+      "description": "A WAF or edge security platform was identified in front of the target via response headers or body signatures. WAF rules may suppress injection probes — absence of a finding does not confirm absence of the vulnerability. Bot-protection may interrupt automated probes.",
       "impact": "",
       "_x_owasp": "A05:2025",
       "_x_nist": "SC-7",
@@ -10819,7 +10821,7 @@
       "_x_cves": [],
       "_x_service": "http",
       "_x_phase": "recon",
-      "_x_remediation": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection \u2014 fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform."
+      "_x_remediation": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection — fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform."
     },
     {
       "id": "FR-198",
@@ -11153,7 +11155,7 @@
           "description": "Fast template-based vulnerability scanner with 5000+ community templates"
         }
       ],
-      "description": "A wildcard/catch-all response was detected \u2014 the server returns the same response for all unknown paths. Directory brute-forcing may be unreliable; all path-based findings are validated against the wildcard baseline.",
+      "description": "A wildcard/catch-all response was detected — the server returns the same response for all unknown paths. Directory brute-forcing may be unreliable; all path-based findings are validated against the wildcard baseline.",
       "impact": "",
       "_x_owasp": "A05:2025",
       "_x_nist": "CM-7",
@@ -11447,7 +11449,7 @@
         86002
       ],
       "owasp_web": "A05:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01",
         "DE.CM-01"
@@ -11564,7 +11566,7 @@
         86002
       ],
       "owasp_web": "A05:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01",
         "DE.CM-01"
@@ -11681,7 +11683,7 @@
         86002
       ],
       "owasp_web": "A05:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01",
         "DE.CM-01"
@@ -11799,7 +11801,7 @@
         86002
       ],
       "owasp_web": "A05:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01",
         "DE.CM-01"
@@ -12252,7 +12254,7 @@
     },
     {
       "id": "FR-216",
-      "title": "Subdomain Takeover \u2014 Dangling CNAME",
+      "title": "Subdomain Takeover — Dangling CNAME",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13133,7 +13135,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A05:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "ID.AM-01"
       ],
@@ -13188,7 +13190,7 @@
           "url": "https://github.com/s0md3v/Arjun",
           "install": "pip3 install arjun",
           "command": "arjun -u https://TARGET/api/endpoint --stable -t 3",
-          "description": "HTTP parameter discovery scanner \u2014 finds hidden GET/POST/JSON parameters"
+          "description": "HTTP parameter discovery scanner — finds hidden GET/POST/JSON parameters"
         },
         {
           "name": "ffuf",
@@ -14062,7 +14064,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -14321,7 +14323,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -14435,7 +14437,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -14549,7 +14551,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -14655,7 +14657,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -14761,7 +14763,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -14872,7 +14874,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "ffuf",
@@ -15034,7 +15036,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -15188,7 +15190,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -15294,7 +15296,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -15780,7 +15782,7 @@
         38172
       ],
       "owasp_web": "A02:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.DS-01",
         "PR.DS-02"
@@ -15919,7 +15921,7 @@
         38172
       ],
       "owasp_web": "A02:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.DS-01",
         "PR.DS-02"
@@ -16060,7 +16062,7 @@
         38172
       ],
       "owasp_web": "A02:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.DS-01",
         "PR.DS-02"
@@ -16397,7 +16399,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         },
         {
           "name": "testssl.sh",
@@ -17048,7 +17050,7 @@
         150024
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "DE.CM-01",
         "PR.DS-02"
@@ -17121,7 +17123,7 @@
           "url": "https://github.com/r0oth3x49/ghauri",
           "install": "pip install ghauri",
           "command": "ghauri -u 'https://TARGET/page?id=1' --dbs --batch",
-          "description": "Advanced SQL injection detection tool \u2014 alternative to sqlmap with improved WAF bypass"
+          "description": "Advanced SQL injection detection tool — alternative to sqlmap with improved WAF bypass"
         },
         {
           "name": "nuclei",
@@ -17137,7 +17139,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "Error-based SQL injection was detected. Database error messages containing SQL syntax are returned in response to crafted input, confirming the application is vulnerable to SQL injection and disclosing database version/structure information.",
@@ -17200,7 +17202,7 @@
         150024
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "DE.CM-01",
         "PR.DS-02"
@@ -17273,7 +17275,7 @@
           "url": "https://github.com/r0oth3x49/ghauri",
           "install": "pip install ghauri",
           "command": "ghauri -u 'https://TARGET/page?id=1' --dbs --batch",
-          "description": "Advanced SQL injection detection tool \u2014 alternative to sqlmap with improved WAF bypass"
+          "description": "Advanced SQL injection detection tool — alternative to sqlmap with improved WAF bypass"
         },
         {
           "name": "nuclei",
@@ -17289,7 +17291,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "sqlmap confirmed SQL injection on the target parameter. SQL injection allows attackers to read, modify, or delete database contents and may enable operating system command execution.",
@@ -17352,7 +17354,7 @@
         150024
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "DE.CM-01",
         "PR.DS-02"
@@ -17425,7 +17427,7 @@
           "url": "https://github.com/r0oth3x49/ghauri",
           "install": "pip install ghauri",
           "command": "ghauri -u 'https://TARGET/page?id=1' --dbs --batch",
-          "description": "Advanced SQL injection detection tool \u2014 alternative to sqlmap with improved WAF bypass"
+          "description": "Advanced SQL injection detection tool — alternative to sqlmap with improved WAF bypass"
         },
         {
           "name": "nuclei",
@@ -17441,7 +17443,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "A second-order (stored) SQL injection vector was identified. User-supplied input stored in the database is later included in SQL queries without sanitisation when retrieved and processed.",
@@ -17496,7 +17498,7 @@
         150051
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -17575,7 +17577,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "OS command injection was detected. User-supplied input is passed to an operating system shell without sanitisation, allowing arbitrary command execution on the server.",
@@ -17611,7 +17613,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A03:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.DS-02",
         "PR.PS-01",
@@ -17691,7 +17693,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         },
         {
           "name": "commix",
@@ -17757,7 +17759,7 @@
         150014
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -18014,7 +18016,7 @@
         150014
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -18158,7 +18160,7 @@
         150014
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -18651,7 +18653,7 @@
       ],
       "qualys_qids": [],
       "owasp_web": "A04:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01"
       ],
@@ -18725,14 +18727,14 @@
     },
     {
       "id": "FR-287",
-      "title": "HTTP TRACE Method Enabled (Cross-Site Tracing)",
+      "title": "HTTP Methods: Unsafe Methods Enabled",
       "aliases": [
         "HTTP TRACE Method Enabled (Cross-Site Tracing)"
       ],
       "source_tools": [
         "fracture"
       ],
-      "risk": "LOW",
+      "risk": "MEDIUM",
       "cwe": [
         "16",
         "693"
@@ -18864,7 +18866,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A10:2025",
-      "owasp_api": "API7:2023 \u2013 Server Side Request Forgery",
+      "owasp_api": "API7:2023 – Server Side Request Forgery",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -18967,7 +18969,7 @@
     },
     {
       "id": "FR-289",
-      "title": "Blind SSRF \u2014 Internal Network Probing",
+      "title": "Blind SSRF — Internal Network Probing",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19013,7 +19015,7 @@
     },
     {
       "id": "FR-290",
-      "title": "Insecure Deserialization \u2014 Serialized Object Accepted",
+      "title": "Insecure Deserialization — Serialized Object Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19059,7 +19061,7 @@
     },
     {
       "id": "FR-291",
-      "title": "Insecure Deserialization \u2014 YAML Tag Injection",
+      "title": "Insecure Deserialization — YAML Tag Injection",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19105,7 +19107,7 @@
     },
     {
       "id": "FR-292",
-      "title": "Insecure Deserialization \u2014 Error Disclosure",
+      "title": "Insecure Deserialization — Error Disclosure",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19151,7 +19153,7 @@
     },
     {
       "id": "FR-293",
-      "title": "Verbose Error Messages \u2014 Stack Trace Disclosed",
+      "title": "Verbose Error Messages — Stack Trace Disclosed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19219,7 +19221,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A02:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.DS-01"
       ],
@@ -19443,7 +19445,7 @@
         150101
       ],
       "owasp_web": "A07:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AA-01",
         "DE.CM-01"
@@ -19525,7 +19527,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         },
         {
           "name": "nuclei",
@@ -19643,9 +19645,9 @@
     },
     {
       "id": "FR-299",
-      "title": "Timing Attack \u2014 Non-Constant-Time Authentication",
+      "title": "Timing Attack — Non-Constant-Time Authentication",
       "aliases": [
-        "Timing Attack \u2014 Non-Constant-Time Authentication"
+        "Timing Attack — Non-Constant-Time Authentication"
       ],
       "source_tools": [
         "fracture"
@@ -19661,7 +19663,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A07:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AC-01"
       ],
@@ -19766,7 +19768,7 @@
         150130
       ],
       "owasp_web": "A02:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AA-01",
         "PR.DS-01"
@@ -19944,9 +19946,9 @@
     },
     {
       "id": "FR-303",
-      "title": "JWT \u2014 Missing Expiry Claim (No exp)",
+      "title": "JWT — Missing Expiry Claim (No exp)",
       "aliases": [
-        "JWT \u2014 Missing Expiry Claim (No exp)"
+        "JWT — Missing Expiry Claim (No exp)"
       ],
       "source_tools": [
         "fracture"
@@ -19962,7 +19964,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A02:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AC-01",
         "PR.AC-07"
@@ -20118,7 +20120,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A07:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AC-01",
         "PR.DS-01"
@@ -20227,7 +20229,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A07:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AC-01",
         "PR.DS-01"
@@ -21230,7 +21232,7 @@
         150116
       ],
       "owasp_web": "A05:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01"
       ],
@@ -21280,7 +21282,7 @@
           "url": "https://github.com/RUB-NDS/CORStest",
           "install": "git clone https://github.com/RUB-NDS/CORStest.git",
           "command": "python corstest.py -i targets.txt -v",
-          "description": "CORS misconfiguration tester \u2014 checks for wildcard, null origin, and prefix bypass"
+          "description": "CORS misconfiguration tester — checks for wildcard, null origin, and prefix bypass"
         },
         {
           "name": "Corsy",
@@ -21314,9 +21316,9 @@
     },
     {
       "id": "FR-321",
-      "title": "JSONP Endpoint \u2014 Cross-Origin Data Leakage",
+      "title": "JSONP Endpoint — Cross-Origin Data Leakage",
       "aliases": [
-        "JSONP Endpoint \u2014 Cross-Origin Data Leakage"
+        "JSONP Endpoint — Cross-Origin Data Leakage"
       ],
       "source_tools": [
         "fracture"
@@ -21332,7 +21334,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A05:2025",
-      "owasp_api": "API7:2023 \u2013 Server Side Request Forgery",
+      "owasp_api": "API7:2023 – Server Side Request Forgery",
       "nist_csf2": [
         "PR.DS-02",
         "PR.AC-05"
@@ -21422,7 +21424,7 @@
     },
     {
       "id": "FR-322",
-      "title": "Cross-Site Request Forgery (CSRF) \u2014 Missing Token",
+      "title": "Cross-Site Request Forgery (CSRF) — Missing Token",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -21488,7 +21490,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A01:2025",
-      "owasp_api": "API5:2023 \u2013 Broken Function Level Authorization",
+      "owasp_api": "API5:2023 – Broken Function Level Authorization",
       "nist_csf2": [
         "PR.AC-04",
         "PR.AC-03"
@@ -21550,9 +21552,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "nuclei",
@@ -21709,7 +21711,7 @@
         150141
       ],
       "owasp_web": "A01:2025",
-      "owasp_api": "API1:2023 \u2013 Broken Object Level Authorization",
+      "owasp_api": "API1:2023 – Broken Object Level Authorization",
       "nist_csf2": [
         "PR.AA-05"
       ],
@@ -21759,9 +21761,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "Arjun",
@@ -21769,7 +21771,7 @@
           "url": "https://github.com/s0md3v/Arjun",
           "install": "pip3 install arjun",
           "command": "arjun -u https://TARGET/api/endpoint --stable -t 3",
-          "description": "HTTP parameter discovery scanner \u2014 finds hidden GET/POST/JSON parameters"
+          "description": "HTTP parameter discovery scanner — finds hidden GET/POST/JSON parameters"
         },
         {
           "name": "nuclei",
@@ -21822,7 +21824,7 @@
         150145
       ],
       "owasp_web": "A01:2025",
-      "owasp_api": "API5:2023 \u2013 Broken Function Level Authorization",
+      "owasp_api": "API5:2023 – Broken Function Level Authorization",
       "nist_csf2": [
         "PR.AA-05"
       ],
@@ -21876,9 +21878,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "ffuf",
@@ -21960,7 +21962,7 @@
       "title": "Mass Assignment / Privilege Escalation via Parameter Binding",
       "aliases": [
         "Over-Posted Parameters",
-        "Mass Assignment \u2014 Accepted",
+        "Mass Assignment — Accepted",
         "Hidden Field Tampering",
         "Auto-Binding Vulnerability",
         "Mass Assignment",
@@ -21987,7 +21989,7 @@
         150146
       ],
       "owasp_web": "A04:2025",
-      "owasp_api": "API6:2023 \u2013 Unrestricted Access to Sensitive Business Flows",
+      "owasp_api": "API6:2023 – Unrestricted Access to Sensitive Business Flows",
       "nist_csf2": [
         "PR.AA-05"
       ],
@@ -22039,7 +22041,7 @@
           "url": "https://github.com/s0md3v/Arjun",
           "install": "pip3 install arjun",
           "command": "arjun -u https://TARGET/api/endpoint --stable -t 3",
-          "description": "HTTP parameter discovery scanner \u2014 finds hidden GET/POST/JSON parameters"
+          "description": "HTTP parameter discovery scanner — finds hidden GET/POST/JSON parameters"
         },
         {
           "name": "ffuf",
@@ -22091,7 +22093,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A01:2025",
-      "owasp_api": "API1:2023 \u2013 Broken Object Level Authorization",
+      "owasp_api": "API1:2023 – Broken Object Level Authorization",
       "nist_csf2": [
         "PR.AC-04",
         "PR.DS-02"
@@ -22151,9 +22153,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "nuclei",
@@ -22205,7 +22207,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A05:2025",
-      "owasp_api": "API7:2023 \u2013 Server Side Request Forgery",
+      "owasp_api": "API7:2023 – Server Side Request Forgery",
       "nist_csf2": [
         "PR.PS-01",
         "ID.AM-01",
@@ -22308,7 +22310,7 @@
     },
     {
       "id": "FR-332",
-      "title": "Business Logic \u2014 Hidden Price/Value Field Tampering",
+      "title": "Business Logic — Hidden Price/Value Field Tampering",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22355,7 +22357,7 @@
     },
     {
       "id": "FR-333",
-      "title": "Business Logic \u2014 Numeric Field Accepts Negative/Zero Value",
+      "title": "Business Logic — Numeric Field Accepts Negative/Zero Value",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22402,7 +22404,7 @@
     },
     {
       "id": "FR-334",
-      "title": "Business Logic \u2014 Potential Race Condition (Duplicate Submission)",
+      "title": "Business Logic — Potential Race Condition (Duplicate Submission)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22448,7 +22450,7 @@
     },
     {
       "id": "FR-335",
-      "title": "Business Logic \u2014 Workflow Step Directly Accessible",
+      "title": "Business Logic — Workflow Step Directly Accessible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22666,7 +22668,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         },
         {
           "name": "nuclei",
@@ -23724,7 +23726,7 @@
     },
     {
       "id": "FR-365",
-      "title": "Server-Side Request Forgery (SSRF) \u2014 {ssrf_desc}",
+      "title": "Server-Side Request Forgery (SSRF) — {ssrf_desc}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23958,7 +23960,7 @@
     },
     {
       "id": "FR-371",
-      "title": "Subdomain Takeover \u2014 Dangling CNAME ({service})",
+      "title": "Subdomain Takeover — Dangling CNAME ({service})",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24966,7 +24968,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "The absence of web directory structure may indicate a single-page application, API-only service, or heavily restricted web root. This finding informs testing methodology \u2014 the tester should pivot to API enumeration and client-side analysis.",
+      "impact": "The absence of web directory structure may indicate a single-page application, API-only service, or heavily restricted web root. This finding informs testing methodology — the tester should pivot to API enumeration and client-side analysis.",
       "_scaffold_from": "fracture.py:22827",
       "_template": false
     },
@@ -25002,7 +25004,7 @@
         38140,
         38143
       ],
-      "owasp_web": "A05:2021 \u2013 Security Misconfiguration",
+      "owasp_web": "A05:2021 – Security Misconfiguration",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -25119,7 +25121,7 @@
         38140,
         38143
       ],
-      "owasp_web": "A05:2021 \u2013 Security Misconfiguration",
+      "owasp_web": "A05:2021 – Security Misconfiguration",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -25236,7 +25238,7 @@
         38140,
         38143
       ],
-      "owasp_web": "A05:2021 \u2013 Security Misconfiguration",
+      "owasp_web": "A05:2021 – Security Misconfiguration",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -25436,7 +25438,7 @@
         38140,
         38143
       ],
-      "owasp_web": "A05:2021 \u2013 Security Misconfiguration",
+      "owasp_web": "A05:2021 – Security Misconfiguration",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -25556,7 +25558,7 @@
         38170,
         38601
       ],
-      "owasp_web": "A02:2021 \u2013 Cryptographic Failures",
+      "owasp_web": "A02:2021 – Cryptographic Failures",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -25681,7 +25683,7 @@
         38170,
         38601
       ],
-      "owasp_web": "A02:2021 \u2013 Cryptographic Failures",
+      "owasp_web": "A02:2021 – Cryptographic Failures",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -25806,7 +25808,7 @@
         38170,
         38601
       ],
-      "owasp_web": "A02:2021 \u2013 Cryptographic Failures",
+      "owasp_web": "A02:2021 – Cryptographic Failures",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -26043,7 +26045,7 @@
     },
     {
       "id": "FR-408",
-      "title": "HTTP Request Smuggling \u2014 CL.0 Client-Side Desync",
+      "title": "HTTP Request Smuggling — CL.0 Client-Side Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26091,7 +26093,7 @@
     },
     {
       "id": "FR-409",
-      "title": "HTTP Request Smuggling \u2014 CL.TE Desync",
+      "title": "HTTP Request Smuggling — CL.TE Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26133,7 +26135,7 @@
     },
     {
       "id": "FR-410",
-      "title": "HTTP Request Smuggling \u2014 TE Obfuscation Desync",
+      "title": "HTTP Request Smuggling — TE Obfuscation Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26175,7 +26177,7 @@
     },
     {
       "id": "FR-411",
-      "title": "HTTP Request Smuggling \u2014 TE.CL Desync",
+      "title": "HTTP Request Smuggling — TE.CL Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26356,7 +26358,7 @@
     },
     {
       "id": "FR-415",
-      "title": "Missing Subresource Integrity \u2014 {entry['tag']} from {entry['host']}",
+      "title": "Missing Subresource Integrity — {entry['tag']} from {entry['host']}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26486,7 +26488,7 @@
     },
     {
       "id": "FR-418",
-      "title": "Reflected Cross-Site Scripting (XSS) \u2014 POST Parameter",
+      "title": "Reflected Cross-Site Scripting (XSS) — POST Parameter",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -27909,7 +27911,7 @@
     },
     {
       "id": "FR-446",
-      "title": "MFA Bypass \u2014 Direct Navigation",
+      "title": "MFA Bypass — Direct Navigation",
       "aliases": [
         "2FA bypass",
         "MFA skip"
@@ -28306,7 +28308,7 @@
     },
     {
       "id": "FR-454",
-      "title": "h2c Smuggling \u2014 Internal Endpoint Accessible",
+      "title": "h2c Smuggling — Internal Endpoint Accessible",
       "aliases": [
         "h2c bypass",
         "h2c internal access"
@@ -28485,7 +28487,7 @@
     },
     {
       "id": "FR-457",
-      "title": "Authorization Gaps \u2014 Unauthenticated Access to Restricted Paths",
+      "title": "Authorization Gaps — Unauthenticated Access to Restricted Paths",
       "aliases": [
         "Forced browsing",
         "Missing access control on admin paths",
@@ -28599,7 +28601,7 @@
     },
     {
       "id": "FR-459",
-      "title": "Improper Error Handling \u2014 Server Error Exposed",
+      "title": "Improper Error Handling — Server Error Exposed",
       "aliases": [
         "500 error exposed",
         "Internal server error disclosure",
@@ -29120,7 +29122,7 @@
       ],
       "risk": "CRITICAL",
       "description": "Terraform state file is accessible via the web, containing infrastructure secrets, API keys, database passwords, and complete cloud resource inventory.",
-      "impact": "Full infrastructure credential compromise \u2014 database passwords, API keys, cloud resource details enabling lateral movement and data exfiltration.",
+      "impact": "Full infrastructure credential compromise — database passwords, API keys, cloud resource details enabling lateral movement and data exfiltration.",
       "cwe": [
         "CWE-312"
       ],
@@ -29750,10 +29752,11 @@
     },
     {
       "id": "FR-480",
-      "title": "Unsafe HTTP Methods Enabled",
+      "title": "HTTP Methods: Unsafe Methods Enabled",
       "aliases": [
         "Dangerous HTTP Methods",
-        "PUT/DELETE Methods Allowed"
+        "PUT/DELETE Methods Allowed",
+        "Unsafe HTTP Methods Enabled"
       ],
       "source_tools": [
         "fracture"
@@ -30020,7 +30023,7 @@
       ],
       "risk": "MEDIUM",
       "description": "The TLS certificate presented by the server does not match the hostname being accessed. The certificate's Common Name (CN) and Subject Alternative Name (SAN) entries do not include the domain name used to reach the service. This may indicate a misconfiguration, a shared certificate, or a reused certificate from a different service.",
-      "impact": "Browsers and TLS clients will reject the connection or display warnings, which users may bypass. A hostname mismatch can indicate the service was deployed hastily, is using a certificate intended for another domain, or is sharing infrastructure with other services \u2014 all of which leak information about the environment.",
+      "impact": "Browsers and TLS clients will reject the connection or display warnings, which users may bypass. A hostname mismatch can indicate the service was deployed hastily, is using a certificate intended for another domain, or is sharing infrastructure with other services — all of which leak information about the environment.",
       "cwe": [
         "CWE-295",
         "CWE-297"
@@ -30143,7 +30146,7 @@
       "searchsploit_terms": [],
       "metasploit_modules": [],
       "kev": false,
-      "remediation_brief": "Replace the revoked certificate immediately with a new certificate from a trusted CA. Investigate the reason for revocation \u2014 if key compromise is suspected, generate a new key pair. Rotate any credentials or secrets that may have been exposed.",
+      "remediation_brief": "Replace the revoked certificate immediately with a new certificate from a trusted CA. Investigate the reason for revocation — if key compromise is suspected, generate a new key pair. Rotate any credentials or secrets that may have been exposed.",
       "remediation_component": "Configuration",
       "remediation_category": "Cryptography",
       "remediation_effort": "Easy",
@@ -30526,7 +30529,7 @@
         "auxiliary/gather/citrix_bleed_cve_2023_4966"
       ],
       "kev": true,
-      "remediation_brief": "Apply Citrix security patches immediately. After patching Citrix Bleed, terminate all active sessions and rotate all credentials \u2014 the patch does not invalidate stolen session tokens. Run Citrix-provided IoC scanning tools to check for compromise.",
+      "remediation_brief": "Apply Citrix security patches immediately. After patching Citrix Bleed, terminate all active sessions and rotate all credentials — the patch does not invalidate stolen session tokens. Run Citrix-provided IoC scanning tools to check for compromise.",
       "remediation_component": "Application",
       "remediation_category": "Patch Management",
       "remediation_effort": "Significant",
