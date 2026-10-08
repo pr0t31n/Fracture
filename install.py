@@ -227,6 +227,8 @@ APT_PACKAGES = [
     "openjdk-21-jre-headless",
     # Headless browser for SPA crawl (chromium-driver provides chromedriver)
     "chromium", "chromium-driver",
+    # mitmproxy via apt (pip build fails on ARM/Pi — Rust native deps)
+    "mitmproxy",
 ]
 # Best-effort browsers/drivers — names vary across distros and releases.
 # Kali ships firefox-esr (not firefox) and geckodriver (no firefox- prefix).
@@ -244,6 +246,7 @@ DNF_PACKAGES = [
     "java-21-openjdk-headless",
     # Headless browser for SPA crawl
     "chromium", "chromedriver",
+    "mitmproxy",
 ]
 DNF_PACKAGES_OPTIONAL = [
     "firefox", "geckodriver",
@@ -306,7 +309,6 @@ PIP_PACKAGES = [
     "sqlmap",
     "termcolor>=2.0.0",
     "dnspython>=2.4.0",
-    "mitmproxy",
 ]
 
 OFFLINE_BUNDLE_URLS = {
