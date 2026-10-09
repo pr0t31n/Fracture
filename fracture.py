@@ -11962,6 +11962,55 @@ _FINGERPRINT_HEADERS: "dict[str, tuple[str, str]]" = {
                                     "Azure CDN or Front Door reference header for request tracing."),
     "x-sa-instance":               ("Application Instance Identifier",
                                     "Response header revealing the application instance name or internal infrastructure identifier."),
+    # Microsoft Exchange / OWA
+    "x-feserver":                  ("Microsoft Exchange Server",
+                                    "Frontend server header emitted by Microsoft Exchange, "
+                                    "revealing the Exchange CAS/frontend server hostname."),
+    "x-calculatedfetarget":        ("Microsoft Exchange Server",
+                                    "Calculated frontend target header from Exchange CAS, "
+                                    "revealing internal Exchange topology."),
+    "x-calculatedbetarget":        ("Microsoft Exchange Server",
+                                    "Calculated backend target header from Exchange CAS, "
+                                    "revealing internal Exchange backend server hostname."),
+    "x-diaginfo":                  ("Microsoft Exchange Server",
+                                    "Diagnostic information header from Exchange, may reveal "
+                                    "internal server hostname."),
+    "x-beserver":                  ("Microsoft Exchange Server",
+                                    "Backend server header emitted by Microsoft Exchange, "
+                                    "revealing the Exchange backend mailbox server."),
+    "x-firsthopcafeefz":           ("Microsoft Exchange Server",
+                                    "First-hop Client Access Frontend EFZ (Edge/Frontier Zone) "
+                                    "header, revealing Exchange CAS routing."),
+    "x-ms-exchange-messagesentrepresentingemailaddress":
+                                   ("Microsoft Exchange Server",
+                                    "Exchange delegate/representative email tracking header."),
+    # Microsoft HTTPAPI / Azure proxy
+    "microsoft-httpapi":           ("Microsoft HTTPAPI",
+                                    "Microsoft HTTP Server API (http.sys) kernel-mode listener, "
+                                    "commonly used by WCF, ADFS, Exchange, and Azure services."),
+    "x-backendhttpstatus":         ("Microsoft Azure / Reverse Proxy",
+                                    "Backend HTTP status relayed by an Azure reverse proxy "
+                                    "or application gateway."),
+    "x-proxy-backendserverstatus": ("Microsoft Reverse Proxy",
+                                    "Backend server status header from a Microsoft reverse "
+                                    "proxy, revealing the upstream response code."),
+    "x-proxy-routingcorrectness":  ("Microsoft Reverse Proxy",
+                                    "Routing correctness diagnostic header from a Microsoft "
+                                    "reverse proxy layer."),
+    "x-nanoproxy":                 ("Microsoft Azure / NanoProxy",
+                                    "NanoProxy header indicating request handling by a "
+                                    "Microsoft lightweight reverse proxy component."),
+    "ms-cv":                       ("Microsoft Correlation Vector",
+                                    "Microsoft Correlation Vector for distributed tracing "
+                                    "across Microsoft services and Azure infrastructure."),
+    # QUIC / HTTP/3
+    "alt-svc":                     ("HTTP/3 / QUIC Support",
+                                    "Alternative Services header advertising HTTP/3 (QUIC) "
+                                    "protocol support or alternate service endpoints."),
+    # Analytics / tracking
+    "google-analytics":            ("Google Analytics",
+                                    "Google Analytics tracking identifier exposed in "
+                                    "response headers."),
 }
 
 _KNOWN_NON_SEC_HEADERS = frozenset({
