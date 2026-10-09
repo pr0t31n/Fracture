@@ -20065,18 +20065,42 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             continue
         if hdr_name not in headers:
             _base_sec_hdrs_absent.add(hdr_name)
-            _sh_of = _sh_ev
             if hdr_name == "X-Frame-Options":
                 _cj_ss = _capture_clickjack_screenshot(
                     url, out, phase, "clickjack_missing_xfo",
                     target, cfg)
                 if _cj_ss:
-                    _sh_of = f"{_sh_ev},{_cj_ss}" if _sh_ev else _cj_ss
+                    out.add_finding(
+                        title="Clickjacking: Page Embeddable in Iframe",
+                        url=url, port=target["port"], risk="MEDIUM",
+                        description=(
+                            "The target page renders inside a third-party iframe, "
+                            "confirming it is vulnerable to clickjacking (UI redress) "
+                            "attacks. An attacker can overlay transparent controls on "
+                            "top of the framed page to trick users into performing "
+                            "unintended actions such as changing settings, transferring "
+                            "funds, or granting permissions. Neither X-Frame-Options "
+                            "nor CSP frame-ancestors restricts framing."
+                        ),
+                        output="PoC: target page successfully rendered in iframe — see screenshot",
+                        sources="fracture-headers", service=target["scheme"],
+                        output_file=_cj_ss,
+                        owasp="A05:2025 Security Misconfiguration", nist="SI-10",
+                        remediation=_platform_remed(
+                            "Add 'X-Frame-Options: DENY' (or SAMEORIGIN) and "
+                            "'Content-Security-Policy: frame-ancestors \\'self\\'' to "
+                            "prevent third-party iframe embedding.",
+                            server_hdr, powered_by,
+                        ),
+                        affected=_url_rel_path(url, target["url"]),
+                        command=_hdr_cmd,
+                        http_code=resp.status_code,
+                    )
             out.add_finding(
                 title=f"Missing Security Header: {hdr_name}",
                 url=url, port=target["port"], risk=risk,
                 description=desc, sources="fracture-headers",
-                service=target["scheme"], output_file=_sh_of,
+                service=target["scheme"], output_file=_sh_ev,
                 owasp="A05", nist=nist_ctrl,
                 remediation=_platform_remed(remed, server_hdr, powered_by),
                 output=f"Missing: {hdr_name}",
@@ -20178,7 +20202,33 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         _cj_perm_ss = _capture_clickjack_screenshot(
             url, out, phase, "clickjack_permissive_xfo",
             target, cfg)
-        _xfo_of = str(out_f) + (f",{_cj_perm_ss}" if _cj_perm_ss else "")
+        if _cj_perm_ss:
+            out.add_finding(
+                title="Clickjacking: Page Embeddable in Iframe",
+                url=url, port=target["port"], risk="MEDIUM",
+                description=(
+                    "The target page renders inside a third-party iframe, "
+                    "confirming it is vulnerable to clickjacking (UI redress) "
+                    "attacks. An attacker can overlay transparent controls on "
+                    "top of the framed page to trick users into performing "
+                    "unintended actions such as changing settings, transferring "
+                    "funds, or granting permissions. X-Frame-Options is set to "
+                    f"a non-protective value: '{_xfo_val}'."
+                ),
+                output="PoC: target page successfully rendered in iframe — see screenshot",
+                sources="fracture-headers", service=target["scheme"],
+                output_file=_cj_perm_ss,
+                owasp="A05:2025 Security Misconfiguration", nist="SI-10",
+                remediation=_platform_remed(
+                    "Add 'X-Frame-Options: DENY' (or SAMEORIGIN) and "
+                    "'Content-Security-Policy: frame-ancestors \\'self\\'' to "
+                    "prevent third-party iframe embedding.",
+                    server_hdr, powered_by,
+                ),
+                affected=_url_rel_path(url, target["url"]),
+                command=_hdr_cmd,
+                http_code=resp.status_code,
+            )
         out.add_finding(
             title="Permissive Security Header: X-Frame-Options",
             url=url, port=target["port"], risk="LOW",
@@ -20188,7 +20238,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             ),
             output=f"X-Frame-Options: {_xfo_val}",
             sources="fracture-headers", service=target["scheme"],
-            output_file=_xfo_of,
+            output_file=str(out_f),
             owasp="A05:2025 Security Misconfiguration", nist="SI-10",
             remediation=_platform_remed(
                 "Set X-Frame-Options: DENY (or SAMEORIGIN if same-origin embedding is required).",
