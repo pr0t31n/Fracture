@@ -529,6 +529,23 @@ def _write_project_meta(project_dir: Path, tool: str, client_short: str,
         pass
 
 
+try:
+    import sys as _s_pp
+    if "/opt/pr0t31n/shared" not in _s_pp.path:
+        _s_pp.path.insert(0, "/opt/pr0t31n/shared")
+    import pr0t31n_pause as _pp
+except ImportError:
+    _pp = None
+
+_pause_mgr: "_pp.PauseManager | None" = None  # type: ignore[name-defined]
+
+
+def _check_pause():
+    """If a pause was requested, checkpoint + exit with EXIT_PAUSED."""
+    if _pause_mgr is not None and _pause_mgr.check_and_pause():
+        sys.exit(_pp.EXIT_PAUSED)
+
+
 def _u_dual_write_meta(project_dir: Path, *, tool: str, version: str,
                        client_short: str = "", client_name: str = "",
                        engagement_name: str = "", target: str = "") -> bool:
@@ -4340,6 +4357,8 @@ def _deregister_proc(proc: subprocess.Popen) -> None:
 
 
 def _signal_handler(sig, frame) -> None:
+    _action = "killed_user" if sig == signal.SIGINT else "killed_crucible"
+    _reason = "KeyboardInterrupt / Ctrl-C" if sig == signal.SIGINT else "SIGTERM"
     vc.log("Interrupted — killing subprocesses and saving checkpoint ...", "WARNING")
     with _procs_lock:
         for p in _active_procs:
@@ -4347,6 +4366,9 @@ def _signal_handler(sig, frame) -> None:
                 p.terminate()
             except Exception:
                 pass
+    if _pause_mgr is not None:
+        _pause_mgr.write_stop_reason(_action, _reason,
+                                     initiated_by="user" if sig == signal.SIGINT else "external")
     sys.exit(0)
 
 
@@ -41805,6 +41827,17 @@ def main() -> None:
     vc.status("init_updates", label="INIT: Plugin Updates", status="complete",
               tools=_update_results)
 
+    global _pause_mgr
+    _fr_proj_root = Path(cfg["project"]).resolve()
+    _fr_proj_root.mkdir(parents=True, exist_ok=True)
+    if _pp is not None:
+        _pause_mgr = _pp.PauseManager(_fr_proj_root, "fracture")
+        _pause_mgr.start_watcher(grace_period=60)
+        _pause_mgr.log_run_type(
+            (_fr_proj_root / "checkpoint.json").exists())
+
+    _check_pause()
+
     # ── Multi-role testing setup ─────────────────────────────────────────────
     # _n_roles: number of authenticated roles to test (0 = unauthenticated only)
     # _collected_roles: grows as the user provides credentials during the scan;
@@ -41902,6 +41935,7 @@ def main() -> None:
                 _all_roles_ctx.append("unauthenticated")
 
     while _pending_idx < len(_pending_urls):
+        _check_pause()
         raw_url      = _pending_urls[_pending_idx]
         _pending_idx += 1
         if not raw_url or raw_url in _processed_urls:
@@ -45426,6 +45460,9 @@ def main() -> None:
 
     # ── Post-scan: cross-tool action items (Isotope) ─────────────────────
     _generate_cross_tool_action_items(_root_proj)
+
+    if _pause_mgr is not None:
+        _pause_mgr.write_stop_reason("completed", "all_phases_done")
 
 
 def _generate_cross_tool_action_items(project_dir: Path) -> None:
