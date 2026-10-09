@@ -12523,7 +12523,7 @@ def _phase_wordpress_scan(
                 _rurq, _rurp = _save_http_evidence(
                     out, phase, f"wp_rest_users_req_{hostname}", r_rest_users)
                 out.add_finding(
-                    title=f"WordPress Users Exposed via REST API ({len(_ru_extracted)} user(s))",
+                    title=f"Enumeration: WordPress Users Exposed via REST API ({len(_ru_extracted)} user(s))",
                     url=base + "/wp-json/wp/v2/users",
                     port=target["port"], risk="HIGH",
                     description=(
@@ -12562,7 +12562,7 @@ def _phase_wordpress_scan(
                 _m_urls = [m.get("source_url","") for m in _media if m.get("source_url")]
                 _mrq, _mrp = _save_http_evidence(out, phase, f"wp_rest_media_{hostname}", r_rest_media)
                 out.add_finding(
-                    title="WordPress Media Files Enumerable via REST API",
+                    title="Enumeration: WordPress Media Files via REST API",
                     url=base + "/wp-json/wp/v2/media",
                     port=target["port"], risk="LOW",
                     description=(
@@ -12618,7 +12618,7 @@ def _phase_wordpress_scan(
             encoding="utf-8",
         )
         out.add_finding(
-            title=f"WordPress User Enumeration via Author Archives ({len(_author_users)} user(s))",
+            title=f"Enumeration: WordPress User Enumeration via Author Archives ({len(_author_users)} user(s))",
             url=base + "/?author=1", port=target["port"], risk="MEDIUM",
             description=(
                 f"Author archive pages disclosed {len(_author_users)} username(s) "
@@ -12663,7 +12663,7 @@ def _phase_wordpress_scan(
                     except Exception:
                         pass
                     out.add_finding(
-                        title="WordPress Username Disclosed via oEmbed API",
+                        title="Enumeration: WordPress Username via oEmbed API",
                         url=base + "/wp-json/oembed/1.0/embed",
                         port=target["port"], risk="LOW",
                         description=(
@@ -12819,7 +12819,7 @@ def _phase_wordpress_scan(
                 f"wp_dirlist_{_dp.strip('/').replace('/', '_')[:30]}_{hostname}")
             _dpev.write_text(r.text[:5000], encoding="utf-8")
             out.add_finding(
-                title=f"WordPress Directory Listing Enabled: {_dp}",
+                title=f"Enumeration: WordPress Directory Listing: {_dp}",
                 url=base + _dp, port=target["port"], risk=_dp_risk,
                 description=(
                     f"Directory listing is enabled for {_dp}, exposing file names, "
@@ -16566,7 +16566,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             # follow-on phase that detects sensitive file names in the index
             # may emit a separate higher-severity finding.
             out.add_finding(
-                title="Directory Listing Enabled",
+                title="Enumeration: Directory Listing Enabled",
                 url=url + "/", port=target["port"], risk="LOW",
                 description="The web server is configured to display a browsable directory index, exposing file structure and potentially sensitive files to unauthenticated users.",
                 output=r.text[:500], sources="fracture-recon",
@@ -19198,7 +19198,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 _sans = _tl.get("san", []) or _tl.get("subject_an", [])
                 if _sans and len(_sans) > 1:
                     out.add_finding(
-                        title="TLS Certificate SAN Enumeration",
+                        title="Enumeration: TLS Certificate SAN Enumeration",
                         url=target["url"], port=_tl_port_n,
                         risk="INFO",
                         description=(
@@ -21369,7 +21369,7 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
                             continue
                         full_vhost = f"{vhost_word}.{host}"
                         out.add_finding(
-                            title=f"Virtual Host Discovered: {full_vhost}",
+                            title=f"Enumeration: Virtual Host Discovered: {full_vhost}",
                             url=url, port=port, risk="LOW",
                             description=(
                                 f"ffuf discovered virtual host '{full_vhost}' (HTTP {status}, "
@@ -21492,7 +21492,7 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
                         if not param:
                             continue
                         out.add_finding(
-                            title=f"Hidden Parameter Discovered: {param}",
+                            title=f"Enumeration: Hidden Parameter Discovered: {param}",
                             url=url, port=port, risk="LOW",
                             description=(
                                 f"ffuf discovered undocumented GET parameter '{param}' at "
@@ -27385,7 +27385,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
             )
             _all_ev.extend(_er['evidence'])
         out.add_finding(
-            title="Application Responses Identify Valid Accounts",
+            title="Enumeration: Application Responses Identify Valid Accounts",
             url=_enum_results[0]["action"], port=target["port"], risk="MEDIUM",
             description=(
                 f"Login endpoint responses differ between invalid and plausible "
@@ -27662,7 +27662,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                         f"Usernames: {', '.join(_jk_users[:20])}\n\n"
                     )
                 out.add_finding(
-                    title="Jenkins: User Enumeration via People Page",
+                    title="Enumeration: Jenkins User Enumeration via People Page",
                     url=_jk_people_url, port=target["port"], risk="MEDIUM",
                     description=(
                         f"The Jenkins People page at /asynchPeople/ is accessible "
@@ -30091,7 +30091,7 @@ def _phase_graphql(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="GraphQL Introspection Enabled",
+                    title="Enumeration: GraphQL Introspection Enabled",
                     url=found_gql, port=target["port"], risk="MEDIUM",
                     description=f"GraphQL introspection is enabled at {found_gql}. This allows attackers to enumerate the full API schema.",
                     output=r.text[:500], sources="fracture-graphql",
