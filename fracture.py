@@ -14465,6 +14465,12 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     # ── Exception disclosure in initial probe (#12 FR-464) ──
     _exc_snips = _detect_exception_disclosure(resp.text)
     if _exc_snips:
+        _exc_ss = _capture_error_screenshot(
+            url, out, phase, "exception_disclosure_" + target["hostname"],
+            target, cfg)
+        _exc_of = _probe_files
+        if _exc_ss:
+            _exc_of = f"{_probe_files},{_exc_ss}" if _probe_files else _exc_ss
         out.add_finding(
             title="Unhandled Application Exception Disclosed",
             url=url, port=target["port"], risk="LOW",
@@ -14477,7 +14483,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             output="Exception patterns found:\n" + "\n".join(f"  • {s}" for s in _exc_snips[:10]),
             affected=_url_rel_path(url, target["url"]),
             sources="fracture-recon", service=target["scheme"],
-            output_file=_probe_files,
+            output_file=_exc_of,
             owasp="A05:2025 Security Misconfiguration",
             remediation=(
                 "Implement custom error pages that suppress stack traces and "
@@ -14494,6 +14500,12 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         _err_detail = ""
         if _err_snips:
             _err_detail = " Detailed error output includes: " + "; ".join(_err_snips[:5])
+        _500_ss = _capture_error_screenshot(
+            url, out, phase, f"server_error_{resp.status_code}_" + target["hostname"],
+            target, cfg)
+        _500_of = _probe_files
+        if _500_ss:
+            _500_of = f"{_probe_files},{_500_ss}" if _probe_files else _500_ss
         out.add_finding(
             title="Improper Error Handling — Server Error Exposed",
             url=url, port=target["port"], risk="MEDIUM",
@@ -14505,7 +14517,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             output=f"HTTP {resp.status_code}\n{resp.text[:2000]}",
             affected=_url_rel_path(url, target["url"]),
             sources="fracture-recon", service=target["scheme"],
-            output_file=_probe_files,
+            output_file=_500_of,
             owasp="A05:2025 Security Misconfiguration",
             remediation=(
                 "Implement proper error handling that returns generic error pages "
@@ -17000,6 +17012,28 @@ def _capture_clickjack_screenshot(target_url: str, out: "OutputManager",
             poc_path.unlink(missing_ok=True)
         except Exception:
             pass
+    return ""
+
+
+def _capture_error_screenshot(error_url: str, out: "OutputManager",
+                               phase: str, label: str,
+                               target: dict, cfg: dict,
+                               auth_session: "requests.Session | None" = None,
+                               ) -> str:
+    """Screenshot a URL that exposes verbose error messages or stack traces.
+
+    Returns the run-dir-relative path to the PNG on success, or empty string.
+    """
+    safe = re.sub(r'[^\w]', '_', label)[:60]
+    ss_dir = out.root / phase
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    ss_path = ss_dir / f"{safe}_error_screenshot.png"
+    if _capture_screenshot_to(error_url, ss_path, target, cfg,
+                              auth_session=auth_session):
+        try:
+            return str(ss_path.relative_to(out.root))
+        except Exception:
+            return str(ss_path)
     return ""
 
 
@@ -22755,6 +22789,14 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         _exc_output = "\n".join(
             f"  • {snip}  (first seen: {u})" for u, snip in _exc_entries[:15]
         )
+        _crawl_exc_of = ""
+        if _exc_entries:
+            _crawl_exc_ss = _capture_error_screenshot(
+                _exc_entries[0][0], out, phase,
+                "crawl_exception_" + target["hostname"],
+                target, cfg, auth_session=sess)
+            if _crawl_exc_ss:
+                _crawl_exc_of = _crawl_exc_ss
         out.add_finding(
             title="Unhandled Application Exception Disclosed",
             url=url, port=target["port"], risk="LOW",
@@ -22766,6 +22808,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             output=f"Exception patterns found during crawl:\n{_exc_output}",
             affected=_url_rel_path(url, target["url"]),
             sources="fracture-crawl", service=target["scheme"],
+            output_file=_crawl_exc_of,
             owasp="A05:2025 Security Misconfiguration",
             remediation=(
                 "Implement custom error pages. Disable debug mode in production. "
@@ -22780,6 +22823,13 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             f"  HTTP {status} — {u}  ({snip[:80]}...)"
             for u, status, snip in _crawl_500_pages[:15]
         )
+        _crawl_500_of = ""
+        _crawl_500_ss = _capture_error_screenshot(
+            _crawl_500_pages[0][0], out, phase,
+            "crawl_500_" + target["hostname"],
+            target, cfg, auth_session=sess)
+        if _crawl_500_ss:
+            _crawl_500_of = _crawl_500_ss
         out.add_finding(
             title="Improper Error Handling — Server Errors During Crawl",
             url=url, port=target["port"], risk="MEDIUM",
@@ -22791,6 +22841,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             output=f"Server errors during crawl ({len(_crawl_500_pages)}):\n{_500_output}",
             affected="\n".join(u for u, _, _ in _crawl_500_pages[:10]),
             sources="fracture-crawl", service=target["scheme"],
+            output_file=_crawl_500_of,
             owasp="A05:2025 Security Misconfiguration",
             remediation=(
                 "Investigate and fix the root causes of server errors. "
@@ -27785,10 +27836,6 @@ _NIKTO_NORM: "list[tuple]" = [
      "Missing Security Header: Content-Security-Policy", "MEDIUM",
      "A05:2025 Security Misconfiguration", "SC-8",
      "Implement a Content-Security-Policy header."),
-    (r"X-XSS-Protection header",
-     "Missing Security Header: X-XSS-Protection", "MEDIUM",
-     "A05:2025 Security Misconfiguration", "SC-8",
-     "Add 'X-XSS-Protection: 0' header (CSP supersedes this)."),
     (r"Permissions-Policy|Feature-Policy",
      "Missing Security Header: Permissions-Policy", "MEDIUM",
      "A05:2025 Security Misconfiguration", "SC-8",
@@ -29033,7 +29080,7 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
     url     = target["url"]
     timeout = max(cfg.get("nuclei_timeout", 1800), 1800)
     handle: dict = {
-        "target": target, "out": out, "url": url, "phase": phase,
+        "target": target, "cfg": cfg, "out": out, "url": url, "phase": phase,
         "timeout": timeout,
         "nuclei_proc": None, "nuclei_cmd": None, "nuclei_out": None,
         "nuclei_started": None,
@@ -29209,6 +29256,7 @@ def _collect_vulnscan_bg(handle: dict) -> None:
     if not handle:
         return
     target = handle["target"]
+    cfg    = handle.get("cfg", {})
     out    = handle["out"]
     url    = handle["url"]
     phase  = handle["phase"]
@@ -29536,14 +29584,27 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                         if _nik_osvdb:
                             _nik_output += f"\nOSVDB-{_nik_osvdb}"
                         _norm = _normalize_nikto(vuln)
+                        _nik_of = str(_nik_json_path)
+                        _nik_title = _norm["title"]
+                        if ("Verbose Error" in _nik_title
+                                or "Stack Trace" in _nik_title
+                                or "Exception" in _nik_title
+                                or "Debug" in _nik_title):
+                            _nik_safe = re.sub(r'[^\w]', '_', _nik_url_path or "root")[:40]
+                            _nik_ss = _capture_error_screenshot(
+                                _nik_full_url, out, phase,
+                                f"nikto_error_{_nik_safe}",
+                                target, cfg)
+                            if _nik_ss:
+                                _nik_of = f"{_nik_of},{_nik_ss}"
                         out.add_finding(
-                            title=_norm["title"],
+                            title=_nik_title,
                             url=_nik_full_url, port=target["port"],
                             risk=_norm["risk"],
                             description=_nik_msg or f"Nikto finding {_nik_id}",
                             output=_nik_output,
                             sources="nikto", service=target["scheme"],
-                            output_file=str(_nik_json_path),
+                            output_file=_nik_of,
                             affected=_norm.get("affected", _nik_full_url),
                             owasp=_norm["owasp"],
                             nist=_norm["nist"],
