@@ -3826,7 +3826,7 @@ class OutputManager:
 
         # ── Header findings — use full "Name: Value" lines from output ──
         if re.match(
-            r"^(Information Disclosure|Software Version Disclosed"
+            r"^(Information Disclosure|Software Version Detected|Software Version Disclosed"
             r"|Unknown Header Identified"
             r"|Inconsistent Security Header Usage"
             r"|Endpoint-Specific Header"
@@ -3972,6 +3972,7 @@ class OutputManager:
         # identical on every response from the same host — recording one per
         # endpoint floods the report with duplicates.
         if (title.startswith("Information Disclosure:")
+                or title.startswith("Software Version Detected:")
                 or title.startswith("Software Version Disclosed:")):
             try:
                 _hdr_host = urllib.parse.urlparse(url).hostname or url
@@ -11913,6 +11914,9 @@ _FINGERPRINT_HEADERS: "dict[str, tuple[str, str]]" = {
     "x-magento-cache-debug":       ("Magento",
                                     "Identifies the Magento e-commerce platform cache layer."),
     # Infrastructure leakage
+    "x-served-by":                 ("Backend Server Identity",
+                                    "Reveals which backend server or cache node handled "
+                                    "the request, exposing internal infrastructure topology."),
     "x-shardid":                   ("Distributed System (Shard Disclosure)",
                                     "Database or service shard identifier, potentially "
                                     "revealing horizontal scaling architecture."),
@@ -12027,6 +12031,18 @@ _KNOWN_NON_SEC_HEADERS = frozenset({
     "meta-refresh-redirect",
     "nel",
     "report-to",
+    # CORS headers — standard, presence alone is not a finding
+    "access-control-allow-credentials",
+    "access-control-allow-headers",
+    "access-control-allow-methods",
+    "access-control-allow-origin",
+    "access-control-expose-headers",
+    "access-control-max-age",
+    "access-control-request-headers",
+    "access-control-request-method",
+    # Deprecated headers — browsers ignore these
+    "expect-ct",
+    "feature-policy",
 })
 
 _BI_PATTERNS = {
@@ -14578,7 +14594,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         if _500_ss:
             _500_of = f"{_probe_files},{_500_ss}" if _probe_files else _500_ss
         out.add_finding(
-            title="Improper Error Handling — Server Error Exposed",
+            title="Information Disclosure: Verbose Server Error Messages",
             url=url, port=target["port"], risk="MEDIUM",
             description=(
                 f"The initial HTTP probe to {url} returned HTTP {resp.status_code}. "
@@ -17758,7 +17774,7 @@ def _phase_endpoint_tools(
                     _vname, _vver = _parse_software(_vhv)
                     if _vver:
                         out.add_finding(
-                            title=f"Software Version Disclosed: {_vname} {_vver}",
+                            title=f"Software Version Detected: {_vname} {_vver}",
                             url=ep_url, port=target["port"], risk=_vr,
                             description=(
                                 f"The HTTP response header '{_vh}' discloses software "
@@ -20385,18 +20401,66 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Security Headers", "running", "CORS check", 2, 5)
     acao = headers.get("Access-Control-Allow-Origin", "")
     acac = headers.get("Access-Control-Allow-Credentials", "")
-    if acao == "*" and acac.lower() == "true":
+    _cors_permissive = acao == "*"
+    _cors_cred_leak = False
+    if _cors_permissive:
         out.add_finding(
-            title="CORS Misconfiguration Allowing Credential Leakage",
-            url=url, port=target["port"], risk="HIGH",
-            description="The CORS policy reflects arbitrary origins or uses a wildcard origin combined with credentials-allowed, permitting malicious third-party sites to make credentialed cross-origin requests and read responses.",
-            output=f"Access-Control-Allow-Origin: {acao}\nAccess-Control-Allow-Credentials: {acac}",
+            title="Permissive Security Header: Cross-Origin Resource Sharing",
+            url=url, port=target["port"],
+            risk="MEDIUM" if acac.lower() == "true" else "LOW",
+            description=(
+                "The Access-Control-Allow-Origin header is set to '*', "
+                "permitting any website to read responses from this origin. "
+                + ("The server also sets Access-Control-Allow-Credentials: true, "
+                   "but browsers block this invalid combination per the CORS spec."
+                   if acac.lower() == "true" else
+                   "While no credentials are shared, sensitive data in responses "
+                   "may be readable by third-party sites.")
+            ),
+            output=f"Access-Control-Allow-Origin: {acao}"
+                   + (f"\nAccess-Control-Allow-Credentials: {acac}" if acac else ""),
             sources="fracture-headers", service=target["scheme"],
             output_file=_sh_ev,
             owasp="A05:2025 Security Misconfiguration", nist="AC-4",
-            remediation="Maintain an explicit allowlist of trusted origins; never combine Access-Control-Allow-Origin: * with Access-Control-Allow-Credentials: true; and reject unexpected Origin headers.",
+            remediation="Replace the wildcard (*) with an explicit allowlist of trusted origins.",
             http_code=resp.status_code,
         )
+    _fake_origin = "https://evil-cors-test.example.com"
+    try:
+        _cors_resp = sess.get(
+            url, timeout=timeout, allow_redirects=True,
+            headers={"Origin": _fake_origin})
+        _cors_acao = _cors_resp.headers.get("Access-Control-Allow-Origin", "")
+        _cors_acac = _cors_resp.headers.get("Access-Control-Allow-Credentials", "")
+        if (_cors_acao == _fake_origin and _cors_acac.lower() == "true"):
+            _cors_cred_leak = True
+            out.add_finding(
+                title="Information Disclosure: CORS Credential Leakage",
+                url=url, port=target["port"], risk="HIGH",
+                description=(
+                    "The server reflects arbitrary Origin headers in "
+                    "Access-Control-Allow-Origin while also setting "
+                    "Access-Control-Allow-Credentials: true. This allows "
+                    "any malicious third-party site to make credentialed "
+                    "cross-origin requests and read the authenticated response."
+                ),
+                output=(
+                    f"Request Origin: {_fake_origin}\n"
+                    f"Access-Control-Allow-Origin: {_cors_acao}\n"
+                    f"Access-Control-Allow-Credentials: {_cors_acac}"
+                ),
+                sources="fracture-headers", service=target["scheme"],
+                output_file=_sh_ev,
+                owasp="A01:2025 Broken Access Control", nist="AC-4",
+                remediation=(
+                    "Validate the Origin header against an explicit allowlist "
+                    "of trusted domains. Never reflect arbitrary origins when "
+                    "credentials are allowed."
+                ),
+                http_code=_cors_resp.status_code,
+            )
+    except Exception:
+        pass
 
     vc.status(phase, "Security Headers", "running", "Cookie flags", 3, 5)
     # Parse raw Set-Cookie headers
@@ -22952,7 +23016,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         if _crawl_500_ss:
             _crawl_500_of = _crawl_500_ss
         out.add_finding(
-            title="Improper Error Handling — Server Errors During Crawl",
+            title="Information Disclosure: Verbose Server Error Messages",
             url=url, port=target["port"], risk="MEDIUM",
             description=(
                 f"{len(_crawl_500_pages)} page(s) returned HTTP 5xx responses "
@@ -23085,7 +23149,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             for u, fn in _crawl_pw_autocomplete[:15]
         )
         out.add_finding(
-            title="Password Field With Autocomplete Enabled",
+            title="Web Misconfiguration: Password Autocomplete Enabled",
             url=url, port=target["port"], risk="LOW",
             description=(
                 f"Password input fields on {len(_crawl_pw_autocomplete)} page(s) "
@@ -28054,20 +28118,32 @@ _NIKTO_NORM: "list[tuple]" = [
      "A05:2025 Security Misconfiguration", "SC-8",
      "Add X-Frame-Options or CSP frame-ancestors to prevent clickjacking."),
     # ── CORS ──
+    (r"Retrieved\s+access.control.allow.origin\s+header",
+     "Permissive Security Header: Access-Control-Allow-Origin", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "AC-4",
+     "Restrict CORS to an explicit allowlist of trusted origins."),
     (r"CORS.*(?:allow|config|misconfigur|wildcard|\*)",
-     "CORS Misconfiguration Allowing Credential Leakage", "HIGH",
-     "A01:2025 Broken Access Control", "AC-4",
-     "Review CORS configuration; do not reflect arbitrary origins with credentials."),
+     "Permissive Security Header: Cross-Origin Resource Sharing", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "AC-4",
+     "Review CORS configuration; restrict to an explicit allowlist of trusted origins."),
     # ── Anti-CSRF ──
     (r"CSRF|cross.site request forgery",
      "Cross-Site Request Forgery (CSRF) — Missing Token", "MEDIUM",
      "A01:2025 Broken Access Control", "SC-23",
      "Implement anti-CSRF tokens on state-changing forms."),
-    # ── Error messages ──
+    # ── Error messages / stack traces ──
     (r"error.*(?:messag|page|disclos)|stack.*trace|debug.*(?:info|enabled|mode)",
-     "Verbose Error Messages — Stack Trace Disclosed", "MEDIUM",
+     "Information Disclosure: Verbose Server Error Messages", "MEDIUM",
      "A05:2025 Security Misconfiguration", "SI-11",
      "Implement custom error pages; disable verbose errors in production."),
+    # ── Suppressed noise ──
+    (r"(?:This|that)\s+might\s+be\s+interesting",
+     "", "DROP", "", "", ""),
+    # ── Server banner / load balancer ──
+    (r"[Ss]erver\s+banner\s+changed",
+     "Discovery: Load Balancer Identified", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Review load balancer configuration for information disclosure."),
     # ── robots.txt ──
     (r"robots\.txt.*(?:contains|entry|found|entries|file)",
      "Information Disclosure: Sensitive Path in robots.txt", "INFO",
@@ -28148,7 +28224,7 @@ _NIKTO_NORM: "list[tuple]" = [
      "Block public access to .htaccess and .htpasswd files."),
     # ── Password field autocomplete ──
     (r"(?:password|passwd).*autocomplete|autocomplete.*(?:password|passwd)",
-     "Password Field with Autocomplete Enabled", "LOW",
+     "Web Misconfiguration: Password Autocomplete Enabled", "LOW",
      "A05:2025 Security Misconfiguration", "SC-23",
      "Disable autocomplete on password input fields."),
     # ── File upload form detected ──
@@ -28296,6 +28372,8 @@ def _normalize_nikto(vuln: dict) -> dict:
     # Table-driven normalisation — first match wins.
     for _rx, _title, _risk, _owasp, _nist, _remed in _NIKTO_NORM_COMPILED:
         if _rx.search(msg):
+            if _risk == "DROP":
+                return None
             if _title == "Admin Panel Exposed" and _nik_url:
                 _url_parts = _nik_url.lower().replace("/", " ").replace("-", " ").replace("_", " ").split()
                 if not (_ADMIN_PATH_KEYWORDS & set(_url_parts)):
@@ -28498,8 +28576,8 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Remove the deprecated X-XSS-Protection header; use CSP instead."),
     # ── CORS ──
     (r"cors-misconfig|cors-check",
-     "CORS Misconfiguration Allowing Credential Leakage", "HIGH",
-     "A01:2025 Broken Access Control", "AC-4",
+     "Permissive Security Header: Cross-Origin Resource Sharing", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "AC-4",
      "Review CORS configuration; do not reflect arbitrary origins with credentials."),
     # ── HTTP methods — TRACE ──
     (r"^http-trace$|cross-site-tracing-xss|trace-method",
@@ -28614,7 +28692,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Implement anti-CSRF tokens on state-changing forms."),
     # ── Error / debug ──
     (r"stacktrace|stack-trace|debug|verbose-error|error-page",
-     "Verbose Error Messages — Stack Trace Disclosed", "MEDIUM",
+     "Information Disclosure: Verbose Server Error Messages", "MEDIUM",
      "A05:2025 Security Misconfiguration", "SI-11",
      "Implement custom error pages; disable verbose errors in production."),
     # ── WordPress ──
@@ -29705,9 +29783,11 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                         if _nik_osvdb:
                             _nik_output += f"\nOSVDB-{_nik_osvdb}"
                         _norm = _normalize_nikto(vuln)
+                        if _norm is None:
+                            continue
                         _nik_of = str(_nik_json_path)
                         _nik_title = _norm["title"]
-                        if ("Verbose Error" in _nik_title
+                        if ("Verbose Server Error" in _nik_title
                                 or "Stack Trace" in _nik_title
                                 or "Exception" in _nik_title
                                 or "Debug" in _nik_title):
@@ -33692,7 +33772,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="Verbose Error Messages — Stack Trace Disclosed",
+                    title="Information Disclosure: Verbose Server Error Messages",
                     url=eu, port=target["port"], risk="LOW",
                     description=(
                         f"The server returned a verbose error at {eu} (HTTP {r.status_code}) "
