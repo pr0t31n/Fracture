@@ -41961,7 +41961,7 @@ def main() -> None:
     _fr_proj_root.mkdir(parents=True, exist_ok=True)
     if _pp is not None:
         _pause_mgr = _pp.PauseManager(_fr_proj_root, "fracture")
-        _pause_mgr.start_watcher(grace_period=60)
+        _pause_mgr.start_watcher(grace_period=30)
         _pause_mgr.log_run_type(
             (_fr_proj_root / "checkpoint.json").exists())
 
