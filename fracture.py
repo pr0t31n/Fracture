@@ -16918,6 +16918,41 @@ def _add_url_bar(png_path: Path, url: str) -> bool:
         return False
 
 
+def _register_screenshot(root: Path, png_path, url: str = "",
+                         ip: str = "", port: int = 0,
+                         hostname: str = "", scheme: str = "",
+                         title: str = "", description: str = ""):
+    """Copy a screenshot PNG into <root>/screenshots/ with a JSON sidecar.
+
+    The screenshots/ directory is the canonical location for the Intelligence
+    Screenshots tab — Crucible reads sidecars here instead of parsing findings.
+    """
+    try:
+        src = Path(png_path)
+        if not src.is_file():
+            return
+        ss_dir = root / "screenshots"
+        ss_dir.mkdir(parents=True, exist_ok=True)
+        dest = ss_dir / src.name
+        if dest.exists():
+            stem, suf = src.stem, src.suffix
+            for i in range(1, 999):
+                dest = ss_dir / f"{stem}_{i}{suf}"
+                if not dest.exists():
+                    break
+        shutil.copy2(str(src), str(dest))
+        sidecar = {
+            "url": url, "ip": ip, "port": int(port) if port else 0,
+            "hostname": hostname,
+            "scheme": scheme or ("https" if port == 443 else "http"),
+            "title": title, "description": description,
+            "timestamp": datetime.datetime.now().isoformat(),
+        }
+        dest.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
+    except Exception:
+        pass
+
+
 def _capture_screenshot_to(ep_url: str, out_path: Path,
                             target: dict, cfg: dict,
                             auth_session: "requests.Session | None" = None,
@@ -17043,6 +17078,10 @@ def _capture_xss_screenshot(proof_url: str, out: "OutputManager",
     ss_path = ss_dir / f"{safe}_screenshot.png"
     if _capture_screenshot_to(proof_url, ss_path, target, cfg,
                               auth_session=auth_session):
+        _register_screenshot(out.root, ss_path, url=proof_url,
+                             ip=target.get("ip", ""), port=target.get("port", 0),
+                             hostname=target.get("hostname", ""),
+                             title=f"XSS Proof: {label}", description="Confirmed XSS proof-of-concept")
         try:
             return str(ss_path.relative_to(out.root))
         except Exception:
@@ -17092,21 +17131,37 @@ def _capture_clickjack_screenshot(target_url: str, out: "OutputManager",
         f"<iframe src='{target_url}'></iframe>"
         "</div></body></html>"
     )
-    poc_path = Path(tempfile.mktemp(suffix=".html", prefix="fracture_cj_"))
+    poc_persist = ss_dir / f"{safe}_clickjack_poc.html"
+    poc_tmp = Path(tempfile.mktemp(suffix=".html", prefix="fracture_cj_"))
     try:
-        poc_path.write_text(poc_html, encoding="utf-8")
-        poc_file_url = f"file://{poc_path}"
+        poc_tmp.write_text(poc_html, encoding="utf-8")
+        poc_file_url = f"file://{poc_tmp}"
         if _capture_screenshot_to(poc_file_url, ss_path, target, cfg,
                                   _url_bar_url=target_url):
+            _register_screenshot(out.root, ss_path, url=target_url,
+                                 ip=target.get("ip", ""), port=target.get("port", 0),
+                                 hostname=target.get("hostname", ""),
+                                 title=f"Clickjacking PoC: {label}", description="Clickjacking proof-of-concept")
             try:
-                return str(ss_path.relative_to(out.root))
+                poc_persist.write_text(poc_html, encoding="utf-8")
             except Exception:
-                return str(ss_path)
+                pass
+            try:
+                ss_rel = str(ss_path.relative_to(out.root))
+                poc_rel = str(poc_persist.relative_to(out.root))
+            except Exception:
+                ss_rel = str(ss_path)
+                poc_rel = str(poc_persist)
+            return json.dumps([{
+                "url": target_url,
+                "req": poc_rel,
+                "resp": ss_rel,
+            }])
     except Exception:
         pass
     finally:
         try:
-            poc_path.unlink(missing_ok=True)
+            poc_tmp.unlink(missing_ok=True)
         except Exception:
             pass
     return ""
@@ -17127,6 +17182,10 @@ def _capture_error_screenshot(error_url: str, out: "OutputManager",
     ss_path = ss_dir / f"{safe}_error_screenshot.png"
     if _capture_screenshot_to(error_url, ss_path, target, cfg,
                               auth_session=auth_session):
+        _register_screenshot(out.root, ss_path, url=error_url,
+                             ip=target.get("ip", ""), port=target.get("port", 0),
+                             hostname=target.get("hostname", ""),
+                             title=f"Error Screenshot: {label}", description="Verbose error or stack trace")
         try:
             return str(ss_path.relative_to(out.root))
         except Exception:
@@ -17509,6 +17568,12 @@ def _phase_endpoint_tools(
                 remediation="Review screenshot for exposed sensitive content.",
             )
             vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] screenshot — done: {ep_shot.name}", "SUCCESS")
+            _register_screenshot(out.root, ep_shot, url=ep_url,
+                                 ip=target.get("ip", ""), port=target.get("port", 0),
+                                 hostname=target.get("hostname", ""),
+                                 scheme=target.get("scheme", ""),
+                                 title="Discovery: Web Screenshot Captured",
+                                 description=f"Endpoint screenshot — HTTP {_ss_http_code}")
 
         # ── Per-endpoint timeout guard ──────────────────────────────────────
         if time.monotonic() - _ep_t0 > _EP_TIMEOUT:
@@ -18134,10 +18199,10 @@ _TLS_VULN_PATTERNS = {
     # DROWN: HIGH — cross-protocol Bleichenbacher oracle via SSLv2 decrypts TLS sessions
     # (CVE-2016-0800 CVSS v3 5.9 MEDIUM; pentest consensus HIGH given C:H impact). CWE-310.
     "SSL/TLS Vulnerability: DROWN":         (re.compile(r'DROWN|VULNERABLE.*drown', re.I),    "HIGH",   "CVE-2016-0800", ""),
-    # LOGJAM: HIGH only when testssl/sslscan explicitly says VULNERABLE (≤1024-bit
-    # DH or export ciphers). The common-prime advisory (2048+ bits, no export) is
-    # handled by dedicated post-loop logic that emits MEDIUM. CWE-326.
-    "SSL/TLS Vulnerability: LOGJAM":        (re.compile(r'(?:VULNERABLE[^\n]*LOGJAM|LOGJAM[^\n]*VULNERABLE)', re.I),  "HIGH",   "CVE-2015-4000", ""),
+    # LOGJAM: HIGH only when export ciphers or ≤1024-bit DH are present.
+    # Common-prime advisory (2048+ bits, no export) handled by post-loop block.
+    # CWE-326.
+    "SSL/TLS Vulnerability: LOGJAM":        (re.compile(r'LOGJAM[^\n]*(?:export|(?:512|768|1024)\s*bit)', re.I),  "HIGH",   "CVE-2015-4000", ""),
     "SSL/TLS Vulnerability: FREAK":         (re.compile(r'FREAK|VULNERABLE.*freak', re.I),    "MEDIUM", "CVE-2015-0204", ""),
     "SSL/TLS Vulnerability: SWEET32":       (re.compile(r'SWEET32|3DES.*cipher|DES-CBC3', re.I), "MEDIUM", "CVE-2016-2183", ""),
     "SSL/TLS Vulnerability: LUCKY13":       (re.compile(r'LUCKY13|lucky13', re.I),            "MEDIUM", "CVE-2013-0169", ""),
@@ -18636,38 +18701,43 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         remediation="Disable weak protocols. Enable TLS 1.2/1.3 only.",
                         highlights=_tvp_hl2,
                     )
-            # ── LOGJAM common-prime detection (MEDIUM) ──────────────────
+            # ── LOGJAM common-prime detection ──────────────────────────
             # testssl flags "common prime with XXXX bits" when the server
             # uses a well-known DH group (RFC 7919 ffdhe2048/3072/4096).
-            # This is NOT the classic LOGJAM attack (which requires
-            # ≤1024-bit or export DH) but carries a theoretical
-            # precomputation risk.  The _TLS_VULN_PATTERNS entry fires
-            # HIGH only on explicitly "VULNERABLE" lines; this block
-            # catches the common-prime advisory separately.
+            # True LOGJAM requires ≤1024-bit DH or export ciphers.
+            # Common-prime with ≥2048 bits and no export = INFO.
             _logjam_cp = re.search(
-                r'LOGJAM[^\n]*common prime[^\n]*?(\d+)\s*bits',
+                r'LOGJAM[^\n]*(?:common prime|DH)[^\n]*?(\d+)\s*bits',
                 stdout, re.I,
             )
-            if _logjam_cp and not re.search(
-                r'LOGJAM[^\n]*VULNERABLE', stdout, re.I
-            ):
+            _logjam_has_export = bool(re.search(
+                r'LOGJAM[^\n]*export', stdout, re.I))
+            if _logjam_cp and not _logjam_has_export:
                 _dh_bits = int(_logjam_cp.group(1))
-                _lj_risk = "HIGH" if _dh_bits <= 1024 else "MEDIUM"
+                if _dh_bits <= 1024:
+                    _lj_risk = "HIGH"
+                    _lj_title = "SSL/TLS Vulnerability: LOGJAM"
+                    _lj_desc = (
+                        f"TLS service uses a {_dh_bits}-bit "
+                        "Diffie-Hellman prime, which permits the classic "
+                        "LOGJAM downgrade attack (CVE-2015-4000)."
+                    )
+                else:
+                    _lj_risk = "INFO"
+                    _lj_title = "SSL/TLS Vulnerability [UNCONFIRMED]: LOGJAM"
+                    _lj_desc = (
+                        f"[UNCONFIRMED] testssl flagged LOGJAM due to a "
+                        f"common {_dh_bits}-bit DH prime, but no export "
+                        "ciphers or small DH parameters were detected. "
+                        "True LOGJAM (CVE-2015-4000) requires DHE_EXPORT "
+                        "cipher suites or DH parameters <1024 bits. "
+                        "Verify manually whether export ciphers are offered."
+                    )
                 out.add_finding(
-                    title="SSL/TLS Vulnerability: LOGJAM",
+                    title=_lj_title,
                     url=target["url"], port=port,
                     risk=_lj_risk,
-                    description=(
-                        f"TLS service uses a common {_dh_bits}-bit "
-                        f"Diffie-Hellman prime for DHE key exchange. "
-                        + ("DH modulus ≤1024 bits permits the classic "
-                           "LOGJAM downgrade attack."
-                           if _dh_bits <= 1024
-                           else "While the key length exceeds the classic "
-                                "LOGJAM threshold, use of a widely shared "
-                                "prime introduces a theoretical "
-                                "precomputation risk.")
-                    ),
+                    description=_lj_desc,
                     cves="CVE-2015-4000",
                     sources="testssl.sh", service="https",
                     output_file=str(out_f),
@@ -18936,23 +19006,48 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     for s in _ts_cert_san
                 )
                 if not _san_match:
-                    out.add_finding(
-                        title="SSL/TLS Certificate: Hostname Mismatch",
-                        url=target["url"], port=port, risk="HIGH",
-                        description=(
-                            f"The TLS certificate's Subject Alternative Names do not cover "
-                            f"{hostname}. Clients will display a certificate mismatch warning, "
-                            "enabling trivial MITM attacks. CWE-297."
-                        ),
-                        output=f"Hostname: {hostname}\nSANs: {', '.join(_ts_cert_san[:10])}",
-                        sources="testssl.sh", service="https",
-                        output_file=str(out_f),
-                        owasp="A02:2025 Cryptographic Failures", nist="SC-8",
-                        remediation=(
-                            f"Reissue the certificate to include {hostname} "
-                            "in the Subject Alternative Name extension."
-                        ),
-                    )
+                    _san_is_ip = False
+                    try:
+                        ipaddress.ip_address(hostname)
+                        _san_is_ip = True
+                    except ValueError:
+                        pass
+                    if _san_is_ip:
+                        out.add_finding(
+                            title="SSL/TLS Certificate: Hostname Mismatch",
+                            url=target["url"], port=port, risk="INFO",
+                            description=(
+                                f"The TLS certificate's Subject Alternative Names do not cover "
+                                f"{hostname}. This is expected when testing by IP address, as "
+                                "certificates rarely include IP SANs. Verify with the actual FQDN."
+                            ),
+                            output=f"Hostname (IP): {hostname}\nSANs: {', '.join(_ts_cert_san[:10])}",
+                            sources="testssl.sh", service="https",
+                            output_file=str(out_f),
+                            owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                            remediation=(
+                                "If testing by IP, re-test using the FQDN to confirm. "
+                                "No action needed if the certificate covers the intended hostname."
+                            ),
+                        )
+                    else:
+                        out.add_finding(
+                            title="SSL/TLS Certificate: Hostname Mismatch",
+                            url=target["url"], port=port, risk="HIGH",
+                            description=(
+                                f"The TLS certificate's Subject Alternative Names do not cover "
+                                f"{hostname}. Clients will display a certificate mismatch warning, "
+                                "enabling trivial MITM attacks. CWE-297."
+                            ),
+                            output=f"Hostname: {hostname}\nSANs: {', '.join(_ts_cert_san[:10])}",
+                            sources="testssl.sh", service="https",
+                            output_file=str(out_f),
+                            owasp="A02:2025 Cryptographic Failures", nist="SC-8",
+                            remediation=(
+                                f"Reissue the certificate to include {hostname} "
+                                "in the Subject Alternative Name extension."
+                            ),
+                        )
                 # GAP-37: Check SANs for internal hostnames
                 _san_internal = []
                 for _san_name in _ts_cert_san:
@@ -19253,15 +19348,27 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
 
                 # Mismatched hostname
                 if _tl.get("mismatched", False):
+                    _tlsx_is_ip = False
+                    try:
+                        ipaddress.ip_address(hostname)
+                        _tlsx_is_ip = True
+                    except ValueError:
+                        pass
+                    _tlsx_mm_risk = "INFO" if _tlsx_is_ip else "MEDIUM"
+                    _tlsx_mm_desc = (
+                        f"The TLS certificate on {_tl_host}:{_tl_port_n} does not match "
+                        "the IP address being tested. This is expected when scanning by IP "
+                        "rather than FQDN. Verify with the actual hostname."
+                    ) if _tlsx_is_ip else (
+                        f"The TLS certificate on {_tl_host}:{_tl_port_n} does not match "
+                        "the hostname being accessed. This may indicate a misconfiguration "
+                        "or a shared/reused certificate."
+                    )
                     out.add_finding(
                         title="SSL/TLS Certificate: Hostname Mismatch",
                         url=target["url"], port=_tl_port_n,
-                        risk="MEDIUM",
-                        description=(
-                            f"The TLS certificate on {_tl_host}:{_tl_port_n} does not match "
-                            "the hostname being accessed. This may indicate a misconfiguration "
-                            "or a shared/reused certificate."
-                        ),
+                        risk=_tlsx_mm_risk,
+                        description=_tlsx_mm_desc,
                         sources="tlsx", service="https",
                         output_file=str(_tlsx_out),
                         affected=f"{_tl_host}:{_tl_port_n}",
@@ -20444,6 +20551,15 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         _cors_acac = _cors_resp.headers.get("Access-Control-Allow-Credentials", "")
         if (_cors_acao == _fake_origin and _cors_acac.lower() == "true"):
             _cors_cred_leak = True
+            _cors_ev = _sh_ev
+            try:
+                _cors_rq, _cors_rp = _save_http_evidence(
+                    out, phase, f"cors_probe_{target['hostname']}", _cors_resp)
+                _cors_ev = json.dumps([
+                    {"url": url, "req": str(_cors_rq), "resp": str(_cors_rp)}
+                ])
+            except Exception:
+                pass
             out.add_finding(
                 title="Information Disclosure: CORS Credential Leakage",
                 url=url, port=target["port"], risk="HIGH",
@@ -20460,7 +20576,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                     f"Access-Control-Allow-Credentials: {_cors_acac}"
                 ),
                 sources="fracture-headers", service=target["scheme"],
-                output_file=_sh_ev,
+                output_file=_cors_ev,
                 owasp="A01:2025 Broken Access Control", nist="AC-4",
                 remediation=(
                     "Validate the Origin header against an explicit allowlist "
@@ -22929,6 +23045,27 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         _cl_details = "\n".join(
             f"  {ip}  (first seen: {_crawl_leaked_ips[ip]})" for ip in _cl_ips
         )
+        _cl_ev = ""
+        _cl_ev_pairs = []
+        for _cl_ip in _cl_ips[:3]:
+            _cl_verify_url = _crawl_leaked_ips[_cl_ip]
+            try:
+                _cl_resp = sess.get(
+                    _cl_verify_url, timeout=timeout, verify=False,
+                    allow_redirects=True)
+                _cl_rq, _cl_rp = _save_http_evidence(
+                    out, phase,
+                    f"internal_ip_verify_{target['hostname']}",
+                    _cl_resp)
+                _cl_ev_pairs.append({
+                    "url": _cl_verify_url,
+                    "req": str(_cl_rq),
+                    "resp": str(_cl_rp),
+                })
+            except Exception:
+                pass
+        if _cl_ev_pairs:
+            _cl_ev = json.dumps(_cl_ev_pairs)
         out.add_finding(
             title="Information Disclosure: Internal IP in HTTP Response",
             url=url, port=target["port"],
@@ -22942,6 +23079,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             output=f"Internal IPs found during crawl ({len(_cl_ips)}):\n{_cl_details}",
             affected=_url_rel_path(url, target["url"]),
             sources="fracture-crawl", service=target["scheme"],
+            output_file=_cl_ev,
             owasp="A05:2025 Security Misconfiguration",
             remediation=(
                 "Remove internal IP addresses from HTTP response bodies, "
@@ -22950,6 +23088,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                 "load-balancer configurations to strip internal addresses "
                 "from forwarded headers."
             ),
+            highlights=_cl_ips[:5],
         )
         vc.log(f"[crawl] Internal IP disclosure: {', '.join(_cl_ips)}", "SUCCESS")
 
@@ -23158,6 +23297,19 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             f"  {u}  (field: {fn or '(unnamed)'})"
             for u, fn in _crawl_pw_autocomplete[:15]
         )
+        _pa_ev_dir = out.root / "crawl"
+        _pa_ev_dir.mkdir(parents=True, exist_ok=True)
+        _pa_ev_file = _pa_ev_dir / "password_autocomplete_evidence.txt"
+        _pa_full = "\n".join(
+            f"{u}  (field: {fn or '(unnamed)'})"
+            for u, fn in _crawl_pw_autocomplete
+        )
+        _pa_ev_file.write_text(
+            f"Password fields with autocomplete enabled ({len(_crawl_pw_autocomplete)}):\n\n"
+            f"{_pa_full}\n",
+            encoding="utf-8",
+        )
+        _pa_ev_rel = str(_pa_ev_file.relative_to(out.root))
         out.add_finding(
             title="Web Misconfiguration: Password Autocomplete Enabled",
             url=url, port=target["port"], risk="LOW",
@@ -23168,6 +23320,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                 f"workstation attacks. CWE-525."
             ),
             output=f"Password fields with autocomplete ({len(_crawl_pw_autocomplete)}):\n{_pa_output}",
+            output_file=_pa_ev_rel,
             affected=_url_rel_path(url, target["url"]),
             sources="fracture-crawl", service=target["scheme"],
             owasp="A04:2025 Insecure Design",
@@ -29643,6 +29796,19 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                 except Exception:
                     pass
                 _norm   = _normalize_nuclei(item)
+                # Downgrade hostname-mismatch findings when target is IP
+                if (_norm.get("title") == "SSL/TLS Certificate: Hostname Mismatch"
+                        and _norm.get("risk") in ("HIGH", "MEDIUM", "CRITICAL")):
+                    try:
+                        ipaddress.ip_address(target["hostname"])
+                        _norm["risk"] = "INFO"
+                        _norm["description"] = (
+                            _norm.get("description", "") +
+                            " Note: target was accessed by IP address; certificate hostname "
+                            "mismatch is expected. Verify with the actual FQDN."
+                        )
+                    except ValueError:
+                        pass
                 # Extract v1.1 enrichment fields from normalizer output
                 _nuc_v11 = {k: _norm[k] for k in ("cvss_score", "cvss_vector", "cwe")
                             if k in _norm and _norm[k]}
