@@ -364,6 +364,38 @@ _TOOL_PATHS: dict = {
                    str(_HOME / "go" / "bin" / "dalfox"),
                    "/root/go/bin/dalfox"],
     },
+    "arjun": {
+        "Darwin": ["/usr/local/bin/arjun", "/opt/homebrew/bin/arjun",
+                   str(_HOME / ".local" / "bin" / "arjun"),
+                   str(_HOME / "go" / "bin" / "arjun")],
+        "Linux":  ["/usr/bin/arjun", "/usr/local/bin/arjun",
+                   str(_HOME / ".local" / "bin" / "arjun"),
+                   "/root/.local/bin/arjun"],
+    },
+    "commix": {
+        "Darwin": ["/usr/local/bin/commix", "/opt/homebrew/bin/commix",
+                   str(_HOME / ".local" / "bin" / "commix"),
+                   "/opt/commix/commix.py"],
+        "Linux":  ["/usr/bin/commix", "/usr/local/bin/commix",
+                   str(_HOME / ".local" / "bin" / "commix"),
+                   "/opt/commix/commix.py"],
+    },
+    "sstimap": {
+        "Darwin": ["/usr/local/bin/sstimap", "/opt/sstimap/sstimap.py",
+                   str(_HOME / ".local" / "bin" / "sstimap"),
+                   "/opt/SSTImap/sstimap.py"],
+        "Linux":  ["/usr/bin/sstimap", "/usr/local/bin/sstimap",
+                   "/opt/sstimap/sstimap.py", "/opt/SSTImap/sstimap.py",
+                   str(_HOME / ".local" / "bin" / "sstimap")],
+    },
+    "toxicache": {
+        "Darwin": ["/usr/local/bin/toxicache", "/opt/homebrew/bin/toxicache",
+                   str(_HOME / "go" / "bin" / "toxicache"),
+                   "/root/go/bin/toxicache"],
+        "Linux":  ["/usr/bin/toxicache", "/usr/local/bin/toxicache",
+                   str(_HOME / "go" / "bin" / "toxicache"),
+                   "/root/go/bin/toxicache"],
+    },
     "jwt_tool": {
         "Darwin": ["/opt/jwt_tool/jwt_tool.py", "/usr/local/bin/jwt_tool",
                    "/usr/local/bin/jwt_tool.py"],
@@ -24886,7 +24918,95 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         )
     forms   = crawl_data.get("forms", [])
     params  = crawl_data.get("params", [])
-    vc.status(phase, "Injection Testing", "running", "SQLi heuristic", 0, 7)
+    vc.status(phase, "Injection Testing", "running", "Hidden param discovery (arjun)", 0, 28)
+
+    # 0. arjun — hidden HTTP parameter discovery
+    arjun_bin = _find_tool("arjun")
+    if arjun_bin and url:
+        arjun_out = out.output_path(phase, "arjun_" + target["hostname"] + ".json")
+        arjun_cmd = [arjun_bin, "-u", url, "-oJ", str(arjun_out), "-t", "5", "--stable"]
+        vc.log("[injection] Running arjun for hidden parameter discovery ...", "INFO")
+        try:
+            proc = _popen(arjun_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            _register_proc(proc)
+            _arj_stdout, _ = proc.communicate(timeout=300)
+            _deregister_proc(proc)
+            out.log_command("arjun", arjun_cmd, arjun_out)
+            _arj_params: list = []
+            _SENSITIVE_PARAM_RE = re.compile(
+                r'(?:admin|debug|test|secret|token|key|password|passwd|auth|'
+                r'api_?key|private|internal|hidden|backdoor|sudo|root|flag)',
+                re.I,
+            )
+            try:
+                with open(arjun_out, "r") as _af:
+                    _arj_data = json.load(_af)
+                for _arj_url, _arj_methods in _arj_data.items():
+                    if isinstance(_arj_methods, dict):
+                        for _arj_method, _arj_plist in _arj_methods.items():
+                            if isinstance(_arj_plist, list):
+                                _arj_params.extend(_arj_plist)
+                    elif isinstance(_arj_methods, list):
+                        _arj_params.extend(_arj_methods)
+            except Exception:
+                pass
+            if _arj_params:
+                _arj_unique = list(dict.fromkeys(_arj_params))
+                _existing = set()
+                for _pe in params:
+                    _existing.update(_pe.get("params", []))
+                _new_params = [p for p in _arj_unique if p not in _existing]
+                if _new_params and params:
+                    params[0]["params"] = list(params[0]["params"]) + _new_params
+                elif _new_params:
+                    params.append({"url": url, "params": _new_params})
+                out.add_finding(
+                    title="Hidden HTTP Parameters Discovered",
+                    url=url, port=target["port"], risk="INFO",
+                    description=(
+                        f"arjun discovered {len(_arj_unique)} hidden HTTP parameter(s) "
+                        f"not visible in crawled forms or links. These parameters are "
+                        f"now included in subsequent injection tests."
+                    ),
+                    output=f"Parameters: {', '.join(_arj_unique)}",
+                    output_file=str(arjun_out),
+                    sources="arjun", service=target["scheme"],
+                    affected=url, owasp="A05:2025 Security Misconfiguration",
+                    nist="CM-7",
+                    remediation=(
+                        "Remove or disable hidden parameters that are not required "
+                        "for application functionality. Document all accepted "
+                        "parameters and reject unknown ones."
+                    ),
+                )
+                vc.log(f"[injection] arjun found {len(_arj_unique)} hidden params: "
+                       f"{', '.join(_arj_unique[:10])}", "SUCCESS")
+                _sensitive = [p for p in _arj_unique if _SENSITIVE_PARAM_RE.search(p)]
+                if _sensitive:
+                    out.add_finding(
+                        title="Security-Sensitive Hidden Parameter",
+                        url=url, port=target["port"], risk="LOW",
+                        description=(
+                            f"arjun discovered hidden parameter(s) with security-sensitive "
+                            f"names ({', '.join(_sensitive)}). These may expose debug "
+                            f"interfaces, admin functionality, or authentication bypasses."
+                        ),
+                        output=f"Sensitive parameters: {', '.join(_sensitive)}",
+                        output_file=str(arjun_out),
+                        sources="arjun", service=target["scheme"],
+                        affected=url, owasp="A05:2025 Security Misconfiguration",
+                        nist="CM-7",
+                        remediation=(
+                            "Remove debug/test/admin parameters from production. "
+                            "Implement strict parameter whitelisting and reject "
+                            "unrecognised parameter names."
+                        ),
+                    )
+                    vc.log(f"[injection] arjun: sensitive params: {', '.join(_sensitive)}", "WARNING")
+        except Exception as e:
+            out.log_error("arjun", arjun_cmd, str(e))
+
+    vc.status(phase, "Injection Testing", "running", "SQLi heuristic", 1, 28)
 
     # 1. URL param error-based SQLi — two-probe gated per 2026-06-11 review.
     # The prior code fired CRITICAL on a single ' injection if any SQL-error
@@ -24937,7 +25057,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 )
                 vc.log(f"[injection] SQLi: {purl} param={param} confirmed={_confirmed}", "SUCCESS")
 
-    vc.status(phase, "Injection Testing", "running", "Form SQLi", 1, 7)
+    vc.status(phase, "Injection Testing", "running", "Form SQLi", 2, 28)
     # 2. Form-based SQLi
     for form in forms[:20]:
         action = form.get("action", url)
@@ -25030,7 +25150,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             except Exception as e:
                 out.log_error("sqlmap", cmd, str(e))
 
-    vc.status(phase, "Injection Testing", "running", "XSS", 2, 7)
+    vc.status(phase, "Injection Testing", "running", "XSS", 3, 28)
     # 4. Reflected XSS
     for entry in params[:10]:
         purl = entry["url"]
@@ -25159,7 +25279,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         except Exception as e:
             out.log_error("dalfox", cmd, str(e))
 
-    vc.status(phase, "Injection Testing", "running", "SSTI", 3, 7)
+    vc.status(phase, "Injection Testing", "running", "SSTI", 4, 28)
     # 5. SSTI
     for entry in params[:10]:
         purl = entry["url"]
@@ -25191,7 +25311,89 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     )
                     vc.log(f"[injection] SSTI: {purl} param={param}", "SUCCESS")
 
-    vc.status(phase, "Injection Testing", "running", "Command injection", 4, 7)
+    # 5b. SSTImap — dedicated SSTI scanner with engine-specific payloads
+    vc.status(phase, "Injection Testing", "running", "SSTImap", 5, 28)
+    sstimap_bin = _find_tool("sstimap") or _find_tool("SSTImap") or _find_tool("sstimap.py")
+    if sstimap_bin and params:
+        _sstimap_dir = out.root / phase / "sstimap"
+        _sstimap_dir.mkdir(parents=True, exist_ok=True)
+        _sstimap_found_params: set = set()
+        for entry in params[:8]:
+            purl = entry["url"]
+            for param in entry["params"][:5]:
+                _sstikey = (purl, param)
+                if _sstikey in _sstimap_found_params:
+                    continue
+                _sstimap_out = _sstimap_dir / f"sstimap_{param}.txt"
+                _sstimap_cmd = [sstimap_bin, "-u", f"{purl}?{param}=INJECT",
+                                "--level", "2", "--no-color"]
+                try:
+                    proc = _popen(_sstimap_cmd, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+                    _register_proc(proc)
+                    _ssti_stdout, _ssti_stderr = proc.communicate(timeout=120)
+                    _deregister_proc(proc)
+                    _sstimap_out.write_text(_ssti_stdout, encoding="utf-8")
+                    out.log_command("sstimap", _sstimap_cmd, _sstimap_out)
+                    _ssti_confirmed = bool(re.search(
+                        r'(?:Confirmed|confirmed|Exploitable|exploitable)',
+                        _ssti_stdout, re.I))
+                    _ssti_identified = bool(re.search(
+                        r'(?:Identified|identified|Detected|detected)\s.*?engine',
+                        _ssti_stdout, re.I))
+                    _engine_m = re.search(
+                        r'(?:Engine|Template)[\s:]+([A-Za-z0-9_. ]+)',
+                        _ssti_stdout, re.I)
+                    _engine_name = _engine_m.group(1).strip() if _engine_m else "Unknown"
+                    if _ssti_confirmed:
+                        _sstimap_found_params.add(_sstikey)
+                        out.add_finding(
+                            title="Server-Side Template Injection (SSTI) — SSTImap Confirmed",
+                            url=purl, port=target["port"], risk="CRITICAL",
+                            description=(
+                                f"SSTImap confirmed SSTI in parameter '{param}' at {purl}. "
+                                f"Template engine: {_engine_name}. Server-side template "
+                                f"injection allows arbitrary code execution on the server."
+                            ),
+                            output=_ssti_stdout[:2000],
+                            output_file=str(_sstimap_out),
+                            sources="sstimap", service=target["scheme"],
+                            affected=purl, owasp="A03:2025 Injection",
+                            nist="SI-10",
+                            remediation=(
+                                "Never pass user input directly to template rendering "
+                                "functions. Use sandboxed or logic-less template engines. "
+                                "Treat user data as context variables only."
+                            ),
+                        )
+                        vc.log(f"[injection] SSTImap confirmed SSTI: {purl} "
+                               f"param={param} engine={_engine_name}", "SUCCESS")
+                    elif _ssti_identified:
+                        _sstimap_found_params.add(_sstikey)
+                        out.add_finding(
+                            title="SSTI — Template Engine Identified",
+                            url=purl, port=target["port"], risk="MEDIUM",
+                            description=(
+                                f"SSTImap identified a template engine ({_engine_name}) "
+                                f"processing parameter '{param}' at {purl}, but could not "
+                                f"confirm exploitable injection. Manual testing is advised."
+                            ),
+                            output=_ssti_stdout[:2000],
+                            output_file=str(_sstimap_out),
+                            sources="sstimap", service=target["scheme"],
+                            affected=purl, owasp="A03:2025 Injection",
+                            nist="SI-10",
+                            remediation=(
+                                "Investigate the identified template engine. Ensure user "
+                                "input cannot influence template syntax. Apply sandboxing."
+                            ),
+                        )
+                        vc.log(f"[injection] SSTImap identified engine: {purl} "
+                               f"param={param} engine={_engine_name}", "WARNING")
+                except Exception as e:
+                    out.log_error("sstimap", _sstimap_cmd, str(e))
+
+    vc.status(phase, "Injection Testing", "running", "Command injection", 6, 28)
     # 6. Command injection
     for entry in params[:10]:
         purl = entry["url"]
@@ -25213,7 +25415,86 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     )
                     vc.log(f"[injection] CMDi: {purl} param={param}", "SUCCESS")
 
-    vc.status(phase, "Injection Testing", "running", "CRLF", 5, 7)
+    # 6b. commix — dedicated OS command injection scanner
+    vc.status(phase, "Injection Testing", "running", "commix", 7, 28)
+    commix_bin = _find_tool("commix")
+    if commix_bin and params:
+        commix_dir = out.root / phase / "commix"
+        commix_dir.mkdir(parents=True, exist_ok=True)
+        _cmx_tested: set = set()
+        for entry in params[:8]:
+            purl = entry["url"]
+            for param in entry["params"][:5]:
+                _cmx_key = (purl, param)
+                if _cmx_key in _cmx_tested:
+                    continue
+                _cmx_tested.add(_cmx_key)
+                _cmx_out = commix_dir / f"commix_{param}.txt"
+                _cmx_cmd = [commix_bin, f"--url={purl}", "-p", param,
+                            "--batch", f"--output-dir={commix_dir}",
+                            "--level=2"]
+                vc.log(f"[injection] Running commix on {purl} param={param} ...", "INFO")
+                try:
+                    proc = _popen(_cmx_cmd, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+                    _register_proc(proc)
+                    _cmx_stdout, _cmx_stderr = proc.communicate(timeout=180)
+                    _deregister_proc(proc)
+                    _cmx_out.write_text(_cmx_stdout, encoding="utf-8")
+                    out.log_command("commix", _cmx_cmd, _cmx_out)
+                    _cmx_vuln = bool(re.search(
+                        r'is\s+vulnerable|injection\s+point|injectable',
+                        _cmx_stdout, re.I))
+                    _cmx_blind = bool(re.search(
+                        r'time-based|blind.*injection|blind.*technique',
+                        _cmx_stdout, re.I))
+                    if _cmx_vuln and not _cmx_blind:
+                        out.add_finding(
+                            title="OS Command Injection — commix Confirmed",
+                            url=purl, port=target["port"], risk="CRITICAL",
+                            description=(
+                                f"commix confirmed OS command injection in parameter "
+                                f"'{param}' at {purl}. An attacker can execute arbitrary "
+                                f"system commands on the host operating system."
+                            ),
+                            output=_cmx_stdout[:2000],
+                            output_file=str(_cmx_out),
+                            sources="commix", service=target["scheme"],
+                            affected=purl, owasp="A03:2025 Injection",
+                            nist="SI-10",
+                            remediation=(
+                                "Eliminate shell calls that incorporate user input. "
+                                "Use language-native library functions. Apply strict "
+                                "allowlist validation on all input values."
+                            ),
+                        )
+                        vc.log(f"[injection] commix confirmed CMDi: {purl} param={param}", "SUCCESS")
+                    elif _cmx_blind:
+                        out.add_finding(
+                            title="Blind Command Injection (Time-Based) — commix",
+                            url=purl, port=target["port"], risk="HIGH",
+                            description=(
+                                f"commix detected time-based blind command injection in "
+                                f"parameter '{param}' at {purl}. The server's response "
+                                f"delay indicates user input reaches a shell execution "
+                                f"function, though output is not directly returned."
+                            ),
+                            output=_cmx_stdout[:2000],
+                            output_file=str(_cmx_out),
+                            sources="commix", service=target["scheme"],
+                            affected=purl, owasp="A03:2025 Injection",
+                            nist="SI-10",
+                            remediation=(
+                                "Eliminate shell calls that incorporate user input. "
+                                "Use language-native library functions. Apply strict "
+                                "allowlist validation on all input values."
+                            ),
+                        )
+                        vc.log(f"[injection] commix blind CMDi: {purl} param={param}", "WARNING")
+                except Exception as e:
+                    out.log_error("commix", _cmx_cmd, str(e))
+
+    vc.status(phase, "Injection Testing", "running", "CRLF", 8, 28)
     # 7. CRLF injection
     for entry in params[:10]:
         purl = entry["url"]
@@ -25233,7 +25514,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     http_code=r.status_code,
                 )
 
-    vc.status(phase, "Injection Testing", "running", "XXE", 6, 7)
+    vc.status(phase, "Injection Testing", "running", "XXE", 9, 28)
     # 8. XXE — test on forms that might accept XML
     _xxe_payload = ('<?xml version="1.0"?><!DOCTYPE foo '
                     '[<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
@@ -25261,7 +25542,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             pass
 
     # 9. Second-order SQL injection
-    vc.status(phase, "Injection Testing", "running", "Second-order SQLi", 7, 17)
+    vc.status(phase, "Injection Testing", "running", "Second-order SQLi", 10, 28)
     for form in forms[:5]:
         action = form.get("action", url)
         inputs = form.get("inputs", [])
@@ -25295,7 +25576,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 pass
 
     # 10. CSV / formula injection
-    vc.status(phase, "Injection Testing", "running", "CSV injection", 8, 17)
+    vc.status(phase, "Injection Testing", "running", "CSV injection", 11, 28)
     _csv_found_forms: set = set()
     for form in forms[:15]:
         action = form.get("action", url)
@@ -25343,7 +25624,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 pass
 
     # 11. NoSQL injection
-    vc.status(phase, "Injection Testing", "running", "NoSQL injection", 9, 17)
+    vc.status(phase, "Injection Testing", "running", "NoSQL injection", 12, 28)
     for entry in params[:10]:
         purl = entry["url"]
         for param in entry["params"]:
@@ -25372,7 +25653,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     # The LDAP error regexes include terms like "objectClass" which can
     # appear in normal page content.  A baseline fetch without the payload
     # must NOT match the regex for the finding to fire.
-    vc.status(phase, "Injection Testing", "running", "LDAP injection", 10, 17)
+    vc.status(phase, "Injection Testing", "running", "LDAP injection", 13, 28)
     for entry in params[:10]:
         purl = entry["url"]
         for param in entry["params"]:
@@ -25419,7 +25700,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 break
 
     # 13. XPath injection
-    vc.status(phase, "Injection Testing", "running", "XPath injection", 11, 17)
+    vc.status(phase, "Injection Testing", "running", "XPath injection", 14, 28)
     for entry in params[:10]:
         purl = entry["url"]
         for param in entry["params"]:
@@ -25443,7 +25724,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     break
 
     # 14. Log injection
-    vc.status(phase, "Injection Testing", "running", "Log injection", 12, 17)
+    vc.status(phase, "Injection Testing", "running", "Log injection", 15, 28)
     _log_found: set = set()
     for entry in params[:10]:
         purl = entry["url"]
@@ -25472,7 +25753,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 break
 
     # 15. HTTP Parameter Pollution
-    vc.status(phase, "Injection Testing", "running", "HTTP Parameter Pollution", 13, 17)
+    vc.status(phase, "Injection Testing", "running", "HTTP Parameter Pollution", 16, 28)
     for entry in params[:10]:
         purl = entry["url"]
         for param in entry["params"]:
@@ -25515,7 +25796,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 pass
 
     # 16. Code injection / eval() RCE probe
-    vc.status(phase, "Injection Testing", "running", "Code injection", 14, 17)
+    vc.status(phase, "Injection Testing", "running", "Code injection", 17, 28)
     for entry in params[:10]:
         purl = entry["url"]
         for param in entry["params"]:
@@ -25572,7 +25853,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     break
 
     # 17. Stored XSS
-    vc.status(phase, "Injection Testing", "running", "Stored XSS", 15, 17)
+    vc.status(phase, "Injection Testing", "running", "Stored XSS", 18, 28)
     _stored_xss_marker = "<img/src=x id=fracture_sxss>"
     _stored_xss_found: set = set()
     for form in forms[:10]:
@@ -25616,7 +25897,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 pass
 
     # 18. DOM-based XSS — static source analysis in discovered JS files
-    vc.status(phase, "Injection Testing", "running", "DOM XSS (static)", 16, 17)
+    vc.status(phase, "Injection Testing", "running", "DOM XSS (static)", 19, 28)
     _dom_sink_re = re.compile(
         r'(document\.write|innerHTML|outerHTML|insertAdjacentHTML|eval\s*\(|'
         r'setTimeout\s*\(\s*["\']|setInterval\s*\(\s*["\']|location\.href\s*=|'
@@ -25656,7 +25937,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             pass
 
     # 19. JSONP endpoint detection
-    vc.status(phase, "Injection Testing", "running", "JSONP endpoints", 17, 17)
+    vc.status(phase, "Injection Testing", "running", "JSONP endpoints", 20, 28)
     _jsonp_wrap_re = re.compile(r'^[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(', re.M)
     for entry in params[:15]:
         purl = entry["url"]
@@ -25697,7 +25978,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         break
 
     # 20. Blind SQL injection — boolean-based
-    vc.status(phase, "Injection Testing", "running", "Blind SQLi (boolean)", 17, 19)
+    vc.status(phase, "Injection Testing", "running", "Blind SQLi (boolean)", 21, 28)
     _bool_sqli_true  = "' OR '1'='1"
     _bool_sqli_false = "' OR '1'='2"
     for entry in params[:8]:
@@ -25746,7 +26027,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     # to the same URL+param with a benign value.  A bare `elapsed >= delay`
     # check false-positives on naturally slow pages, load-balanced targets,
     # and session-expired redirects.
-    vc.status(phase, "Injection Testing", "running", "Blind SQLi (time-based)", 18, 19)
+    vc.status(phase, "Injection Testing", "running", "Blind SQLi (time-based)", 22, 28)
     _TIME_SQLI = [
         ("' AND SLEEP(3)--",     3.0),
         ("'; WAITFOR DELAY '0:0:3'--", 3.0),
@@ -25808,7 +26089,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
 
     # 22. POST-parameter reflected XSS — test form POST fields
     # (Tests 4/dalfox cover GET query-parameter XSS; this covers POST bodies.)
-    vc.status(phase, "Injection Testing", "running", "POST XSS", 19, 23)
+    vc.status(phase, "Injection Testing", "running", "POST XSS", 23, 28)
     _post_xss_seen: set = set()
     for form in forms[:20]:
         action = form.get("action", url)
@@ -25885,7 +26166,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     #     Then we confirm with a <script> payload on the same field to
     #     establish full XSS.
     vc.status(phase, "Injection Testing", "running",
-              "Error-page reflection XSS", 20, 23)
+              "Error-page reflection XSS", 24, 28)
     _ERR_REFL_HTML_PROBE = "fracture<xss a=b>probe"
     _ERR_REFL_SCRIPT     = '<script>alert("fracture_errxss")</script>'
     _ERR_REFL_MARKER_TAG = "<xss a=b>"
@@ -26081,7 +26362,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         )
 
     # ── HTTP Parameter Pollution (#4 FR-458) ──────────────────────────────────
-    vc.status(phase, "Injection Testing", "running", "HTTP Parameter Pollution", 23, 24)
+    vc.status(phase, "Injection Testing", "running", "HTTP Parameter Pollution", 25, 28)
     _hpp_canary = "fr4ctur3_hpp_" + str(int(time.time()))[-6:]
     _hpp_found: list = []
     for entry in params[:30]:
@@ -26185,7 +26466,106 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             http_code=_hpp_found[0]["http_code"],
         )
 
-    vc.status(phase, "Injection Testing", "complete", "Done", 24, 24)
+    # 25. toxicache — web cache poisoning
+    vc.status(phase, "Injection Testing", "running", "Cache poisoning (toxicache)", 26, 28)
+    toxicache_bin = _find_tool("toxicache")
+    if toxicache_bin and url:
+        tc_out = out.output_path(phase, "toxicache_" + target["hostname"] + ".txt")
+        tc_cmd = [toxicache_bin, "-u", url, "-o", str(tc_out)]
+        vc.log("[injection] Running toxicache for web cache poisoning ...", "INFO")
+        try:
+            proc = _popen(tc_cmd, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+            _register_proc(proc)
+            _tc_stdout, _tc_stderr = proc.communicate(timeout=120)
+            _deregister_proc(proc)
+            if not tc_out.exists():
+                tc_out.write_text(_tc_stdout, encoding="utf-8")
+            out.log_command("toxicache", tc_cmd, tc_out)
+            _tc_combined = _tc_stdout + "\n" + (_tc_stderr or "")
+            _tc_vulnerable = bool(re.search(
+                r'(?:Vulnerable|VULNERABLE|poisoned|POISONED)',
+                _tc_combined, re.I))
+            _tc_deception = bool(re.search(
+                r'(?:deception|DECEPTION|wrong\s+content|cache\s+deception)',
+                _tc_combined, re.I))
+            _tc_unkeyed = re.findall(
+                r'[Uu]nkeyed\s+[Hh]eader[:\s]+([^\n]+)', _tc_combined)
+            if _tc_vulnerable:
+                out.add_finding(
+                    title="Web Cache Poisoning",
+                    url=url, port=target["port"], risk="HIGH",
+                    description=(
+                        "toxicache confirmed that the web cache can be poisoned. "
+                        "An attacker can inject malicious content into cached responses, "
+                        "which are then served to other users, enabling XSS, open "
+                        "redirects, or denial of service at scale."
+                    ),
+                    output=_tc_stdout[:2000],
+                    output_file=str(tc_out),
+                    sources="toxicache", service=target["scheme"],
+                    affected=url,
+                    owasp="A05:2025 Security Misconfiguration",
+                    nist="SC-8",
+                    remediation=(
+                        "Configure the cache to include all relevant request headers "
+                        "in the cache key. Disable caching of responses that vary by "
+                        "unkeyed headers. Use Vary headers correctly."
+                    ),
+                )
+                vc.log(f"[injection] toxicache: cache poisoning confirmed at {url}", "SUCCESS")
+            if _tc_deception:
+                out.add_finding(
+                    title="Web Cache Deception",
+                    url=url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        "toxicache detected web cache deception — the cache serves "
+                        "content from one user's session to another. An attacker can "
+                        "trick a victim into loading a URL that caches their "
+                        "authenticated content, then retrieve it."
+                    ),
+                    output=_tc_stdout[:2000],
+                    output_file=str(tc_out),
+                    sources="toxicache", service=target["scheme"],
+                    affected=url,
+                    owasp="A05:2025 Security Misconfiguration",
+                    nist="SC-8",
+                    remediation=(
+                        "Set Cache-Control: no-store on all authenticated/dynamic "
+                        "responses. Validate that path extensions match actual "
+                        "content types. Use Vary: Cookie where appropriate."
+                    ),
+                )
+                vc.log(f"[injection] toxicache: cache deception at {url}", "SUCCESS")
+            if _tc_unkeyed and not _tc_vulnerable:
+                out.add_finding(
+                    title="Unkeyed Header in Cache Response",
+                    url=url, port=target["port"], risk="LOW",
+                    description=(
+                        f"toxicache found {len(_tc_unkeyed)} unkeyed header(s) that "
+                        f"influence the response but are not included in the cache key. "
+                        f"While not directly exploitable, these could enable cache "
+                        f"poisoning if the header value is reflected or influences "
+                        f"response content."
+                    ),
+                    output=f"Unkeyed headers:\n" + "\n".join(
+                        f"  • {h.strip()}" for h in _tc_unkeyed),
+                    output_file=str(tc_out),
+                    sources="toxicache", service=target["scheme"],
+                    affected=url,
+                    owasp="A05:2025 Security Misconfiguration",
+                    nist="SC-8",
+                    remediation=(
+                        "Include all response-influencing headers in the cache key "
+                        "or add them to the Vary header. Review CDN/proxy "
+                        "configuration for unintended cache key exclusions."
+                    ),
+                )
+                vc.log(f"[injection] toxicache: {len(_tc_unkeyed)} unkeyed headers at {url}", "INFO")
+        except Exception as e:
+            out.log_error("toxicache", tc_cmd, str(e))
+
+    vc.status(phase, "Injection Testing", "complete", "Done", 28, 28)
     vc.log("[injection] Phase complete", "SUCCESS")
 
 
@@ -32014,7 +32394,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
     url      = target["url"]
     hostname = target["hostname"]
     timeout  = cfg.get("timeout", 10)
-    vc.status(phase, "Session Analysis", "running", "Token entropy", 0, 5)
+    vc.status(phase, "Session Analysis", "running", "Token entropy", 0, 13)
     _SESS_LOGIN_RE = re.compile(
         r'login|sign.?in|auth(?:enticate)?|session.?expired|timed.?out|'
         r'please.{0,20}log.{0,10}in', re.I
@@ -32098,7 +32478,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                 remediation="Use cryptographically secure random session identifiers.",
             )
 
-    vc.status(phase, "Session Analysis", "running", "Session fixation", 1, 5)
+    vc.status(phase, "Session Analysis", "running", "Session fixation", 1, 13)
     # 2. Session fixation — OWASP WSTG-SESS-03
     #    Test whether the server regenerates the session ID upon login.
     #    Methodology:
@@ -32290,7 +32670,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
     except Exception as _fix_e:
         vc.log(f"[session] Fixation test error: {_fix_e}", "WARNING")
 
-    vc.status(phase, "Session Analysis", "running", "Session management UI", 2, 5)
+    vc.status(phase, "Session Analysis", "running", "Session management UI", 2, 13)
     # 3. Active session management UI detection (OWASP WSTG-SESS-06)
     # Probe common paths where apps expose an interface to view/close active sessions.
     _SESS_MGMT_PATHS = (
@@ -32407,7 +32787,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
     else:
         vc.log("[session] No active session management interface found at common paths", "INFO")
 
-    vc.status(phase, "Session Analysis", "running", "Cookie security flags", 3, 5)
+    vc.status(phase, "Session Analysis", "running", "Cookie security flags", 3, 13)
     # 4. Cookie security flag audit
     # Collect all cookies missing Secure, HttpOnly, or SameSite.
     # Groups by flag type to produce one finding per issue, not per cookie,
@@ -32618,7 +32998,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         vc.log("[session] Cookie security flags: all checked cookies appear correctly configured",
                "INFO")
 
-    vc.status(phase, "Session Analysis", "running", "Logout invalidation", 4, 5)
+    vc.status(phase, "Session Analysis", "running", "Logout invalidation", 4, 13)
     # 5. Check logout invalidation
     # IMPORTANT: Never use auth_sess itself for logout probing — hitting /logout
     # on the live session object invalidates the server-side session and breaks all
@@ -32719,7 +33099,726 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
 
-    vc.status(phase, "Session Analysis", "complete", "Done", 5, 5)
+    # ── Step 5: Session Token in URL — WSTG-SESS-04 ──────────────────────
+    vc.status(phase, "Session Analysis", "running", "Session token in URL", 5, 13)
+    vc.log(f"[session] Testing session token in URL for {hostname}", "INFO")
+    _SESS_URL_PARAM_RE = re.compile(
+        r'(?i)(jsessionid|phpsessid|aspsessionid|sid|session_?id|'
+        r'sess_?id|token|auth_?token|access_?token|stoken)', re.I)
+    try:
+        _url_r = auth_sess.get(url, timeout=timeout, allow_redirects=True)
+        _final_url = _url_r.url or url
+        _parsed_final = urllib.parse.urlparse(_final_url)
+        _url_params = urllib.parse.parse_qs(_parsed_final.query)
+        _leaked_params = [p for p in _url_params if _SESS_URL_PARAM_RE.search(p)]
+        if _leaked_params:
+            _url_ev = ""
+            try:
+                _url_ev_path = out.output_path(phase, f"session_in_url_{hostname}")
+                _url_ev_path.write_text(
+                    f"Session Token in URL Analysis\n"
+                    f"Final URL: {_final_url}\n"
+                    f"Leaked parameters: {', '.join(_leaked_params)}\n"
+                    f"Values: {json.dumps({p: _url_params[p] for p in _leaked_params}, indent=2)}\n",
+                    encoding="utf-8")
+                _url_ev = str(_url_ev_path)
+            except Exception:
+                pass
+            out.add_finding(
+                title="Session Token Exposed in URL",
+                url=_final_url, port=target["port"], risk="MEDIUM",
+                description=(
+                    f"Session-related parameter(s) ({', '.join(_leaked_params)}) appear in "
+                    f"the URL query string. Tokens in URLs leak through browser history, "
+                    f"Referer headers, proxy logs, and server access logs, enabling session "
+                    f"hijacking without direct access to the victim's browser."
+                ),
+                output=f"URL: {_final_url}\nLeaked params: {', '.join(_leaked_params)}",
+                sources="fracture-session", service=target["scheme"],
+                output_file=_url_ev,
+                owasp="A07:2025 Identification and Authentication Failures",
+                nist="SC-23",
+                cwe=["CWE-598"],
+                remediation=(
+                    "Transmit session tokens only via cookies (with Secure, HttpOnly, "
+                    "SameSite attributes) or Authorization headers. Never embed session "
+                    "identifiers in URL query parameters or path segments."
+                ),
+            )
+            vc.log(f"[session] Session token in URL: {', '.join(_leaked_params)}", "SUCCESS")
+        else:
+            # Also scan page body for links containing session tokens
+            _body_links = re.findall(r'href=["\']([^"\']*)["\']', (_url_r.text or "")[:50000])
+            _body_leaked = []
+            for _bl in _body_links[:100]:
+                _bl_parsed = urllib.parse.urlparse(_bl)
+                _bl_params = urllib.parse.parse_qs(_bl_parsed.query)
+                for _bp in _bl_params:
+                    if _SESS_URL_PARAM_RE.search(_bp):
+                        _body_leaked.append((_bl, _bp))
+                        break
+            if _body_leaked:
+                _bl_ev = ""
+                try:
+                    _bl_ev_path = out.output_path(phase, f"session_in_body_links_{hostname}")
+                    _bl_ev_path.write_text(
+                        f"Session Tokens in Body Links\n"
+                        + "\n".join(f"  {bl[0]} -> param={bl[1]}" for bl in _body_leaked[:10])
+                        + "\n", encoding="utf-8")
+                    _bl_ev = str(_bl_ev_path)
+                except Exception:
+                    pass
+                out.add_finding(
+                    title="Session Token in Page Links",
+                    url=url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"Page links embed session tokens in URL query parameters. "
+                        f"Found {len(_body_leaked)} link(s) with session-like parameters "
+                        f"in href attributes. These leak through Referer headers when "
+                        f"users navigate to external sites."
+                    ),
+                    output="\n".join(f"Link: {bl[0]} (param: {bl[1]})" for bl in _body_leaked[:5]),
+                    sources="fracture-session", service=target["scheme"],
+                    output_file=_bl_ev,
+                    owasp="A07:2025 Identification and Authentication Failures",
+                    nist="SC-23",
+                    cwe=["CWE-598"],
+                    remediation=(
+                        "Remove session tokens from all hyperlinks. Use cookie-based "
+                        "session management exclusively. Set Referrer-Policy to "
+                        "no-referrer or same-origin."
+                    ),
+                )
+                vc.log(f"[session] Session tokens found in {len(_body_leaked)} body links", "SUCCESS")
+            else:
+                vc.log("[session] No session tokens found in URLs or body links", "INFO")
+    except Exception:
+        vc.log("[session] Session token in URL check failed (request error)", "WARN")
+
+    # ── Step 6: Cookie Scope Audit — WSTG-SESS-02 ─────────────────────
+    vc.status(phase, "Session Analysis", "running", "Cookie scope audit", 6, 13)
+    vc.log(f"[session] Auditing cookie scope for {hostname}", "INFO")
+    try:
+        _target_domain = hostname.lower()
+        _target_path = urllib.parse.urlparse(url).path or "/"
+        _broad_domain_cookies = []
+        _broad_path_cookies = []
+        for cookie in auth_sess.cookies:
+            if _INFRA_COOKIE_RE.match(cookie.name):
+                continue
+            # Domain scope check
+            _ck_domain = (cookie.domain or "").lower().lstrip(".")
+            if _ck_domain and _ck_domain != _target_domain:
+                # Cookie domain is broader than target (parent domain)
+                if _target_domain.endswith("." + _ck_domain):
+                    _broad_domain_cookies.append((cookie.name, _ck_domain))
+            # Path scope check
+            _ck_path = cookie.path or "/"
+            if (_ck_path == "/" and _target_path != "/"
+                    and len(_target_path) > 1):
+                _broad_path_cookies.append((cookie.name, _ck_path))
+        if _broad_domain_cookies:
+            _scope_ev = ""
+            try:
+                _scope_ev_path = out.output_path(phase, f"cookie_scope_{hostname}")
+                _scope_ev_path.write_text(
+                    f"Cookie Scope Audit\nTarget: {_target_domain}\n"
+                    + "\n".join(f"  {n}: Domain=.{d}" for n, d in _broad_domain_cookies)
+                    + "\n", encoding="utf-8")
+                _scope_ev = str(_scope_ev_path)
+            except Exception:
+                pass
+            out.add_finding(
+                title="Overly Broad Cookie Domain Scope",
+                url=url, port=target["port"], risk="LOW",
+                description=(
+                    f"Session cookie(s) are scoped to a parent domain rather than "
+                    f"the application's specific hostname ({_target_domain}). "
+                    f"Cookies: {', '.join(n for n, _ in _broad_domain_cookies)}. "
+                    f"This allows any subdomain under the parent to read these cookies, "
+                    f"increasing the attack surface for session hijacking via "
+                    f"compromised sibling applications."
+                ),
+                output="\n".join(
+                    f"Cookie: {n}, Domain: .{d}" for n, d in _broad_domain_cookies),
+                sources="fracture-session", service=target["scheme"],
+                output_file=_scope_ev,
+                owasp="A07:2025 Identification and Authentication Failures",
+                nist="SC-23",
+                cwe=["CWE-1275"],
+                remediation=(
+                    "Set the cookie Domain attribute to the exact hostname of the "
+                    "application. Avoid using parent domain cookies unless required "
+                    "for cross-subdomain SSO."
+                ),
+            )
+            vc.log(f"[session] Broad domain scope: {', '.join(n for n, _ in _broad_domain_cookies)}", "SUCCESS")
+        if _broad_path_cookies and _target_path != "/":
+            out.add_finding(
+                title="Cookie Path Scoped to Root",
+                url=url, port=target["port"], risk="INFO",
+                description=(
+                    f"Session cookie(s) use Path=/ while the application appears to "
+                    f"reside at {_target_path}. Cookies: "
+                    f"{', '.join(n for n, _ in _broad_path_cookies)}. Other applications "
+                    f"on the same hostname can read these cookies."
+                ),
+                output="\n".join(
+                    f"Cookie: {n}, Path: {p}" for n, p in _broad_path_cookies),
+                sources="fracture-session", service=target["scheme"],
+                owasp="A07:2025 Identification and Authentication Failures",
+                nist="SC-23",
+                remediation=(
+                    f"Set the cookie Path attribute to '{_target_path}' to limit "
+                    f"cookie visibility to the application's URL space."
+                ),
+            )
+            vc.log(f"[session] Root-path cookies: {', '.join(n for n, _ in _broad_path_cookies)}", "SUCCESS")
+        if not _broad_domain_cookies and not _broad_path_cookies:
+            vc.log("[session] Cookie scope audit: all cookies properly scoped", "INFO")
+    except Exception:
+        vc.log("[session] Cookie scope audit failed", "WARN")
+
+    # ── Step 7: CSRF Token Validation — WSTG-SESS-05 ──────────────────
+    # NOTE: Full CSRF token validation (tampered/missing token submission)
+    # is tested in the dedicated Advanced CSRF phase. Skip here to avoid
+    # duplicate findings and unnecessary requests.
+    vc.status(phase, "Session Analysis", "running", "CSRF token validation", 7, 13)
+    vc.log("[session] CSRF token validation covered in dedicated CSRF phase — skipped", "INFO")
+
+    # ── Step 8: JWT Analysis — WSTG-SESS-01 ────────────────────────────
+    vc.status(phase, "Session Analysis", "running", "JWT analysis", 8, 13)
+    vc.log(f"[session] Analysing JWT tokens for {hostname}", "INFO")
+    _JWT_RE = re.compile(r'^eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$')
+    def _jwt_b64_decode(segment):
+        padded = segment + "=" * (4 - len(segment) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded))
+    _jwt_candidates = []
+    for cookie in auth_sess.cookies:
+        if _JWT_RE.match(cookie.value or ""):
+            _jwt_candidates.append(("cookie", cookie.name, cookie.value))
+    _auth_hdr = ""
+    for _hdr_name in ("Authorization", "authorization"):
+        _auth_hdr = auth_sess.headers.get(_hdr_name, "")
+        if _auth_hdr:
+            break
+    if _auth_hdr.startswith("Bearer "):
+        _bearer_tok = _auth_hdr[7:]
+        if _JWT_RE.match(_bearer_tok):
+            _jwt_candidates.append(("header", "Authorization", _bearer_tok))
+    for _jwt_src, _jwt_name, _jwt_val in _jwt_candidates:
+        try:
+            _parts = _jwt_val.split(".")
+            _header = _jwt_b64_decode(_parts[0])
+            _payload = _jwt_b64_decode(_parts[1])
+            _jwt_alg = _header.get("alg", "").lower()
+            _jwt_ev = ""
+            try:
+                _jwt_ev_path = out.output_path(phase, f"jwt_{_jwt_name}_{hostname}")
+                _jwt_ev_path.write_text(
+                    f"JWT Analysis\nSource: {_jwt_src} ({_jwt_name})\n"
+                    f"Header: {json.dumps(_header, indent=2)}\n"
+                    f"Payload: {json.dumps(_payload, indent=2)}\n",
+                    encoding="utf-8")
+                _jwt_ev = str(_jwt_ev_path)
+            except Exception:
+                pass
+
+            # Check 1: alg=none
+            if _jwt_alg in ("none", ""):
+                out.add_finding(
+                    title="JWT Algorithm None Accepted",
+                    url=url, port=target["port"], risk="CRITICAL",
+                    description=(
+                        f"JWT in {_jwt_src} '{_jwt_name}' uses algorithm '{_header.get('alg', 'none')}'. "
+                        f"The 'none' algorithm means the token has no signature verification, "
+                        f"allowing any attacker to forge arbitrary tokens."
+                    ),
+                    output=f"Source: {_jwt_src} ({_jwt_name})\nAlgorithm: {_header.get('alg', 'none')}\nHeader: {json.dumps(_header)}",
+                    sources="fracture-session", service=target["scheme"],
+                    output_file=_jwt_ev,
+                    owasp="A07:2025 Identification and Authentication Failures",
+                    nist="IA-5",
+                    cwe=["CWE-345", "CWE-327"],
+                    remediation=(
+                        "Enforce a strong signing algorithm (RS256, ES256) server-side. "
+                        "Reject tokens with alg=none. Use an allowlist of accepted algorithms."
+                    ),
+                )
+                vc.log(f"[session] JWT alg=none in {_jwt_src} '{_jwt_name}'", "SUCCESS")
+
+            # Check 2: Missing exp claim
+            if "exp" not in _payload:
+                out.add_finding(
+                    title="JWT Missing Expiration Claim",
+                    url=url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"JWT in {_jwt_src} '{_jwt_name}' has no 'exp' (expiration) claim. "
+                        f"Without expiration, a stolen token remains valid indefinitely, "
+                        f"eliminating the time-limited nature of token-based authentication."
+                    ),
+                    output=f"Source: {_jwt_src} ({_jwt_name})\nPayload keys: {list(_payload.keys())}",
+                    sources="fracture-session", service=target["scheme"],
+                    output_file=_jwt_ev,
+                    owasp="A07:2025 Identification and Authentication Failures",
+                    nist="IA-5",
+                    cwe=["CWE-613"],
+                    remediation=(
+                        "Include an 'exp' claim in all JWTs with a reasonable lifetime "
+                        "(15 minutes for access tokens, hours for refresh tokens). "
+                        "Validate expiration server-side on every request."
+                    ),
+                )
+                vc.log(f"[session] JWT missing exp in {_jwt_src} '{_jwt_name}'", "SUCCESS")
+            elif "exp" in _payload:
+                # Check 3: Excessive lifetime
+                import time as _jwt_time
+                _exp_val = _payload.get("exp", 0)
+                _iat_val = _payload.get("iat", 0)
+                if _iat_val and _exp_val:
+                    _lifetime_secs = _exp_val - _iat_val
+                    _lifetime_hrs = _lifetime_secs / 3600
+                    if _lifetime_hrs > 24:
+                        _risk = "MEDIUM" if _lifetime_hrs > 720 else "LOW"
+                        out.add_finding(
+                            title="JWT Excessive Lifetime",
+                            url=url, port=target["port"], risk=_risk,
+                            description=(
+                                f"JWT in {_jwt_src} '{_jwt_name}' has a lifetime of "
+                                f"{_lifetime_hrs:.1f} hours ({_lifetime_secs} seconds). "
+                                f"Long-lived tokens increase the window for token theft "
+                                f"and replay attacks."
+                            ),
+                            output=(
+                                f"Source: {_jwt_src} ({_jwt_name})\n"
+                                f"iat: {_iat_val}\nexp: {_exp_val}\n"
+                                f"Lifetime: {_lifetime_hrs:.1f} hours"
+                            ),
+                            sources="fracture-session", service=target["scheme"],
+                            output_file=_jwt_ev,
+                            owasp="A07:2025 Identification and Authentication Failures",
+                            nist="AC-12",
+                            cwe=["CWE-613"],
+                            remediation=(
+                                "Reduce JWT lifetime to 15-60 minutes for access tokens. "
+                                "Use refresh tokens for session continuity. Implement "
+                                "token revocation for compromised tokens."
+                            ),
+                        )
+                        vc.log(f"[session] JWT excessive lifetime: {_lifetime_hrs:.1f}h in {_jwt_name}", "SUCCESS")
+
+            # Check 4: Sensitive data in payload
+            _sensitive_keys = {"password", "passwd", "pwd", "secret", "ssn",
+                               "credit_card", "cc_number", "cvv"}
+            _found_sensitive = [k for k in _payload if k.lower() in _sensitive_keys]
+            if _found_sensitive:
+                out.add_finding(
+                    title="JWT Contains Sensitive Data",
+                    url=url, port=target["port"], risk="MEDIUM",
+                    description=(
+                        f"JWT in {_jwt_src} '{_jwt_name}' payload contains sensitive "
+                        f"field(s): {', '.join(_found_sensitive)}. JWT payloads are "
+                        f"base64url-encoded (not encrypted) and readable by anyone "
+                        f"with access to the token."
+                    ),
+                    output=f"Source: {_jwt_src} ({_jwt_name})\nSensitive keys: {', '.join(_found_sensitive)}",
+                    sources="fracture-session", service=target["scheme"],
+                    output_file=_jwt_ev,
+                    owasp="A07:2025 Identification and Authentication Failures",
+                    nist="SC-28",
+                    cwe=["CWE-315"],
+                    remediation=(
+                        "Remove sensitive data from JWT payloads. Store sensitive "
+                        "data server-side and reference it by ID. Use JWE (encrypted "
+                        "JWT) if payload confidentiality is required."
+                    ),
+                )
+                vc.log(f"[session] JWT sensitive data: {', '.join(_found_sensitive)}", "SUCCESS")
+
+            # Check 5: Missing aud claim
+            if "aud" not in _payload:
+                out.add_finding(
+                    title="JWT Missing Audience Claim",
+                    url=url, port=target["port"], risk="LOW",
+                    description=(
+                        f"JWT in {_jwt_src} '{_jwt_name}' has no 'aud' (audience) claim. "
+                        f"Without audience restriction, tokens intended for one service "
+                        f"may be replayed against a different service that shares the "
+                        f"same signing key."
+                    ),
+                    output=f"Source: {_jwt_src} ({_jwt_name})\nPayload keys: {list(_payload.keys())}",
+                    sources="fracture-session", service=target["scheme"],
+                    output_file=_jwt_ev,
+                    owasp="A07:2025 Identification and Authentication Failures",
+                    nist="IA-5",
+                    cwe=["CWE-284"],
+                    remediation=(
+                        "Include an 'aud' claim in all JWTs identifying the intended "
+                        "recipient. Validate the audience server-side and reject tokens "
+                        "with unexpected audience values."
+                    ),
+                )
+                vc.log(f"[session] JWT missing aud in {_jwt_src} '{_jwt_name}'", "SUCCESS")
+        except (json.JSONDecodeError, Exception):
+            pass
+    if not _jwt_candidates:
+        vc.log("[session] No JWT tokens found in cookies or Authorization header", "INFO")
+
+    # ── Step 9: Session After Password Change ──────────────────────────
+    vc.status(phase, "Session Analysis", "running", "Session after password change", 9, 13)
+    _pw_change_url = cfg.get("auth", {}).get("password_change_url", "")
+    if _pw_change_url:
+        vc.log(f"[session] Testing session persistence after password change at {_pw_change_url}", "INFO")
+        try:
+            _pre_pw_cookies = dict(auth_sess.cookies)
+            _old_sess = _make_session(cfg)
+            for k, v in _pre_pw_cookies.items():
+                _old_sess.cookies.set(k, v)
+            # Verify old session works before password change
+            _pre_check = _old_sess.get(url, timeout=timeout)
+            _pre_is_authed = (
+                _pre_check.status_code == 200
+                and not _SESS_LOGIN_RE.search(_pre_check.url or "")
+                and not _matches_error_fingerprint(_pre_check.text or "")
+            )
+            if _pre_is_authed:
+                # Attempt password change via a disposable session
+                _pw_sess = _make_session(cfg)
+                for k, v in _pre_pw_cookies.items():
+                    _pw_sess.cookies.set(k, v)
+                _pw_r = _pw_sess.post(_pw_change_url, timeout=timeout,
+                                      data={"password": "Fracture_Test_1!", "confirm": "Fracture_Test_1!"},
+                                      allow_redirects=True)
+                if _pw_r.status_code in (200, 302):
+                    # Check if old session still works
+                    _post_check = _old_sess.get(url, timeout=timeout)
+                    _spa_shell = False
+                    try:
+                        _unauth_pw = _make_session(cfg)
+                        _unauth_pw_r = _unauth_pw.get(url, timeout=timeout)
+                        if (_unauth_pw_r and _unauth_pw_r.status_code == 200
+                                and _post_check.status_code == 200):
+                            if (_p20_body_hash((_post_check.text or "").strip())
+                                    == _p20_body_hash((_unauth_pw_r.text or "").strip())):
+                                _spa_shell = True
+                    except Exception:
+                        pass
+                    if (_post_check.status_code == 200
+                            and not _spa_shell
+                            and not _SESS_LOGIN_RE.search(_post_check.url or "")
+                            and not _matches_error_fingerprint(_post_check.text or "")):
+                        _pw_ev = ""
+                        try:
+                            _pw_rq, _pw_rp = _save_http_evidence(
+                                out, phase, f"session_after_pw_{hostname}", _post_check)
+                            _pw_ev = json.dumps([{
+                                "url": url, "req": str(_pw_rq), "resp": str(_pw_rp),
+                            }])
+                        except Exception:
+                            pass
+                        out.add_finding(
+                            title="Session Persists After Password Change",
+                            url=url, port=target["port"], risk="MEDIUM",
+                            description=(
+                                "Existing sessions remain valid after a password change. "
+                                "If an attacker has compromised a session, changing the "
+                                "password does not revoke their access. All existing "
+                                "sessions should be invalidated upon password change."
+                            ),
+                            output=(
+                                f"Password change URL: {_pw_change_url}\n"
+                                f"Password change response: HTTP {_pw_r.status_code}\n"
+                                f"Old session still valid: Yes (HTTP {_post_check.status_code})"
+                            ),
+                            sources="fracture-session", service=target["scheme"],
+                            output_file=_pw_ev,
+                            owasp="A07:2025 Identification and Authentication Failures",
+                            nist="AC-12",
+                            cwe=["CWE-613"],
+                            remediation=(
+                                "Invalidate all existing sessions for the user when their "
+                                "password is changed. Force re-authentication on all devices."
+                            ),
+                        )
+                        vc.log("[session] Session persists after password change", "SUCCESS")
+                    else:
+                        vc.log("[session] Session correctly invalidated after password change", "INFO")
+        except Exception:
+            vc.log("[session] Password change session test failed (request error)", "WARN")
+    else:
+        vc.log("[session] No password_change_url configured — skipping session-after-pw-change test", "INFO")
+
+    # ── Step 10: Absolute Session Timeout — WSTG-SESS-07 ───────────────
+    vc.status(phase, "Session Analysis", "running", "Absolute session timeout", 10, 13)
+    vc.log(f"[session] Checking session timeout configuration for {hostname}", "INFO")
+    try:
+        _timeout_issues = []
+        _no_expiry_cookies = []
+        for cookie in auth_sess.cookies:
+            if _INFRA_COOKIE_RE.match(cookie.name):
+                continue
+            if not re.search(r'sess|token|auth|sid', cookie.name, re.I):
+                continue
+            _max_age = None
+            _expires = cookie.expires
+            # Check Max-Age from the cookie jar (Python's cookiejar stores
+            # the computed expires timestamp, not raw Max-Age).
+            if _expires:
+                import time as _timeout_time
+                _remaining = _expires - _timeout_time.time()
+                if _remaining > 2592000:  # >30 days
+                    _timeout_issues.append((cookie.name, "MEDIUM",
+                        f"Expires in {_remaining / 86400:.0f} days (>30 days)"))
+                elif _remaining > 86400:  # >24 hours
+                    _timeout_issues.append((cookie.name, "LOW",
+                        f"Expires in {_remaining / 3600:.1f} hours (>24 hours)"))
+            else:
+                # Session cookie — no persistent timeout; expires on browser close.
+                # This is fine for browser-close behaviour but means no absolute
+                # timeout is enforced client-side.
+                _no_expiry_cookies.append(cookie.name)
+
+        for _ck_name, _ck_risk, _ck_detail in _timeout_issues:
+            _to_ev = ""
+            try:
+                _to_ev_path = out.output_path(phase, f"timeout_{_ck_name}_{hostname}")
+                _to_ev_path.write_text(
+                    f"Session Timeout Analysis\nCookie: {_ck_name}\n{_ck_detail}\n",
+                    encoding="utf-8")
+                _to_ev = str(_to_ev_path)
+            except Exception:
+                pass
+            out.add_finding(
+                title="Excessive Session Cookie Lifetime",
+                url=url, port=target["port"], risk=_ck_risk,
+                description=(
+                    f"Session cookie '{_ck_name}' has an excessively long lifetime: "
+                    f"{_ck_detail}. Long-lived session cookies increase the window "
+                    f"for session hijacking via stolen cookies."
+                ),
+                output=f"Cookie: {_ck_name}\n{_ck_detail}",
+                sources="fracture-session", service=target["scheme"],
+                output_file=_to_ev,
+                owasp="A07:2025 Identification and Authentication Failures",
+                nist="AC-12",
+                cwe=["CWE-613"],
+                remediation=(
+                    "Set session cookie Max-Age/Expires to a reasonable duration "
+                    "(4-8 hours for standard apps, shorter for sensitive apps). "
+                    "Implement absolute server-side session timeout independent of "
+                    "cookie expiry."
+                ),
+            )
+            vc.log(f"[session] Excessive timeout: {_ck_name} — {_ck_detail}", "SUCCESS")
+        if not _timeout_issues:
+            vc.log("[session] Session cookie timeouts within acceptable range", "INFO")
+    except Exception:
+        vc.log("[session] Absolute session timeout check failed", "WARN")
+
+    # ── Step 11: Referer Token Leakage + Mixed Content — WSTG-SESS-09 ─
+    vc.status(phase, "Session Analysis", "running", "Referer leakage / mixed content", 11, 13)
+    vc.log(f"[session] Checking Referrer-Policy and mixed content for {hostname}", "INFO")
+    try:
+        _ref_r = auth_sess.get(url, timeout=timeout)
+        _ref_policy = ""
+        for _rp_hdr in ("Referrer-Policy", "referrer-policy"):
+            _ref_policy = _ref_r.headers.get(_rp_hdr, "")
+            if _ref_policy:
+                break
+        # Parse external links from body
+        _ext_links = []
+        _target_host = urllib.parse.urlparse(url).hostname or hostname
+        for _href in re.findall(r'href=["\']([^"\']+)["\']', (_ref_r.text or "")[:100000]):
+            try:
+                _href_parsed = urllib.parse.urlparse(_href)
+                if (_href_parsed.scheme in ("http", "https")
+                        and _href_parsed.hostname
+                        and _href_parsed.hostname.lower() != _target_host.lower()):
+                    _ext_links.append(_href)
+            except Exception:
+                pass
+        if _ext_links and not _ref_policy:
+            _ref_ev = ""
+            try:
+                _ref_ev_path = out.output_path(phase, f"referer_leak_{hostname}")
+                _ref_ev_path.write_text(
+                    f"Referer Token Leakage Analysis\n"
+                    f"Referrer-Policy header: NOT SET\n"
+                    f"External links found: {len(_ext_links)}\n"
+                    + "\n".join(f"  {l}" for l in _ext_links[:20]) + "\n",
+                    encoding="utf-8")
+                _ref_ev = str(_ref_ev_path)
+            except Exception:
+                pass
+            out.add_finding(
+                title="Missing Referrer-Policy With External Links",
+                url=url, port=target["port"], risk="MEDIUM",
+                description=(
+                    f"The page contains {len(_ext_links)} external link(s) but no "
+                    f"Referrer-Policy header is set. Browsers default to sending the "
+                    f"full URL (including any session tokens in query parameters or "
+                    f"URL paths) as the Referer header when users click external links."
+                ),
+                output=(
+                    f"Referrer-Policy: NOT SET\n"
+                    f"External links: {len(_ext_links)}\n"
+                    f"Sample: {', '.join(_ext_links[:3])}"
+                ),
+                sources="fracture-session", service=target["scheme"],
+                output_file=_ref_ev,
+                owasp="A07:2025 Identification and Authentication Failures",
+                nist="SC-23",
+                cwe=["CWE-200"],
+                remediation=(
+                    "Set Referrer-Policy header to 'strict-origin-when-cross-origin' "
+                    "or 'no-referrer' to prevent URL leakage. Apply via HTTP header "
+                    "or <meta> tag."
+                ),
+            )
+            vc.log(f"[session] Missing Referrer-Policy with {len(_ext_links)} external links", "SUCCESS")
+        elif _ref_policy:
+            vc.log(f"[session] Referrer-Policy set: {_ref_policy}", "INFO")
+        else:
+            vc.log("[session] No external links found — Referer leakage not applicable", "INFO")
+
+        # Mixed content check (HTTP resources on HTTPS page)
+        if url.startswith("https://"):
+            _http_resources = re.findall(
+                r'(?:src|href|action)=["\']http://[^"\']+["\']',
+                (_ref_r.text or "")[:100000])
+            if _http_resources:
+                _mc_ev = ""
+                try:
+                    _mc_ev_path = out.output_path(phase, f"mixed_content_{hostname}")
+                    _mc_ev_path.write_text(
+                        f"Mixed Content Analysis\n"
+                        f"HTTPS page: {url}\n"
+                        f"HTTP resources found: {len(_http_resources)}\n"
+                        + "\n".join(f"  {r}" for r in _http_resources[:20]) + "\n",
+                        encoding="utf-8")
+                    _mc_ev = str(_mc_ev_path)
+                except Exception:
+                    pass
+                out.add_finding(
+                    title="Mixed Content on Authenticated Page",
+                    url=url, port=target["port"], risk="LOW",
+                    description=(
+                        f"The authenticated HTTPS page loads {len(_http_resources)} "
+                        f"resource(s) over plain HTTP. Mixed content allows a network "
+                        f"attacker to inject malicious resources (scripts, styles) into "
+                        f"the authenticated page via MITM."
+                    ),
+                    output="\n".join(_http_resources[:5]),
+                    sources="fracture-session", service=target["scheme"],
+                    output_file=_mc_ev,
+                    owasp="A07:2025 Identification and Authentication Failures",
+                    nist="SC-8",
+                    cwe=["CWE-319"],
+                    remediation=(
+                        "Load all resources over HTTPS. Use Content-Security-Policy: "
+                        "upgrade-insecure-requests to automatically upgrade HTTP to HTTPS."
+                    ),
+                )
+                vc.log(f"[session] Mixed content: {len(_http_resources)} HTTP resources", "SUCCESS")
+    except Exception:
+        vc.log("[session] Referer / mixed content check failed", "WARN")
+
+    # ── Step 12: Session Puzzling — WSTG-SESS-08 ──────────────────────
+    vc.status(phase, "Session Analysis", "running", "Session puzzling", 12, 13)
+    vc.log(f"[session] Testing session puzzling / variable overloading for {hostname}", "INFO")
+    _puzzle_paths = ["/login", "/register", "/signup", "/forgot-password",
+                     "/password-reset", "/profile", "/account", "/dashboard"]
+    try:
+        _puzzle_results = {}
+        for _pp in _puzzle_paths:
+            try:
+                _ps = _make_session(cfg)
+                _pr = _ps.get(url + _pp, timeout=timeout, allow_redirects=True)
+                if _pr.status_code in (200, 302, 301):
+                    _sess_cookies = {}
+                    for _pc in _ps.cookies:
+                        if re.search(r'sess|token|auth|sid', _pc.name, re.I):
+                            _sess_cookies[_pc.name] = _pc.value
+                    if _sess_cookies:
+                        _puzzle_results[_pp] = _sess_cookies
+            except Exception:
+                pass
+        # Analyse: if 3+ different functional paths set the same session
+        # cookie name, that's the same session variable being used across
+        # distinct security contexts (session puzzling).
+        if len(_puzzle_results) >= 3:
+            _common_names = set()
+            for _path_cookies in _puzzle_results.values():
+                if not _common_names:
+                    _common_names = set(_path_cookies.keys())
+                else:
+                    _common_names &= set(_path_cookies.keys())
+            if _common_names:
+                # Check if the values differ — same name but different context
+                _context_varying = []
+                for _cn in _common_names:
+                    _vals = set(
+                        _puzzle_results[p][_cn]
+                        for p in _puzzle_results if _cn in _puzzle_results[p])
+                    if len(_vals) > 1:
+                        _context_varying.append(_cn)
+                if _context_varying:
+                    _pz_ev = ""
+                    try:
+                        _pz_ev_path = out.output_path(phase, f"session_puzzling_{hostname}")
+                        _pz_ev_path.write_text(
+                            f"Session Puzzling Analysis\n"
+                            f"Target: {hostname}\n"
+                            f"Paths tested: {', '.join(_puzzle_results.keys())}\n"
+                            f"Shared session cookies: {', '.join(_common_names)}\n"
+                            f"Context-varying cookies: {', '.join(_context_varying)}\n"
+                            + "\n".join(
+                                f"  {p}: {json.dumps(c)}"
+                                for p, c in _puzzle_results.items()) + "\n",
+                            encoding="utf-8")
+                        _pz_ev = str(_pz_ev_path)
+                    except Exception:
+                        pass
+                    out.add_finding(
+                        title="Potential Session Puzzling",
+                        url=url, port=target["port"], risk="LOW",
+                        description=(
+                            f"The same session cookie name(s) ({', '.join(_context_varying)}) "
+                            f"are assigned different values across functionally distinct paths "
+                            f"({', '.join(_puzzle_results.keys())}). This may indicate session "
+                            f"variable overloading where authentication state from one context "
+                            f"(e.g. password reset) can be leveraged in another (e.g. login)."
+                        ),
+                        output=(
+                            f"Paths tested: {len(_puzzle_results)}\n"
+                            f"Varying cookies: {', '.join(_context_varying)}\n"
+                            + "\n".join(
+                                f"  {p}: {', '.join(f'{n}={v[:20]}...' for n, v in c.items())}"
+                                for p, c in _puzzle_results.items())
+                        ),
+                        sources="fracture-session", service=target["scheme"],
+                        output_file=_pz_ev,
+                        owasp="A07:2025 Identification and Authentication Failures",
+                        nist="SC-23",
+                        cwe=["CWE-384"],
+                        remediation=(
+                            "Use separate session variables for each functional context "
+                            "(authentication, registration, password reset). Regenerate "
+                            "session IDs at each privilege boundary. Do not reuse session "
+                            "objects across security contexts."
+                        ),
+                    )
+                    vc.log(f"[session] Session puzzling detected: {', '.join(_context_varying)}", "SUCCESS")
+                else:
+                    vc.log("[session] Session cookies consistent across paths — no puzzling detected", "INFO")
+            else:
+                vc.log("[session] No common session cookies across functional paths", "INFO")
+        else:
+            vc.log(f"[session] Only {len(_puzzle_results)} paths returned session cookies — insufficient for puzzling analysis", "INFO")
+    except Exception:
+        vc.log("[session] Session puzzling test failed", "WARN")
+
+    vc.status(phase, "Session Analysis", "complete", "Done", 13, 13)
     vc.log("[session] Phase complete", "SUCCESS")
 
 
