@@ -261,6 +261,7 @@ BREW_PACKAGES = [
     "chromium",
     # Firefox fallback for SPA crawl
     "geckodriver",
+    "mitmproxy",
 ]
 
 
@@ -753,12 +754,12 @@ def install_gems():
         return
     gem = shutil.which("gem")
     if not gem:
-        warn("gem not found — falling back to git install for whatweb ...")
+        note("gem not found — falling back to git install for whatweb ...")
         _install_whatweb_git()
         return
     _r = run([gem, "install", "whatweb"], check=False)
     if _r.returncode != 0:
-        warn("gem install failed for whatweb — falling back to git ...")
+        note("gem install failed for whatweb — falling back to git ...")
         _install_whatweb_git()
     # wpscan — WordPress vulnerability scanner
     if shutil.which("wpscan"):
@@ -1029,7 +1030,7 @@ def print_summary(skips):
     info("Run: fracture --help")
     note("testssl.sh installed from git (/opt/testssl.sh) — use the git version.")
     note("jwt_tool installed from git (/opt/jwt_tool) — available as /usr/local/bin/jwt_tool.")
-    warn("searchsploit: installed via exploitdb package or git (/opt/exploitdb).")
+    info("searchsploit: installed via exploitdb package or git (/opt/exploitdb).")
     note("shcheck: installed from git (/opt/shcheck) — available as /usr/local/bin/shcheck.")
     note("feroxbuster: apt/brew only — install manually on dnf/other systems (cargo install feroxbuster).")
     if OS == "macos":
