@@ -4344,9 +4344,14 @@ _procs_lock = threading.Lock()
 _redirect_seen: set = set()  # (from_url, to_url) pairs already reported
 
 
-def _register_proc(proc: subprocess.Popen) -> None:
+def _register_proc(proc: subprocess.Popen, operation: str = "") -> None:
     with _procs_lock:
         _active_procs.append(proc)
+    if _pause_mgr is not None:
+        try:
+            _pause_mgr.register(proc, operation)
+        except Exception:
+            pass
 
 
 def _deregister_proc(proc: subprocess.Popen) -> None:
@@ -4354,6 +4359,11 @@ def _deregister_proc(proc: subprocess.Popen) -> None:
         try:
             _active_procs.remove(proc)
         except ValueError:
+            pass
+    if _pause_mgr is not None:
+        try:
+            _pause_mgr.unregister(proc.pid)
+        except Exception:
             pass
 
 
@@ -42734,6 +42744,7 @@ def main() -> None:
         phases_enabled = cfg.get("phases", {})
 
         def _skip(phase_name: str) -> bool:
+            _check_pause()
             if not phases_enabled.get(phase_name, False):
                 vc.log(f"[{phase_name}] Phase disabled — skipping", "INFO")
                 vc.status(phase_name, phase_name, "skipped")
@@ -42989,9 +43000,13 @@ def main() -> None:
             except Exception as _cpe:
                 vc.log(f"[checkpoint] Save error: {_cpe}", "WARNING")
 
+        if _pause_mgr is not None:
+            _pause_mgr._checkpoint_cb = _save_checkpoint
+
         # ── Per-credential context loop ─────────────────────────────────────
         _ss_login_done: set = set()  # dedup: login URLs already screenshotted
         for _ctx in _cred_contexts:
+            _check_pause()
             _ctx_label = _ctx["label"]
             _scan_ctx["role"] = _ctx_label  # route structure_map statuses to this role's column
             _ctx_auth  = _ctx["auth_sess"]
@@ -43525,6 +43540,7 @@ def main() -> None:
             # Closures capture _ctx_label and _is_reduced_ctx via default arg
             def _skip(phase_name: str, _lbl: str = _ctx_label,
                       _reduced: bool = _is_reduced_ctx) -> bool:
+                _check_pause()
                 if not phases_enabled.get(phase_name, False):
                     vc.log(f"[{phase_name}] Phase disabled — skipping", "INFO")
                     vc.status(phase_name, phase_name, "skipped")
@@ -45302,6 +45318,7 @@ def main() -> None:
             out.set_auth_context([{"username": "UNAUTH", "role": "unauthenticated"}])
 
         def _skip(phase_name: str) -> bool:
+            _check_pause()
             if not phases_enabled.get(phase_name, False):
                 vc.log(f"[{phase_name}] Phase disabled — skipping", "INFO")
                 vc.status(phase_name, phase_name, "skipped")
