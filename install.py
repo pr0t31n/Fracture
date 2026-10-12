@@ -311,6 +311,7 @@ PIP_PACKAGES = [
     "sqlmap",
     "termcolor>=2.0.0",
     "dnspython>=2.4.0",
+    "arjun",
 ]
 
 OFFLINE_BUNDLE_URLS = {
@@ -855,6 +856,50 @@ def install_git():
         "https://github.com/projectdiscovery/nuclei-templates.git",
         "/opt/nuclei-templates",
     )
+
+    # commix — OS command injection scanner
+    if not shutil.which("commix"):
+        git_clone_or_update("https://github.com/commixproject/commix.git", "/opt/commix")
+        commix_bin = "/opt/commix/commix.py"
+        if os.path.isfile(commix_bin):
+            os.chmod(commix_bin, 0o755)
+            symlink_force(commix_bin, "/usr/local/bin/commix")
+            info("commix symlinked to /usr/local/bin/commix")
+    elif os.path.isdir("/opt/commix"):
+        info("commix installed — pulling latest…")
+        git_clone_or_update("https://github.com/commixproject/commix.git", "/opt/commix")
+
+    # SSTImap — server-side template injection scanner
+    if not shutil.which("sstimap") and not os.path.isfile("/opt/SSTImap/sstimap.py"):
+        git_clone_or_update("https://github.com/vladko312/SSTImap.git", "/opt/SSTImap")
+        sstimap_bin = "/opt/SSTImap/sstimap.py"
+        if os.path.isfile(sstimap_bin):
+            os.chmod(sstimap_bin, 0o755)
+            symlink_force(sstimap_bin, "/usr/local/bin/sstimap")
+            info("sstimap symlinked to /usr/local/bin/sstimap")
+            req = "/opt/SSTImap/requirements.txt"
+            if os.path.isfile(req):
+                run([sys.executable, "-m", "pip", "install", "--break-system-packages",
+                     "-r", req], check=False)
+    elif os.path.isdir("/opt/SSTImap"):
+        info("SSTImap installed — pulling latest…")
+        git_clone_or_update("https://github.com/vladko312/SSTImap.git", "/opt/SSTImap")
+
+    # toxicache — web cache poisoning scanner
+    if not shutil.which("toxicache"):
+        git_clone_or_update("https://github.com/xhzeem/toxicache.git", "/opt/toxicache")
+        toxicache_bin = "/opt/toxicache/toxicache.py"
+        if os.path.isfile(toxicache_bin):
+            os.chmod(toxicache_bin, 0o755)
+            symlink_force(toxicache_bin, "/usr/local/bin/toxicache")
+            info("toxicache symlinked to /usr/local/bin/toxicache")
+            req = "/opt/toxicache/requirements.txt"
+            if os.path.isfile(req):
+                run([sys.executable, "-m", "pip", "install", "--break-system-packages",
+                     "-r", req], check=False)
+    elif os.path.isdir("/opt/toxicache"):
+        info("toxicache installed — pulling latest…")
+        git_clone_or_update("https://github.com/xhzeem/toxicache.git", "/opt/toxicache")
 
 
 # ---------------------------------------------------------------------------
