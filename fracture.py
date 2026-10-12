@@ -46847,12 +46847,22 @@ def main() -> None:
                 continue
             try:
                 _sub_findings = json.loads(_sub_fj.read_text(encoding="utf-8"))
+                _sub_prefix = _sub.name
                 for _sf in _sub_findings:
                     _key = ((_sf.get("title") or "").lower(),
                             (_sf.get("ip") or "").lower(),
                             int(_sf.get("port") or 0))
                     if _key not in _seen:
                         _seen.add(_key)
+                        _of = (_sf.get("output_file") or "").strip()
+                        if _of and not _of.startswith("/") and not _of.startswith("["):
+                            parts = []
+                            for _ofp in re.split(r'[,\n]', _of):
+                                _ofp = _ofp.strip()
+                                if _ofp and not _ofp.startswith("/"):
+                                    _ofp = f"{_sub_prefix}/{_ofp}"
+                                parts.append(_ofp)
+                            _sf["output_file"] = ",".join(parts)
                         _root_findings.append(_sf)
                         _merge_count += 1
             except Exception:
