@@ -3862,7 +3862,7 @@ class OutputManager:
             r"|Unknown Header Identified"
             r"|Inconsistent Security Header Usage"
             r"|Endpoint-Specific Header"
-            r"|Technology Identified|Vulnerable Component):",
+            r"|Technology Identified|Software Identified|Software Version Detected|Vulnerable Component):",
             t,
         ):
             for ln in (output or "").split("\n"):
@@ -15957,8 +15957,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             _ww_versions.append((pname, version))
                             _ww_hl_tech = [f"{pname} {version}".strip()] if version else [pname]
                             out.add_finding(
-                                title=(f"Technology Identified: {pname} {version}".strip()
-                                       if version else f"Technology Identified: {pname}"),
+                                title=(f"Software Version Detected: {pname} {version}".strip()
+                                       if version else f"Software Identified: {pname}"),
                                 url=url, port=target["port"], risk="INFO",
                                 description=(
                                     f"whatweb identified {pname}"
@@ -29070,7 +29070,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Patch OpenSSL to a version not affected by Heartbleed."),
     # ── Server / technology ──
     (r"^tech-detect$|^wappalyzer-",
-     "Technology Identified", "INFO",
+     "Software Identified", "INFO",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Review exposed technology stack for known vulnerabilities."),
     (r"^waf-detect$|^waf-",
@@ -29669,8 +29669,9 @@ def _normalize_nuclei(item: dict) -> dict:
             _tech_display = _name
         else:
             _tech_display = "Unknown Technology"
+        _sw_cat = "Software Version Detected" if re.search(r'\d+\.\d+', _tech_display) else "Software Identified"
         return {
-            "title": f"Technology Identified: {_tech_display}", "risk": "INFO",
+            "title": f"{_sw_cat}: {_tech_display}", "risk": "INFO",
             "description": _desc or f"{_tech_display} detected by nuclei ({_tid}).",
             "output": str(_output)[:2000] if _output else f"Template: {_tid}",
             "owasp": "A05:2025 Security Misconfiguration", "nist": "CM-7",
@@ -29783,8 +29784,9 @@ def _normalize_nuclei(item: dict) -> dict:
                 if _clean.endswith(_sfx):
                     _clean = _clean[:-len(_sfx)].strip()
                     break
+            _sw_cat2 = "Software Version Detected" if re.search(r'\d+\.\d+', _clean) else "Software Identified"
             return {
-                "title": f"Technology Identified: {_clean}", "risk": _sev or "INFO",
+                "title": f"{_sw_cat2}: {_clean}", "risk": _sev or "INFO",
                 "description": _desc or f"{_name} ({_tid})",
                 "output": str(_output)[:2000] if _output else f"Template: {_tid}",
                 "owasp": "A06:2025 Vulnerable and Outdated Components", "nist": "SI-2",
