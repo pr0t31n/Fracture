@@ -2897,26 +2897,26 @@ def _ensure_dependencies() -> None:
     if not missing:
         return
 
-    _vantage_early = os.environ.get("CRUCIBLE_MANAGED", "") == "1"
-    if _vantage_early:
+    _crucible_early = os.environ.get("CRUCIBLE_MANAGED", "") == "1"
+    if _crucible_early:
         for pkg, mod, desc in missing:
             required = pkg in _REQUIRED_PKGS
             break_sys = platform.system() == "Linux"
-            sys.stdout.write(f"[Vantage] Auto-installing Python package: {pkg} ...\n")
+            sys.stdout.write(f"[Crucible] Auto-installing Python package: {pkg} ...\n")
             sys.stdout.flush()
             ok, _err = _pip_install(pkg, break_system=break_sys)
             if ok:
                 importlib.invalidate_caches()
                 ok = _is_importable(mod)
             if ok:
-                sys.stdout.write(f"[Vantage] {pkg} installed OK\n")
+                sys.stdout.write(f"[Crucible] {pkg} installed OK\n")
                 sys.stdout.flush()
             elif required:
-                sys.stderr.write(f"[Vantage] FATAL: could not install required package '{pkg}'.\n")
+                sys.stderr.write(f"[Crucible] FATAL: could not install required package '{pkg}'.\n")
                 sys.stderr.flush()
                 sys.exit(1)
             else:
-                sys.stdout.write(f"[Vantage] Warning: optional '{pkg}' install failed — some features may be unavailable.\n")
+                sys.stdout.write(f"[Crucible] Warning: optional '{pkg}' install failed — some features may be unavailable.\n")
                 sys.stdout.flush()
         return
 
@@ -3058,7 +3058,7 @@ def _tprint(*args, **kwargs):
 
 
 # ─────────────────────────────────────────────
-# Vantage integration layer
+# Crucible integration layer
 # ─────────────────────────────────────────────
 import queue as _queue
 import uuid as _uuid
@@ -3100,19 +3100,19 @@ def _timeout_action_item(out, tool_name, target, timeout_s, priority="MEDIUM"):
     )
 
 
-_VANTAGE_MANAGED = os.environ.get("CRUCIBLE_MANAGED", "") == "1"
+_CRUCIBLE_MANAGED = os.environ.get("CRUCIBLE_MANAGED", "") == "1"
 
-_VP_LOG    = "__CRUCIBLE_LOG__:"
-_VP_ERR    = "__CRUCIBLE_ERR__:"
-_VP_PROMPT = "__CRUCIBLE_PROMPT__:"
-_VP_STATUS = "__CRUCIBLE_STATUS__:"
+_CP_LOG    = "__CRUCIBLE_LOG__:"
+_CP_ERR    = "__CRUCIBLE_ERR__:"
+_CP_PROMPT = "__CRUCIBLE_PROMPT__:"
+_CP_STATUS = "__CRUCIBLE_STATUS__:"
 _CR_ACTION = "__CRUCIBLE_ACTION_ITEM__:"
 
 
-class VantageConsole:
+class CrucibleConsole:
     """Dual-mode console output.
 
-    When VANTAGE_MANAGED=1: emits protocol tokens that Vantage intercepts for
+    When CRUCIBLE_MANAGED=1: emits protocol tokens that Crucible intercepts for
     structured logs, errors, prompts, and phase-status updates.
     When running in a real terminal: falls back to ANSI-coloured text.
     """
@@ -3120,7 +3120,7 @@ class VantageConsole:
     _ERROR_LEVELS = frozenset({"ERROR", "WARNING"})
 
     def __init__(self) -> None:
-        self._managed = _VANTAGE_MANAGED
+        self._managed = _CRUCIBLE_MANAGED
         self._lock    = threading.Lock()
         self._error_log_path: "pathlib.Path | None" = None
         self._current_target: str = ""
@@ -3159,7 +3159,7 @@ class VantageConsole:
                     "level":   level,
                     "message": message,
                 }
-                sys.stdout.write(_VP_LOG + json.dumps(entry) + "\n")
+                sys.stdout.write(_CP_LOG + json.dumps(entry) + "\n")
                 sys.stdout.flush()
             else:
                 _colours = {
@@ -3191,7 +3191,7 @@ class VantageConsole:
                     "detail":   detail,
                     "category": category or self._categorise(message),
                 }
-                sys.stderr.write(_VP_ERR + json.dumps(entry) + "\n")
+                sys.stderr.write(_CP_ERR + json.dumps(entry) + "\n")
                 sys.stderr.flush()
             else:
                 _tprint(f"{Fore.RED}[!] {message}{Style.RESET_ALL}")
@@ -3218,7 +3218,7 @@ class VantageConsole:
                     entry["target"] = self._current_target
                     entry["target_index"] = self._target_index
                     entry["target_total"] = self._target_total
-                sys.stdout.write(_VP_STATUS + json.dumps(entry) + "\n")
+                sys.stdout.write(_CP_STATUS + json.dumps(entry) + "\n")
                 sys.stdout.flush()
         # §14j: persist the phase transition to scan.log + scan.log.json with a
         # timestamp, unconditionally (the status token above is ephemeral / live-UI).
@@ -3269,7 +3269,7 @@ class VantageConsole:
             if timeout:
                 payload["timeout"] = timeout
             with self._lock:
-                sys.stdout.write(_VP_PROMPT + json.dumps(payload) + "\n")
+                sys.stdout.write(_CP_PROMPT + json.dumps(payload) + "\n")
                 sys.stdout.flush()
             try:
                 if timeout:
@@ -4370,7 +4370,7 @@ _BANNER = r"""
 # ─────────────────────────────────────────────
 # Module-level singletons
 # ─────────────────────────────────────────────
-vc: VantageConsole = VantageConsole()
+vc: CrucibleConsole = CrucibleConsole()
 _active_procs: list = []
 _procs_lock = threading.Lock()
 _redirect_seen: set = set()  # (from_url, to_url) pairs already reported
@@ -43300,7 +43300,7 @@ def main() -> None:
     _role_landing_urls: dict = {}  # {role_label: landing_url} — per-role canary targets
 
     _am = cfg.get("auth_matrix") or []
-    if _VANTAGE_MANAGED and _am:
+    if _CRUCIBLE_MANAGED and _am:
         # Roles were pre-defined in the Crucible project — load them directly,
         # no prompt needed.
         _n_roles = len(_am)
@@ -43352,9 +43352,9 @@ def main() -> None:
         _all_roles_ctx[:] = [r["role"] for r in _collected_roles]
         if "unauthenticated" not in _all_roles_ctx:
             _all_roles_ctx.append("unauthenticated")
-    elif _VANTAGE_MANAGED:
+    elif _CRUCIBLE_MANAGED:
         # Managed mode with no auth_matrix — run unauthenticated only.
-        # Do NOT prompt; the operator is in Vantage/Crucible and cannot
+        # Do NOT prompt; the operator is in Crucible and cannot
         # interact with Fracture's stdin.
         _n_roles = 0
         vc.log(
@@ -44331,7 +44331,7 @@ def main() -> None:
             # each other (e.g. recon/Admin/gobuster_... vs recon/User/gobuster_...).
             out._output_role = _ctx_label if _n_roles >= 1 else ""
 
-            # Lazy auth build for Roles 2..n in VANTAGE_MANAGED multi-role mode.
+            # Lazy auth build for Roles 2..n in CRUCIBLE_MANAGED multi-role mode.
             # Sessions are not pre-built so browser-auth prompts appear after the
             # previous role's phases complete, not before any phases run.
             # Browser-auth fallback is handled inside _build_auth_session (form_login
