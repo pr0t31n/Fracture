@@ -17480,6 +17480,33 @@ def _resolve_spa_landing(
                 pass
 
 
+_AUTH_PROVIDER_HOSTS = frozenset({
+    "login.microsoftonline.com",
+    "login.microsoft.com",
+    "login.windows.net",
+    "sts.windows.net",
+    "accounts.google.com",
+    "login.salesforce.com",
+    "signin.aws.amazon.com",
+    "sso.jumpcloud.com",
+})
+_AUTH_PROVIDER_SUFFIXES = (
+    ".okta.com",
+    ".auth0.com",
+    ".onelogin.com",
+    ".duosecurity.com",
+    ".pingone.com",
+    ".pingidentity.com",
+)
+
+
+def _is_auth_provider_host(hostname: str) -> bool:
+    if not hostname:
+        return False
+    h = hostname.lower()
+    return h in _AUTH_PROVIDER_HOSTS or any(h.endswith(s) for s in _AUTH_PROVIDER_SUFFIXES)
+
+
 def _phase_endpoint_tools(
     discovered_urls: list, target: dict, cfg: dict, pm: ProgressManager,
     out: OutputManager, sess: requests.Session,
@@ -17530,16 +17557,27 @@ def _phase_endpoint_tools(
     _ep_fer_threads = "5" if _ep_tools_cdn else str(_SCAN_SEM.limit)
     wordlist_file = _find_wordlist("raft-large-files.txt")
 
-    # Deduplicate, exclude base URL, cap count
+    # Deduplicate, exclude base URL, cap count, skip auth-provider URLs
     seen = {base_url}
     endpoints: list = []
+    _auth_skipped = 0
     for u in discovered_urls:
         u = u.rstrip("/")
         if u and u not in seen:
             seen.add(u)
+            try:
+                _ep_host = urllib.parse.urlparse(u).hostname or ""
+            except Exception:
+                _ep_host = ""
+            if _is_auth_provider_host(_ep_host):
+                _auth_skipped += 1
+                continue
             endpoints.append(u)
             if len(endpoints) >= max_ep:
                 break
+    if _auth_skipped:
+        vc.log(f"[endpoint_tools] Skipped {_auth_skipped} auth-provider endpoint(s) "
+               f"(SSO/IdP URLs are out of testing scope)", "INFO")
 
     if not endpoints:
         return
@@ -18010,7 +18048,7 @@ def _phase_endpoint_tools(
                 _deregister_proc(_ep_fer_proc)
                 out.log_command("feroxbuster", cmd, ep_fer)
             except subprocess.TimeoutExpired:
-                _ep_kill_proc_tree(_fer_proc)
+                _kill_proc_tree(_ep_fer_proc)
                 _ep_fer_proc.communicate()
                 _deregister_proc(_ep_fer_proc)
                 vc.log(f"[endpoint_tools] feroxbuster timed out after 180s — killed", "WARNING")
@@ -43739,11 +43777,18 @@ def main() -> None:
                         try:
                             _redir_host = urllib.parse.urlparse(_redir_loc).hostname
                             if _redir_host and _redir_host not in _scope_hostnames:
-                                _scope_hostnames.add(_redir_host)
-                                vc.log(
-                                    f"[scope] Auto-added redirect target to scope: {_redir_host}",
-                                    "INFO",
-                                )
+                                if _is_auth_provider_host(_redir_host):
+                                    vc.log(
+                                        f"[scope] Redirect target is an auth provider — "
+                                        f"not adding to scope: {_redir_host}",
+                                        "INFO",
+                                    )
+                                else:
+                                    _scope_hostnames.add(_redir_host)
+                                    vc.log(
+                                        f"[scope] Auto-added redirect target to scope: {_redir_host}",
+                                        "INFO",
+                                    )
                         except Exception:
                             pass
                 break
