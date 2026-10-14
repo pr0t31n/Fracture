@@ -43439,6 +43439,15 @@ def main() -> None:
             engagement_name=eng.get("engagement_name", ""),
             target=target.get("url", "") if isinstance(target, dict) else "",
         )
+        try:
+            import pr0t31n_dep_snapshot as _ds
+            _ds.write_snapshot(
+                Path(cfg["project"]).resolve(), "fracture", VERSION,
+                binaries=["gobuster", "nikto", "sqlmap", "nuclei", "dalfox", "sslscan", "testssl.sh", "whatweb", "wpscan", "ffuf", "feroxbuster", "searchsploit", "shcheck", "mitmdump", "tlsx", "webanalyze"],
+                pip_packages=["requests", "colorama", "beautifulsoup4", "selenium", "termcolor", "dnspython"],
+            )
+        except Exception:
+            pass
 
         if pm.get_state()["completed_phases"]:
             vc.log("Checkpoint found — resuming from previous run", "INFO")

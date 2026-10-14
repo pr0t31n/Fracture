@@ -110,6 +110,26 @@ def run(cmd, check=True, capture=False, env=None, cwd=None):
 # ---------------------------------------------------------------------------
 # Pre-install guards
 # ---------------------------------------------------------------------------
+
+def _dpkg_installed(pkg):
+    try:
+        r = subprocess.run(["dpkg", "-s", pkg],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return r.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def _rpm_installed(pkg):
+    try:
+        return subprocess.run(
+            ["rpm", "-q", pkg],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        ).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
 def _pip_installed(pkg_spec):
     import importlib.util
     name = pkg_spec.split(">=")[0].split("==")[0].split("[")[0].split("<")[0].strip()
@@ -174,7 +194,12 @@ def apt_install(packages):
         info("Running apt update ...")
         run(["apt-get", "update", "-y"])
         _apt_updated = True
-    run(["apt-get", "install", "-y"] + packages)
+    _needed = [p for p in packages if not _dpkg_installed(p)]
+    _skip = len(packages) - len(_needed)
+    if _skip:
+        info(f"  {_skip} APT package(s) already installed")
+    if _needed:
+        run(["apt-get", "install", "-y"] + _needed)
 
 
 def apt_install_optional(packages):
@@ -190,6 +215,9 @@ def apt_install_optional(packages):
         run(["apt-get", "update", "-y"], check=False)
         _apt_updated = True
     for pkg in packages:
+        if _dpkg_installed(pkg):
+            info(f"  ✓ {pkg} already installed")
+            continue
         try:
             run(["apt-get", "install", "-y", pkg], check=True)
             info(f"  installed (optional): {pkg}")
@@ -198,11 +226,19 @@ def apt_install_optional(packages):
 
 
 def dnf_install(packages):
-    run(["dnf", "install", "-y"] + packages)
+    _needed = [p for p in packages if not _rpm_installed(p)]
+    _skip = len(packages) - len(_needed)
+    if _skip:
+        info(f"  {_skip} DNF package(s) already installed")
+    if _needed:
+        run(["dnf", "install", "-y"] + _needed)
 
 
 def dnf_install_optional(packages):
     for pkg in packages:
+        if _rpm_installed(pkg):
+            info(f"  ✓ {pkg} already installed")
+            continue
         try:
             run(["dnf", "install", "-y", pkg], check=True)
             info(f"  installed (optional): {pkg}")
@@ -211,7 +247,12 @@ def dnf_install_optional(packages):
 
 
 def zypper_install(packages):
-    run(["zypper", "install", "-y"] + packages)
+    _needed = [p for p in packages if not _rpm_installed(p)]
+    _skip = len(packages) - len(_needed)
+    if _skip:
+        info(f"  {_skip} zypper package(s) already installed")
+    if _needed:
+        run(["zypper", "install", "-y"] + _needed)
 
 
 # ---------------------------------------------------------------------------
@@ -573,13 +614,17 @@ def install_selenium():
                 if not _apt_updated:
                     run(["apt-get", "update", "-y"], check=False)
                     _apt_updated = True
-                result = subprocess.run(
-                    ["apt-get", "install", "-y", "python3-selenium"],
-                    check=False,
-                )
-                if result.returncode == 0:
+                if _dpkg_installed("python3-selenium"):
                     _installed = True
-                    info("python3-selenium installed via apt-get")
+                    info("python3-selenium already installed (apt)")
+                else:
+                    result = subprocess.run(
+                        ["apt-get", "install", "-y", "python3-selenium"],
+                        check=False,
+                    )
+                    if result.returncode == 0:
+                        _installed = True
+                        info("python3-selenium installed via apt-get")
             elif OS == "dnf" and shutil.which("dnf"):
                 warn("pip install failed — trying dnf (last resort) ...")
                 result = subprocess.run(
@@ -801,7 +846,8 @@ def install_git():
         info("Installing OWASP ZAP …")
         if OS == "apt":
             try:
-                run(["apt-get", "install", "-y", "zaproxy"])
+                if not _dpkg_installed("zaproxy"):
+                    run(["apt-get", "install", "-y", "zaproxy"])
                 info("  ✓ ZAP installed via apt")
             except Exception as _ze:
                 warn(f"ZAP install failed (non-fatal): {_ze}")
