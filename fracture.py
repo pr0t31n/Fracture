@@ -17104,10 +17104,11 @@ def _capture_xss_screenshot(proof_url: str, out: "OutputManager",
     Returns the run-dir-relative path to the PNG on success, or empty string.
     The screenshot is placed in evidence/<phase>/ alongside the HTTP evidence.
     """
+    _xss_ip = re.sub(r'[^\w]', '_', target.get("ip", "unknown"))
     safe = re.sub(r'[^\w]', '_', label)[:60]
     ss_dir = out.root / phase
     ss_dir.mkdir(parents=True, exist_ok=True)
-    ss_path = ss_dir / f"{safe}_screenshot.png"
+    ss_path = ss_dir / f"{safe}_{_xss_ip}_screenshot.png"
     if _capture_screenshot_to(proof_url, ss_path, target, cfg,
                               auth_session=auth_session):
         _register_screenshot(out.root, ss_path, url=proof_url,
@@ -17134,10 +17135,12 @@ def _capture_clickjack_screenshot(target_url: str, out: "OutputManager",
     """
     if not _check_selenium():
         return ""
+    _cj_ip = re.sub(r'[^\w]', '_', target.get("ip", "unknown"))
     safe = re.sub(r'[^\w]', '_', label)[:60]
+    _cj_base = f"{safe}_{_cj_ip}"
     ss_dir = out.root / phase
     ss_dir.mkdir(parents=True, exist_ok=True)
-    ss_path = ss_dir / f"{safe}_clickjack_poc.png"
+    ss_path = ss_dir / f"{_cj_base}_clickjack_poc.png"
 
     # Build the PoC HTML
     _esc_url = target_url.replace("&", "&amp;").replace("<", "&lt;")
@@ -17163,7 +17166,7 @@ def _capture_clickjack_screenshot(target_url: str, out: "OutputManager",
         f"<iframe src='{target_url}'></iframe>"
         "</div></body></html>"
     )
-    poc_persist = ss_dir / f"{safe}_clickjack_poc.html"
+    poc_persist = ss_dir / f"{_cj_base}_clickjack_poc.html"
     poc_tmp = Path(tempfile.mktemp(suffix=".html", prefix="fracture_cj_"))
     try:
         poc_tmp.write_text(poc_html, encoding="utf-8")
@@ -17208,10 +17211,11 @@ def _capture_error_screenshot(error_url: str, out: "OutputManager",
 
     Returns the run-dir-relative path to the PNG on success, or empty string.
     """
+    _err_ip = re.sub(r'[^\w]', '_', target.get("ip", "unknown"))
     safe = re.sub(r'[^\w]', '_', label)[:60]
     ss_dir = out.root / phase
     ss_dir.mkdir(parents=True, exist_ok=True)
-    ss_path = ss_dir / f"{safe}_error_screenshot.png"
+    ss_path = ss_dir / f"{safe}_{_err_ip}_error_screenshot.png"
     if _capture_screenshot_to(error_url, ss_path, target, cfg,
                               auth_session=auth_session):
         _register_screenshot(out.root, ss_path, url=error_url,
