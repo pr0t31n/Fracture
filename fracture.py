@@ -13800,7 +13800,7 @@ def _check_f5_consistency(target: dict, cfg: dict, out: "OutputManager",
 _IIS_PROBE_TABLE = [
     # ── Sensitive configuration files ──
     ("/web.config", "CRITICAL",
-     "Sensitive File Exposed: web.config",
+     "Discovery: Sensitive File Exposed",
      "The ASP.NET web.config file is directly accessible. This file typically "
      "contains database connection strings, authentication settings, MachineKey "
      "values, and other sensitive configuration. Exposure enables credential "
@@ -13811,7 +13811,7 @@ _IIS_PROBE_TABLE = [
      "<security><requestFiltering><hiddenSegments><add segment='web.config'/>"
      "</hiddenSegments></requestFiltering></security>"),
     ("/web.config.bak", "CRITICAL",
-     "Sensitive File Exposed: web.config Backup",
+     "Discovery: Sensitive File Exposed",
      "A backup copy of the ASP.NET configuration file is accessible. Backup "
      "files often contain the same credentials and MachineKey values as the "
      "live configuration.",
@@ -13819,12 +13819,12 @@ _IIS_PROBE_TABLE = [
      "Remove backup files from web-accessible directories. Add .bak, .old, .txt "
      "to IIS Request Filtering denied extensions."),
     ("/web.config.old", "CRITICAL",
-     "Sensitive File Exposed: web.config Backup",
+     "Discovery: Sensitive File Exposed",
      "A backup copy of the ASP.NET configuration file is accessible.",
      [(re.compile(r'<configuration\b|<connectionStrings|<appSettings', re.I), True)],
      "Remove backup files from web-accessible directories."),
     ("/web.config.txt", "CRITICAL",
-     "Sensitive File Exposed: web.config Backup",
+     "Discovery: Sensitive File Exposed",
      "A text copy of the ASP.NET configuration file is accessible.",
      [(re.compile(r'<configuration\b|<connectionStrings|<appSettings', re.I), True)],
      "Remove backup files from web-accessible directories."),
@@ -28535,7 +28535,7 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
                 out_f = out.output_path(phase, "file_" + fpath.replace("/", "_").lstrip("_"))
                 out_f.write_text(r.text[:10000], encoding="utf-8")
                 out.add_finding(
-                    title=f"Sensitive File Exposed: {fpath}",
+                    title="Discovery: Sensitive File Exposed",
                     url=_fpath_full_url, port=target["port"], risk=risk,
                     description=fdesc + f" ({_fpath_full_url} returned HTTP 200).",
                     output=r.text[:500], sources="fracture-files",
@@ -28669,7 +28669,7 @@ _NIKTO_NORM: "list[tuple]" = [
      "Disable unnecessary HTTP methods; review and restrict allowed methods to only those required."),
     # ── Exposed files / paths ──
     (r"phpinfo\(\)|\/phpinfo\.php|\/info\.php",
-     "Sensitive File Exposed: phpinfo()", "HIGH",
+     "Discovery: Sensitive File Exposed", "HIGH",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Remove phpinfo() files from production servers."),
     (r"\/\.env\b",
@@ -28685,7 +28685,7 @@ _NIKTO_NORM: "list[tuple]" = [
      "A05:2025 Security Misconfiguration", "CM-7",
      "Block public access to version control directories."),
     (r"(?:backup|\.bak|\.old|\.orig|\.save|\.swp|~).*(?:file|found)",
-     "Sensitive File Exposed", "HIGH",
+     "Discovery: Sensitive File Exposed", "HIGH",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Remove backup files from production web roots."),
     (r"(?:admin|administrator|manager|console|dashboard).*(?:found|accessible|interface|panel)",
@@ -28697,7 +28697,7 @@ _NIKTO_NORM: "list[tuple]" = [
      "A05:2025 Security Misconfiguration", "CM-7",
      "Remove default Apache directory listings and files from production servers."),
     (r"default.*(?:page|file|install|welcome|content)|(?:IIS|Apache).*(?:default|welcome)",
-     "Sensitive File Exposed", "LOW",
+     "Discovery: Sensitive File Exposed", "LOW",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Remove default installation pages from production servers."),
     # ── Deprecated headers ──
@@ -28812,7 +28812,7 @@ _NIKTO_NORM: "list[tuple]" = [
      "Restrict phpMyAdmin access to internal IPs only or remove from production."),
     # ── .htaccess / .htpasswd readable ──
     (r"\.htaccess|\.htpasswd",
-     "Sensitive File Exposed: .htaccess/.htpasswd", "HIGH",
+     "Discovery: Sensitive File Exposed", "HIGH",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Block public access to .htaccess and .htpasswd files."),
     # ── Password field autocomplete ──
@@ -29116,7 +29116,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "A05:2025 Security Misconfiguration", "CM-7",
      "Block public access to .env files."),
     (r"phpinfo",
-     "Sensitive File Exposed: phpinfo()", "HIGH",
+     "Discovery: Sensitive File Exposed", "HIGH",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Remove phpinfo() files from production servers."),
     (r"robots\.txt",
@@ -29124,7 +29124,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "A05:2025 Security Misconfiguration", "CM-7",
      "Review robots.txt for sensitive path disclosure."),
     (r"backup-file|\.bak|\.old|\.orig",
-     "Sensitive File Exposed", "HIGH",
+     "Discovery: Sensitive File Exposed", "HIGH",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Remove backup files from production web roots."),
     (r"swagger|openapi|api-doc",
