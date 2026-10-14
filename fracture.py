@@ -12057,6 +12057,16 @@ _FINGERPRINT_HEADERS: "dict[str, tuple[str, str]]" = {
     "google-analytics":            ("Google Analytics",
                                     "Google Analytics tracking identifier exposed in "
                                     "response headers."),
+    # Azure CDN / Front Door / Storage
+    "x-fd-int-roxy-purgeid":       ("Microsoft Azure Front Door",
+                                    "Azure Front Door internal purge identifier, revealing "
+                                    "the application is behind Azure Front Door CDN/WAF."),
+    "x-ms-content-source":         ("Microsoft Azure CDN / Front Door",
+                                    "Azure CDN origin content source identifier, revealing "
+                                    "Azure CDN infrastructure and origin routing."),
+    "x-ms-version":                ("Microsoft Azure Storage / Services",
+                                    "Azure Storage or Azure Services API version header, "
+                                    "revealing Azure-hosted API infrastructure and version."),
 }
 
 _KNOWN_NON_SEC_HEADERS = frozenset({
@@ -12082,6 +12092,9 @@ _KNOWN_NON_SEC_HEADERS = frozenset({
     "access-control-max-age",
     "access-control-request-headers",
     "access-control-request-method",
+    # Standard web platform headers — not security-relevant
+    "reporting-endpoints",
+    "timing-allow-origin",
     # Deprecated headers — browsers ignore these
     "expect-ct",
     "feature-policy",
@@ -15242,7 +15255,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
         out.add_finding(
-            title=f"CDN Active: {_recon_cdn}",
+            title=f"Discovery: CDN Detected - {_recon_cdn}",
             url=url, port=target["port"], risk="INFO",
             description=(
                 f"A Content Delivery Network ({_recon_cdn}) was identified in front of the target. "
@@ -15306,7 +15319,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             for _wh, _wv in _waf_id_found:
                 _waf_hl.append(f"{_wh}: {_wv}")
             out.add_finding(
-                title=f"WAF / Edge Security Platform Active: {_waf_label}",
+                title=f"Discovery: WAF Detected - {_waf_label}",
                 url=url, port=target["port"], risk="INFO",
                 description=(
                     f"A WAF or edge security platform ({_waf_label}) was identified in front of the target. "
@@ -28978,7 +28991,7 @@ def _normalize_nikto(vuln: dict) -> dict:
 
     # Fallback: use first sentence of msg as title (no "Nikto:" prefix so
     # identical findings from different tools still merge by title).
-    _fb_title = msg.split(".")[0].strip() if msg else f"Nikto ID {_nik_id}"
+    _fb_title = msg.split(". ")[0].strip().rstrip(".") if msg else f"Nikto ID {_nik_id}"
     if len(_fb_title) > 120:
         _fb_title = _fb_title[:117] + "..."
     return {"title": _fb_title, "risk": "MEDIUM",
@@ -29527,6 +29540,47 @@ _NUCLEI_TECH_DISPLAY = {
     "onelogin": "OneLogin",
     "keycloak": "Keycloak",
 }
+# nuclei waf-detect matcher-name → human-readable WAF/platform name.
+# The waf-detect template uses generic info.name="WAF Detection" with the
+# specific platform in the matcher-name field.
+_NUCLEI_WAF_MATCHER_MAP = {
+    "aspgeneric": "ASP.NET Request Filtering",
+    "apachegeneric": "Apache mod_security / Generic",
+    "cloudflare": "Cloudflare",
+    "akamai": "Akamai",
+    "awswaf": "AWS WAF",
+    "azurewaap": "Azure Web Application Firewall",
+    "azurefrontdoor": "Azure Front Door",
+    "bigip": "F5 BIG-IP ASM",
+    "barracuda": "Barracuda WAF",
+    "citrix": "Citrix NetScaler AppFirewall",
+    "fortiweb": "Fortinet FortiWeb",
+    "imperva": "Imperva / Incapsula",
+    "incapsula": "Imperva / Incapsula",
+    "modsecurity": "ModSecurity",
+    "nginx": "Nginx",
+    "paloalto": "Palo Alto Networks",
+    "sucuri": "Sucuri WAF",
+    "wordfence": "Wordfence",
+    "comodo": "Comodo WAF",
+    "denyall": "DenyAll WAF",
+    "dotdefender": "dotDefender",
+    "expressionengine": "ExpressionEngine",
+    "limelight": "Limelight Networks",
+    "naxsi": "NAXSI",
+    "profense": "Profense",
+    "radware": "Radware AppWall",
+    "reblaze": "Reblaze",
+    "safedog": "SafeDog",
+    "sophos": "Sophos UTM",
+    "squarespace": "Squarespace",
+    "stackpath": "StackPath",
+    "varnish": "Varnish",
+    "wallarm": "Wallarm",
+    "webknight": "WebKnight",
+    "yundun": "Yundun",
+    "zscaler": "Zscaler",
+}
 _NUCLEI_DYN_WAF   = re.compile(r"^waf-detect$|^waf-", re.IGNORECASE)
 _NUCLEI_DYN_PANEL = re.compile(
     r"admin-panel|phpmyadmin|adminer|grafana-default|jenkins"
@@ -29700,7 +29754,7 @@ def _normalize_nuclei(item: dict) -> dict:
         ))
         if _is_lb:
             return {
-                "title": f"Load Balancer Detected: {_name}", "risk": "INFO",
+                "title": f"Discovery: Load Balancer Detected - {_name}", "risk": "INFO",
                 "description": (
                     _desc or f"A load balancer ({_name}) was identified in front of the target. "
                     "The load balancer distributes traffic but does NOT perform application-layer "
@@ -29715,12 +29769,23 @@ def _normalize_nuclei(item: dict) -> dict:
                 ),
                 "cves": _cves, **_v11,
             }
+        _waf_id = _NUCLEI_WAF_MATCHER_MAP.get(
+            _matcher.lower(), _name if _name != "WAF Detection" else _matcher or "Unknown")
         return {
-            "title": f"WAF / Edge Security Platform Active: {_name}", "risk": "INFO",
-            "description": _desc or f"{_name} detected by nuclei ({_tid}).",
+            "title": f"Discovery: WAF Detected - {_waf_id}", "risk": "INFO",
+            "description": (
+                _desc or
+                f"A WAF or edge security platform ({_waf_id}) was identified by nuclei "
+                f"({_tid}, matcher: {_matcher}). WAF rules may mask application-layer "
+                f"vulnerabilities — absence of a finding does not confirm absence of "
+                f"the vulnerability."
+            ),
             "output": str(_output)[:2000] if _output else f"Template: {_tid}",
             "owasp": "A05:2025 Security Misconfiguration", "nist": "CM-7",
-            "remediation": "WAF/CDN detected — informational.",
+            "remediation": (
+                "Keep WAF rule sets up to date and covering OWASP Top 10 2025. "
+                "Do not rely solely on WAF protection — fix underlying vulnerabilities."
+            ),
             "cves": _cves, **_v11,
         }
     if _NUCLEI_DYN_PANEL.search(_tid):
