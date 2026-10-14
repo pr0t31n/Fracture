@@ -46871,10 +46871,37 @@ def main() -> None:
         # until the final post-scan merge.  Incrementally updating the root
         # file after each target ensures findings are visible as they arrive.
         _root_proj_inc = Path(cfg["project"]).resolve()
+        def _prefix_of(of_str, sub_prefix):
+            if not of_str or not sub_prefix:
+                return of_str
+            of_str = of_str.strip()
+            if of_str.startswith("["):
+                try:
+                    arr = json.loads(of_str)
+                    for item in arr:
+                        for key in ("req", "resp", "log", "path", "file"):
+                            v = item.get(key, "")
+                            if v and not v.startswith("/") and not v.startswith(sub_prefix + "/"):
+                                item[key] = f"{sub_prefix}/{v}"
+                    return json.dumps(arr)
+                except (json.JSONDecodeError, TypeError):
+                    return of_str
+            parts = []
+            for p in re.split(r"[,\n]", of_str):
+                p = p.strip()
+                if p and not p.startswith("/") and not p.startswith(sub_prefix + "/"):
+                    p = f"{sub_prefix}/{p}"
+                if p:
+                    parts.append(p)
+            return ",".join(parts)
         if project_dir != _root_proj_inc and findings:
             try:
                 _root_fj_inc = _root_proj_inc / "findings.json"
                 _root_fj_inc.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    _inc_sub = str(Path(project_dir).relative_to(_root_proj_inc))
+                except ValueError:
+                    _inc_sub = ""
                 with threading.Lock():
                     _existing_root: list = []
                     if _root_fj_inc.exists():
@@ -46896,7 +46923,11 @@ def main() -> None:
                                int(_f.get("port") or 0))
                         if _fk not in _seen_inc:
                             _seen_inc.add(_fk)
-                            _existing_root.append(_f)
+                            _fc = dict(_f)
+                            _ofi = (_fc.get("output_file") or "").strip()
+                            if _ofi and _inc_sub:
+                                _fc["output_file"] = _prefix_of(_ofi, _inc_sub)
+                            _existing_root.append(_fc)
                             _inc_count += 1
                     if _inc_count:
                         _tmp_inc = _root_fj_inc.with_suffix(".tmp")
@@ -46988,14 +47019,8 @@ def main() -> None:
                     if _key not in _seen:
                         _seen.add(_key)
                         _of = (_sf.get("output_file") or "").strip()
-                        if _of and not _of.startswith("/") and not _of.startswith("["):
-                            parts = []
-                            for _ofp in re.split(r'[,\n]', _of):
-                                _ofp = _ofp.strip()
-                                if _ofp and not _ofp.startswith("/"):
-                                    _ofp = f"{_sub_prefix}/{_ofp}"
-                                parts.append(_ofp)
-                            _sf["output_file"] = ",".join(parts)
+                        if _of:
+                            _sf["output_file"] = _prefix_of(_of, _sub_prefix)
                         _root_findings.append(_sf)
                         _merge_count += 1
             except Exception:
