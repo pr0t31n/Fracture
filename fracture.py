@@ -18589,7 +18589,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             if not _tls13_enabled and _ss_ciphers:
                 # Only flag when we have cipher data (confirms sslscan ran)
                 out.add_finding(
-                    title="SSL/TLS: TLSv1.3 Not Supported",
+                    title="SSL/TLS Vulnerability: TLSv1.3 Not Supported",
                     url=target["url"], port=port, risk="LOW",
                     description=(
                         "The server does not support TLSv1.3 (RFC 8446). "
@@ -18811,9 +18811,9 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     )
                 else:
                     _lj_risk = "INFO"
-                    _lj_title = "SSL/TLS Vulnerability [UNCONFIRMED]: LOGJAM"
+                    _lj_title = "SSL/TLS Vulnerability (Potential): LOGJAM"
                     _lj_desc = (
-                        f"[UNCONFIRMED] testssl flagged LOGJAM due to a "
+                        f"(Potential) testssl flagged LOGJAM due to a "
                         f"common {_dh_bits}-bit DH prime, but no export "
                         "ciphers or small DH parameters were detected. "
                         "True LOGJAM (CVE-2015-4000) requires DHE_EXPORT "
@@ -18998,7 +18998,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                             # TLSv1.3 support check
                             elif _tsf_id == "TLS1_3":
                                 if "not offered" in _tsf_finding_lo:
-                                    _tsf_title = "SSL/TLS: TLSv1.3 Not Supported"
+                                    _tsf_title = "SSL/TLS Vulnerability: TLSv1.3 Not Supported"
                                     _tsf_risk  = "LOW"
                                 else:
                                     continue  # offered — not a finding
