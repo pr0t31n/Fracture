@@ -688,6 +688,8 @@ _NON_HTML_EXTENSIONS = frozenset({
     ".travis.yml", ".circleci", ".env.local", ".env.production",
     ".pem", ".key", ".crt", ".cert", ".p12", ".jks", ".keystore",
     ".csv", ".tsv", ".dat",
+    ".zip", ".gz", ".tar", ".tgz", ".bz2", ".xz", ".7z", ".rar",
+    ".tfstate", ".backup", ".dump", ".db", ".sqlite", ".sqlite3",
 })
 
 # Known error-page body markers (frameworks that return 200 for everything)
@@ -23742,7 +23744,8 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             if pkeys:
                 all_params.append({"url": link, "params": pkeys})
 
-    return {"forms": all_forms, "params": all_params, "links": list(set(all_links))}
+    return {"forms": all_forms, "params": all_params, "links": list(set(all_links)),
+            "is_spa": bool(_spa_roots)}
 
 
 # ─────────────────────────────────────────────
@@ -28523,6 +28526,20 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
     if _file_wc is not None:
         vc.log("[files] Wildcard detected — all file findings will be validated against baseline",
                "INFO")
+    # SPA baseline: fetch the root page body once; any file probe that returns
+    # an identical body is the SPA shell, not a real file.
+    _spa_baseline_body = None
+    try:
+        _tp_files = json.loads((out.root / "target_profile.json").read_text())
+        _ws = (_tp_files.get("web_structure") or "").lower()
+        if "spa" in _ws or "single page" in _ws:
+            _spa_r = sess.get(url, timeout=timeout, allow_redirects=True)
+            if _spa_r.status_code == 200:
+                _spa_baseline_body = _spa_r.text[:50000]
+                vc.log("[files] SPA detected — file probes returning identical body will be skipped",
+                       "INFO")
+    except Exception:
+        pass
 
     for idx, (fpath, risk, fdesc) in enumerate(_SENSITIVE_FILES):
         vc.status(phase, "Sensitive Files", "running", fpath, idx, total)
@@ -28532,6 +28549,9 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
             if r.status_code == 200 and len(r.text) > 5:
                 if _is_wildcard_match(r, _file_wc):
                     continue   # matches catch-all baseline — not a real file
+                if (_spa_baseline_body is not None
+                        and r.text[:50000] == _spa_baseline_body):
+                    continue   # SPA shell — identical to root page
                 if _matches_error_fingerprint(r.text):
                     continue   # custom error page (e.g. ErrorPage.aspx catch-all)
                 if _response_is_error_page(r.text, fpath):
@@ -29926,7 +29946,8 @@ def _normalize_nuclei(item: dict) -> dict:
 
 def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
                         out: OutputManager, sess: requests.Session,
-                        fast: bool = False) -> dict:
+                        fast: bool = False,
+                        skip_nikto: bool = False) -> dict:
     """Launch nuclei and nikto as background processes.
 
     Returns a handle dict consumed by _collect_vulnscan_bg() to join and
@@ -30059,6 +30080,13 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
 
     # ── 2. Launch nikto (one per app-base parent path) ──────────────────────
     nikto = _find_tool("nikto")
+    if skip_nikto:
+        vc.log(
+            "[vulnscan] nikto skipped — target has wildcard/catch-all or SPA "
+            "behaviour (every path returns identical content)",
+            "INFO",
+        )
+        nikto = None
     if nikto:
         for _nik_idx, _nik_base in enumerate(_vs_parents):
             _nik_label = urllib.parse.urlparse(_nik_base).path or "/"
@@ -45670,8 +45698,11 @@ def main() -> None:
                 if not _skip("vulnscan"):
                     pm.set_phase_status(f"vulnscan#{_ctx_label}", "running", "Vuln Scan")
                     try:
+                        _skip_nikto = (wc_baseline is not None
+                                       or crawl_data.get("is_spa", False))
                         _vulnscan_handle = _launch_vulnscan_bg(
-                            target, _ctx_cfg, pm, out, effective_auth, fast=args.fast)
+                            target, _ctx_cfg, pm, out, effective_auth,
+                            fast=args.fast, skip_nikto=_skip_nikto)
                         _vulnscan_ctx_label = _ctx_label
                         vc.log("[vulnscan] nuclei + nikto launched in background", "INFO")
                         _save_checkpoint()
