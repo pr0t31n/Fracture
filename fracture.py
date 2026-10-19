@@ -17198,10 +17198,49 @@ def _add_url_bar(png_path: Path, url: str) -> bool:
         return False
 
 
+def _classify_screenshot(page_title, server, status_code):
+    t = (page_title or "").lower()
+    s = (server or "").lower()
+    sc = status_code or 0
+    if sc == 400: return "Bad Request (400)"
+    if sc == 401: return "Unauthorized (401)"
+    if sc == 403: return "Forbidden (403)"
+    if sc == 404 or (sc == 0 and "404" in t): return "Not Found (404)"
+    if sc == 405: return "Method Not Allowed (405)"
+    if sc == 429: return "Too Many Requests (429)"
+    if sc == 500: return "Internal Server Error (500)"
+    if sc == 502: return "Bad Gateway (502)"
+    if sc == 503: return "Service Unavailable (503)"
+    if 400 <= sc < 500: return f"Client Error ({sc})"
+    if 500 <= sc < 600: return f"Server Error ({sc})"
+    if any(k in t for k in ("login", "sign in", "log in", "signin", "logon")): return "Login Page"
+    if "dashboard" in t or "admin panel" in t: return "Dashboard / Admin Panel"
+    if "wordpress" in t or "wp-" in t: return "WordPress Site"
+    if "iis" in t and ("windows" in t or "default" in t): return "Default IIS Page"
+    if "apache" in t and ("it works" in t or "test page" in t or "default" in t): return "Default Apache Page"
+    if "nginx" in t and ("welcome" in t or "default" in t): return "Default Nginx Page"
+    if "default" in t or "welcome" in t or "placeholder" in t: return "Default Web Page"
+    if "index of" in t: return "Directory Listing"
+    if any(k in t for k in ("api", "swagger", "openapi")): return "API Documentation"
+    if "error" in t or "exception" in t: return "Error Page"
+    if not page_title or page_title.strip() == "":
+        if sc and 200 <= sc < 300: return "Web Page (no title)"
+        if sc and 300 <= sc < 400: return f"Redirect ({sc})"
+        return "Blank / Minimal Response"
+    if "apache" in s: return "Web Page (Apache)"
+    if "nginx" in s: return "Web Page (Nginx)"
+    if "iis" in s or "microsoft" in s: return "Web Page (IIS)"
+    return "Web Page Detected"
+
+
 def _register_screenshot(root: Path, png_path, url: str = "",
                          ip: str = "", port: int = 0,
                          hostname: str = "", scheme: str = "",
-                         title: str = "", description: str = ""):
+                         title: str = "", description: str = "",
+                         classification: str = "",
+                         status_code: "int | None" = None,
+                         server: str = "", page_title: str = "",
+                         oos: bool = False):
     """Copy a screenshot PNG into <root>/screenshots/ with a JSON sidecar.
 
     The screenshots/ directory is the canonical location for the Intelligence
@@ -17211,8 +17250,22 @@ def _register_screenshot(root: Path, png_path, url: str = "",
         src = Path(png_path)
         if not src.is_file():
             return
+        _sc = scheme or ("https" if port == 443 else "http")
+        if url and "://" not in url:
+            url = f"{_sc}://{url}"
         ss_dir = root / "screenshots"
         ss_dir.mkdir(parents=True, exist_ok=True)
+        _parsed = urllib.parse.urlparse(url)
+        _dedup_key = f"{ip or ''}:{port or 0}:{_parsed.path or '/'}"
+        for existing_json in ss_dir.glob("*.json"):
+            try:
+                _ej = json.loads(existing_json.read_text())
+                _ep = urllib.parse.urlparse(_ej.get("url", ""))
+                _ek = f"{_ej.get('ip', '')}:{_ej.get('port', 0)}:{_ep.path or '/'}"
+                if _ek == _dedup_key:
+                    return
+            except Exception:
+                continue
         dest = ss_dir / src.name
         if dest.exists():
             stem, suf = src.stem, src.suffix
@@ -17223,9 +17276,12 @@ def _register_screenshot(root: Path, png_path, url: str = "",
         shutil.copy2(str(src), str(dest))
         sidecar = {
             "url": url, "ip": ip, "port": int(port) if port else 0,
-            "hostname": hostname,
-            "scheme": scheme or ("https" if port == 443 else "http"),
+            "hostname": hostname, "scheme": _sc,
             "title": title, "description": description,
+            "classification": classification or _classify_screenshot(page_title, server, status_code),
+            "status_code": status_code,
+            "server": server, "page_title": page_title,
+            "oos": oos,
             "timestamp": datetime.datetime.now().isoformat(),
         }
         dest.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
@@ -17307,22 +17363,30 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                 driver = _do_firefox()
                 _used_browser = "firefox"
         try:
-            driver.set_page_load_timeout(15)
+            driver.set_page_load_timeout(30)
             if _used_browser == "firefox":
                 driver.set_window_size(1280, 800)
-            # Transfer auth cookies when an authenticated session
-            # is provided — needed for pages behind login
-            # (SPA/React apps, authenticated landing pages, etc.).
             if auth_session is not None:
                 try:
-                    driver.get(ep_url)  # establish origin first
+                    driver.get(ep_url)
                 except Exception:
                     pass
                 _spa_transfer_cookies(auth_session, driver, ep_url)
             try:
                 driver.get(ep_url)
+            except Exception as _load_err:
+                _le = str(_load_err)
+                if "net::ERR_CONNECTION_REFUSED" in _le or "Reached error page" in _le:
+                    return False
+            from selenium.webdriver.support.ui import WebDriverWait
+            try:
+                WebDriverWait(driver, 20).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
             except Exception:
                 pass
+            import time as _time_cs
+            _time_cs.sleep(1.5)
             total_h = driver.execute_script(
                 "return Math.max("
                 "  document.body.scrollHeight,"
@@ -17362,7 +17426,8 @@ def _capture_xss_screenshot(proof_url: str, out: "OutputManager",
         _register_screenshot(out.root, ss_path, url=proof_url,
                              ip=target.get("ip", ""), port=target.get("port", 0),
                              hostname=target.get("hostname", ""),
-                             title=f"XSS Proof: {label}", description="Confirmed XSS proof-of-concept")
+                             title=f"XSS Proof: {label}", description="Confirmed XSS proof-of-concept",
+                             classification="XSS Proof-of-Concept")
         try:
             return str(ss_path.relative_to(out.root))
         except Exception:
@@ -17424,7 +17489,8 @@ def _capture_clickjack_screenshot(target_url: str, out: "OutputManager",
             _register_screenshot(out.root, ss_path, url=target_url,
                                  ip=target.get("ip", ""), port=target.get("port", 0),
                                  hostname=target.get("hostname", ""),
-                                 title=f"Clickjacking PoC: {label}", description="Clickjacking proof-of-concept")
+                                 title=f"Clickjacking PoC: {label}", description="Clickjacking proof-of-concept",
+                                 classification="ClickJacking Successful")
             try:
                 poc_persist.write_text(poc_html, encoding="utf-8")
             except Exception:
@@ -17469,7 +17535,8 @@ def _capture_error_screenshot(error_url: str, out: "OutputManager",
         _register_screenshot(out.root, ss_path, url=error_url,
                              ip=target.get("ip", ""), port=target.get("port", 0),
                              hostname=target.get("hostname", ""),
-                             title=f"Error Screenshot: {label}", description="Verbose error or stack trace")
+                             title=f"Error Screenshot: {label}", description="Verbose error or stack trace",
+                             classification="Error Page")
         try:
             return str(ss_path.relative_to(out.root))
         except Exception:
@@ -17868,17 +17935,21 @@ def _phase_endpoint_tools(
         _ep_not_asset = not (_ep_path_low.endswith(".css") or _ep_path_low.endswith(".js"))
         _ep_screenshot_ok = _is_valid_endpoint_url(ep_url) and _ep_scope_ok and _ep_not_asset
         _ss_http_code = None
+        _ss_ep_server = ""
         if _ep_screenshot_ok:
             try:
                 _ss_check = sess.head(ep_url, timeout=min(timeout, 5), allow_redirects=True)
                 _ss_http_code = _ss_check.status_code
+                _ss_ep_server = _ss_check.headers.get("Server", "")
                 _ep_screenshot_ok = (200 <= _ss_http_code < 300) or (400 <= _ss_http_code < 500)
             except Exception:
                 _ep_screenshot_ok = False
         if _ep_screenshot_ok and _capture_screenshot_to(ep_url, ep_shot, target, cfg, auth_session=sess):
             _ep_rel = urllib.parse.urlparse(ep_url).path or "/"
+            _ep_cls = _classify_screenshot("", _ss_ep_server, _ss_http_code)
+            _ep_oos = not _ep_scope_ok
             out.add_finding(
-                title="Discovery: Web Screenshot Captured",
+                title=f"Web Screenshot: {_ep_cls}",
                 url=ep_url, port=target["port"], risk="INFO",
                 description=f"A screenshot of discovered endpoint {ep_url} was captured. HTTP {_ss_http_code}.",
                 affected=out._rel_affected(_ep_rel),
@@ -17889,13 +17960,17 @@ def _phase_endpoint_tools(
                 owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                 remediation="Review screenshot for exposed sensitive content.",
             )
-            vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] screenshot — done: {ep_shot.name}", "SUCCESS")
+            vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] screenshot — done: {ep_shot.name} ({_ep_cls})", "SUCCESS")
             _register_screenshot(out.root, ep_shot, url=ep_url,
                                  ip=target.get("ip", ""), port=target.get("port", 0),
                                  hostname=target.get("hostname", ""),
                                  scheme=target.get("scheme", ""),
-                                 title="Discovery: Web Screenshot Captured",
-                                 description=f"Endpoint screenshot — HTTP {_ss_http_code}")
+                                 title=f"Web Screenshot: {_ep_cls}",
+                                 description=f"Endpoint screenshot — HTTP {_ss_http_code}",
+                                 classification=_ep_cls,
+                                 status_code=_ss_http_code,
+                                 server=_ss_ep_server,
+                                 oos=_ep_oos)
 
         # ── Per-endpoint timeout guard ──────────────────────────────────────
         if time.monotonic() - _ep_t0 > _EP_TIMEOUT:
@@ -21682,37 +21757,65 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                 _used_browser = "firefox"
                 vc.log("[screenshot] Using Firefox (GeckoDriver)", "INFO")
 
+        _ss_page_title = ""
+        _ss_loaded = False
         try:
-            driver.set_page_load_timeout(15)
+            driver.set_page_load_timeout(30)
             if _used_browser == "firefox":
                 driver.set_window_size(1280, 800)
             try:
                 driver.get(url)
-            except Exception:
-                pass
-            total_h = driver.execute_script(
-                "return Math.max("
-                "  document.body.scrollHeight,"
-                "  document.documentElement.scrollHeight"
-                ")"
-            )
-            driver.set_window_size(1280, max(800, int(total_h)))
-            driver.save_screenshot(str(out_path))
-            _add_url_bar(out_path, url)
+                _ss_loaded = True
+            except Exception as _load_err:
+                _le = str(_load_err)
+                if "net::ERR_CONNECTION_REFUSED" in _le or "Reached error page" in _le:
+                    vc.log(f"[screenshot] Page unreachable — skipping", "INFO")
+                else:
+                    _ss_loaded = True
+            if _ss_loaded:
+                from selenium.webdriver.support.ui import WebDriverWait
+                try:
+                    WebDriverWait(driver, 20).until(
+                        lambda d: d.execute_script("return document.readyState") == "complete"
+                    )
+                except Exception:
+                    vc.log("[screenshot] Page did not fully load within 20s — capturing partial screenshot", "INFO")
+                import time as _time_ps
+                _time_ps.sleep(1.5)
+                _ss_page_title = driver.title or ""
+                total_h = driver.execute_script(
+                    "return Math.max("
+                    "  document.body.scrollHeight,"
+                    "  document.documentElement.scrollHeight"
+                    ")"
+                )
+                driver.set_window_size(1280, max(800, int(total_h)))
+                driver.save_screenshot(str(out_path))
+                _add_url_bar(out_path, url)
         finally:
             try:
                 driver.quit()
             except Exception:
                 pass
 
+        if not _ss_loaded or not out_path.is_file():
+            vc.status(phase, "Screenshot", "complete", "Done", 1, 1)
+            vc.log("[screenshot] Phase complete (no screenshot captured)", "INFO")
+            return
+
         _ss_rel = urllib.parse.urlparse(url).path or "/"
+        _ss_phase_code = None
+        _ss_server = ""
         try:
-            _ss_phase_code = requests.head(url, timeout=5, verify=False, allow_redirects=True).status_code
+            _ss_head = requests.head(url, timeout=5, verify=False, allow_redirects=True)
+            _ss_phase_code = _ss_head.status_code
+            _ss_server = _ss_head.headers.get("Server", "")
         except Exception:
-            _ss_phase_code = None
+            pass
+        _ss_classification = _classify_screenshot(_ss_page_title, _ss_server, _ss_phase_code)
         _ss_code_str = f" HTTP {_ss_phase_code}." if _ss_phase_code is not None else ""
         out.add_finding(
-            title="Discovery: Web Screenshot Captured",
+            title=f"Web Screenshot: {_ss_classification}",
             url=url, port=port, risk="INFO",
             description=f"A screenshot of {url} was captured during reconnaissance.{_ss_code_str}",
             affected=out._rel_affected(_ss_rel),
@@ -21723,7 +21826,15 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             owasp="A05:2025 Security Misconfiguration", nist="CM-7",
             remediation="Review screenshot for exposed sensitive content.",
         )
-        vc.log(f"[screenshot] Saved: {out_path}", "SUCCESS")
+        _register_screenshot(out.root, out_path, url=url,
+                             ip=target.get("ip", ""), port=port,
+                             hostname=hostname, scheme=target["scheme"],
+                             title=f"Web Screenshot: {_ss_classification}",
+                             description=f"A screenshot of {url} was captured during reconnaissance.{_ss_code_str}",
+                             classification=_ss_classification,
+                             status_code=_ss_phase_code,
+                             server=_ss_server, page_title=_ss_page_title)
+        vc.log(f"[screenshot] Saved: {out_path} ({_ss_classification})", "SUCCESS")
 
     except Exception as exc:
         vc.log(f"[screenshot] Failed: {type(exc).__name__}: {exc}", "WARNING")
@@ -21739,15 +21850,20 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
         vc.status(phase, "Screenshot", "running", "Root page", 1, 2)
         try:
             if _capture_screenshot_to(_root_url, _root_out, target, cfg):
+                _root_code = None
+                _root_server = ""
                 try:
-                    _root_code = requests.head(
+                    _root_head = requests.head(
                         _root_url, timeout=5, verify=False,
-                        allow_redirects=True).status_code
+                        allow_redirects=True)
+                    _root_code = _root_head.status_code
+                    _root_server = _root_head.headers.get("Server", "")
                 except Exception:
-                    _root_code = None
+                    pass
+                _root_cls = _classify_screenshot("", _root_server, _root_code)
                 _root_code_str = f" HTTP {_root_code}." if _root_code is not None else ""
                 out.add_finding(
-                    title="Discovery: Web Screenshot Captured",
+                    title=f"Web Screenshot: {_root_cls}",
                     url=_root_url, port=port, risk="INFO",
                     description=(
                         f"A screenshot of the site root {_root_url} was "
@@ -21761,7 +21877,15 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                     owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                     remediation="Review screenshot for exposed sensitive content.",
                 )
-                vc.log(f"[screenshot] Root page saved: {_root_out}", "SUCCESS")
+                _register_screenshot(out.root, _root_out, url=_root_url,
+                                     ip=target.get("ip", ""), port=port,
+                                     hostname=hostname, scheme=target["scheme"],
+                                     title=f"Web Screenshot: {_root_cls}",
+                                     description=f"Site root screenshot.{_root_code_str}",
+                                     classification=_root_cls,
+                                     status_code=_root_code,
+                                     server=_root_server)
+                vc.log(f"[screenshot] Root page saved: {_root_out} ({_root_cls})", "SUCCESS")
         except Exception as _re:
             vc.log(f"[screenshot] Root page failed: {_re}", "WARNING")
 
@@ -21775,16 +21899,19 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Screenshot", "running", "Error page", 2, 3)
     try:
         _err_code = None
+        _err_server = ""
         try:
             _err_resp = requests.get(
                 _err_url, timeout=5, verify=False, allow_redirects=True)
             _err_code = _err_resp.status_code
+            _err_server = _err_resp.headers.get("Server", "")
         except Exception:
             pass
         if _capture_screenshot_to(_err_url, _err_out, target, cfg):
+            _err_cls = _classify_screenshot("", _err_server, _err_code)
             _err_code_str = f" HTTP {_err_code}." if _err_code is not None else ""
             out.add_finding(
-                title="Discovery: Web Screenshot Captured",
+                title=f"Web Screenshot: {_err_cls}",
                 url=_err_url, port=port, risk="INFO",
                 description=(
                     f"A screenshot of the application's error page was "
@@ -21799,7 +21926,15 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                 owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                 remediation="Review screenshot for exposed sensitive content.",
             )
-            vc.log(f"[screenshot] Error page saved: {_err_out}", "SUCCESS")
+            _register_screenshot(out.root, _err_out, url=_err_url,
+                                 ip=target.get("ip", ""), port=port,
+                                 hostname=hostname, scheme=target["scheme"],
+                                 title=f"Web Screenshot: {_err_cls}",
+                                 description=f"Error page screenshot.{_err_code_str}",
+                                 classification=_err_cls,
+                                 status_code=_err_code,
+                                 server=_err_server)
+            vc.log(f"[screenshot] Error page saved: {_err_out} ({_err_cls})", "SUCCESS")
     except Exception as _ee:
         vc.log(f"[screenshot] Error page failed: {_ee}", "WARNING")
 
@@ -26790,6 +26925,17 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     _parsed._replace(query=_hpp_qs))
                 _hpp_r = sess.get(_hpp_url, timeout=timeout, allow_redirects=True)
                 if _hpp_r and _hpp_canary in (_hpp_r.text or ""):
+                    _hpp_text = _hpp_r.text or ""
+                    for _strip_u in (_hpp_r.url, _hpp_url,
+                                     urllib.parse.unquote(_hpp_url),
+                                     urllib.parse.unquote_plus(_hpp_url)):
+                        _hpp_text = _hpp_text.replace(_strip_u, "")
+                    _hpp_text = re.sub(
+                        r'(?:href|src|action|content|data(?:-[a-z][a-z0-9-]*)?)(?:\s*)=(?:\s*)["\'][^"\']*'
+                        + re.escape(_hpp_canary) + r'[^"\']*["\']',
+                        '', _hpp_text, flags=re.I)
+                    if _hpp_canary not in _hpp_text:
+                        continue
                     _hpp_ev: list = []
                     try:
                         _rq, _rp = _save_http_evidence(
@@ -26829,6 +26975,15 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                     allow_redirects=True)
                 if _hpp_r and _hpp_canary in (_hpp_r.text or ""):
+                    _hpp_post_text = _hpp_r.text or ""
+                    for _strip_u in (_hpp_r.url, _f_action):
+                        _hpp_post_text = _hpp_post_text.replace(_strip_u, "")
+                    _hpp_post_text = re.sub(
+                        r'(?:href|src|action|content|data(?:-[a-z][a-z0-9-]*)?)(?:\s*)=(?:\s*)["\'][^"\']*'
+                        + re.escape(_hpp_canary) + r'[^"\']*["\']',
+                        '', _hpp_post_text, flags=re.I)
+                    if _hpp_canary not in _hpp_post_text:
+                        continue
                     _hpp_ev = []
                     try:
                         _rq, _rp = _save_http_evidence(
