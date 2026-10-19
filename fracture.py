@@ -11270,6 +11270,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--no-vulnscan",   action="store_true", help="Skip nuclei vulnscan")
     parser.add_argument("--no-ffuf",       action="store_true", help="Skip ffuf vhost and parameter fuzzing")
     parser.add_argument("--no-auth",       action="store_true", help="Skip all authenticated phases")
+    parser.add_argument("--no-cve-correlation", action="store_true", help="Skip OSV CVE version correlation")
     parser.add_argument("--browser-auth",  action="store_true", help="Fall back to interactive browser login if automated auth fails")
     parser.add_argument("--chromedriver",  metavar="PATH", help="Path to chromedriver binary (used with --browser-auth)")
     parser.add_argument("--list-phases",   action="store_true", help="Print phases and exit")
@@ -16165,6 +16166,238 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     else:
         vc.log("[recon] searchsploit not found — skipping exploit lookup", "WARNING")
 
+    # ── OSV CVE correlation ───────────────────────────────────────────────────
+    if not cfg.get("no_cve_correlation") and _ww_versions:
+        vc.status(phase, "Recon", "running", "CVE correlation (OSV)", 1, 10)
+        _osv_seen: set = set()
+        _osv_count = 0
+        _RISK_ORDER = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
+        for _osv_name, _osv_ver in _ww_versions:
+            if not _osv_ver or not re.search(r'\d', _osv_ver):
+                continue
+            _osv_key = (_osv_name.lower(), _osv_ver)
+            if _osv_key in _osv_seen:
+                continue
+            _osv_seen.add(_osv_key)
+
+            _osv_vulns = _query_osv_cves(_osv_name, _osv_ver)
+            if not _osv_vulns:
+                continue
+
+            cpe = _build_cpe23(_osv_name, _osv_ver)
+            _osv_ev_path = out.output_path(phase, f"osv_{re.sub(r'[^a-zA-Z0-9_.-]', '_', _osv_name)}")
+            try:
+                _osv_ev_path.parent.mkdir(parents=True, exist_ok=True)
+                _osv_ev_path.write_text(
+                    json.dumps(_osv_vulns[:10], indent=2), encoding="utf-8"
+                )
+            except Exception:
+                pass
+
+            _all_cves: list[str] = []
+            _highest_risk = "INFO"
+            _highest_score = 0.0
+            _detail_lines: list[str] = []
+            _actionable_cves: dict[str, list[dict]] = {}
+            _EXPLOIT_REF_RE = re.compile(
+                r"exploit-db\.com|packetstorm|github\.com/.+/exploit|"
+                r"github\.com/.+/[Pp][Oo][Cc]|metasploit|rapid7\.com/db",
+                re.IGNORECASE,
+            )
+            _ACTIONABLE_CATEGORIES = [
+                ("RCE / Code Execution", re.compile(
+                    r"remote.code.exec|command.inject|code.exec|"
+                    r"arbitrary.code|shell.inject|os.command|"
+                    r"\bRCE\b|\bACE\b|code.injection|command.execution",
+                    re.IGNORECASE)),
+                ("Injection", re.compile(
+                    r"sql.inject|ldap.inject|xpath.inject|nosql.inject|"
+                    r"ssti|server.side.template|expression.language.inject|"
+                    r"ognl.inject|el.inject|hql.inject",
+                    re.IGNORECASE)),
+                ("Authentication Bypass", re.compile(
+                    r"auth.+bypass|bypass.+auth|improper.auth|"
+                    r"broken.auth|authentication.bypass|unauthenticated.access",
+                    re.IGNORECASE)),
+                ("Privilege Escalation", re.compile(
+                    r"privilege.escalat|privesc|\bpe\b.+escalat|"
+                    r"elevation.of.privilege|unauthorized.+admin|"
+                    r"improper.+privilege|vertical.+escalat",
+                    re.IGNORECASE)),
+                ("SSRF", re.compile(
+                    r"server.side.request.forg|\bssrf\b|"
+                    r"request.forgery.+server",
+                    re.IGNORECASE)),
+                ("Deserialization", re.compile(
+                    r"deserializ|insecure.+unserializ|"
+                    r"object.inject|java.+serial|pickle.+load|"
+                    r"yaml.+load.+untrust",
+                    re.IGNORECASE)),
+                ("Path Traversal / LFI", re.compile(
+                    r"path.traversal|directory.traversal|"
+                    r"local.file.inclus|\blfi\b|"
+                    r"arbitrary.file.read|file.+disclosure",
+                    re.IGNORECASE)),
+                ("Information Disclosure", re.compile(
+                    r"credential.+leak|key.+expos|secret.+expos|"
+                    r"password.+disclos|source.code.+disclos|"
+                    r"sensitive.+data.+expos|private.key.+leak",
+                    re.IGNORECASE)),
+            ]
+
+            for _ov in _osv_vulns[:10]:
+                _ov_cves = _osv_extract_cves(_ov)
+                _ov_risk, _ov_score = _osv_severity(_ov)
+                _ov_id = _ov.get("id", "unknown")
+                _ov_summary = _ov.get("summary", _ov.get("details", "")[:300])
+                _ov_refs = [r.get("url", "") for r in _ov.get("references", []) if r.get("url")]
+
+                for _c in _ov_cves:
+                    if _c not in _all_cves:
+                        _all_cves.append(_c)
+
+                if _RISK_ORDER.get(_ov_risk, 0) > _RISK_ORDER.get(_highest_risk, 0):
+                    _highest_risk = _ov_risk
+                if _ov_score > _highest_score:
+                    _highest_score = _ov_score
+
+                _ov_text = f"{_ov_summary} {_ov_id} {' '.join(_ov_cves)}"
+                _exploit_urls = [u for u in _ov_refs if _EXPLOIT_REF_RE.search(u)]
+
+                _matched_cats: list[str] = []
+                for _cat_name, _cat_re in _ACTIONABLE_CATEGORIES:
+                    if _cat_re.search(_ov_text):
+                        _matched_cats.append(_cat_name)
+                        _actionable_cves.setdefault(_cat_name, []).append({
+                            "cves": _ov_cves, "id": _ov_id, "risk": _ov_risk,
+                            "score": _ov_score, "summary": _ov_summary,
+                            "exploit_urls": _exploit_urls,
+                        })
+                if _cat_name == "Information Disclosure" and _matched_cats == ["Information Disclosure"]:
+                    if _RISK_ORDER.get(_ov_risk, 0) < _RISK_ORDER.get("HIGH", 0):
+                        _actionable_cves["Information Disclosure"].pop()
+                        _matched_cats.clear()
+
+                _cve_label = ", ".join(_ov_cves) if _ov_cves else _ov_id
+                _score_label = f" (CVSS {_ov_score})" if _ov_score else ""
+                _line = f"  [{_ov_risk}] {_cve_label}{_score_label}\n    {_ov_summary}"
+                if _matched_cats:
+                    _line += f"\n    ** {' / '.join(_matched_cats)} **"
+                if _exploit_urls:
+                    _line += f"\n    Known exploit: {_exploit_urls[0]}"
+                _detail_lines.append(_line)
+
+            out.add_finding(
+                title=f"Vulnerability (Version Based): {_osv_name} {_osv_ver}",
+                url=url, port=target["port"],
+                risk=_highest_risk,
+                description=(
+                    f"{len(_osv_vulns[:10])} known vulnerability(ies) identified for "
+                    f"{_osv_name} {_osv_ver} via OSV database correlation."
+                    + (f"\nCPE: {cpe}" if cpe else "")
+                    + f"\nHighest severity: {_highest_risk}"
+                    + (f" (CVSS {_highest_score})" if _highest_score else "")
+                ),
+                output=(
+                    f"Component: {_osv_name} {_osv_ver}\n"
+                    f"Source: OSV vulnerability database\n"
+                    f"Total vulnerabilities: {len(_osv_vulns[:10])}\n"
+                    f"Highest risk: {_highest_risk}"
+                    + (f" (CVSS {_highest_score})" if _highest_score else "")
+                    + f"\n\n"
+                    + "\n\n".join(_detail_lines)
+                ),
+                sources="osv-cve-correlation",
+                service=target["scheme"],
+                output_file=str(_osv_ev_path),
+                cves=",".join(_all_cves),
+                owasp="A06:2025 Vulnerable and Outdated Components",
+                nist="SI-2",
+                remediation=(
+                    f"Update {_osv_name} to the latest stable version to address "
+                    f"{len(_all_cves)} known CVE(s). "
+                    f"Consult vendor advisories for remediation guidance."
+                ),
+            )
+            _osv_count += 1
+
+            _AI_TOOLS = {
+                "RCE / Code Execution": "Metasploit / Manual Exploit Verification",
+                "Injection": "sqlmap / Manual Injection Testing",
+                "Authentication Bypass": "Manual Verification / Burp Suite",
+                "Privilege Escalation": "Manual Verification / Metasploit",
+                "SSRF": "Manual Verification / Burp Suite",
+                "Deserialization": "ysoserial / Manual Exploit Verification",
+                "Path Traversal / LFI": "Manual Verification / Burp Suite",
+                "Information Disclosure": "Manual Verification",
+            }
+            for _cat_name, _cat_vulns in _actionable_cves.items():
+                if not _cat_vulns:
+                    continue
+                _ai_cve_ids: list[str] = []
+                _ai_lines: list[str] = []
+                for _ac in _cat_vulns:
+                    _ac_label = ", ".join(_ac["cves"]) if _ac["cves"] else _ac["id"]
+                    _ai_cve_ids.extend(_ac["cves"])
+                    _ac_line = f"{_ac_label} ({_ac['risk']}"
+                    if _ac["score"]:
+                        _ac_line += f", CVSS {_ac['score']}"
+                    _ac_line += f"): {_ac['summary']}"
+                    if _ac["exploit_urls"]:
+                        _ac_line += f"\n  Known exploit: {_ac['exploit_urls'][0]}"
+                    _ai_lines.append(_ac_line)
+
+                _has_exploit = any(ac["exploit_urls"] for ac in _cat_vulns)
+                _ai_rec = (
+                    f"Prioritise patching {_osv_name} {_osv_ver} — "
+                    f"{len(_cat_vulns)} CVE(s) classified as {_cat_name}"
+                )
+                if _has_exploit:
+                    _first_exp = next(
+                        u for ac in _cat_vulns for u in ac["exploit_urls"]
+                    )
+                    _ai_rec += (
+                        f". A public exploit is available ({_first_exp}); "
+                        "assume active exploitation is feasible"
+                    )
+                _ai_rec += ". Update immediately or apply vendor mitigations."
+
+                _ai_priority = "CRITICAL" if _cat_name in (
+                    "RCE / Code Execution", "Injection", "Authentication Bypass",
+                    "Deserialization",
+                ) else "HIGH"
+
+                out.log_action_item(
+                    type="exploit",
+                    recommended_tool=_AI_TOOLS.get(_cat_name, "Manual Verification"),
+                    target=url,
+                    ip=target.get("ip", ""),
+                    port=target["port"],
+                    hostname=target.get("hostname", ""),
+                    title=f"{_cat_name} Verification — {_osv_name} {_osv_ver}",
+                    description=(
+                        f"{len(_cat_vulns)} {_cat_name.lower()} CVE(s) "
+                        f"identified for {_osv_name} {_osv_ver}:\n"
+                        + "\n".join(_ai_lines)
+                    ),
+                    source_finding=f"Vulnerability (Version Based): {_osv_name} {_osv_ver}",
+                    priority=_ai_priority,
+                    scope="webapp",
+                    metadata={
+                        "software": _osv_name,
+                        "version": _osv_ver,
+                        "category": _cat_name,
+                        "cves": _ai_cve_ids,
+                        "has_public_exploit": _has_exploit,
+                        "recommendation": _ai_rec,
+                    },
+                )
+
+        if _osv_count:
+            vc.log(f"[recon] OSV CVE correlation: {_osv_count} component(s) with known vulnerabilities", "SUCCESS")
+        else:
+            vc.log("[recon] OSV CVE correlation: no matches", "INFO")
+
     vc.status(phase, "Recon", "running", "robots.txt/sitemap", 2, 10)
     _sitemap_discovered: list = []  # URLs from sitemap.xml, merged later
     for rpath in ["/robots.txt", "/sitemap.xml"]:
@@ -19847,6 +20080,100 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
 # ─────────────────────────────────────────────
 # Phase 2: Headers
 # ─────────────────────────────────────────────
+# ── CPE generation + OSV CVE correlation ──────────────────────────────────
+
+_CPE_VENDOR_MAP = {
+    "wordpress": "wordpress", "drupal": "drupal", "joomla": "joomla",
+    "apache": "apache", "apache httpd": "apache", "nginx": "f5",
+    "php": "php", "openssl": "openssl", "tomcat": "apache",
+    "iis": "microsoft", "lighttpd": "lighttpd", "jquery": "jquery",
+    "react": "facebook", "angular": "google", "vue.js": "vuejs",
+    "bootstrap": "getbootstrap", "express": "expressjs",
+    "django": "djangoproject", "flask": "palletsprojects",
+    "spring": "vmware", "laravel": "laravel", "rails": "rubyonrails",
+    "node.js": "nodejs", "nodejs": "nodejs", "ruby": "ruby-lang",
+    "python": "python", "perl": "perl", "java": "oracle",
+    "grafana": "grafana", "jenkins": "jenkins", "gitlab": "gitlab",
+    "confluence": "atlassian", "jira": "atlassian", "bitbucket": "atlassian",
+    "nextcloud": "nextcloud", "phpmyadmin": "phpmyadmin", "webmin": "webmin",
+    "moodle": "moodle", "mediawiki": "mediawiki", "magento": "magento",
+    "prestashop": "prestashop", "ghost": "ghost", "strapi": "strapi",
+    "keycloak": "redhat", "sonarqube": "sonarsource", "roundcube": "roundcube",
+    "typo3": "typo3", "elasticsearch": "elastic", "kibana": "elastic",
+    "ckeditor": "ckeditor", "tinymce": "tiny", "lodash": "lodash",
+    "moment.js": "momentjs", "axios": "axios", "webpack": "webpack",
+    "woocommerce": "automattic", "elementor": "developer_developer",
+    "yoast seo": "yoast", "contact form 7": "rocklobster",
+    "w3 total cache": "boldgrid",
+}
+
+_CPE_PRODUCT_MAP = {
+    "apache": "http_server", "apache httpd": "http_server",
+    "tomcat": "tomcat", "iis": "internet_information_services",
+    "node.js": "node.js", "nodejs": "node.js", "vue.js": "vue.js",
+}
+
+
+def _build_cpe23(software_name: str, version: str | None) -> str | None:
+    key = software_name.lower().strip()
+    vendor = _CPE_VENDOR_MAP.get(key)
+    if not vendor:
+        for k, v in _CPE_VENDOR_MAP.items():
+            if k in key or key in k:
+                vendor = v
+                break
+    if not vendor:
+        return None
+    product = _CPE_PRODUCT_MAP.get(key, key.replace(" ", "_").replace("-", "_").lower())
+    ver_clean = re.sub(r'[^0-9.]', '', (version or "").split()[0]) if version else "*"
+    if not ver_clean:
+        ver_clean = "*"
+    return f"cpe:2.3:a:{vendor}:{product}:{ver_clean}:*:*:*:*:*:*:*"
+
+
+def _query_osv_cves(name: str, version: str) -> list[dict]:
+    import urllib.request, urllib.error
+    payload = json.dumps({"version": version, "package": {"name": name.lower()}}).encode()
+    try:
+        req = urllib.request.Request(
+            "https://api.osv.dev/v1/query",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return data.get("vulns", [])
+    except Exception:
+        return []
+
+
+def _osv_extract_cves(vuln: dict) -> list[str]:
+    cves = []
+    vid = vuln.get("id", "")
+    if vid.startswith("CVE-"):
+        cves.append(vid)
+    for alias in vuln.get("aliases", []):
+        if alias.startswith("CVE-") and alias not in cves:
+            cves.append(alias)
+    return cves
+
+
+def _osv_severity(vuln: dict) -> tuple[str, float]:
+    for sev in vuln.get("severity", []):
+        vec = sev.get("score", "")
+        if vec:
+            try:
+                score = float(vec)
+                if score >= 9.0: return ("CRITICAL", score)
+                if score >= 7.0: return ("HIGH", score)
+                if score >= 4.0: return ("MEDIUM", score)
+                if score > 0: return ("LOW", score)
+            except ValueError:
+                pass
+    return ("MEDIUM", 0.0)
+
+
 # ── 2026-06-11 A06 Vulnerable Component check ─────────────────────────
 # Embedded vulnerable-version map. Keys are lowercase plugin/component
 # names (matching whatweb output); values list (version_prefix, fixed_in,
@@ -43232,6 +43559,8 @@ def main() -> None:
     if args.no_auth:
         for auth_phase in ("auth_recon", "authorization", "session", "csrf", "cross_user", "logout"):
             cfg["phases"][auth_phase] = False
+    if getattr(args, "no_cve_correlation", False):
+        cfg["no_cve_correlation"] = True
     if args.browser_auth:
         cfg["browser_auth"] = True
     if args.chromedriver:
