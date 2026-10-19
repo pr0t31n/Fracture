@@ -18980,6 +18980,31 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             _deregister_proc(proc)
             out_f.write_text(stdout, encoding="utf-8")
             out.log_command("testssl.sh", cmd, out_f)
+            # ── No-TLS-service guard ─────────────────────────────────
+            # When testssl reports no protocol offered and can't determine the
+            # service, the port isn't running TLS.  Skip all finding generation
+            # to avoid false positives from grade caps / test-failed lines.
+            _ts_lo = stdout.lower()
+            _ts_no_tls = (
+                "couldn't determine what's running" in _ts_lo
+                or (
+                    all(
+                        f"{_p}    not offered" in _ts_lo
+                        or f"{_p}   not offered" in _ts_lo
+                        or f"{_p}  not offered" in _ts_lo
+                        for _p in ("tls 1.2", "tls 1.3")
+                    )
+                    and "no connection" in _ts_lo
+                )
+            )
+            if _ts_no_tls:
+                vc.log(
+                    f"[tls] testssl: no TLS service on {host_port} "
+                    "(all protocols refused, all client sims failed) "
+                    "— suppressing findings to avoid false positives",
+                    "INFO",
+                )
+                raise RuntimeError("testssl: no TLS service")
             # Filter out (OK) lines, noise lines, and embedded HTTP content
             # that can cause false-positive pattern matches.
             _TESTSSL_NOISE = re.compile(
@@ -19398,8 +19423,10 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     )
                     vc.log(f"[tls] Internal hostname in cert SAN: {', '.join(_san_internal[:3])}", "SUCCESS")
         except Exception as e:
-            out.log_error("testssl.sh", cmd, str(e))
-            _timeout_action_item(out, "testssl.sh", target, 0)
+            _e_str = str(e)
+            out.log_error("testssl.sh", cmd, _e_str)
+            if "no TLS service" not in _e_str:
+                _timeout_action_item(out, "testssl.sh", target, 0)
     else:
         vc.log("[tls] testssl.sh not found — basic socket TLS check", "WARNING")
         import ssl as _ssl
@@ -36062,6 +36089,84 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
 
+        # ── SAML / SSO guard ──────────────────────────────────────
+        # If the login page advertises an external IdP (SAML, CyberArk,
+        # Okta, Azure AD, PingFederate, ADFS, Auth0, OneLogin, etc.),
+        # the real auth flow goes through the IdP.  A direct POST to the
+        # local endpoint is rejected or ignored — 403/302 responses
+        # reflect the IdP enforcement, not missing rate-limiting.
+        # Also detect CSP form-action headers pointing to external IdPs.
+        _SSO_PAGE_RE = re.compile(
+            r'saml\s+login|saml.sso|/saml2?/|/adfs/|'
+            r'/auth/realms/|/oauth2/|/\.well-known/openid|'
+            r'sso\s+login|single\s+sign.on|'
+            r'(?:use|login\s+with|sign\s+in\s+with)\s+(?:sso|saml|okta|azure|'
+            r'ping|adfs|onelogin|auth0|duo|cyberark|jumpcloud)',
+            re.IGNORECASE,
+        )
+        _SSO_IDP_DOMAINS = re.compile(
+            r'(?:\.okta\.com|\.auth0\.com|\.onelogin\.com|'
+            r'login\.microsoftonline\.com|adfs\.|'
+            r'\.pingidentity\.com|\.pingone\.com|'
+            r'\.duosecurity\.com|\.duo\.com|'
+            r'id\.cyberark\.cloud|auth\.alero\.io|'
+            r'\.jumpcloud\.com|accounts\.google\.com|'
+            r'\.pphosted\.com(?::\d+)?/saml)',
+            re.IGNORECASE,
+        )
+        _sso_detected = False
+        _sso_reason = ""
+        if method == "POST" and _baseline_size > 0:
+            _fp_text = _form_page.text if '_form_page' in dir() else ""
+            if _fp_text:
+                if _SSO_PAGE_RE.search(_fp_text[:16000]):
+                    _sso_detected = True
+                    _sso_reason = "SAML/SSO login UI detected on page"
+                if not _sso_detected:
+                    _fp_csp = (_form_page.headers.get(
+                        "Content-Security-Policy", "") if '_form_page' in dir() else "")
+                    _fa_match = re.search(r'form-action\s+([^;]+)', _fp_csp, re.I)
+                    if _fa_match and _SSO_IDP_DOMAINS.search(_fa_match.group(1)):
+                        _sso_detected = True
+                        _sso_reason = (
+                            "CSP form-action references external IdP: "
+                            + _fa_match.group(1).strip()[:120]
+                        )
+                if not _sso_detected:
+                    for _fm_a in re.finditer(
+                        r'<form[^>]+action=["\']([^"\']+)["\']', _fp_text[:16000], re.I
+                    ):
+                        if _SSO_IDP_DOMAINS.search(_fm_a.group(1)):
+                            _sso_detected = True
+                            _sso_reason = (
+                                "Form action points to external IdP: "
+                                + _fm_a.group(1)[:120]
+                            )
+                            break
+                if not _sso_detected:
+                    for _a_tag in re.finditer(
+                        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>([^<]{0,80})',
+                        _fp_text[:16000], re.I,
+                    ):
+                        _a_href = _a_tag.group(1)
+                        _a_text = _a_tag.group(2)
+                        if (_SSO_IDP_DOMAINS.search(_a_href)
+                                or re.search(r'saml\s+login|sso\s+login', _a_text, re.I)):
+                            _sso_detected = True
+                            _sso_reason = (
+                                "SAML/SSO link on login page: "
+                                + _a_text.strip()[:60] + " → " + _a_href[:80]
+                            )
+                            break
+        if _sso_detected:
+            vc.log(
+                f"[account_lockout] {_sso_reason} — authentication is "
+                f"delegated to an external IdP; rate-limiting is enforced "
+                f"there, not on the local endpoint. Skipping: {action}",
+                "INFO",
+            )
+            continue
+
         status_codes: list = []
         probe_responses: list = []  # requests.Response objects for evidence
         probe_times: list = []      # response times in seconds
@@ -36117,6 +36222,47 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
             )
             continue
 
+        # All-403 with generic error page — the endpoint is rejecting the request
+        # wholesale (e.g. SAML-only auth rejecting direct POSTs, or WAF blocking).
+        # A 403 "Forbidden" page without auth-failure phrases is not evidence of
+        # missing rate-limiting; it means the auth logic was never reached.
+        _GENERIC_ERR_RE = re.compile(
+            r'Error\s+403\s*[-–—:]\s*Forbidden|'
+            r'<title>\s*(?:Error\s+)?(?:403|401|Forbidden|Unauthorized)\b',
+            re.IGNORECASE,
+        )
+        if status_codes and all(s == 403 for s in status_codes):
+            _has_auth_err = False
+            _auth_fail_re = re.compile(
+                r'\b(?:invalid|incorrect|wrong)\s+(?:user|pass|cred|login)|'
+                r'bad\s+(?:credentials?|password|login)|'
+                r'authentication\s+failed|login\s+failed',
+                re.IGNORECASE,
+            )
+            for _pr403 in probe_responses[:3]:
+                _t403 = _pr403.text or ""
+                if _auth_fail_re.search(re.sub(r'<[^>]+>', ' ', _t403[:4000])):
+                    _has_auth_err = True
+                    break
+            if not _has_auth_err:
+                _is_generic = any(
+                    _GENERIC_ERR_RE.search((_pr403.text or "")[:4000])
+                    for _pr403 in probe_responses[:3]
+                )
+                if _is_generic or not any(
+                    re.search(r'<input[^>]+type=["\']?password["\']?',
+                              (_pr403.text or "")[:4000], re.I)
+                    for _pr403 in probe_responses[:3]
+                ):
+                    vc.log(
+                        f"[account_lockout] All {len(status_codes)} probes returned "
+                        f"HTTP 403 on {action} with generic error page (no auth-failure "
+                        "text, no login form) — endpoint is rejecting requests outright, "
+                        "not processing authentication. Skipping finding.",
+                        "INFO",
+                    )
+                    continue
+
         if len(status_codes) >= 10:
             # Before firing, verify the endpoint was actually processing auth
             # attempts and not just returning a static page for every request.
@@ -36134,6 +36280,11 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                 r'try\s+again|please\s+enter|sign\s+in\s+again)\b',
                 re.IGNORECASE,
             )
+            _GENERIC_HTTP_ERR_RE = re.compile(
+                r'<title>\s*(?:Error\s+)?\d{3}\s*[-–—:]\s*\w|'
+                r'Error\s+\d{3}\s*[-–—:]\s*(?:Forbidden|Unauthorized|Not Found)',
+                re.IGNORECASE,
+            )
             for _chk_r in probe_responses[:5]:
                 _chk_text  = _chk_r.text or ""
                 _chk_path  = urllib.parse.urlparse(_chk_r.url).path.rstrip("/")
@@ -36143,6 +36294,13 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                 _has_err   = bool(_lockout_skip_phrases.search(
                     re.sub(r'<[^>]+>', ' ', _chk_text[:4000])))
                 _stayed_on = (_chk_path == _act_path)
+                # Path match alone is not enough when the response is a generic
+                # HTTP error page (e.g. "Error 403 - Forbidden").  The server
+                # served the error at the same URL but never processed the login.
+                if _stayed_on and not _has_form and not _has_err:
+                    if (_chk_r.status_code in (401, 403)
+                            and _GENERIC_HTTP_ERR_RE.search(_chk_text[:4000])):
+                        _stayed_on = False
                 if _stayed_on or _has_form or _has_err:
                     _auth_processing_confirmed = True
                     break
