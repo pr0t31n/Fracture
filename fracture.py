@@ -4095,7 +4095,10 @@ class OutputManager:
         # Merge v1.1 enrichment fields (cvss_score, cvss_vector, cwe, etc.)
         if extra_v11:
             entry.update(extra_v11)
-        if title.strip().lower().startswith("missing security header:"):
+        _tl = title.strip().lower()
+        if (_tl.startswith("missing security header:")
+                or _tl.startswith("deprecated protocol enabled:")
+                or _tl.startswith("ssl/tls ")):
             _init_aff = set(a.strip() for a in entry["affected"].split("\n") if a.strip())
             _init_aff = self._collapse_header_affected(_init_aff)
             entry["affected"] = "\n".join(sorted(_init_aff)) if _init_aff else entry["affected"]
@@ -4249,7 +4252,9 @@ class OutputManager:
                     _ex_aff.discard("")
                     if _ex_aff:
                         _ex_aff = self._dedup_affected(_ex_aff)
-                        if _title_lower.startswith("missing security header:"):
+                        if (_title_lower.startswith("missing security header:")
+                                or _title_lower.startswith("deprecated protocol enabled:")
+                                or _title_lower.startswith("ssl/tls ")):
                             _ex_aff = self._collapse_header_affected(_ex_aff)
                         ex["affected"] = "\n".join(sorted(_ex_aff))
                     # ── merge output_file — preserve BOTH formats ──────────
@@ -14567,8 +14572,11 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     # Check probe response for missing security headers.
     # Risk and format match shcheck so findings merge when both tools run.
     _HSTS_HDR = "Strict-Transport-Security"
+    _recon_is_redirect = bool(resp.history and 300 <= resp.history[0].status_code < 400) or (300 <= resp.status_code < 400)
     for _hdr_name, _hdr_risk, _, _hdr_desc, _hdr_nist, _hdr_remed in _SECURITY_HEADERS:
         if _hdr_name == _HSTS_HDR and not target["is_https"]:
+            continue
+        if _recon_is_redirect and _hdr_name in _REDIRECT_EXEMPT_HEADERS:
             continue
         if _hdr_name not in headers:
             out.add_finding(
@@ -20454,6 +20462,17 @@ _SECURITY_HEADERS = [
 ]
 _SEC_HDR_RISK  = {h: r for h, r, *_ in _SECURITY_HEADERS}
 
+# Headers that govern rendered content — meaningless on pure 3xx redirects
+# because the browser follows the redirect before rendering anything.
+# STS and Cache-Control still apply (transport/caching concern, not content).
+_REDIRECT_EXEMPT_HEADERS = frozenset({
+    "Content-Security-Policy",
+    "X-Frame-Options",
+    "X-Content-Type-Options",
+    "Referrer-Policy",
+    "Permissions-Policy",
+})
+
 # Headers allowed by the shcheck parser — must match _SECURITY_HEADERS names exactly
 _SHCHECK_ALLOWED_HEADERS = {
     "Strict-Transport-Security", "Content-Security-Policy",
@@ -20469,18 +20488,25 @@ _SHCHECK_ALLOWED_HEADERS = {
 # without changing the token-stream / session-share behaviour they rely
 # on, because the helpers preserve the same external semantics.
 
-def _iter_missing_security_headers(target: dict, present_headers) -> "list":
+def _iter_missing_security_headers(target: dict, present_headers,
+                                   is_redirect: bool = False) -> "list":
     """Return [(name, risk, desc, nist, remediation), …] for each security
     header listed in `_SECURITY_HEADERS` that is missing from
     `present_headers`, with the standard HSTS-on-HTTP suppression.
     `present_headers` may be a dict, a `requests.structures.CaseInsensitiveDict`,
     or any iterable that supports membership tests on header names.
 
+    When `is_redirect` is True the response is a pure 3xx redirect with no
+    meaningful body — content-rendering headers (CSP, X-Frame-Options, etc.)
+    are suppressed because the browser follows the redirect before rendering.
+
     Previously this iterate-and-filter pattern was inlined 3+ times across
     `_phase_recon`, the whatweb consumer, and the endpoint-tools pass."""
     out: list = []
     for hdr_name, hdr_risk, _unused, hdr_desc, hdr_nist, hdr_remed in _SECURITY_HEADERS:
         if hdr_name == "Strict-Transport-Security" and not target.get("is_https"):
+            continue
+        if is_redirect and hdr_name in _REDIRECT_EXEMPT_HEADERS:
             continue
         if hdr_name not in present_headers:
             out.append((hdr_name, hdr_risk, hdr_desc, hdr_nist, hdr_remed))
@@ -20750,6 +20776,20 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
 
     _is_error_page = resp.status_code >= 400
 
+    # Detect pure-redirect targets: if the original (pre-redirect) response
+    # is a 3xx, content-rendering headers are meaningless — the browser
+    # follows the redirect before rendering anything.
+    _is_redirect = False
+    if resp.history:
+        _r0 = resp.history[0]
+        _is_redirect = 300 <= _r0.status_code < 400
+    elif 300 <= resp.status_code < 400:
+        _is_redirect = True
+    if _is_redirect:
+        vc.log(f"[headers] {url} is a redirect — suppressing content-rendering "
+               "header findings (CSP, X-Frame-Options, etc.)", "INFO")
+    target["_is_redirect"] = _is_redirect
+
     out_f = out.output_path(phase, "headers_" + target["hostname"])
     out_f.write_text(
         "\n".join(f"{k}: {v}" for k, v in headers.items()), encoding="utf-8"
@@ -20837,6 +20877,8 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     _base_sec_hdrs_absent:  set = set()
     for hdr_name, risk, _unused_title, desc, nist_ctrl, remed in _SECURITY_HEADERS:
         if hdr_name == "Strict-Transport-Security" and not is_https:
+            continue
+        if _is_redirect and hdr_name in _REDIRECT_EXEMPT_HEADERS:
             continue
         if hdr_name not in headers:
             _base_sec_hdrs_absent.add(hdr_name)
@@ -21691,6 +21733,8 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
                         continue   # filter to the canonical 6 security headers only
                     if hdr == _HSTS and not tgt["is_https"]:
                         continue   # HSTS only applies to HTTPS
+                    if tgt.get("_is_redirect") and hdr in _REDIRECT_EXEMPT_HEADERS:
+                        continue
                     risk = _SEC_HDR_RISK.get(hdr, "LOW")
                     out.add_finding(
                         title=f"Missing Security Header: {hdr}",
@@ -21724,6 +21768,8 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
                 if hdr not in _SHCHECK_ALLOWED_HEADERS:
                     continue   # filter to the canonical 6 security headers only
                 if hdr == _HSTS and not tgt["is_https"]:
+                    continue
+                if tgt.get("_is_redirect") and hdr in _REDIRECT_EXEMPT_HEADERS:
                     continue
                 risk = _SEC_HDR_RISK.get(hdr, "LOW")
                 out.add_finding(
@@ -30357,6 +30403,45 @@ def _normalize_nuclei(item: dict) -> dict:
                 "cves": _cves, **_v11,
             }
 
+    # ── Priority 1b: Deprecated TLS/SSL protocol — split by protocol ──
+    # Nuclei's tls-version / deprecated-tls / sslvN templates emit a
+    # generic title.  Parse the specific protocol from the template-id,
+    # matcher, output, or description to emit per-protocol findings
+    # matching testssl/sslscan titles and risk levels.
+    _tid_lower = _tid.lower()
+    if re.search(r"tls-version|deprecated-tls|ssl-deprecated|sslv[23]|tlsv1", _tid_lower):
+        _proto_map = [
+            (re.compile(r"sslv?2",         re.I), "SSLv2",   "CRITICAL", "CVE-2016-0800"),
+            (re.compile(r"sslv?3",         re.I), "SSLv3",   "HIGH",     "CVE-2014-3566"),
+            (re.compile(r"tlsv?1[._-]0|tls[._\s-]1\.0", re.I), "TLSv1.0", "MEDIUM", "CVE-2011-3389"),
+            (re.compile(r"tlsv?1[._-]1|tls[._\s-]1\.1", re.I), "TLSv1.1", "MEDIUM", ""),
+        ]
+        _nuc_text = f"{_tid} {_matcher} {_output} {_desc} {_name}"
+        _detected_proto = None
+        for _prx, _pname, _prisk, _pcve in _proto_map:
+            if _prx.search(_nuc_text):
+                _detected_proto = (_pname, _prisk, _pcve)
+                break
+        if _detected_proto:
+            _dp_name, _dp_risk, _dp_cve = _detected_proto
+            _dp_all_cves = ",".join(filter(None, [_dp_cve, _cves]))
+            return {
+                "title": f"Deprecated Protocol Enabled: {_dp_name}",
+                "risk": _dp_risk,
+                "description": _desc or (
+                    f"{_dp_name} is a deprecated protocol version that is no longer "
+                    "considered secure. Disable it and enforce TLS 1.2 or higher."
+                ),
+                "output": str(_output)[:2000] if _output else f"Template: {_tid}",
+                "owasp": "A02:2025 Cryptographic Failures", "nist": "SC-8",
+                "remediation": (
+                    f"Disable {_dp_name} on the server/load balancer and enforce "
+                    "TLS 1.2 minimum. Update the TLS configuration to remove "
+                    "support for deprecated protocol versions."
+                ),
+                "cves": _dp_all_cves, **_v11,
+            }
+
     # ── Priority 2: Dynamic titles from template category ──
     # Use matcher-name (the actual detected technology) instead of
     # info.name (which is just "Wappalyzer Technology Detection").
@@ -30948,6 +31033,14 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                         )
                     except ValueError:
                         pass
+                # Redirect gate — suppress content-rendering header findings
+                # on pure redirect targets.
+                _nuc_title = _norm["title"]
+                if (target.get("_is_redirect")
+                        and _nuc_title.startswith("Missing Security Header: ")):
+                    _nuc_hdr = _nuc_title.split(": ", 1)[1]
+                    if _nuc_hdr in _REDIRECT_EXEMPT_HEADERS:
+                        continue
                 # Extract v1.1 enrichment fields from normalizer output
                 _nuc_v11 = {k: _norm[k] for k in ("cvss_score", "cvss_vector", "cwe")
                             if k in _norm and _norm[k]}
@@ -31153,6 +31246,14 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                         if (_norm["title"] == "Missing Security Header: Strict-Transport-Security"
                                 and not target["is_https"]):
                             continue
+                        # Redirect gate — content-rendering headers are
+                        # meaningless on pure 3xx redirect responses.
+                        _nik_norm_title = _norm["title"]
+                        if (target.get("_is_redirect")
+                                and _nik_norm_title.startswith("Missing Security Header: ")):
+                            _nik_hdr_name = _nik_norm_title.split(": ", 1)[1]
+                            if _nik_hdr_name in _REDIRECT_EXEMPT_HEADERS:
+                                continue
                         # Cloud catch-all guard: suppress path-based findings
                         # when the server returns a branded error page for any
                         # arbitrary path (Azure AD/Entra ID, Microsoft cloud).
