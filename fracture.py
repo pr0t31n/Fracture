@@ -20481,6 +20481,22 @@ _SHCHECK_ALLOWED_HEADERS = {
     "Permissions-Policy",
 }
 
+# Headers that are obsolete (Flash/Silverlight era) or niche Spectre-class
+# isolation controls — flagging their absence produces bulk findings with
+# no actionable remediation priority for typical web applications.
+_SUPPRESSED_HEADERS = frozenset({
+    "X-Permitted-Cross-Domain-Policies",  # Flash/Silverlight dead
+    "Cross-Origin-Embedder-Policy",       # Spectre isolation — SharedArrayBuffer gating
+    "Cross-Origin-Opener-Policy",         # Spectre isolation — process isolation
+    "Cross-Origin-Resource-Policy",       # Cross-origin embedding control — niche
+    "Clear-Site-Data",                    # Logout hygiene — not a security finding
+    "Content-Type",                       # Present by default on any real response
+    "Content-Type Charset",              # Charset specification — not a security header
+    "X-XSS-Protection",                  # Removed from all browsers — use CSP instead
+    "Expect-CT",                         # Chrome removed support in 2023
+    "Public-Key-Pins",                   # HPKP deprecated in all browsers
+})
+
 
 # ── 2026-06-11 review round 5: consolidation helpers ─────────────────────────
 # These helpers consolidate logic previously duplicated across multiple
@@ -29631,6 +29647,8 @@ def _normalize_nikto(vuln: dict) -> dict:
     _m = _NIKTO_DYN_HEADER.search(msg)
     if _m:
         _hdr = "-".join(w.capitalize() for w in _m.group(1).strip().split("-"))
+        if _hdr not in _SHCHECK_ALLOWED_HEADERS:
+            return None
         return {"title": f"Missing Security Header: {_hdr}", "risk": "LOW",
                 "owasp": "A05:2025 Security Misconfiguration", "nist": "SC-8",
                 "remediation": f"Configure the {_hdr} response header."}
@@ -30277,14 +30295,8 @@ _NUCLEI_HDR_MATCHER: dict = {
     "permissions-policy":               ("Permissions-Policy", "LOW"),
     "x-frame-options":                  ("X-Frame-Options", "MEDIUM"),
     "x-content-type-options":           ("X-Content-Type-Options", "MEDIUM"),
-    "x-permitted-cross-domain-policies": ("X-Permitted-Cross-Domain-Policies", "LOW"),
     "referrer-policy":                  ("Referrer-Policy", "LOW"),
-    "clear-site-data":                  ("Clear-Site-Data", "LOW"),
-    "cross-origin-embedder-policy":     ("Cross-Origin-Embedder-Policy", "LOW"),
-    "cross-origin-opener-policy":       ("Cross-Origin-Opener-Policy", "LOW"),
-    "cross-origin-resource-policy":     ("Cross-Origin-Resource-Policy", "LOW"),
-    "missing-content-type":             ("Content-Type", "LOW"),
-    "content-type-charset-specification": ("Content-Type Charset", "LOW"),
+    "cache-control":                    ("Cache-Control", "LOW"),
 }
 
 
@@ -30402,6 +30414,7 @@ def _normalize_nuclei(item: dict) -> dict:
                 "remediation": f"Add the {_hdr_display} header to all HTTP responses.",
                 "cves": _cves, **_v11,
             }
+        return None
 
     # ── Priority 1b: Deprecated TLS/SSL protocol — split by protocol ──
     # Nuclei's tls-version / deprecated-tls / sslvN templates emit a
