@@ -14432,6 +14432,46 @@ def _extract_spa_routes(target: dict, cfg: dict, out: "OutputManager",
     return discovered
 
 
+_METHOD_REJECT_CODES = frozenset({400, 401, 403, 404, 405, 406, 501})
+
+def _verify_http_methods(sess: requests.Session, url: str,
+                         methods: "set[str]", timeout: int = 8
+                         ) -> "dict[str, tuple[int, bool]]":
+    """Send actual requests for each claimed-unsafe method; return only those
+    that the server did NOT reject.
+
+    Returns {method: (status_code, echoes_body)} for methods that appear
+    genuinely functional.  A 405/501/403/400/401/404/406 response is treated
+    as "method disabled" and excluded.
+
+    For TRACE specifically, the response must echo request headers back
+    (true XST behaviour) to count — a 200 with a generic HTML page is not
+    confirmation.
+    """
+    confirmed = {}
+    for method in sorted(methods):
+        try:
+            extra = {}
+            if method == "TRACE":
+                extra["headers"] = {"X-Fracture-Verify": "1"}
+            r = sess.request(method, url, timeout=timeout,
+                             allow_redirects=False, **extra)
+            if r.status_code in _METHOD_REJECT_CODES:
+                continue
+            if method == "TRACE":
+                body_upper = (r.text or "")[:2000].upper()
+                echoes = any(tok in body_upper for tok in (
+                    "X-FRACTURE-VERIFY", "HOST:", "USER-AGENT:", "ACCEPT:"))
+                if not echoes:
+                    continue
+                confirmed[method] = (r.status_code, True)
+            else:
+                confirmed[method] = (r.status_code, False)
+        except Exception:
+            continue
+    return confirmed
+
+
 def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                  out: OutputManager, sess: requests.Session,
                  landing_url: str = "") -> None:
@@ -15001,40 +15041,58 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                         f"Allow header unreliable: {_allow_hdr}", "INFO",
                     )
                 else:
-                    _opt_ev_dir = out.root / "evidence" / "recon"
-                    _opt_ev_dir.mkdir(parents=True, exist_ok=True)
-                    _opt_ev = _opt_ev_dir / f"options_{urllib.parse.urlparse(url).hostname}.txt"
-                    _opt_ev.write_text(
-                        f"OPTIONS {url} HTTP/1.1\n\n"
-                        f"HTTP/{_opt_r.raw.version / 10 if hasattr(_opt_r.raw, 'version') and _opt_r.raw.version else '1.1'} "
-                        f"{_opt_r.status_code} {_opt_r.reason}\n"
-                        + "".join(f"{k}: {v}\n" for k, v in _opt_r.headers.items())
-                        + f"\n{_opt_body}\n",
-                        errors="replace",
-                    )
-                    out.add_finding(
-                        title="HTTP Methods: Unsafe Methods Enabled",
-                        url=url, port=target["port"], risk="MEDIUM",
-                        description=(
-                            f"The server at {url} advertises potentially dangerous "
-                            f"HTTP methods via OPTIONS: {', '.join(sorted(_unsafe))}. "
-                            f"These methods may allow file upload (PUT), file deletion "
-                            f"(DELETE), or cross-site tracing (TRACE). CWE-16."
-                        ),
-                        output=f"OPTIONS {url}\nAllow: {_allow_hdr}",
-                        affected=_url_rel_path(url, target["url"]),
-                        sources="fracture-recon", service=target["scheme"],
-                        output_file=str(_opt_ev.relative_to(out.root)),
-                        owasp="A05:2025 Security Misconfiguration",
-                        remediation=(
-                            "Disable unnecessary HTTP methods in the web server "
-                            "configuration. Only allow GET, POST, HEAD, and OPTIONS. "
-                            "Restrict WebDAV methods (PROPFIND, MKCOL, etc.) unless "
-                            "explicitly required."
-                        ),
-                        http_code=_opt_r.status_code,
-                    )
-                    vc.log(f"[recon] Unsafe HTTP methods: {', '.join(sorted(_unsafe))}", "SUCCESS")
+                    _verified = _verify_http_methods(sess, url, _unsafe, min(timeout, 8))
+                    _unverified = _unsafe - set(_verified.keys())
+                    if _unverified:
+                        vc.log(
+                            f"[recon] OPTIONS advertises {', '.join(sorted(_unverified))} "
+                            f"but server rejects actual requests — suppressed", "INFO",
+                        )
+                    if _verified:
+                        _opt_ev_dir = out.root / "evidence" / "recon"
+                        _opt_ev_dir.mkdir(parents=True, exist_ok=True)
+                        _opt_ev = _opt_ev_dir / f"options_{urllib.parse.urlparse(url).hostname}.txt"
+                        _ver_lines = [f"OPTIONS {url} HTTP/1.1", f"Allow: {_allow_hdr}", ""]
+                        for _vm, (_vsc, _vecho) in sorted(_verified.items()):
+                            _ver_lines.append(f"Verified: {_vm} {url} → HTTP {_vsc}"
+                                              + (" (echoes request)" if _vecho else ""))
+                        _opt_ev.write_text(
+                            "\n".join(_ver_lines) + "\n\n"
+                            f"HTTP/{_opt_r.raw.version / 10 if hasattr(_opt_r.raw, 'version') and _opt_r.raw.version else '1.1'} "
+                            f"{_opt_r.status_code} {_opt_r.reason}\n"
+                            + "".join(f"{k}: {v}\n" for k, v in _opt_r.headers.items())
+                            + f"\n{_opt_body}\n",
+                            errors="replace",
+                        )
+                        _ver_names = sorted(_verified.keys())
+                        out.add_finding(
+                            title="HTTP Methods: Unsafe Methods Enabled",
+                            url=url, port=target["port"], risk="MEDIUM",
+                            description=(
+                                f"The server at {url} accepts dangerous HTTP methods: "
+                                f"{', '.join(_ver_names)}. "
+                                f"Verified by sending actual requests (not just OPTIONS). "
+                                f"These methods may allow file upload (PUT), file deletion "
+                                f"(DELETE), or cross-site tracing (TRACE). CWE-16."
+                            ),
+                            output=(
+                                f"OPTIONS {url}\nAllow: {_allow_hdr}\n\n"
+                                + "\n".join(f"Verified: {m} → HTTP {_verified[m][0]}"
+                                           for m in _ver_names)
+                            ),
+                            affected=_url_rel_path(url, target["url"]),
+                            sources="fracture-recon", service=target["scheme"],
+                            output_file=str(_opt_ev.relative_to(out.root)),
+                            owasp="A05:2025 Security Misconfiguration",
+                            remediation=(
+                                "Disable unnecessary HTTP methods in the web server "
+                                "configuration. Only allow GET, POST, HEAD, and OPTIONS. "
+                                "Restrict WebDAV methods (PROPFIND, MKCOL, etc.) unless "
+                                "explicitly required."
+                            ),
+                            http_code=_opt_r.status_code,
+                        )
+                        vc.log(f"[recon] Unsafe HTTP methods (verified): {', '.join(_ver_names)}", "SUCCESS")
             # GAP-32: WebDAV enabled detection
             _webdav_methods = _methods & {"PROPFIND", "PROPPATCH", "MKCOL",
                                            "COPY", "MOVE", "LOCK", "UNLOCK"}
@@ -31054,6 +31112,11 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                     _nuc_hdr = _nuc_title.split(": ", 1)[1]
                     if _nuc_hdr in _REDIRECT_EXEMPT_HEADERS:
                         continue
+                # Unsafe methods gate — nuclei reports OPTIONS Allow
+                # header contents without verifying; recon sends actual
+                # requests (GAP-50).  Suppress here to avoid FPs.
+                if _nuc_title == "HTTP Methods: Unsafe Methods Enabled":
+                    continue
                 # Extract v1.1 enrichment fields from normalizer output
                 _nuc_v11 = {k: _norm[k] for k in ("cvss_score", "cvss_vector", "cwe")
                             if k in _norm and _norm[k]}
@@ -31267,6 +31330,12 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                             _nik_hdr_name = _nik_norm_title.split(": ", 1)[1]
                             if _nik_hdr_name in _REDIRECT_EXEMPT_HEADERS:
                                 continue
+                        # Unsafe methods gate — nikto reports OPTIONS Allow
+                        # header contents without verifying; recon already
+                        # sends actual requests (GAP-50).  Suppress here to
+                        # avoid re-introducing FPs that recon filtered out.
+                        if _nik_norm_title == "HTTP Methods: Unsafe Methods Enabled":
+                            continue
                         # Cloud catch-all guard: suppress path-based findings
                         # when the server returns a branded error page for any
                         # arbitrary path (Azure AD/Entra ID, Microsoft cloud).
