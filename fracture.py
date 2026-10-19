@@ -29403,6 +29403,29 @@ _NIKTO_NORM: "list[tuple]" = [
      "Telerik UI Component Detected", "MEDIUM",
      "A06:2025 Vulnerable and Outdated Components", "SI-2",
      "Review the Telerik UI version for known vulnerabilities and apply patches."),
+    # ── Standard discovery / well-known endpoints (RFC 8414, RFC 5785) ──
+    (r"OAuth\s*2\.0.*(?:Metadata|Authorization\s*Server)|oauth.authorization.server",
+     "Discovery: OAuth 2.0 Endpoint", "INFO",
+     "A07:2025 Identification and Authentication Failures", "IA-8",
+     "Standard OAuth 2.0 Authorization Server Metadata endpoint (RFC 8414). Review scopes and grant types."),
+    (r"OpenID.*(?:configuration|discovery)|openid.configuration",
+     "Discovery: OpenID Connect Endpoint", "INFO",
+     "A07:2025 Identification and Authentication Failures", "IA-8",
+     "Standard OpenID Connect discovery endpoint. Review for sensitive claim disclosure."),
+    (r"\.well-known.*(?:found|accessible|file|endpoint|metadata|detected)",
+     "Discovery: Well-Known Endpoint", "INFO",
+     "A05:2025 Security Misconfiguration", "CM-7",
+     "Standard RFC 5785 well-known endpoint. Review exposed metadata for sensitive information."),
+    # ── Users.lst / password file — path-pattern-only Nikto check ──
+    (r"users\.lst.*password|password.*users\.lst|LocalWEB2000",
+     "Information Disclosure: User List", "MEDIUM",
+     "A05:2025 Security Misconfiguration", "AC-3",
+     "Remove publicly accessible user/password list files."),
+    # ── VP-ASP / shopadmin — Nikto signature for legacy shopping cart ──
+    (r"VP-ASP|shopadmin",
+     "Discovery: Legacy Shopping Cart Admin", "INFO",
+     "A05:2025 Security Misconfiguration", "AC-3",
+     "VP-ASP shopping cart admin path detected. Verify this is not a false positive from a catch-all response."),
 ]
 _NIKTO_NORM_COMPILED = [(re.compile(p, re.IGNORECASE), t, r, o, n, rm)
                          for p, t, r, o, n, rm in _NIKTO_NORM]
@@ -30920,6 +30943,39 @@ def _collect_vulnscan_bg(handle: dict) -> None:
 
     vc.status(phase, "Vuln Scan", "running", "nikto", 1, 2)
 
+    # ── Cloud catch-all detection ───────────────────────────────────────────
+    # Azure AD / Entra ID / Microsoft cloud apps return non-404 error pages
+    # for any arbitrary path (treating the first segment as a tenant lookup).
+    # Nikto flags these as findings based on the path pattern match alone.
+    # Probe a random non-existent path; if the response contains known cloud
+    # error signatures, suppress all Nikto path-based findings for this host.
+    _CLOUD_CATCHALL_SIGS = (
+        "AADSTS",
+        "Tenant '",
+        "login.microsoftonline.com",
+        "login.live.com",
+        "logincdn.msauth.net",
+        "The resource you are looking for has been removed",
+    )
+    _nik_cloud_catchall: dict = {}  # base_url -> bool
+
+    def _is_cloud_catchall(base_url: str, sess_obj) -> bool:
+        if base_url in _nik_cloud_catchall:
+            return _nik_cloud_catchall[base_url]
+        try:
+            _probe_url = base_url.rstrip("/") + "/fr4ctur3_catchall_probe_" + str(int(time.time()))
+            _pr = sess_obj.get(_probe_url, timeout=10, allow_redirects=True)
+            _pr_body = (_pr.text or "")[:8000]
+            _pr_loc = (_pr.headers.get("Location") or "")
+            _is_ca = any(sig in _pr_body or sig in _pr_loc for sig in _CLOUD_CATCHALL_SIGS)
+            if _is_ca:
+                vc.log(f"[vulnscan] nikto: cloud catch-all detected on {base_url} — "
+                       f"path-based findings will be suppressed", "INFO")
+        except Exception:
+            _is_ca = False
+        _nik_cloud_catchall[base_url] = _is_ca
+        return _is_ca
+
     # ── 2. Collect nikto ────────────────────────────────────────────────────
     _nik_total = 0
     for _nik_h in handle.get("nikto_procs", []):
@@ -30994,6 +31050,14 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                             _nik_output += f"\nOSVDB-{_nik_osvdb}"
                         _norm = _normalize_nikto(vuln)
                         if _norm is None:
+                            continue
+                        # Cloud catch-all guard: suppress path-based findings
+                        # when the server returns a branded error page for any
+                        # arbitrary path (Azure AD/Entra ID, Microsoft cloud).
+                        if (_nik_url_path and _nik_url_path != "/"
+                                and _is_cloud_catchall(
+                                    _nik_base,
+                                    handle.get("sess") or requests.Session())):
                             continue
                         _nik_of = str(_nik_json_path)
                         _nik_title = _norm["title"]
