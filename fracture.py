@@ -3817,6 +3817,24 @@ class OutputManager:
             result.append(rel)
         return "\n".join(result)
 
+    @staticmethod
+    def _collapse_header_affected(entries: set) -> set:
+        """For host-level header findings, collapse subpath entries to
+        parent origin.  'columbushosp.org/bin/' → 'columbushosp.org/'.
+        Entries that are already parent-level or not URL-shaped pass through.
+        IPs without a path component are normalised to IP:PORT."""
+        result: set = set()
+        for entry in entries:
+            e = entry.strip()
+            if not e:
+                continue
+            if "/" in e:
+                host_part = e.split("/", 1)[0]
+                result.add(host_part + "/")
+            else:
+                result.add(e)
+        return result
+
     def _dedup_affected(self, entries: set) -> set:
         """Deduplicate affected location entries that refer to the same host.
         Collapses bare host, host:default_port, and host/ into one entry.
@@ -4077,6 +4095,10 @@ class OutputManager:
         # Merge v1.1 enrichment fields (cvss_score, cvss_vector, cwe, etc.)
         if extra_v11:
             entry.update(extra_v11)
+        if title.strip().lower().startswith("missing security header:"):
+            _init_aff = set(a.strip() for a in entry["affected"].split("\n") if a.strip())
+            _init_aff = self._collapse_header_affected(_init_aff)
+            entry["affected"] = "\n".join(sorted(_init_aff)) if _init_aff else entry["affected"]
         csv_entry = dict(entry)
         csv_entry["title"] = ascii_title
 
@@ -4227,6 +4249,8 @@ class OutputManager:
                     _ex_aff.discard("")
                     if _ex_aff:
                         _ex_aff = self._dedup_affected(_ex_aff)
+                        if _title_lower.startswith("missing security header:"):
+                            _ex_aff = self._collapse_header_affected(_ex_aff)
                         ex["affected"] = "\n".join(sorted(_ex_aff))
                     # ── merge output_file — preserve BOTH formats ──────────
                     # output_file can be in two formats:
@@ -31124,6 +31148,10 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                             _nik_output += f"\nOSVDB-{_nik_osvdb}"
                         _norm = _normalize_nikto(vuln)
                         if _norm is None:
+                            continue
+                        # STS on HTTP gate — RFC 6797 §7.2: ignore over plain HTTP
+                        if (_norm["title"] == "Missing Security Header: Strict-Transport-Security"
+                                and not target["is_https"]):
                             continue
                         # Cloud catch-all guard: suppress path-based findings
                         # when the server returns a branded error page for any
