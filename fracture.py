@@ -11470,9 +11470,13 @@ _RE_RFC1918_IN_TEXT = re.compile(
     r')\b'
 )
 
+# SVG path coordinate data (d="m4.636 10.2.5.3 ...") produces false IP matches
+_RE_SVG_BLOCK = re.compile(r'<svg[\s>].*?</svg>', re.S | re.I)
+
 
 def _find_rfc1918_in_text(text: str, exclude_ips: "set[str] | None" = None) -> "set[str]":
     """Return RFC 1918 IPs found in *text*, minus any in *exclude_ips*."""
+    text = _RE_SVG_BLOCK.sub(' ', text)
     exclude = exclude_ips or set()
     found: set[str] = set()
     for m in _RE_RFC1918_IN_TEXT.finditer(text):
