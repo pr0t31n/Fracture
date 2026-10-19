@@ -20697,6 +20697,8 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         out.log_error("headers", url, str(e))
         return
 
+    _is_error_page = resp.status_code >= 400
+
     out_f = out.output_path(phase, "headers_" + target["hostname"])
     out_f.write_text(
         "\n".join(f"{k}: {v}" for k, v in headers.items()), encoding="utf-8"
@@ -20792,18 +20794,29 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                     url, out, phase, "clickjack_missing_xfo",
                     target, cfg)
                 if _cj_ss:
+                    _cj_risk = "INFO" if _is_error_page else "MEDIUM"
+                    _cj_desc = (
+                        "The target page renders inside a third-party iframe, "
+                        "confirming it is vulnerable to clickjacking (UI redress) "
+                        "attacks. An attacker can overlay transparent controls on "
+                        "top of the framed page to trick users into performing "
+                        "unintended actions such as changing settings, transferring "
+                        "funds, or granting permissions. Neither X-Frame-Options "
+                        "nor CSP frame-ancestors restricts framing."
+                    )
+                    if _is_error_page:
+                        _cj_desc = (
+                            f"The target returned an HTTP {resp.status_code} error page "
+                            "that renders inside a third-party iframe. While the page is "
+                            "technically frameable, error pages typically contain no "
+                            "authenticated actions or interactive elements, making "
+                            "clickjacking unexploitable. Neither X-Frame-Options nor "
+                            "CSP frame-ancestors restricts framing."
+                        )
                     out.add_finding(
                         title="Clickjacking: Page Embeddable in Iframe",
-                        url=url, port=target["port"], risk="MEDIUM",
-                        description=(
-                            "The target page renders inside a third-party iframe, "
-                            "confirming it is vulnerable to clickjacking (UI redress) "
-                            "attacks. An attacker can overlay transparent controls on "
-                            "top of the framed page to trick users into performing "
-                            "unintended actions such as changing settings, transferring "
-                            "funds, or granting permissions. Neither X-Frame-Options "
-                            "nor CSP frame-ancestors restricts framing."
-                        ),
+                        url=url, port=target["port"], risk=_cj_risk,
+                        description=_cj_desc,
                         output="PoC: target page successfully rendered in iframe — see screenshot",
                         sources="fracture-headers", service=target["scheme"],
                         output_file=_cj_ss,
@@ -20853,6 +20866,13 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     if _csp_val:
         _csp_weaknesses, _csp_max_risk, _csp_detail = _analyze_csp_directives(
             _csp_val, headers)
+        if _is_error_page and _csp_weaknesses:
+            _csp_weaknesses = [
+                ("INFO", lbl, expl) if "frame-ancestors" in lbl else (r, lbl, expl)
+                for r, lbl, expl in _csp_weaknesses
+            ]
+            _csp_max_risk = min(_csp_weaknesses,
+                                key=lambda w: _CSP_RISK_ORDER.get(w[0], 9))[0]
         if _csp_weaknesses:
             _csp_risk = _csp_max_risk or "LOW"
             _csp_desc_parts = [
@@ -20925,18 +20945,29 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             url, out, phase, "clickjack_permissive_xfo",
             target, cfg)
         if _cj_perm_ss:
+            _cj_perm_risk = "INFO" if _is_error_page else "MEDIUM"
+            _cj_perm_desc = (
+                "The target page renders inside a third-party iframe, "
+                "confirming it is vulnerable to clickjacking (UI redress) "
+                "attacks. An attacker can overlay transparent controls on "
+                "top of the framed page to trick users into performing "
+                "unintended actions such as changing settings, transferring "
+                "funds, or granting permissions. X-Frame-Options is set to "
+                f"a non-protective value: '{_xfo_val}'."
+            )
+            if _is_error_page:
+                _cj_perm_desc = (
+                    f"The target returned an HTTP {resp.status_code} error page "
+                    "that renders inside a third-party iframe. While the page is "
+                    "technically frameable, error pages typically contain no "
+                    "authenticated actions or interactive elements, making "
+                    "clickjacking unexploitable. X-Frame-Options is set to "
+                    f"a non-protective value: '{_xfo_val}'."
+                )
             out.add_finding(
                 title="Clickjacking: Page Embeddable in Iframe",
-                url=url, port=target["port"], risk="MEDIUM",
-                description=(
-                    "The target page renders inside a third-party iframe, "
-                    "confirming it is vulnerable to clickjacking (UI redress) "
-                    "attacks. An attacker can overlay transparent controls on "
-                    "top of the framed page to trick users into performing "
-                    "unintended actions such as changing settings, transferring "
-                    "funds, or granting permissions. X-Frame-Options is set to "
-                    f"a non-protective value: '{_xfo_val}'."
-                ),
+                url=url, port=target["port"], risk=_cj_perm_risk,
+                description=_cj_perm_desc,
                 output="PoC: target page successfully rendered in iframe — see screenshot",
                 sources="fracture-headers", service=target["scheme"],
                 output_file=_cj_perm_ss,
