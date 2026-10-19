@@ -676,6 +676,7 @@ GO_TOOLS = [
     ("github.com/ffuf/ffuf/v2@latest",                          "ffuf"),
     ("github.com/projectdiscovery/tlsx/cmd/tlsx@latest",       "tlsx"),
     ("github.com/rverton/webanalyze/cmd/webanalyze@latest",    "webanalyze"),
+    ("github.com/bitquark/shortscan/cmd/shortscan@latest",     "shortscan"),
 ]
 
 

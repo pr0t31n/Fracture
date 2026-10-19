@@ -410,6 +410,14 @@ _TOOL_PATHS: dict = {
                    "/usr/local/bin/zap.sh", "/opt/zaproxy/zap.sh",
                    "/snap/zaproxy/current/ZAP/zap.sh"],
     },
+    "shortscan": {
+        "Darwin": ["/usr/local/bin/shortscan", "/opt/homebrew/bin/shortscan",
+                   str(_HOME / "go" / "bin" / "shortscan"),
+                   "/root/go/bin/shortscan"],
+        "Linux":  ["/usr/local/bin/shortscan", "/usr/bin/shortscan",
+                   str(_HOME / "go" / "bin" / "shortscan"),
+                   "/root/go/bin/shortscan"],
+    },
 }
 
 
@@ -4140,7 +4148,9 @@ class OutputManager:
                 "http method tampering:",
                 "non-standard cipher suites accepted",
                 "missing rate limiting",
-                "iis short file/directory name disclosure",
+                "web misconfiguration: iis tilde shortname vulnerability",
+                "enumeration: iis tilde directory enumeration",
+                "dns information: missing caa record",
                 "outdated copyright notice detected",
                 "exposed cryptocurrency wallet address",
                 "unauthenticated access to protected path",
@@ -19378,7 +19388,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                             elif _tsf_id == "cipherlist_OBSOLETED":
                                 _tsf_title = "SSL/TLS Ciphers: Obsolete Ciphers"
                             elif _tsf_id == "DNS_CAArecord":
-                                _tsf_title = "DNS: Missing CAA Record"
+                                _tsf_title = "DNS Information: Missing CAA Record"
                                 _tsf_risk  = "LOW"
                             elif _tsf_id == "TLS_session_ticket":
                                 _tsf_title = "SSL/TLS Session: Long Duration"
@@ -19660,34 +19670,47 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
     # ── CAA DNS record check ──────────────────────────────────────────────────
     # CAA restricts which CAs can issue certs for the domain.
     # Missing CAA = any CA can issue, enabling mis-issuance attacks.
+    # CAA is a domain-level DNS control — skip raw IP addresses entirely.
+    # CAA records are inherited by subdomains, so check only the parent
+    # (registrable) domain to avoid duplicate findings per subdomain.
     _dig_bin = shutil.which("dig")
-    if _dig_bin:
+    _caa_is_ip = False
+    try:
+        ipaddress.ip_address(hostname)
+        _caa_is_ip = True
+    except ValueError:
+        pass
+    if _dig_bin and not _caa_is_ip:
+        _caa_parts = hostname.lower().split(".")
+        _caa_domain = ".".join(_caa_parts[-2:]) if len(_caa_parts) >= 2 else hostname
         try:
             _caa_proc = subprocess.run(
-                [_dig_bin, "+short", "CAA", hostname],
+                [_dig_bin, "+short", "CAA", _caa_domain],
                 capture_output=True, text=True, timeout=10,
             )
             if _caa_proc.returncode == 0 and not _caa_proc.stdout.strip():
-                _caa_out = out.output_path(phase, f"dig_caa_{hostname}")
+                _caa_out = out.output_path(phase, f"dig_caa_{_caa_domain}")
                 _caa_out.write_text(
-                    f"$ dig +short CAA {hostname}\n{_caa_proc.stdout or '(no output — no CAA records found)'}",
+                    f"$ dig +short CAA {_caa_domain}\n{_caa_proc.stdout or '(no output — no CAA records found)'}",
                     encoding="utf-8",
                 )
                 out.add_finding(
-                    title="DNS: Missing CAA Record",
+                    title="DNS Information: Missing CAA Record",
                     url=target["url"], port=port, risk="LOW",
                     description=(
                         f"No CAA (Certification Authority Authorization) DNS record "
-                        f"exists for {hostname}. Without CAA, any certificate authority "
+                        f"exists for {_caa_domain}. Without CAA, any certificate authority "
                         "can issue certificates for this domain, increasing mis-issuance risk."
                     ),
-                    output=f"dig +short CAA {hostname} → (no records)",
+                    output=f"dig +short CAA {_caa_domain} → (no records)",
                     sources="fracture-tls-dns", service="https",
                     output_file=str(_caa_out),
+                    affected=_caa_domain,
                     owasp="A05:2025 Security Misconfiguration", nist="SC-8",
                     remediation=(
-                        f'Add a CAA record: {hostname} CAA 0 issue "letsencrypt.org" '
-                        "(replace with your preferred CA)."
+                        f'Add a CAA record on the parent zone: '
+                        f'{_caa_domain} CAA 0 issue "letsencrypt.org" '
+                        "(replace with your preferred CA). This covers all subdomains."
                     ),
                 )
         except Exception:
@@ -29789,7 +29812,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Disable trace.axd in production via web.config."),
     # ── IIS-specific ──
     (r"iis-shortname",
-     "Information Disclosure: IIS Short File/Directory Disclosure", "LOW",
+     "Web Misconfiguration: IIS Tilde Shortname Vulnerability", "LOW",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Disable 8.3 filename generation via `fsutil behavior set disable8dot3 1` and restart IIS."),
     # ── Crypto wallet FP filter ──
@@ -30976,6 +30999,22 @@ def _collect_vulnscan_bg(handle: dict) -> None:
         except Exception:
             pass
 
+        # ── IIS tilde shortname enumeration ──
+        try:
+            _has_iis_shortname = any(
+                "iis tilde shortname" in f.get("title", "").lower()
+                for f in json.loads(out.findings_json.read_text())
+            ) if out.findings_json.exists() else False
+            if _has_iis_shortname:
+                try:
+                    _enumerate_iis_shortname(
+                        target, handle.get("cfg", {}), out,
+                        handle.get("sess") or requests.Session())
+                except Exception as _ise_err:
+                    vc.error(f"[iis-shortname] Enumeration failed: {_ise_err}")
+        except Exception:
+            pass
+
     vc.status(phase, "Vuln Scan", "running", "nikto", 1, 2)
 
     # ── Cloud catch-all detection ───────────────────────────────────────────
@@ -32046,6 +32085,182 @@ _TELERIK_VERSION_RE = re.compile(
     r'Version\s*=\s*)'
     r'(\d{4}\.\d+\.\d+(?:\.\d+)?)',                 # Capture: 2023.3.1010[.45]
     re.I)
+
+# ── IIS Tilde Shortname Enumeration ──────────────────────────────────────────
+
+def _enumerate_iis_shortname(target: dict, cfg: dict, out: "OutputManager",
+                             sess: "requests.Session") -> None:
+    """Run shortscan against an IIS target confirmed vulnerable to tilde
+    shortname enumeration.  Called after nuclei's iis-shortname-detect
+    template fires a positive.
+    """
+    shortscan = _find_tool("shortscan")
+    if not shortscan:
+        vc.log("[iis-shortname] shortscan not installed — skipping enumeration", "INFO")
+        out.log_action_item(
+            type="enumeration",
+            recommended_tool="shortscan (go install github.com/bitquark/shortscan/cmd/shortscan@latest)",
+            target=target.get("url", ""),
+            ip=target.get("ip", ""),
+            port=target["port"],
+            hostname=target.get("hostname", ""),
+            title="IIS Tilde Shortname Enumeration Required",
+            description=(
+                "Nuclei confirmed the IIS tilde shortname vulnerability. "
+                "Install shortscan and re-run, or manually enumerate with: "
+                "shortscan <target-url>"
+            ),
+            source_finding="Web Misconfiguration: IIS Tilde Shortname Vulnerability",
+            priority="MEDIUM",
+            scope="webapp",
+        )
+        return
+
+    phase   = "vulnscan"
+    url     = target["url"]
+    port    = target["port"]
+    scheme  = target["scheme"]
+    timeout = cfg.get("timeout", 10)
+    _pu     = urllib.parse.urlparse(url)
+    origin  = f"{_pu.scheme}://{_pu.netloc}"
+
+    vc.log("[iis-shortname] Starting IIS tilde shortname enumeration", "INFO")
+
+    _bases = [origin]
+    _app_path = _pu.path.rstrip("/")
+    if _app_path:
+        _parts = _app_path.split("/")
+        for i in range(2, len(_parts) + 1):
+            _b = origin + "/".join(_parts[:i])
+            if _b not in _bases:
+                _bases.append(_b)
+
+    _all_files: list[str] = []
+    _all_dirs:  list[str] = []
+    _evidence_lines: list[str] = [
+        "IIS Tilde Shortname Enumeration Results",
+        "=" * 50,
+        f"Target: {url}",
+        f"Tool:   shortscan",
+        "",
+    ]
+
+    _vs_cookie_str, _vs_auth_headers = _extract_subprocess_auth(sess)
+
+    for _base in _bases:
+        _ss_out = out.output_path(phase, f"shortscan_{_pu.hostname}")
+        _ss_cmd = [shortscan, _base]
+        if _vs_cookie_str:
+            _ss_cmd.extend(["--header", f"Cookie: {_vs_cookie_str}"])
+        for _hk, _hv in (_vs_auth_headers or {}).items():
+            _ss_cmd.extend(["--header", f"{_hk}: {_hv}"])
+
+        vc.log(f"[iis-shortname] shortscan → {_base}", "INFO")
+        _ss_started = datetime.now().astimezone()
+        try:
+            _ss_proc = subprocess.run(
+                _ss_cmd, capture_output=True, text=True,
+                timeout=min(timeout * 30, 300),
+            )
+            _ss_ended = datetime.now().astimezone()
+            _ss_stdout = _ss_proc.stdout or ""
+            _ss_stderr = _ss_proc.stderr or ""
+
+            out.log_command(
+                "shortscan", _ss_cmd, _ss_out,
+                tool_path=shortscan,
+                stdout=_ss_stdout, stderr=_ss_stderr,
+                started=_ss_started, ended=_ss_ended,
+                exit_code=_ss_proc.returncode,
+            )
+
+            _ss_out.write_text(_ss_stdout, encoding="utf-8")
+
+            _evidence_lines.append(f"Base: {_base}")
+            _evidence_lines.append(f"Exit: {_ss_proc.returncode}")
+            _evidence_lines.append(_ss_stdout[:4000])
+            _evidence_lines.append("")
+
+            for _line in _ss_stdout.splitlines():
+                _line = _line.strip()
+                if not _line or _line.startswith("[") or _line.startswith("Running"):
+                    continue
+                if "/" in _line:
+                    _all_dirs.append(_line)
+                elif _line and not _line.startswith("-"):
+                    _all_files.append(_line)
+
+        except subprocess.TimeoutExpired:
+            _ss_ended = datetime.now().astimezone()
+            vc.log(f"[iis-shortname] shortscan timed out on {_base}", "WARNING")
+            _evidence_lines.append(f"Base: {_base} — TIMED OUT\n")
+            _timeout_action_item(out, "shortscan", target, timeout * 30)
+        except Exception as _ss_err:
+            _ss_ended = datetime.now().astimezone()
+            vc.error(f"[iis-shortname] shortscan error: {_ss_err}")
+            _evidence_lines.append(f"Base: {_base} — ERROR: {_ss_err}\n")
+
+    _ev_path = ""
+    try:
+        _ev_file = out.output_path(phase, f"iis_shortname_enum_{_pu.hostname}")
+        _ev_file.write_text("\n".join(_evidence_lines), encoding="utf-8")
+        _ev_path = str(_ev_file)
+    except Exception:
+        pass
+
+    _total = len(_all_files) + len(_all_dirs)
+    if _total > 0:
+        _output_text = ""
+        if _all_dirs:
+            _output_text += f"Directories ({len(_all_dirs)}):\n"
+            _output_text += "\n".join(f"  {d}" for d in _all_dirs[:20])
+            if len(_all_dirs) > 20:
+                _output_text += f"\n  ... and {len(_all_dirs) - 20} more"
+            _output_text += "\n\n"
+        if _all_files:
+            _output_text += f"Files ({len(_all_files)}):\n"
+            _output_text += "\n".join(f"  {f}" for f in _all_files[:20])
+            if len(_all_files) > 20:
+                _output_text += f"\n  ... and {len(_all_files) - 20} more"
+
+        out.add_finding(
+            title="Enumeration: IIS Tilde Directory Enumeration",
+            url=url, port=port, risk="MEDIUM",
+            description=(
+                f"Active brute-force enumeration of IIS 8.3 short filenames "
+                f"recovered {len(_all_files)} file(s) and {len(_all_dirs)} "
+                f"directory(ies) from the web server. These names reveal the "
+                f"first six characters of files and directories on disk, "
+                f"potentially exposing backup files, configuration files, "
+                f"source code, or hidden administrative paths."
+            ),
+            output=_output_text[:4000],
+            sources="fracture-iis-shortname-enum",
+            service=scheme,
+            output_file=_ev_path,
+            affected=url,
+            owasp="A01:2025 Broken Access Control",
+            nist="CM-7",
+            remediation=(
+                "Disable 8.3 filename generation: "
+                "`fsutil behavior set disable8dot3 1` then restart IIS. "
+                "Existing short names persist until files are recreated. "
+                "Review enumerated names for sensitive files and restrict "
+                "access to any exposed administrative or backup paths."
+            ),
+            command=" ".join(_ss_cmd),
+            cwe=["CWE-200"],
+            cvss_score=5.3,
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+        )
+        vc.log(
+            f"[iis-shortname] Enumeration found {_total} name(s) "
+            f"({len(_all_files)} files, {len(_all_dirs)} dirs)", "SUCCESS")
+    else:
+        vc.log("[iis-shortname] Enumeration returned no results", "INFO")
+
+    vc.log("[iis-shortname] Enumeration complete", "SUCCESS")
+
 
 # DialogHandler CVE-2017-9248 probe: invalid key causes a different response
 # than a valid key, enabling a timing/content oracle.

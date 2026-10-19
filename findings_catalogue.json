@@ -2,7 +2,7 @@
   "version": "1.7.0",
   "tool": "fracture",
   "generated": "(complete: upgraded existing + scaffolded missing)",
-  "total": 519,
+  "total": 521,
   "from_existing": 340,
   "newly_scaffolded": 64,
   "findings": [
@@ -32532,6 +32532,148 @@
       "remediation_effort": "Moderate",
       "validation_tools": [
         "burp-suite"
+      ]
+    },
+    {
+      "id": "FR-521",
+      "title": "Web Misconfiguration: IIS Tilde Shortname Vulnerability",
+      "aliases": [
+        "IIS Short File/Directory Disclosure",
+        "IIS 8.3 Filename Disclosure",
+        "IIS Tilde Enumeration",
+        "Microsoft IIS Tilde Directory Enumeration"
+      ],
+      "source_tools": [
+        "fracture",
+        "nuclei"
+      ],
+      "risk": "LOW",
+      "description": "The IIS web server processes 8.3 short filename (tilde) requests, confirmed by differential response analysis. When the server receives a request containing the *~1* wildcard pattern, it responds differently (e.g. 404 vs 501) depending on whether the pattern matches an existing short filename, confirming the server interprets tilde shortname syntax.",
+      "impact": "This misconfiguration enables an attacker to perform brute-force enumeration of the first six characters of all files and directories on the web server using 8.3 short filename patterns. This can reveal backup files, configuration files, source code, hidden administrative paths, and other resources not intended to be publicly accessible.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "cve_examples": [
+        "CVE-2012-6049",
+        "CVE-2010-2730"
+      ],
+      "cvss_v3_base": 5.3,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+      "nessus_plugin_ids": [
+        17573
+      ],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.AC-4"
+      ],
+      "nist_800_53": [
+        "CM-7"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "2.2.4"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1083",
+          "tactic": "Discovery",
+          "name": "File and Directory Discovery"
+        }
+      ],
+      "searchsploit_terms": [
+        "IIS shortname",
+        "IIS tilde",
+        "IIS 8.3"
+      ],
+      "metasploit_modules": [
+        "auxiliary/scanner/http/iis_shortname_scanner"
+      ],
+      "kev": false,
+      "remediation_brief": "Disable 8.3 filename generation via `fsutil behavior set disable8dot3 1` and restart IIS. Note that existing short names persist until the files are recreated; to remove them, copy files to a new directory and delete the originals.",
+      "remediation_component": "Configuration",
+      "remediation_category": "Access Control",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "nuclei",
+        "shortscan",
+        "IIS-ShortName-Scanner",
+        "tilde_enum"
+      ]
+    },
+    {
+      "id": "FR-522",
+      "title": "Enumeration: IIS Tilde Directory Enumeration",
+      "aliases": [
+        "IIS Shortname Brute Force",
+        "IIS 8.3 File Enumeration",
+        "IIS Short Filename Enumeration Results"
+      ],
+      "source_tools": [
+        "fracture",
+        "shortscan"
+      ],
+      "risk": "MEDIUM",
+      "description": "Active brute-force enumeration of IIS 8.3 short filenames recovered actual file and directory names from the web server. The shortscan tool exploited the confirmed tilde shortname vulnerability to recover the first six characters of files and directories on disk.",
+      "impact": "An attacker has successfully enumerated file and directory names on the server, potentially revealing backup files (e.g. web~1.bak), configuration files, source code files, database dumps, or hidden administrative directories. These discoveries can be used to directly access sensitive resources or to inform further targeted attacks against the application.",
+      "cwe": [
+        "CWE-200",
+        "CWE-538"
+      ],
+      "cve_examples": [
+        "CVE-2012-6049"
+      ],
+      "cvss_v3_base": 5.3,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A01:2025 Broken Access Control",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.AC-4"
+      ],
+      "nist_800_53": [
+        "CM-7"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "2.2.4"
+      ],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1083",
+          "tactic": "Discovery",
+          "name": "File and Directory Discovery"
+        }
+      ],
+      "searchsploit_terms": [
+        "IIS shortname",
+        "IIS tilde"
+      ],
+      "metasploit_modules": [
+        "auxiliary/scanner/http/iis_shortname_scanner"
+      ],
+      "kev": false,
+      "remediation_brief": "Disable 8.3 filename generation: `fsutil behavior set disable8dot3 1` then restart IIS. Existing short names persist until files are recreated. Review all enumerated names for sensitive files and restrict access to any exposed administrative or backup paths. Consider renaming or removing sensitive files that were discovered.",
+      "remediation_component": "Configuration",
+      "remediation_category": "Access Control",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "shortscan",
+        "IIS-ShortName-Scanner",
+        "tilde_enum",
+        "curl"
       ]
     }
   ]
