@@ -22380,15 +22380,21 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
     # Capture the application's custom error page by requesting a
     # deliberately non-existent path.  Many frameworks render a branded
     # error page that leaks technology information or exposes debug data.
+    # On SPAs that serve the same shell for every route, the "error page"
+    # is identical to the landing page — skip it when the body matches.
     _err_url = f"{_parsed_target.scheme}://{_parsed_target.netloc}" \
                f"/fracture_nonexistent_path_404_test"
     _err_out = save_dir / f"screenshot_{safe_host}_{port}_errorpage.png"
     vc.status(phase, "Screenshot", "running", "Error page", 2, 3)
+    _err_skip_spa = False
     try:
         _err_code, _err_server, _err_html_title, _err_body_len = _probe_screenshot_meta(_err_url, sess)
+        if out.is_spa_duplicate(_err_body_len):
+            _err_skip_spa = True
+            vc.log("[screenshot] Error page skipped — SPA duplicate of landing/root page", "INFO")
         out.record_spa_baseline(_err_body_len)
         _err_meta = {}
-        if _capture_screenshot_to(_err_url, _err_out, target, cfg,
+        if not _err_skip_spa and _capture_screenshot_to(_err_url, _err_out, target, cfg,
                                   auth_session=sess, _meta=_err_meta):
             _err_page_title = _err_meta.get("page_title", "") or _err_html_title
             _err_cls = _classify_screenshot(
