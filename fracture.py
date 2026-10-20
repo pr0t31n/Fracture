@@ -772,7 +772,8 @@ _INFRA_COOKIE_RE = re.compile(
     r'^(BIGipServer|AWSALB|AWSELB|__cf|_cf_bm|cf_clearance|'
     r'incap_ses|visid_incap|nlbi_|GCLB|SERVERID|HAProxy|'
     r'route|__RequestVerificationToken|__AntiXsrf|'
-    r'AWSALBCORS|AWSELBCORS|__cflb|__cfruid)',
+    r'AWSALBCORS|AWSELBCORS|__cflb|__cfruid|'
+    r'pps_magic|AzureAppProxy)',
     re.I,
 )
 
@@ -787,6 +788,55 @@ _TRACKING_COOKIE_RE = re.compile(
     r'back[-_]?url$|goto$|continue$|referer$|origin[-_]?url$)',
     re.I,
 )
+
+def _is_deletion_cookie_from_output(output_lower: str) -> bool:
+    """Check if nuclei/nikto output references only a deletion cookie."""
+    for sc_m in re.finditer(r'set-cookie:\s*([^\n]+)', output_lower):
+        sc = sc_m.group(1)
+        nv = sc.split(";")[0].strip()
+        val = nv.split("=", 1)[1].strip() if "=" in nv else ""
+        if val and val not in ('""', "''", ""):
+            return False
+        if "expires=" in sc and ("1970" in sc or "1969" in sc):
+            return True
+        if re.search(r'max-age\s*=\s*0\b', sc):
+            return True
+    return False
+
+
+def _is_deletion_cookie(sc_raw: str) -> bool:
+    """Return True when a Set-Cookie header is a deletion instruction.
+
+    Browsers treat a cookie as deleted when the value is empty and the
+    expiry is in the past (or epoch).  Missing security flags on such
+    a header have zero security impact — there is nothing to steal.
+    """
+    parts = sc_raw.split(";")
+    nv = parts[0].strip()
+    val = nv.split("=", 1)[1].strip() if "=" in nv else ""
+    if val and val not in ('""', "''"):
+        return False
+    for p in parts[1:]:
+        p = p.strip().lower()
+        if p.startswith("expires="):
+            exp_str = p[8:].strip()
+            if "1970" in exp_str or "1969" in exp_str:
+                return True
+            try:
+                from email.utils import parsedate_to_datetime
+                exp_dt = parsedate_to_datetime(exp_str)
+                if exp_dt.year < 2000:
+                    return True
+            except Exception:
+                pass
+        if p.startswith("max-age="):
+            try:
+                if int(p[8:].strip()) <= 0:
+                    return True
+            except ValueError:
+                pass
+    return False
+
 
 # URL path patterns for handler endpoints that should be excluded from
 # parameter injection testing (their params are not database-bound).
@@ -17539,6 +17589,64 @@ def _capture_xss_screenshot(proof_url: str, out: "OutputManager",
     return ""
 
 
+_SSO_REDIRECT_DOMAINS = frozenset({
+    "login.microsoftonline.com",
+    "login.microsoft.com",
+    "login.windows.net",
+    "accounts.google.com",
+    "auth0.com",
+    "okta.com",
+    "login.okta.com",
+    "sso.jumpcloud.com",
+    "login.duosecurity.com",
+    "idp.secureworks.com",
+})
+
+
+def _is_clickjack_fp(resp: "requests.Response") -> bool:
+    """Return True if the response chain makes clickjacking unexploitable.
+
+    Checks for:
+    1. Azure App Proxy (redirects to Azure AD login which sets XFO: DENY)
+    2. Redirect chains where the final destination sets X-Frame-Options or
+       CSP frame-ancestors — the browser follows the redirect INSIDE the
+       iframe and the destination blocks framing.
+    3. Redirects to known SSO providers (the auth gate prevents any
+       authenticated content from rendering in the iframe).
+    """
+    _all_responses = list(resp.history) + [resp]
+    for r in _all_responses:
+        if r.headers.get("x-ms-proxy-app-id"):
+            return True
+    if resp.history:
+        for r in resp.history:
+            loc = r.headers.get("Location", "")
+            try:
+                _loc_host = urllib.parse.urlparse(loc).hostname or ""
+            except Exception:
+                _loc_host = ""
+            if _loc_host:
+                if any(_loc_host == d or _loc_host.endswith("." + d)
+                       for d in _SSO_REDIRECT_DOMAINS):
+                    return True
+    final_xfo = (resp.headers.get("X-Frame-Options") or "").upper().strip()
+    if final_xfo in ("DENY", "SAMEORIGIN"):
+        return True
+    final_csp = resp.headers.get("Content-Security-Policy", "")
+    if "frame-ancestors" in final_csp.lower():
+        _fa = ""
+        for _d in final_csp.split(";"):
+            _d = _d.strip()
+            if _d.lower().startswith("frame-ancestors"):
+                _fa = _d.lower()
+                break
+        if _fa and "'none'" in _fa:
+            return True
+        if _fa and "'self'" in _fa and "*" not in _fa:
+            return True
+    return False
+
+
 def _capture_clickjack_screenshot(target_url: str, out: "OutputManager",
                                    phase: str, label: str,
                                    target: dict, cfg: dict,
@@ -17553,8 +17661,12 @@ def _capture_clickjack_screenshot(target_url: str, out: "OutputManager",
     if not _check_selenium():
         return ""
     _cj_ip = re.sub(r'[^\w]', '_', target.get("ip", "unknown"))
+    _cj_port = str(target.get("port", 0))
+    _cj_host = re.sub(r'[^\w]', '_', target.get("hostname", ""))[:40]
     safe = re.sub(r'[^\w]', '_', label)[:60]
-    _cj_base = f"{safe}_{_cj_ip}"
+    _cj_base = f"{safe}_{_cj_ip}_{_cj_port}"
+    if _cj_host and _cj_host != _cj_ip:
+        _cj_base = f"{safe}_{_cj_host}_{_cj_port}"
     ss_dir = out.root / phase
     ss_dir.mkdir(parents=True, exist_ok=True)
     ss_path = ss_dir / f"{_cj_base}_clickjack_poc.png"
@@ -17593,8 +17705,9 @@ def _capture_clickjack_screenshot(target_url: str, out: "OutputManager",
             _register_screenshot(out.root, ss_path, url=target_url,
                                  ip=target.get("ip", ""), port=target.get("port", 0),
                                  hostname=target.get("hostname", ""),
-                                 title=f"Clickjacking PoC: {label}", description="Clickjacking proof-of-concept",
-                                 classification="ClickJacking Successful")
+                                 title=f"Clickjacking PoC: {target_url}",
+                                 description=f"Clickjacking proof-of-concept — {target_url}",
+                                 classification="ClickJacking PoC")
             try:
                 poc_persist.write_text(poc_html, encoding="utf-8")
             except Exception:
@@ -18291,6 +18404,8 @@ def _phase_endpoint_tools(
                               else _ep_sc.split(";")[0].strip())
                 # Skip infrastructure cookies (load balancer, CDN, WAF)
                 if _INFRA_COOKIE_RE.match(_ep_cname):
+                    continue
+                if _is_deletion_cookie(_ep_sc):
                     continue
                 _ep_sc_out = f"Set-Cookie: {_ep_sc[:300]}"
                 if "httponly" not in _ep_sc_low:
@@ -20956,7 +21071,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             continue
         if hdr_name not in headers:
             _base_sec_hdrs_absent.add(hdr_name)
-            if hdr_name == "X-Frame-Options":
+            if hdr_name == "X-Frame-Options" and not _is_clickjack_fp(resp):
                 _cj_ss = _capture_clickjack_screenshot(
                     url, out, phase, "clickjack_missing_xfo",
                     target, cfg)
@@ -21107,7 +21222,8 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             )
 
     _xfo_val = headers.get("X-Frame-Options", "")
-    if _xfo_val and _xfo_val.upper().strip() not in ("DENY", "SAMEORIGIN"):
+    if (_xfo_val and _xfo_val.upper().strip() not in ("DENY", "SAMEORIGIN")
+            and not _is_redirect and not _is_clickjack_fp(resp)):
         _cj_perm_ss = _capture_clickjack_screenshot(
             url, out, phase, "clickjack_permissive_xfo",
             target, cfg)
@@ -21326,6 +21442,8 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         # Skip infrastructure cookies (load balancer, CDN, WAF) — not session
         # cookies and missing flags on them is not a session-hijack vector.
         if _INFRA_COOKIE_RE.match(cname):
+            continue
+        if _is_deletion_cookie(sc):
             continue
         _sc_out  = f"Set-Cookie: {sc[:300]}"
         _sc_src  = "fracture-headers"
@@ -29742,6 +29860,19 @@ def _normalize_nikto(vuln: dict) -> dict:
                     return {"title": "Login Page Identified",
                             "risk": "INFO", "owasp": _owasp, "nist": _nist,
                             "remediation": "Informational — login pages are expected on web applications."}
+            # Cookie FP gate — validate nikto output against actual attrs
+            if _title.startswith("Missing Secure Cookie Attribute:"):
+                _nik_msg_low = msg.lower()
+                if _title.endswith(": SameSite"):
+                    if re.search(r'samesite\s*=\s*\w+', _nik_msg_low):
+                        return None
+                elif _title.endswith(": HttpOnly"):
+                    if "httponly" in _nik_msg_low.split("not")[0] if "not" in _nik_msg_low else False:
+                        pass  # "httponly not set" — legit finding
+                elif _title.endswith(": Secure"):
+                    pass
+                if _is_deletion_cookie_from_output(_nik_msg_low):
+                    return None
             return {"title": _title, "risk": _risk, "owasp": _owasp,
                     "nist": _nist, "remediation": _remed}
 
@@ -30607,6 +30738,20 @@ def _normalize_nuclei(item: dict) -> dict:
                 break
             if _title == "__SUPPRESS__":
                 return {}  # Intentionally suppressed — known FP template
+            # ── Cookie FP gate: validate nuclei output against actual attrs ──
+            if _title.startswith("Missing Secure Cookie Attribute:"):
+                _nuc_out_low = (str(_output) or "").lower()
+                if _title.endswith(": SameSite"):
+                    if re.search(r'samesite\s*=\s*\w+', _nuc_out_low):
+                        return {}
+                elif _title.endswith(": HttpOnly"):
+                    if "httponly" in _nuc_out_low:
+                        return {}
+                elif _title.endswith(": Secure"):
+                    if re.search(r'[;\s]secure[;\s]|[;\s]secure$', _nuc_out_low):
+                        return {}
+                if _is_deletion_cookie_from_output(_nuc_out_low):
+                    return {}
             return {
                 "title": _title, "risk": _risk or _sev,
                 "description": _desc or f"{_name} ({_tid})",

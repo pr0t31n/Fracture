@@ -269,14 +269,13 @@ APT_PACKAGES = [
     "openjdk-21-jre-headless",
     # Headless browser for SPA crawl (chromium-driver provides chromedriver)
     "chromium", "chromium-driver",
-    # mitmproxy via apt (pip build fails on ARM/Pi — Rust native deps)
-    "mitmproxy",
 ]
-# Best-effort browsers/drivers — names vary across distros and releases.
+# Best-effort packages — names/versions vary across distros and releases.
 # Kali ships firefox-esr (not firefox) and geckodriver (no firefox- prefix).
-# Older Debian/Ubuntu use firefox-geckodriver. Try each; tolerate misses.
+# mitmproxy via apt can have broken deps on ARM (python3-mitmproxy-rs lag).
 APT_PACKAGES_OPTIONAL = [
     "firefox-esr", "firefox", "geckodriver", "firefox-geckodriver",
+    "mitmproxy",
 ]
 DNF_PACKAGES = [
     "nikto", "sqlmap", "sslscan", "whatweb", "ffuf",
@@ -288,10 +287,10 @@ DNF_PACKAGES = [
     "java-21-openjdk-headless",
     # Headless browser for SPA crawl
     "chromium", "chromedriver",
-    "mitmproxy",
 ]
 DNF_PACKAGES_OPTIONAL = [
     "firefox", "geckodriver",
+    "mitmproxy",
 ]
 BREW_PACKAGES = [
     "gobuster", "nikto", "sslscan", "git",
@@ -306,16 +305,58 @@ BREW_PACKAGES = [
 ]
 
 
+def _install_mitmproxy():
+    """Install mitmproxy with apt→pip fallback and loud warning on failure.
+
+    mitmproxy powers authenticated manual crawling — a key differentiator.
+    Kali ARM repos sometimes ship broken dependency chains (python3-mitmproxy-rs
+    version lag), so we fall back to pip if apt fails.
+    """
+    if shutil.which("mitmdump"):
+        info("✓ mitmproxy already installed (mitmdump found)")
+        return
+    # Try apt first (preferred — no Rust build from source)
+    if OS == "apt":
+        try:
+            run(["apt-get", "install", "-y", "mitmproxy"], check=True)
+            info("✓ mitmproxy installed via apt")
+            return
+        except subprocess.CalledProcessError:
+            note("  apt install of mitmproxy failed (broken deps) — trying pip fallback...")
+    # pip fallback — may need Rust toolchain on ARM
+    try:
+        run([sys.executable, "-m", "pip", "install",
+             "--break-system-packages", "mitmproxy"], check=True)
+        info("✓ mitmproxy installed via pip")
+        return
+    except subprocess.CalledProcessError:
+        pass
+    # Both failed
+    warn("╔══════════════════════════════════════════════════════════╗")
+    warn("║  mitmproxy COULD NOT BE INSTALLED                      ║")
+    warn("║                                                        ║")
+    warn("║  Authenticated manual crawling will be UNAVAILABLE.    ║")
+    warn("║  This is Fracture's key differentiator for SPA/auth    ║")
+    warn("║  testing — fix this when possible.                     ║")
+    warn("║                                                        ║")
+    warn("║  To fix manually:                                      ║")
+    warn("║    apt-get install mitmproxy   (after Kali repo fix)   ║")
+    warn("║    pip install mitmproxy       (needs Rust on ARM)     ║")
+    warn("╚══════════════════════════════════════════════════════════╝")
+
+
 def install_system():
     banner("Phase: system packages")
     if OS == "apt":
         apt_install(APT_PACKAGES)
         info("Installing optional Firefox / geckodriver (Chromium remains primary)...")
         apt_install_optional(APT_PACKAGES_OPTIONAL)
+        _install_mitmproxy()
     elif OS == "dnf":
         dnf_install(DNF_PACKAGES)
         info("Installing optional Firefox / geckodriver (Chromium remains primary)...")
         dnf_install_optional(DNF_PACKAGES_OPTIONAL)
+        _install_mitmproxy()
     elif OS == "zypper":
         zypper_install(["nikto", "python3-pip", "git", "golang", "ruby"])
     elif OS == "macos":
