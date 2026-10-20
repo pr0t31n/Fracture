@@ -34500,6 +34500,217 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         vc.log("[session] Cookie security flags: all checked cookies appear correctly configured",
                "INFO")
 
+    # 4b. __Host- / __Secure- cookie prefix validation (RFC 6265bis §4.1.3)
+    vc.status(phase, "Session Analysis", "running", "Cookie prefix validation", 3, 13)
+    _bad_host_prefix:   list = []
+    _bad_secure_prefix: list = []
+    for _ck in auth_sess.cookies:
+        if _INFRA_COOKIE_RE.match(_ck.name):
+            continue
+        if _TRACKING_COOKIE_RE.match(_ck.name):
+            continue
+        if _ck.name.startswith("__Host-"):
+            _prefix_ok = True
+            if not _ck.secure:
+                _prefix_ok = False
+            if _ck.domain and not _ck.domain.startswith("."):
+                pass
+            elif _ck.domain and _ck.domain.startswith("."):
+                _prefix_ok = False
+            if _ck.path != "/":
+                _prefix_ok = False
+            if not _prefix_ok:
+                _bad_host_prefix.append(_ck.name)
+        elif _ck.name.startswith("__Secure-"):
+            if not _ck.secure:
+                _bad_secure_prefix.append(_ck.name)
+
+    if _bad_host_prefix:
+        out.add_finding(
+            title="__Host- Cookie Prefix Requirements Not Met",
+            url=url, port=target["port"], risk="MEDIUM",
+            description=(
+                f"The following cookie(s) use the __Host- prefix but violate its "
+                f"requirements: {', '.join(_bad_host_prefix)}. "
+                f"__Host- cookies MUST set Secure, MUST NOT set a Domain attribute, "
+                f"and MUST set Path=/. When these requirements are not met, the "
+                f"prefix provides no protection against cookie injection attacks from "
+                f"subdomains or insecure pages."
+            ),
+            output=f"Non-compliant __Host- cookies: {', '.join(_bad_host_prefix)}",
+            sources="fracture-session", service=target["scheme"],
+            affected=url, output_file=_ck_ev_str,
+            owasp="A07:2025 Identification and Authentication Failures",
+            nist="SC-23",
+            remediation=(
+                "Ensure all __Host- prefixed cookies set the Secure flag, omit the "
+                "Domain attribute, and set Path=/. If these requirements cannot be met, "
+                "remove the __Host- prefix and rely on standard cookie hardening."
+            ),
+        )
+        vc.log(f"[session] __Host- prefix violation: {', '.join(_bad_host_prefix)}", "SUCCESS")
+
+    if _bad_secure_prefix:
+        out.add_finding(
+            title="__Secure- Cookie Prefix Without Secure Flag",
+            url=url, port=target["port"], risk="MEDIUM",
+            description=(
+                f"The following cookie(s) use the __Secure- prefix but lack the "
+                f"Secure flag: {', '.join(_bad_secure_prefix)}. "
+                f"__Secure- cookies MUST set the Secure attribute. Without it, the "
+                f"prefix has no effect and the cookie may be sent over plaintext HTTP."
+            ),
+            output=f"Non-compliant __Secure- cookies: {', '.join(_bad_secure_prefix)}",
+            sources="fracture-session", service=target["scheme"],
+            affected=url, output_file=_ck_ev_str,
+            owasp="A02:2025 Cryptographic Failures",
+            nist="SC-8",
+            remediation=(
+                "Add the Secure attribute to all __Secure- prefixed cookies. "
+                "If HTTPS cannot be enforced, remove the __Secure- prefix."
+            ),
+        )
+        vc.log(f"[session] __Secure- prefix violation: {', '.join(_bad_secure_prefix)}", "SUCCESS")
+
+    # 4c. Cookie scope / domain overly-broad check
+    vc.status(phase, "Session Analysis", "running", "Cookie domain scope", 3, 13)
+    _target_host = urllib.parse.urlparse(url).hostname or ""
+    _target_parts = _target_host.split(".")
+    _broad_domain_cookies: list = []
+    for _ck in auth_sess.cookies:
+        if _INFRA_COOKIE_RE.match(_ck.name):
+            continue
+        if _TRACKING_COOKIE_RE.match(_ck.name):
+            continue
+        _ck_domain = (_ck.domain or "").lstrip(".")
+        if not _ck_domain:
+            continue
+        _ck_parts = _ck_domain.split(".")
+        if len(_ck_parts) < len(_target_parts) and _target_host.endswith(_ck_domain):
+            _broad_domain_cookies.append(f"{_ck.name} (Domain=.{_ck_domain})")
+
+    if _broad_domain_cookies:
+        out.add_finding(
+            title="Cookie Domain Scope Overly Broad",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"The following cookie(s) are scoped to a parent domain broader than "
+                f"the application host ({_target_host}): "
+                f"{', '.join(_broad_domain_cookies)}. "
+                f"Overly-broad domain scoping means every subdomain under that domain "
+                f"receives the cookie, expanding the attack surface. A compromised "
+                f"sibling application could read session tokens."
+            ),
+            output=f"Overly-broad cookies: {', '.join(_broad_domain_cookies)}",
+            sources="fracture-session", service=target["scheme"],
+            affected=url, output_file=_ck_ev_str,
+            owasp="A07:2025 Identification and Authentication Failures",
+            nist="SC-23",
+            remediation=(
+                f"Scope session cookies to the specific application host ({_target_host}) "
+                f"by omitting the Domain attribute or setting it to the exact FQDN. "
+                f"Avoid setting Domain to a parent domain unless cross-subdomain "
+                f"sharing is explicitly required."
+            ),
+        )
+        vc.log(f"[session] Overly-broad domain: {', '.join(_broad_domain_cookies)}", "SUCCESS")
+
+    # 4d. Cookie expiration / Max-Age analysis
+    vc.status(phase, "Session Analysis", "running", "Cookie expiration", 3, 13)
+    _EXCESSIVE_LIFETIME_DAYS = 365
+    _persistent_session_cookies: list = []
+    _excessive_lifetime_cookies: list = []
+    _session_like_re = re.compile(
+        r'(?:sess|token|auth|jwt|sid|login|identity|access)',
+        re.IGNORECASE
+    )
+    for _ck in auth_sess.cookies:
+        if _INFRA_COOKIE_RE.match(_ck.name):
+            continue
+        if _TRACKING_COOKIE_RE.match(_ck.name):
+            continue
+        if not _session_like_re.search(_ck.name):
+            continue
+        if _ck.expires is not None and _ck.expires > 0:
+            _ck_lifetime_days = (_ck.expires - time.time()) / 86400
+            if _ck_lifetime_days > _EXCESSIVE_LIFETIME_DAYS:
+                _excessive_lifetime_cookies.append(
+                    f"{_ck.name} ({int(_ck_lifetime_days)}d)"
+                )
+            elif _ck_lifetime_days > 1:
+                _persistent_session_cookies.append(
+                    f"{_ck.name} ({int(_ck_lifetime_days)}d)"
+                )
+
+    if _excessive_lifetime_cookies:
+        out.add_finding(
+            title="Session Cookie With Excessive Lifetime",
+            url=url, port=target["port"], risk="LOW",
+            description=(
+                f"The following session-related cookie(s) have an expiration exceeding "
+                f"{_EXCESSIVE_LIFETIME_DAYS} days: "
+                f"{', '.join(_excessive_lifetime_cookies)}. "
+                f"Long-lived session cookies widen the window for session hijacking "
+                f"via stolen cookies. If the cookie is compromised, the attacker "
+                f"can use it for an extended period."
+            ),
+            output=f"Excessive-lifetime cookies: {', '.join(_excessive_lifetime_cookies)}",
+            sources="fracture-session", service=target["scheme"],
+            affected=url, output_file=_ck_ev_str,
+            owasp="A07:2025 Identification and Authentication Failures",
+            nist="AC-12",
+            remediation=(
+                "Set session cookie expiration to the minimum necessary for the "
+                "application's session requirements. For high-security applications, "
+                "prefer session cookies (no Expires/Max-Age) that expire when the "
+                "browser closes, or limit lifetime to 8-24 hours."
+            ),
+        )
+        vc.log(
+            f"[session] Excessive cookie lifetime: {', '.join(_excessive_lifetime_cookies)}",
+            "SUCCESS"
+        )
+
+    # 4e. Cookie Path attribute — flag session cookies with Path=/
+    vc.status(phase, "Session Analysis", "running", "Cookie path scope", 3, 13)
+    _broad_path_cookies: list = []
+    _app_root_path = urllib.parse.urlparse(url).path or "/"
+    _app_root_path = _app_root_path.rstrip("/") or "/"
+    if _app_root_path != "/":
+        for _ck in auth_sess.cookies:
+            if _INFRA_COOKIE_RE.match(_ck.name):
+                continue
+            if _TRACKING_COOKIE_RE.match(_ck.name):
+                continue
+            if not _session_like_re.search(_ck.name):
+                continue
+            if (_ck.path or "/") == "/" and _app_root_path != "/":
+                _broad_path_cookies.append(_ck.name)
+
+    if _broad_path_cookies:
+        out.add_finding(
+            title="Session Cookie Path Not Restricted to Application Root",
+            url=url, port=target["port"], risk="INFO",
+            description=(
+                f"The following session cookie(s) use Path=/ even though the "
+                f"application is served from {_app_root_path}: "
+                f"{', '.join(_broad_path_cookies)}. "
+                f"A Path=/ cookie is accessible to all paths on the host, including "
+                f"other applications that may share the same origin."
+            ),
+            output=f"Broad-path cookies: {', '.join(_broad_path_cookies)}",
+            sources="fracture-session", service=target["scheme"],
+            affected=url, output_file=_ck_ev_str,
+            owasp="A04:2025 Insecure Design",
+            nist="SC-23",
+            remediation=(
+                f"Set the cookie Path attribute to the application root "
+                f"({_app_root_path}) to limit cookie exposure to only the paths "
+                f"that need it."
+            ),
+        )
+        vc.log(f"[session] Broad Path=/ cookies: {', '.join(_broad_path_cookies)}", "SUCCESS")
+
     vc.status(phase, "Session Analysis", "running", "Logout invalidation", 4, 13)
     # 5. Check logout invalidation
     # IMPORTANT: Never use auth_sess itself for logout probing — hitting /logout
@@ -44860,11 +45071,31 @@ def main() -> None:
         urllib.parse.urlparse(u).hostname for u in target_urls if u
     }
 
+    # Auto-scope the login page: when auth is configured and the login URL
+    # is on a different host, add it to scope so it gets tested.  The login
+    # page is part of the authentication surface and must be assessed even
+    # if the user only targeted the application host.
+    _login_url_cfg = cfg.get("auth", {}).get("login_url", "").strip()
+    if _login_url_cfg:
+        _login_host = urllib.parse.urlparse(_login_url_cfg).hostname
+        if _login_host and _login_host not in _scope_hostnames:
+            _scope_hostnames.add(_login_host)
+            vc.log(f"[scope] Auto-added login page host to scope: {_login_host}", "INFO")
+
     # Pending URL queue — grows when in-scope redirects are discovered during scanning
     _pending_urls:        list = list(target_urls)
     _processed_urls:      set  = set()
     _redirect_discovered: set  = set()  # tracks redirect-discovered target URLs
     _pending_idx = 0
+
+    # If the login URL is on a newly-scoped host, add its origin to the queue
+    # so it gets full phase coverage like any other target.
+    if _login_url_cfg:
+        _login_parsed = urllib.parse.urlparse(_login_url_cfg)
+        _login_origin = f"{_login_parsed.scheme}://{_login_parsed.netloc}"
+        if _login_origin not in _pending_urls and _login_url_cfg not in _pending_urls:
+            _pending_urls.append(_login_url_cfg)
+            vc.log(f"[scope] Auto-queued login page for scanning: {_login_url_cfg}", "INFO")
 
     # Start adaptive concurrency monitor (adjusts _SCAN_SEM based on CPU/RAM)
     _start_concurrency_monitor(_SCAN_SEM)
