@@ -4547,27 +4547,32 @@ def _is_valid_endpoint_url(u: str) -> bool:
 
 
 class _ScopedSession(requests.Session):
-    """requests.Session that blocks any request whose hostname is outside scope."""
+    """requests.Session that blocks any request whose hostname is outside scope.
+
+    Auth/IdP domains discovered during browser-assisted login are whitelisted
+    via add_auth_domain() so OAuth/SAML/CAS redirect chains complete normally
+    instead of returning a synthetic 403.
+    """
 
     def __init__(self, scope_hostnames: set) -> None:
         super().__init__()
         self._scope = scope_hostnames
+        self._auth_domains: set = set()
+
+    def add_auth_domain(self, domain: str) -> None:
+        if domain:
+            self._auth_domains.add(domain.lower().lstrip("."))
 
     def send(self, request, **kwargs):
         try:
             host = urllib.parse.urlparse(request.url).hostname or ""
         except Exception:
             host = ""
-        if host and host not in self._scope:
+        if host and host not in self._scope and host.lower() not in self._auth_domains:
             vc.log(
                 f"[scope] Blocked out-of-scope request: {request.method} {request.url}",
                 "WARNING",
             )
-            # Return a synthetic 403 instead of raising ValueError.
-            # When a redirect chain crosses out of scope (e.g. target →
-            # CAS → third-party IdP), raising makes the caller treat the
-            # entire request as a connection failure.  A non-redirect
-            # response stops the chain gracefully.
             resp = requests.models.Response()
             resp.status_code = 403
             resp._content = b"Blocked by Fracture scope enforcement"
@@ -6967,6 +6972,20 @@ document.addEventListener('submit', function(e) {
         for ck in browser_cookies:
             domain = ck.get("domain", "").lstrip(".")
             new_sess.cookies.set(ck["name"], ck["value"], domain=domain or None)
+            if domain and hasattr(new_sess, "add_auth_domain"):
+                new_sess.add_auth_domain(domain)
+        if captured_url and hasattr(new_sess, "add_auth_domain"):
+            try:
+                _cap_host = urllib.parse.urlparse(captured_url).hostname
+                if _cap_host:
+                    new_sess.add_auth_domain(_cap_host)
+            except Exception:
+                pass
+        if hasattr(new_sess, "_auth_domains") and new_sess._auth_domains:
+            _extra = new_sess._auth_domains - (_scope_hostnames or set())
+            if _extra:
+                vc.log(f"[auth] Whitelisted {len(_extra)} auth/IdP domain(s): "
+                       f"{', '.join(sorted(_extra))}", "INFO")
 
         # Attach browser state to session so _capture_screenshot_to can
         # inject it into headless Chrome for authenticated screenshots.
@@ -21131,6 +21150,13 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     except Exception as e:
         vc.log(f"[headers] Could not fetch {url}: {e}", "ERROR")
         out.log_error("headers", url, str(e))
+        return
+
+    if resp.headers.get("X-Fracture-Scope-Blocked"):
+        vc.log(f"[headers] Response is a Fracture scope-block synthetic 403 "
+               f"(redirected to out-of-scope IdP) — skipping header findings",
+               "INFO")
+        vc.status(phase, "Security Headers", "complete", "Skipped (scope-blocked)", 1, 1)
         return
 
     _is_error_page = resp.status_code >= 400
@@ -45418,9 +45444,6 @@ def main() -> None:
                         "file_upload_info", "open_redirect",
                         "business_logic", "auth_bypass", "files",
                         "subdomain_takeover",
-                        # webfiles: probes /.git, /.env, /robots.txt,
-                        # /backup.zip, etc. Each request is a known IoC.
-                        "webfiles",
                         # account_lockout: by design sends N login attempts
                         # — guaranteed to trip Cloudflare's bot-fight mode.
                         "account_lockout",
