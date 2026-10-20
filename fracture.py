@@ -10875,7 +10875,8 @@ return null;
             _auto_cfg["browser_auth"] = cfg.get("browser_auth", False)
             try:
                 _auto_sess = _build_auth_session(
-                    _auto_cfg, auth_key, scope_hostnames, role_label=role_label)
+                    _auto_cfg, auth_key, scope_hostnames, role_label=role_label,
+                    no_interactive=no_interactive, session=session)
                 if _auto_sess is not None and _auto_has_auth(_auto_sess):
                     # ── Verify login-based methods against baseline ──
                     # Cookies alone are not proof of auth — SPAs set tracking /
