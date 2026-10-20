@@ -14379,7 +14379,7 @@ _SPA_API_PATTERNS = [
 
 # Paths to exclude (static assets, not routes)
 _SPA_ROUTE_EXCLUDE = re.compile(
-    r'\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map|json|xml)$'
+    r'\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map|json|xml|webmanifest)$'
     r'|^/static/'
     r'|^/assets/'
     r'|^/node_modules/'
@@ -37047,7 +37047,29 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
 
-        # ── SAML / SSO guard ──────────────────────────────────────
+        # ── URL-path SSO guard ────────────────────────────────────
+        # SPAs serve a JS shell — the Okta/SAML redirect happens
+        # client-side, so HTML inspection finds no SSO markers.
+        # Detect IdP names embedded in the login URL path itself.
+        _SSO_PATH_RE = re.compile(
+            r'[/_-](?:okta|saml|azure|adfs|ping|auth0|onelogin|duo|'
+            r'cyberark|jumpcloud|keycloak|cognito)(?:[/_-]|$)'
+            r'|/oauth2?/'
+            r'|/\.well-known/openid',
+            re.IGNORECASE,
+        )
+        _action_path = urllib.parse.urlparse(action).path or ""
+        if _SSO_PATH_RE.search(_action_path):
+            vc.log(
+                f"[account_lockout] Login URL path contains IdP identifier "
+                f"({_action_path}) — authentication is delegated to an "
+                f"external IdP; rate-limiting is enforced there. "
+                f"Skipping: {action}",
+                "INFO",
+            )
+            continue
+
+        # ── SAML / SSO guard (HTML-based) ────────────────────────
         # If the login page advertises an external IdP (SAML, CyberArk,
         # Okta, Azure AD, PingFederate, ADFS, Auth0, OneLogin, etc.),
         # the real auth flow goes through the IdP.  A direct POST to the
@@ -39739,7 +39761,9 @@ _P20_LOGIN_FORM_RE = re.compile(
     re.I)
 _P20_LOGIN_PATH_RE = re.compile(
     r'(?:^|/)(?:login|log[-_]in|signin|sign[-_]in|auth(?:enticate)?'
-    r'|sso|cas|adfs)/?$', re.I)
+    r'|sso|cas|adfs'
+    r'|login[-_](?:okta|saml|azure|sso|adfs|ping|auth0|onelogin|duo|cognito)'
+    r')/?$', re.I)
 # ── Per-request entropy normalization (CSP nonces, CSRF tokens) ──────────────
 # Some SPAs embed a per-request 32-char hex CSP nonce in <meta>, <script>,
 # and <style> tags.  This rotates every response, making every body hash unique
@@ -39753,6 +39777,10 @@ _P20_CSRF_TOKEN_RE = re.compile(
     r'(\bcsrf[-_]?token["\'":=\s]+)[0-9a-fA-F]{24,64}', re.I)
 _P20_VIEWSTATE_RE = re.compile(
     r'(__VIEWSTATE[^>]*value=["\'"])[A-Za-z0-9+/=]{32,}')
+_P20_SRI_RE = re.compile(
+    r'(\bintegrity=["\'"])sha\d+-[A-Za-z0-9+/=]{20,}(?:\s+sha\d+-[A-Za-z0-9+/=]{20,})*')
+_P20_INLINE_STATE_RE = re.compile(
+    r'(<script[^>]*>\s*(?:window\.__\w+|window\.\w+_STATE|__NEXT_DATA__)\s*=\s*)\{[^<]{0,8000}\}')
 
 def _p20_normalize_body(body: str) -> str:
     """Strip per-request entropy from an HTML body for consistent comparison."""
@@ -39760,6 +39788,8 @@ def _p20_normalize_body(body: str) -> str:
     s = _P20_CSP_META_RE.sub(r'\1_NONCE_', s)
     s = _P20_CSRF_TOKEN_RE.sub(r'\1_TOKEN_', s)
     s = _P20_VIEWSTATE_RE.sub(r'\1_VS_', s)
+    s = _P20_SRI_RE.sub(r'\1_SRI_', s)
+    s = _P20_INLINE_STATE_RE.sub(r'\1_STATE_', s)
     return s
 
 def _p20_body_hash(body: str) -> str:
@@ -40386,9 +40416,13 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         any_authed  = any(_ok(ep_access.get(r), r, ep) for r in cred_roles)
 
         if _ok(unauth_st, "unauthenticated", ep) and any_authed:
+            _ep_lower = (ep.get("path") or "").lower().rstrip("/")
+            # Root path is always public — every site serves / to
+            # unauthenticated users (SPA shell, landing page, etc.)
+            if not _ep_lower or _ep_lower == "/":
+                continue
             # Skip login/auth pages — they are expected to be publicly
             # accessible and are not missing access control.
-            _ep_lower = (ep.get("path") or "").lower().rstrip("/")
             if _P20_LOGIN_PATH_RE.search(_ep_lower):
                 continue
             # Defence in depth: skip error-page URLs even if body
@@ -40401,7 +40435,21 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 continue
             if re.search(r'robots\.txt$|sitemap\.xml$|apple-touch-icon'
                          r'|browserconfig\.xml$|manifest\.json$'
+                         r'|\.webmanifest$'
                          r'|service-?worker\.js$|sw\.js$', _ep_lower):
+                continue
+            # Skip intentionally-public pages — registration, legal,
+            # password recovery, etc. are expected to be accessible
+            # without authentication.
+            if re.search(
+                r'(?:^|/)(?:create[-_]?account|sign[-_]?up|register'
+                r'|forgot[-_]?password|reset[-_]?password|password[-_]?reset'
+                r'|eula|terms(?:[-_]of[-_](?:service|use))?'
+                r'|privacy(?:[-_]policy)?|legal|tos|gdpr|cookie[-_]?policy'
+                r'|accessibility|help|support|contact(?:[-_]us)?'
+                r'|about(?:[-_]us)?|faq)/?$',
+                _ep_lower,
+            ):
                 continue
             _unauth_ev = ""
             try:
