@@ -6666,28 +6666,31 @@ document.addEventListener('submit', function(e) {
             captured_url    = driver.current_url
             browser_cookies = driver.get_cookies()
 
-            # Capture localStorage from the authenticated page — SPAs (Okta,
-            # Auth0, Firebase) store auth tokens/state here that httpOnly
-            # cookies alone don't provide.  Injected into headless Chrome
-            # for authenticated screenshots.
+            # Capture localStorage + sessionStorage from the authenticated
+            # page.  SPAs (Okta, Auth0, Firebase) store auth tokens/state
+            # here that httpOnly cookies alone don't provide.
             _browser_local_storage = {}
-            try:
-                _ls_len = driver.execute_script(
-                    "return window.localStorage.length;") or 0
-                for _ls_i in range(_ls_len):
-                    _ls_k = driver.execute_script(
-                        f"return window.localStorage.key({_ls_i});")
-                    if _ls_k:
-                        _ls_v = driver.execute_script(
-                            f"return window.localStorage.getItem({json.dumps(_ls_k)});")
-                        _browser_local_storage[_ls_k] = _ls_v
-                if _browser_local_storage:
-                    vc.log(
-                        f"[auth] Captured {len(_browser_local_storage)} localStorage entries from browser",
-                        "INFO",
-                    )
-            except Exception:
-                pass
+            _browser_session_storage = {}
+            for _st_name, _st_target in [("localStorage", _browser_local_storage),
+                                          ("sessionStorage", _browser_session_storage)]:
+                try:
+                    _st_len = driver.execute_script(
+                        f"return window.{_st_name}.length;") or 0
+                    for _st_i in range(_st_len):
+                        _st_k = driver.execute_script(
+                            f"return window.{_st_name}.key({_st_i});")
+                        if _st_k:
+                            _st_v = driver.execute_script(
+                                f"return window.{_st_name}.getItem(arguments[0]);",
+                                _st_k)
+                            _st_target[_st_k] = _st_v
+                    if _st_target:
+                        vc.log(
+                            f"[auth] Captured {len(_st_target)} {_st_name} entries from browser",
+                            "INFO",
+                        )
+                except Exception:
+                    pass
 
             # Collect remaining DOM events from the current (final) page,
             # then merge with events gathered by the background poller.
@@ -6970,6 +6973,7 @@ document.addEventListener('submit', function(e) {
         # browser_cookies preserves ALL attributes (secure, httpOnly,
         # sameSite, expiry, path) that requests.Session.cookies loses.
         new_sess._fracture_local_storage = _browser_local_storage  # type: ignore[attr-defined]
+        new_sess._fracture_session_storage = _browser_session_storage  # type: ignore[attr-defined]
         new_sess._fracture_captured_url = captured_url  # type: ignore[attr-defined]
         new_sess._fracture_browser_cookies = list(browser_cookies)  # type: ignore[attr-defined]
 
@@ -17611,16 +17615,12 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                     except Exception:
                         pass
                     _spa_transfer_cookies(auth_session, driver, ep_url)
-                # Inject localStorage (SPA auth state) — must be on the
-                # target origin (localStorage is origin-scoped).  Use a
-                # data: URI with the correct scheme/host to seed the origin,
-                # then inject before the real page load.
+                # Inject localStorage + sessionStorage (SPA auth state).
+                # Must be on the target origin (both are origin-scoped).
                 _ls_data = getattr(auth_session, "_fracture_local_storage", None)
-                if _ls_data:
+                _ss_data = getattr(auth_session, "_fracture_session_storage", None)
+                if _ls_data or _ss_data:
                     try:
-                        # Navigate to a minimal page on the target origin.
-                        # Use Page.navigate CDP to avoid Selenium's wait-for-load
-                        # (which would let the SPA redirect to IdP).
                         if _used_cdp:
                             try:
                                 driver.execute_cdp_cmd("Page.navigate", {"url": _origin_url})
@@ -17635,23 +17635,39 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                                     driver.execute_script("window.stop();")
                                 except Exception:
                                     pass
-                        # else: Selenium fallback already navigated to origin
-                        _ls_set = 0
-                        for _ls_k, _ls_v in _ls_data.items():
-                            try:
-                                driver.execute_script(
-                                    "window.localStorage.setItem(arguments[0], arguments[1]);",
-                                    _ls_k, _ls_v,
-                                )
-                                _ls_set += 1
-                            except Exception:
-                                pass
-                        if _ls_set:
-                            vc.log(f"[screenshot] Injected {_ls_set}/{len(_ls_data)} localStorage entries", "INFO")
+                        for _st_js, _st_src in [("localStorage", _ls_data),
+                                                ("sessionStorage", _ss_data)]:
+                            if not _st_src:
+                                continue
+                            _st_ok = 0
+                            for _sk, _sv in _st_src.items():
+                                try:
+                                    driver.execute_script(
+                                        f"window.{_st_js}.setItem(arguments[0], arguments[1]);",
+                                        _sk, _sv,
+                                    )
+                                    _st_ok += 1
+                                except Exception:
+                                    pass
+                            if _st_ok:
+                                vc.log(f"[screenshot] Injected {_st_ok}/{len(_st_src)} {_st_js} entries", "INFO")
                     except Exception as _ls_err:
-                        vc.log(f"[screenshot] localStorage injection failed: {_ls_err}", "WARNING")
+                        vc.log(f"[screenshot] Storage injection failed: {_ls_err}", "WARNING")
+            # For SPAs with route-based auth gating, "/" may always show
+            # the public view.  When the browser landed on a different
+            # URL after login, use THAT as the screenshot target — it's
+            # where the authenticated content lives.
+            _nav_url = ep_url
+            _captured = getattr(auth_session, "_fracture_captured_url", None) if auth_session else None
+            if _captured:
+                _cap_parsed = urllib.parse.urlparse(_captured)
+                _ep_parsed  = urllib.parse.urlparse(ep_url)
+                if (_cap_parsed.netloc == _ep_parsed.netloc
+                        and _cap_parsed.path.rstrip("/") != _ep_parsed.path.rstrip("/")):
+                    _nav_url = _captured
+                    vc.log(f"[screenshot] SPA: using authenticated landing URL {_nav_url} instead of {ep_url}", "INFO")
             try:
-                driver.get(ep_url)
+                driver.get(_nav_url)
             except Exception as _load_err:
                 _le = str(_load_err)
                 if "net::ERR_CONNECTION_REFUSED" in _le or "Reached error page" in _le:
@@ -17677,7 +17693,7 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
             )
             driver.set_window_size(1280, max(800, int(total_h)))
             driver.save_screenshot(str(out_path))
-            _add_url_bar(out_path, _url_bar_url or ep_url)
+            _add_url_bar(out_path, _url_bar_url or _nav_url)
             return True
         finally:
             try:
