@@ -6316,12 +6316,15 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                                 _owner = _pwd2.getpwuid(_su).pw_name
                             except Exception:
                                 pass
-                if _owner and _xhost_src:
+                if _owner:
+                    _xh_env = f"DISPLAY={_d}"
+                    if _xhost_src:
+                        _xh_env += f" XAUTHORITY={_xhost_src}"
                     for _arg in ["+SI:localuser:root", "+local:"]:
                         try:
                             _r = subprocess.run(
                                 ["su", _owner, "-c",
-                                 f"DISPLAY={_d} XAUTHORITY={_xhost_src} xhost {_arg}"],
+                                 f"{_xh_env} xhost {_arg}"],
                                 capture_output=True, timeout=5,
                             )
                             if _r.returncode == 0:
@@ -10465,7 +10468,8 @@ return null;
             sess.headers["Authorization"] = f"Bearer {token}"
         else:
             # No pre-issued token — POST credentials to obtain JWT (same as token_login)
-            resp, _url = _login_post()
+            _jwt_login_url = (auth.get("login_url") or cfg.get("target_url") or "").strip()
+            resp, _url = _login_post(_jwt_login_url)
             if resp is not None:
                 try:
                     body = resp.json()
@@ -10498,7 +10502,8 @@ return null;
 
     # ── Token Login ───────────────────────────────────────────────────────────
     elif method == "token_login":
-        resp, _url = _login_post()
+        _tl_login_url = (auth.get("login_url") or cfg.get("target_url") or "").strip()
+        resp, _url = _login_post(_tl_login_url)
         if resp is not None:
             try:
                 body = resp.json()
@@ -10639,7 +10644,8 @@ return null;
                 except Exception as exc:
                     vc.err(f"[auth] TOTP single-step login failed: {exc}")
         else:
-            resp, _url = _login_post()
+            _totp_login_url = (auth.get("login_url") or cfg.get("target_url") or "").strip()
+            resp, _url = _login_post(_totp_login_url)
             if resp is not None and mfa_url and totp_secret:
                 try:
                     sess.post(mfa_url, data={mfa_field: _totp(totp_secret)}, timeout=timeout)
