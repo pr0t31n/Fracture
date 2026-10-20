@@ -4138,6 +4138,9 @@ class OutputManager:
             "nist":           nist or "",
             "remediation":    remediation or "",
             "accounts":       list(self._current_accounts),
+            "roles":          ", ".join(sorted(set(
+                                  a.get("role", "") for a in self._current_accounts
+                                  if a.get("role", "")))),
             "http_code":      int(http_code) if http_code else 0,
             "highlights":     highlights or self._auto_highlights(
                                   title, output, cves, affected),
@@ -4389,6 +4392,12 @@ class OutputManager:
                                 _ex_accts.append(_a)
                                 _ex_roles.add(_a.get("role", ""))
                         ex["accounts"] = _ex_accts
+                    # merge roles — union existing and incoming
+                    _in_roles = entry.get("roles", "")
+                    if _in_roles:
+                        _ex_r_set = set(r.strip() for r in (ex.get("roles") or "").split(",") if r.strip())
+                        _ex_r_set |= set(r.strip() for r in _in_roles.split(",") if r.strip())
+                        ex["roles"] = ", ".join(sorted(_ex_r_set))
                     # merge highlights — combine without duplication
                     if highlights:
                         _ex_hl = ex.get("highlights") or []
@@ -40464,6 +40473,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 _unauth_ev = str(_unauth_path)
             except Exception:
                 pass
+            _authed_roles = [r for r in cred_roles if _ok(ep_access.get(r), r, ep)]
             out.add_finding(
                 title="Unauthenticated Access to Protected Path",
                 url=ep["url"], port=port, risk="MEDIUM",
@@ -40478,6 +40488,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 affected=ep["url"],
                 owasp="A01:2021 Broken Access Control", nist="AC-3",
                 remediation="Enforce authentication middleware on all non-public routes.",
+                roles=", ".join(["unauthenticated"] + sorted(_authed_roles)),
             )
 
         if most_privileged and len(cred_roles) > 1:
@@ -40586,6 +40597,8 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     _bfla_risk = "HIGH" if _higher_denied else "MEDIUM"
+                    _bfla_roles = sorted(set([low_role, most_privileged] +
+                        [r for r in cred_roles if _ok(ep_access.get(r), r, ep)]))
                     out.add_finding(
                         title=f"BFLA: Role '{low_role}' Can Access Admin Path",
                         url=ep["url"], port=port, risk=_bfla_risk,
@@ -40605,6 +40618,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                         affected=ep["url"],
                         owasp="A01:2021 Broken Access Control", nist="AC-6",
                         remediation="Implement role-based access control (RBAC).",
+                        roles=", ".join(_bfla_roles),
                     )
 
     # Build per-role auth status so consumers (Crucible, reviewers) can see
@@ -40760,6 +40774,7 @@ def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
                 "endpoint. Verify the authenticated identity's role before executing "
                 "privileged operations — do not rely solely on hiding URLs or UI elements."
             ),
+            roles=", ".join(sorted(set([ctx_label, role1_label]))),
         )
 
     _emit_bfla_tier(
