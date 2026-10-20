@@ -6666,6 +6666,29 @@ document.addEventListener('submit', function(e) {
             captured_url    = driver.current_url
             browser_cookies = driver.get_cookies()
 
+            # Capture localStorage from the authenticated page — SPAs (Okta,
+            # Auth0, Firebase) store auth tokens/state here that httpOnly
+            # cookies alone don't provide.  Injected into headless Chrome
+            # for authenticated screenshots.
+            _browser_local_storage = {}
+            try:
+                _ls_len = driver.execute_script(
+                    "return window.localStorage.length;") or 0
+                for _ls_i in range(_ls_len):
+                    _ls_k = driver.execute_script(
+                        f"return window.localStorage.key({_ls_i});")
+                    if _ls_k:
+                        _ls_v = driver.execute_script(
+                            f"return window.localStorage.getItem({json.dumps(_ls_k)});")
+                        _browser_local_storage[_ls_k] = _ls_v
+                if _browser_local_storage:
+                    vc.log(
+                        f"[auth] Captured {len(_browser_local_storage)} localStorage entries from browser",
+                        "INFO",
+                    )
+            except Exception:
+                pass
+
             # Collect remaining DOM events from the current (final) page,
             # then merge with events gathered by the background poller.
             try:
@@ -6941,6 +6964,11 @@ document.addEventListener('submit', function(e) {
         for ck in browser_cookies:
             domain = ck.get("domain", "").lstrip(".")
             new_sess.cookies.set(ck["name"], ck["value"], domain=domain or None)
+
+        # Attach localStorage to session so _capture_screenshot_to can
+        # inject it into headless Chrome for SPA-authenticated screenshots.
+        new_sess._fracture_local_storage = _browser_local_storage  # type: ignore[attr-defined]
+        new_sess._fracture_captured_url = captured_url  # type: ignore[attr-defined]
 
         vc.log(
             f"[auth] Captured {len(browser_cookies)} cookie(s) via {_used_name} "
@@ -17557,6 +17585,45 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                     except Exception:
                         pass
                     _spa_transfer_cookies(auth_session, driver, ep_url)
+                # Inject localStorage (SPA auth state) — must be on the
+                # target origin (localStorage is origin-scoped).  Use a
+                # data: URI with the correct scheme/host to seed the origin,
+                # then inject before the real page load.
+                _ls_data = getattr(auth_session, "_fracture_local_storage", None)
+                if _ls_data:
+                    try:
+                        # Navigate to a minimal page on the target origin.
+                        # Use Page.navigate CDP to avoid Selenium's wait-for-load
+                        # (which would let the SPA redirect to IdP).
+                        if _used_cdp:
+                            try:
+                                driver.execute_cdp_cmd("Page.navigate", {"url": _origin_url})
+                                import time as _time_ls
+                                _time_ls.sleep(0.5)
+                                driver.execute_cdp_cmd("Page.stopLoading", {})
+                            except Exception:
+                                try:
+                                    driver.get(_origin_url)
+                                    import time as _time_ls2
+                                    _time_ls2.sleep(0.3)
+                                    driver.execute_script("window.stop();")
+                                except Exception:
+                                    pass
+                        # else: Selenium fallback already navigated to origin
+                        _ls_set = 0
+                        for _ls_k, _ls_v in _ls_data.items():
+                            try:
+                                driver.execute_script(
+                                    "window.localStorage.setItem(arguments[0], arguments[1]);",
+                                    _ls_k, _ls_v,
+                                )
+                                _ls_set += 1
+                            except Exception:
+                                pass
+                        if _ls_set:
+                            vc.log(f"[screenshot] Injected {_ls_set}/{len(_ls_data)} localStorage entries", "INFO")
+                    except Exception as _ls_err:
+                        vc.log(f"[screenshot] localStorage injection failed: {_ls_err}", "WARNING")
             try:
                 driver.get(ep_url)
             except Exception as _load_err:
@@ -17571,7 +17638,12 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
             except Exception:
                 pass
             import time as _time_cs
-            _time_cs.sleep(1.5)
+            # SPAs need more time after readyState=complete — the JS
+            # framework still has to bootstrap, check auth, fetch data,
+            # and render.  Wait longer when we injected auth state.
+            _spa_wait = 4.0 if (auth_session is not None
+                                and getattr(auth_session, "_fracture_local_storage", None)) else 1.5
+            _time_cs.sleep(_spa_wait)
             total_h = driver.execute_script(
                 "return Math.max("
                 "  document.body.scrollHeight,"
