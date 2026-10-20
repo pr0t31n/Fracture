@@ -17392,10 +17392,11 @@ def _add_url_bar(png_path: Path, url: str) -> bool:
         return False
 
 
-def _classify_screenshot(page_title, server, status_code):
+def _classify_screenshot(page_title, server, status_code, url_path=""):
     t = (page_title or "").lower()
     s = (server or "").lower()
     sc = status_code or 0
+    p = (url_path or "").lower().rstrip("/")
     if sc == 400: return "Bad Request (400)"
     if sc == 401: return "Unauthorized (401)"
     if sc == 403: return "Forbidden (403)"
@@ -17417,10 +17418,25 @@ def _classify_screenshot(page_title, server, status_code):
     if "index of" in t: return "Directory Listing"
     if any(k in t for k in ("api", "swagger", "openapi")): return "API Documentation"
     if "error" in t or "exception" in t: return "Error Page"
+    if any(k in p for k in ("/login", "/signin", "/logon", "/sso", "/auth/", "/oauth")):
+        return "Login Page"
+    if any(k in p for k in ("/dashboard", "/home", "/landing", "/main", "/portal")):
+        return "Landing Page"
+    if any(k in p for k in ("/register", "/signup", "/sign-up", "/enroll")):
+        return "Registration Page"
+    if any(k in p for k in ("/admin", "/wp-admin", "/manage")):
+        return "Admin Page"
+    if any(k in p for k in ("/api", "/swagger", "/docs", "/openapi")):
+        return "API Documentation"
+    if any(k in p for k in ("/upload", "/import", "/attach")):
+        return "File Upload Page"
+    if "error" in p or "404" in p or "not-found" in p or "notfound" in p:
+        return "Error Page"
     if not page_title or page_title.strip() == "":
         if sc and 200 <= sc < 300: return "Web Page (no title)"
         if sc and 300 <= sc < 400: return f"Redirect ({sc})"
-        return "Blank / Minimal Response"
+        if not p or p == "/": return "Landing Page"
+        return "Interesting Page"
     if "apache" in s: return "Web Page (Apache)"
     if "nginx" in s: return "Web Page (Nginx)"
     if "iis" in s or "microsoft" in s: return "Web Page (IIS)"
@@ -17487,6 +17503,7 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                             target: dict, cfg: dict,
                             auth_session: "requests.Session | None" = None,
                             _url_bar_url: str = "",
+                            _meta: "dict | None" = None,
                             ) -> bool:
     """Take a headless screenshot of ep_url and save to out_path.
     Returns True on success.  Tries Chrome first, falls back to Firefox.
@@ -17685,6 +17702,15 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
             # and render.  Wait longer when authenticated.
             _spa_wait = 4.0 if auth_session is not None else 1.5
             _time_cs.sleep(_spa_wait)
+            if _meta is not None:
+                try:
+                    _meta["page_title"] = driver.title or ""
+                except Exception:
+                    pass
+                try:
+                    _meta["final_url"] = driver.current_url or ""
+                except Exception:
+                    pass
             total_h = driver.execute_script(
                 "return Math.max("
                 "  document.body.scrollHeight,"
@@ -22166,12 +22192,14 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
     vc.log(f"[screenshot] Capturing {_ss_ctx} screenshots", "INFO")
 
     try:
+        _ss_meta = {}
         if _capture_screenshot_to(url, out_path, target, cfg,
-                                  auth_session=sess):
-            _ss_rel = urllib.parse.urlparse(url).path or "/"
+                                  auth_session=sess, _meta=_ss_meta):
+            _ss_nav_url = _ss_meta.get("final_url", url)
+            _ss_rel = urllib.parse.urlparse(_ss_nav_url).path or "/"
             _ss_phase_code = None
             _ss_server = ""
-            _ss_page_title = ""
+            _ss_page_title = _ss_meta.get("page_title", "")
             try:
                 _ss_probe = sess if sess is not None else requests
                 _ss_head = _ss_probe.head(url, timeout=5, verify=False, allow_redirects=True)
@@ -22179,13 +22207,9 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                 _ss_server = _ss_head.headers.get("Server", "")
             except Exception:
                 pass
-            try:
-                from PIL import Image as _pil_img
-                _pil_ss = _pil_img.open(str(out_path))
-                _pil_ss.close()
-            except Exception:
-                pass
-            _ss_classification = _classify_screenshot(_ss_page_title, _ss_server, _ss_phase_code)
+            _ss_classification = _classify_screenshot(
+                _ss_page_title, _ss_server, _ss_phase_code,
+                url_path=_ss_rel)
             _ss_code_str = f" HTTP {_ss_phase_code}." if _ss_phase_code is not None else ""
             out.add_finding(
                 title=f"Web Screenshot: {_ss_classification}",
@@ -22199,7 +22223,7 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                 owasp="A05:2025 Security Misconfiguration", nist="CM-7",
                 remediation="Review screenshot for exposed sensitive content.",
             )
-            _register_screenshot(out.root, out_path, url=url,
+            _register_screenshot(out.root, out_path, url=_ss_nav_url,
                                  ip=target.get("ip", ""), port=port,
                                  hostname=hostname, scheme=target["scheme"],
                                  title=f"Web Screenshot: {_ss_classification}",
@@ -22226,10 +22250,12 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
         _root_out = save_dir / f"screenshot_{safe_host}_{port}_root.png"
         vc.status(phase, "Screenshot", "running", "Root page", 1, 2)
         try:
+            _root_meta = {}
             if _capture_screenshot_to(_root_url, _root_out, target, cfg,
-                                      auth_session=sess):
+                                      auth_session=sess, _meta=_root_meta):
                 _root_code = None
                 _root_server = ""
+                _root_page_title = _root_meta.get("page_title", "")
                 try:
                     _root_probe = sess if sess is not None else requests
                     _root_head = _root_probe.head(
@@ -22239,7 +22265,9 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                     _root_server = _root_head.headers.get("Server", "")
                 except Exception:
                     pass
-                _root_cls = _classify_screenshot("", _root_server, _root_code)
+                _root_cls = _classify_screenshot(
+                    _root_page_title, _root_server, _root_code,
+                    url_path="/")
                 _root_code_str = f" HTTP {_root_code}." if _root_code is not None else ""
                 out.add_finding(
                     title=f"Web Screenshot: {_root_cls}",
@@ -22263,7 +22291,8 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                                      description=f"Site root screenshot.{_root_code_str}",
                                      classification=_root_cls,
                                      status_code=_root_code,
-                                     server=_root_server)
+                                     server=_root_server,
+                                     page_title=_root_page_title)
                 vc.log(f"[screenshot] Root page saved: {_root_out} ({_root_cls})", "SUCCESS")
         except Exception as _re:
             vc.log(f"[screenshot] Root page failed: {_re}", "WARNING")
@@ -22287,9 +22316,13 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             _err_server = _err_resp.headers.get("Server", "")
         except Exception:
             pass
+        _err_meta = {}
         if _capture_screenshot_to(_err_url, _err_out, target, cfg,
-                                  auth_session=sess):
-            _err_cls = _classify_screenshot("", _err_server, _err_code)
+                                  auth_session=sess, _meta=_err_meta):
+            _err_page_title = _err_meta.get("page_title", "")
+            _err_cls = _classify_screenshot(
+                _err_page_title, _err_server, _err_code,
+                url_path="/fracture_nonexistent_path_404_test")
             _err_code_str = f" HTTP {_err_code}." if _err_code is not None else ""
             out.add_finding(
                 title=f"Web Screenshot: {_err_cls}",
@@ -22314,7 +22347,8 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                                  description=f"Error page screenshot.{_err_code_str}",
                                  classification=_err_cls,
                                  status_code=_err_code,
-                                 server=_err_server)
+                                 server=_err_server,
+                                 page_title=_err_page_title)
             vc.log(f"[screenshot] Error page saved: {_err_out} ({_err_cls})", "SUCCESS")
     except Exception as _ee:
         vc.log(f"[screenshot] Error page failed: {_ee}", "WARNING")
