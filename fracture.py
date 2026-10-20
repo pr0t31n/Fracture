@@ -17525,12 +17525,38 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
             driver.set_page_load_timeout(30)
             if _used_browser == "firefox":
                 driver.set_window_size(1280, 800)
-            if auth_session is not None:
-                try:
-                    driver.get(ep_url)
-                except Exception:
-                    pass
-                _spa_transfer_cookies(auth_session, driver, ep_url)
+            if auth_session is not None and len(auth_session.cookies):
+                _parsed_ep = urllib.parse.urlparse(ep_url)
+                _origin_url = f"{_parsed_ep.scheme}://{_parsed_ep.netloc}/"
+                _used_cdp = False
+                if _used_browser != "firefox":
+                    try:
+                        _ep_domain = _parsed_ep.netloc.split(":")[0]
+                        for ck in auth_session.cookies:
+                            driver.execute_cdp_cmd("Network.setCookie", {
+                                "name":   ck.name,
+                                "value":  ck.value,
+                                "domain": ck.domain or _ep_domain,
+                                "path":   ck.path or "/",
+                                "secure": bool(ck.secure),
+                                "url":    _origin_url,
+                            })
+                        _used_cdp = True
+                        vc.log(f"[screenshot] Injected {len(auth_session.cookies)} cookies via CDP", "INFO")
+                    except Exception as _cdp_err:
+                        vc.log(f"[screenshot] CDP cookie injection failed ({_cdp_err}), falling back to Selenium", "WARNING")
+                if not _used_cdp:
+                    try:
+                        driver.get(_origin_url)
+                        import time as _time_stop
+                        _time_stop.sleep(0.3)
+                        try:
+                            driver.execute_script("window.stop();")
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    _spa_transfer_cookies(auth_session, driver, ep_url)
             try:
                 driver.get(ep_url)
             except Exception as _load_err:
@@ -21993,13 +22019,14 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
 # ─────────────────────────────────────────────
 
 def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
-                      out: OutputManager) -> None:
-    """Capture a screenshot of the target URL using a headless browser via Selenium.
+                      out: OutputManager,
+                      sess: "requests.Session | None" = None) -> None:
+    """Capture screenshots of the target URL using a headless browser via Selenium.
 
-    Tries Chrome first; falls back to Firefox (GeckoDriver) if Chrome is unavailable.
-    Saved to: recon/screenshot_<hostname>_<port>.png
-    Creates an INFO finding "Web Screenshot Captured" with output_file pointing
-    to the PNG so it can be viewed via Crucible's Evidence tab.
+    When sess is provided (authenticated requests.Session), cookies are
+    transferred into the headless browser so screenshots reflect the
+    authenticated view.  The session is also used for HTTP HEAD/GET probes
+    so status-code classification matches the authenticated context.
     """
     phase    = "screenshot"
     url      = target["url"]
@@ -22022,144 +22049,56 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
     safe_host = hostname.replace(".", "_")
     out_path  = save_dir / f"screenshot_{safe_host}_{port}.png"
 
+    _ss_ctx = "authenticated" if sess is not None and len(sess.cookies) else "unauthenticated"
+    vc.log(f"[screenshot] Capturing {_ss_ctx} screenshots", "INFO")
+
     try:
-        from selenium import webdriver
-
-        def _do_chrome_ss():
-            from selenium.webdriver.chrome.options import Options
-            _opts = Options()
-            _opts.add_argument("--headless=new")
-            _opts.add_argument("--no-sandbox")
-            _opts.add_argument("--disable-dev-shm-usage")
-            _opts.add_argument("--disable-gpu")
-            _opts.add_argument("--ignore-certificate-errors")
-            _opts.add_argument("--allow-insecure-localhost")
-            _opts.add_argument("--window-size=1280,800")
-            _opts.add_experimental_option("excludeSwitches", ["enable-logging"])
-            # Override HeadlessChrome UA to match the requests Session.
-            _ua_override = cfg.get(
-                "user_agent",
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            )
-            _opts.add_argument(f"--user-agent={_ua_override}")
-            _cb = _find_chrome_binary()
-            if _cb:
-                _opts.binary_location = _cb
-            _ip = target.get("ip")
-            if not _ip:
-                try:
-                    _ip = socket.gethostbyname(hostname)
-                except Exception:
-                    _ip = None
-            if hostname and _ip and _ip != hostname:
-                _opts.add_argument(f"--host-resolver-rules=MAP {hostname} {_ip}")
-            _svc = _build_chrome_service()
-            return webdriver.Chrome(service=_svc, options=_opts)
-
-        def _do_firefox_ss():
-            from selenium.webdriver.firefox.options import Options
-            _opts = Options()
-            _opts.add_argument("-headless")
-            _opts.accept_insecure_certs = True
-            _fb = _find_firefox_binary()
-            if _fb:
-                _opts.binary = _fb
-            _svc = _build_firefox_service()
-            return webdriver.Firefox(service=_svc, options=_opts)
-
-        _used_browser = browser
-        if browser == "firefox":
-            driver = _do_firefox_ss()
-            vc.log("[screenshot] Using Firefox (GeckoDriver)", "INFO")
-        else:
+        if _capture_screenshot_to(url, out_path, target, cfg,
+                                  auth_session=sess):
+            _ss_rel = urllib.parse.urlparse(url).path or "/"
+            _ss_phase_code = None
+            _ss_server = ""
+            _ss_page_title = ""
             try:
-                driver = _do_chrome_ss()
-                vc.log("[screenshot] Using Chrome", "INFO")
-            except Exception as _ce:
-                vc.log(f"[screenshot] Chrome unavailable ({_ce}), trying Firefox", "WARNING")
-                driver = _do_firefox_ss()
-                _used_browser = "firefox"
-                vc.log("[screenshot] Using Firefox (GeckoDriver)", "INFO")
-
-        _ss_page_title = ""
-        _ss_loaded = False
-        try:
-            driver.set_page_load_timeout(30)
-            if _used_browser == "firefox":
-                driver.set_window_size(1280, 800)
-            try:
-                driver.get(url)
-                _ss_loaded = True
-            except Exception as _load_err:
-                _le = str(_load_err)
-                if "net::ERR_CONNECTION_REFUSED" in _le or "Reached error page" in _le:
-                    vc.log(f"[screenshot] Page unreachable — skipping", "INFO")
-                else:
-                    _ss_loaded = True
-            if _ss_loaded:
-                from selenium.webdriver.support.ui import WebDriverWait
-                try:
-                    WebDriverWait(driver, 20).until(
-                        lambda d: d.execute_script("return document.readyState") == "complete"
-                    )
-                except Exception:
-                    vc.log("[screenshot] Page did not fully load within 20s — capturing partial screenshot", "INFO")
-                import time as _time_ps
-                _time_ps.sleep(1.5)
-                _ss_page_title = driver.title or ""
-                total_h = driver.execute_script(
-                    "return Math.max("
-                    "  document.body.scrollHeight,"
-                    "  document.documentElement.scrollHeight"
-                    ")"
-                )
-                driver.set_window_size(1280, max(800, int(total_h)))
-                driver.save_screenshot(str(out_path))
-                _add_url_bar(out_path, url)
-        finally:
-            try:
-                driver.quit()
+                _ss_probe = sess if sess is not None else requests
+                _ss_head = _ss_probe.head(url, timeout=5, verify=False, allow_redirects=True)
+                _ss_phase_code = _ss_head.status_code
+                _ss_server = _ss_head.headers.get("Server", "")
             except Exception:
                 pass
-
-        if not _ss_loaded or not out_path.is_file():
+            try:
+                from PIL import Image as _pil_img
+                _pil_ss = _pil_img.open(str(out_path))
+                _pil_ss.close()
+            except Exception:
+                pass
+            _ss_classification = _classify_screenshot(_ss_page_title, _ss_server, _ss_phase_code)
+            _ss_code_str = f" HTTP {_ss_phase_code}." if _ss_phase_code is not None else ""
+            out.add_finding(
+                title=f"Web Screenshot: {_ss_classification}",
+                url=url, port=port, risk="INFO",
+                description=f"A screenshot of {url} was captured during reconnaissance.{_ss_code_str}",
+                affected=out._rel_affected(_ss_rel),
+                output=f"Saved: {out_path.name}",
+                sources="fracture-screenshot", service=target["scheme"],
+                output_file=str(out_path),
+                http_code=_ss_phase_code,
+                owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                remediation="Review screenshot for exposed sensitive content.",
+            )
+            _register_screenshot(out.root, out_path, url=url,
+                                 ip=target.get("ip", ""), port=port,
+                                 hostname=hostname, scheme=target["scheme"],
+                                 title=f"Web Screenshot: {_ss_classification}",
+                                 description=f"A screenshot of {url} was captured during reconnaissance.{_ss_code_str}",
+                                 classification=_ss_classification,
+                                 status_code=_ss_phase_code,
+                                 server=_ss_server, page_title=_ss_page_title)
+            vc.log(f"[screenshot] Saved: {out_path} ({_ss_classification})", "SUCCESS")
+        else:
             vc.status(phase, "Screenshot", "complete", "Done", 1, 1)
             vc.log("[screenshot] Phase complete (no screenshot captured)", "INFO")
             return
-
-        _ss_rel = urllib.parse.urlparse(url).path or "/"
-        _ss_phase_code = None
-        _ss_server = ""
-        try:
-            _ss_head = requests.head(url, timeout=5, verify=False, allow_redirects=True)
-            _ss_phase_code = _ss_head.status_code
-            _ss_server = _ss_head.headers.get("Server", "")
-        except Exception:
-            pass
-        _ss_classification = _classify_screenshot(_ss_page_title, _ss_server, _ss_phase_code)
-        _ss_code_str = f" HTTP {_ss_phase_code}." if _ss_phase_code is not None else ""
-        out.add_finding(
-            title=f"Web Screenshot: {_ss_classification}",
-            url=url, port=port, risk="INFO",
-            description=f"A screenshot of {url} was captured during reconnaissance.{_ss_code_str}",
-            affected=out._rel_affected(_ss_rel),
-            output=f"Saved: {out_path.name}",
-            sources="fracture-screenshot", service=target["scheme"],
-            output_file=str(out_path),
-            http_code=_ss_phase_code,
-            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
-            remediation="Review screenshot for exposed sensitive content.",
-        )
-        _register_screenshot(out.root, out_path, url=url,
-                             ip=target.get("ip", ""), port=port,
-                             hostname=hostname, scheme=target["scheme"],
-                             title=f"Web Screenshot: {_ss_classification}",
-                             description=f"A screenshot of {url} was captured during reconnaissance.{_ss_code_str}",
-                             classification=_ss_classification,
-                             status_code=_ss_phase_code,
-                             server=_ss_server, page_title=_ss_page_title)
-        vc.log(f"[screenshot] Saved: {out_path} ({_ss_classification})", "SUCCESS")
 
     except Exception as exc:
         vc.log(f"[screenshot] Failed: {type(exc).__name__}: {exc}", "WARNING")
@@ -22174,11 +22113,13 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
         _root_out = save_dir / f"screenshot_{safe_host}_{port}_root.png"
         vc.status(phase, "Screenshot", "running", "Root page", 1, 2)
         try:
-            if _capture_screenshot_to(_root_url, _root_out, target, cfg):
+            if _capture_screenshot_to(_root_url, _root_out, target, cfg,
+                                      auth_session=sess):
                 _root_code = None
                 _root_server = ""
                 try:
-                    _root_head = requests.head(
+                    _root_probe = sess if sess is not None else requests
+                    _root_head = _root_probe.head(
                         _root_url, timeout=5, verify=False,
                         allow_redirects=True)
                     _root_code = _root_head.status_code
@@ -22226,13 +22167,15 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
         _err_code = None
         _err_server = ""
         try:
-            _err_resp = requests.get(
+            _err_probe = sess if sess is not None else requests
+            _err_resp = _err_probe.get(
                 _err_url, timeout=5, verify=False, allow_redirects=True)
             _err_code = _err_resp.status_code
             _err_server = _err_resp.headers.get("Server", "")
         except Exception:
             pass
-        if _capture_screenshot_to(_err_url, _err_out, target, cfg):
+        if _capture_screenshot_to(_err_url, _err_out, target, cfg,
+                                  auth_session=sess):
             _err_cls = _classify_screenshot("", _err_server, _err_code)
             _err_code_str = f" HTTP {_err_code}." if _err_code is not None else ""
             out.add_finding(
@@ -23250,12 +23193,14 @@ _SPA_INTERCEPT_JS = """
 
 
 def _spa_transfer_cookies(sess: "requests.Session", driver: object,
-                          base_url: str) -> None:
+                          base_url: str) -> int:
     """Copy all cookies from a requests.Session into a Selenium WebDriver.
 
     The driver must already be on the target origin before this is called —
     Selenium's same-origin cookie policy rejects additions to a foreign domain.
+    Returns the number of cookies successfully transferred.
     """
+    _ok = 0
     try:
         domain_hint = urllib.parse.urlparse(base_url).netloc.split(":")[0]
         for ck in sess.cookies:
@@ -23267,10 +23212,20 @@ def _spa_transfer_cookies(sess: "requests.Session", driver: object,
                     "path":   ck.path   or "/",
                     "secure": bool(ck.secure),
                 })
-            except Exception:
-                pass
-    except Exception:
-        pass
+                _ok += 1
+            except Exception as _ck_err:
+                vc.log(
+                    f"[screenshot] Cookie transfer failed: {ck.name} "
+                    f"(domain={ck.domain!r}) — {_ck_err}",
+                    "WARNING",
+                )
+        if _ok:
+            vc.log(f"[screenshot] Transferred {_ok}/{len(sess.cookies)} session cookies to browser", "INFO")
+        elif len(sess.cookies):
+            vc.log(f"[screenshot] WARNING: 0/{len(sess.cookies)} cookies transferred — screenshots will be unauthenticated", "WARNING")
+    except Exception as _tc_err:
+        vc.log(f"[screenshot] Cookie transfer error: {_tc_err}", "WARNING")
+    return _ok
 
 
 def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
@@ -46452,7 +46407,8 @@ def main() -> None:
                 if not _skip("screenshot"):
                     pm.set_phase_status(f"screenshot#{_ctx_label}", "running", "Screenshot")
                     try:
-                        _phase_screenshot(target, _ctx_cfg, pm, out)
+                        _phase_screenshot(target, _ctx_cfg, pm, out,
+                                          sess=effective_auth)
                         pm.set_phase_status(f"screenshot#{_ctx_label}", "complete", "Screenshot")
                         _save_checkpoint()
                     except Exception as e:
