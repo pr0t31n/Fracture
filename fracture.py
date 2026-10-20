@@ -6965,10 +6965,13 @@ document.addEventListener('submit', function(e) {
             domain = ck.get("domain", "").lstrip(".")
             new_sess.cookies.set(ck["name"], ck["value"], domain=domain or None)
 
-        # Attach localStorage to session so _capture_screenshot_to can
-        # inject it into headless Chrome for SPA-authenticated screenshots.
+        # Attach browser state to session so _capture_screenshot_to can
+        # inject it into headless Chrome for authenticated screenshots.
+        # browser_cookies preserves ALL attributes (secure, httpOnly,
+        # sameSite, expiry, path) that requests.Session.cookies loses.
         new_sess._fracture_local_storage = _browser_local_storage  # type: ignore[attr-defined]
         new_sess._fracture_captured_url = captured_url  # type: ignore[attr-defined]
+        new_sess._fracture_browser_cookies = list(browser_cookies)  # type: ignore[attr-defined]
 
         vc.log(
             f"[auth] Captured {len(browser_cookies)} cookie(s) via {_used_name} "
@@ -17556,21 +17559,44 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
             if auth_session is not None and len(auth_session.cookies):
                 _parsed_ep = urllib.parse.urlparse(ep_url)
                 _origin_url = f"{_parsed_ep.scheme}://{_parsed_ep.netloc}/"
+                _is_https = _parsed_ep.scheme == "https"
                 _used_cdp = False
+                # Prefer full browser cookies (preserves secure, httpOnly,
+                # sameSite, path, expiry) over requests CookieJar (loses all).
+                _raw_cks = getattr(auth_session, "_fracture_browser_cookies", None)
                 if _used_browser != "firefox":
                     try:
                         _ep_domain = _parsed_ep.netloc.split(":")[0]
-                        for ck in auth_session.cookies:
-                            driver.execute_cdp_cmd("Network.setCookie", {
-                                "name":   ck.name,
-                                "value":  ck.value,
-                                "domain": ck.domain or _ep_domain,
-                                "path":   ck.path or "/",
-                                "secure": bool(ck.secure),
-                                "url":    _origin_url,
-                            })
-                        _used_cdp = True
-                        vc.log(f"[screenshot] Injected {len(auth_session.cookies)} cookies via CDP", "INFO")
+                        if _raw_cks:
+                            for ck in _raw_cks:
+                                _cdp_ck = {
+                                    "name":     ck["name"],
+                                    "value":    ck["value"],
+                                    "domain":   ck.get("domain") or _ep_domain,
+                                    "path":     ck.get("path") or "/",
+                                    "secure":   ck.get("secure", _is_https),
+                                    "httpOnly":  ck.get("httpOnly", False),
+                                    "url":      _origin_url,
+                                }
+                                if ck.get("sameSite") and ck["sameSite"] != "None":
+                                    _cdp_ck["sameSite"] = ck["sameSite"]
+                                if ck.get("expiry"):
+                                    _cdp_ck["expires"] = ck["expiry"]
+                                driver.execute_cdp_cmd("Network.setCookie", _cdp_ck)
+                            _used_cdp = True
+                            vc.log(f"[screenshot] Injected {len(_raw_cks)} cookies via CDP (full attributes)", "INFO")
+                        else:
+                            for ck in auth_session.cookies:
+                                driver.execute_cdp_cmd("Network.setCookie", {
+                                    "name":   ck.name,
+                                    "value":  ck.value,
+                                    "domain": ck.domain or _ep_domain,
+                                    "path":   ck.path or "/",
+                                    "secure": _is_https,
+                                    "url":    _origin_url,
+                                })
+                            _used_cdp = True
+                            vc.log(f"[screenshot] Injected {len(auth_session.cookies)} cookies via CDP", "INFO")
                     except Exception as _cdp_err:
                         vc.log(f"[screenshot] CDP cookie injection failed ({_cdp_err}), falling back to Selenium", "WARNING")
                 if not _used_cdp:
@@ -17640,9 +17666,8 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
             import time as _time_cs
             # SPAs need more time after readyState=complete — the JS
             # framework still has to bootstrap, check auth, fetch data,
-            # and render.  Wait longer when we injected auth state.
-            _spa_wait = 4.0 if (auth_session is not None
-                                and getattr(auth_session, "_fracture_local_storage", None)) else 1.5
+            # and render.  Wait longer when authenticated.
+            _spa_wait = 4.0 if auth_session is not None else 1.5
             _time_cs.sleep(_spa_wait)
             total_h = driver.execute_script(
                 "return Math.max("
