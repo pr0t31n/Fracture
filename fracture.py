@@ -778,14 +778,20 @@ _INFRA_COOKIE_RE = re.compile(
     re.I,
 )
 
-# Analytics, tracking, and redirect cookies — NOT session-sensitive.
-# Missing security flags on these is a configuration hygiene issue at
-# most, not a session-hijack vector.  Kept separate from _INFRA_COOKIE_RE
-# so infra detection remains narrow (CDN/LB/WAF only).
+# Analytics and tracking cookies — third-party pixels and telemetry.
+# Missing security flags on these is noise, not a session-hijack vector.
 _TRACKING_COOKIE_RE = re.compile(
     r'^(_pk_|stg_|_ga$|_gid$|_gat|__utm|_fbp$|_gcl|__hstc$|__hssc$|'
-    r'hubspot|DT$|dtSa$|dtPC$|dtCookie$|dtLatC$|rxVisitor$|rxvt$|'
-    r'login[-_]?redirect$|return[-_]?(?:url|to)$|next$|redirect$|'
+    r'hubspot|DT$|dtSa$|dtPC$|dtCookie$|dtLatC$|rxVisitor$|rxvt$)',
+    re.I,
+)
+
+# Redirect/navigation cookies — values are URL paths, not secrets.
+# Skip for entropy/predictability (a URL is expected to be low-entropy),
+# but still check for security flags (missing HttpOnly on a redirect cookie
+# lets XSS read/modify the redirect destination).
+_REDIRECT_COOKIE_RE = re.compile(
+    r'^(login[-_]?redirect$|return[-_]?(?:url|to)$|next$|redirect$|'
     r'back[-_]?url$|goto$|continue$|referer$|origin[-_]?url$)',
     re.I,
 )
@@ -3136,12 +3142,14 @@ def _sanitize_ip(ip_or_url):
 
 
 
-def _timeout_action_item(out, tool_name, target, timeout_s, priority="MEDIUM"):
+def _timeout_action_item(out, tool_name, target, timeout_s, priority="MEDIUM",
+                         display_name=""):
     """Emit an action item when a tool times out — lost coverage needs re-scan."""
     _ip = target.get("ip", "")
     _port = target.get("port", 0)
     _hn = target.get("hostname", "")
     _tgt = f"{_ip}:{_port}" if _port else _ip
+    _disp = display_name or tool_name
     out.log_action_item(
         type="scan_timeout",
         recommended_tool=tool_name,
@@ -3149,13 +3157,13 @@ def _timeout_action_item(out, tool_name, target, timeout_s, priority="MEDIUM"):
         ip=_ip,
         port=int(_port) if _port else 0,
         hostname=_hn,
-        title=f"{tool_name} Timed Out — Re-Scan Required",
+        title=f"{_disp} Timed Out — Re-Scan Required",
         description=(
-            f"{tool_name} timed out after {timeout_s}s on {_tgt}"
+            f"{_disp} timed out after {timeout_s}s on {_tgt}"
             f"{f' ({_hn})' if _hn else ''}. "
             f"Re-run manually with adjusted timeout or reduced scope."
         ),
-        source_finding=f"{tool_name} timeout",
+        source_finding=f"{_disp} timeout",
         priority=priority,
         scope="webapp",
     )
@@ -11277,8 +11285,8 @@ DEFAULT_SETTINGS: dict = {
             "auth_bypass": True, "files": True, "vulnscan": True,
             "zap": True,
             "graphql": False, "logging_monitoring": True, "account_lockout": True,
-            "auth_recon": False, "authorization": False,
-            "session": False, "csrf": False, "cross_user": False,
+            "auth_recon": True, "authorization": False,
+            "session": True, "csrf": True, "cross_user": False,
             "logout": False,   # Phase 22: post-context logout + session lifecycle
             "open_redirect": True, "deserialization": True,
             "request_smuggling": True,  # Phase 17b: CL.0/TE.CL/CL.TE smuggling
@@ -19974,7 +19982,8 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             _e_str = str(e)
             out.log_error("testssl.sh", cmd, _e_str)
             if "no TLS service" not in _e_str:
-                _timeout_action_item(out, "testssl.sh", target, 0)
+                _timeout_action_item(out, "testssl", target, 0,
+                                     display_name="testssl.sh")
     else:
         vc.log("[tls] testssl.sh not found — basic socket TLS check", "WARNING")
         import ssl as _ssl
@@ -25056,8 +25065,16 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
             hv = r.headers.get(hdr, "")
             for m in _JWT_RE.finditer(hv):
                 found_tokens.add(m.group(0))
-        # Check cookies
+        # Check cookies from this response
         for ck in r.cookies:
+            for m in _JWT_RE.finditer(str(ck.value)):
+                found_tokens.add(m.group(0))
+    except Exception:
+        pass
+
+    # Check session cookie jar (auth cookies set during login flow)
+    try:
+        for ck in sess.cookies:
             for m in _JWT_RE.finditer(str(ck.value)):
                 found_tokens.add(m.group(0))
     except Exception:
@@ -34311,8 +34328,9 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         # session-hijack vector.
         if _INFRA_COOKIE_RE.match(_ck.name):
             continue
-        # Skip analytics, tracking, and redirect cookies — missing flags
-        # on these are not session-hijack vectors.
+        # Skip analytics/tracking cookies — missing flags on pixel/telemetry
+        # cookies are noise.  Redirect cookies are NOT skipped here: missing
+        # HttpOnly lets XSS read/modify the redirect destination.
         if _TRACKING_COOKIE_RE.match(_ck.name):
             continue
 
