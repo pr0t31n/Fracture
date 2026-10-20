@@ -3288,7 +3288,7 @@
     },
     {
       "id": "FR-069",
-      "title": "Session Cookie Missing Secure Flag",
+      "title": "Cookies: Missing Secure Flag",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3335,7 +3335,7 @@
     },
     {
       "id": "FR-070",
-      "title": "Session Cookie Missing HttpOnly Flag",
+      "title": "Cookies: Missing HttpOnly Flag",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3382,7 +3382,7 @@
     },
     {
       "id": "FR-071",
-      "title": "Session Cookie Missing SameSite Attribute",
+      "title": "Cookies: Missing SameSite Attribute",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13777,7 +13777,7 @@
     },
     {
       "id": "FR-233",
-      "title": "Active Session Management Interface Detected",
+      "title": "Session: Active Management Interface Detected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -20548,7 +20548,7 @@
     },
     {
       "id": "FR-312",
-      "title": "Session Cookie SameSite=None Without Secure Flag",
+      "title": "Cookies: SameSite=None Without Secure Flag",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -20595,12 +20595,12 @@
     },
     {
       "id": "FR-313",
-      "title": "Missing Secure Cookie Attribute: Secure",
+      "title": "Cookies: Missing Secure Flag",
       "aliases": [
-        "Missing Secure Cookie Attribute: SameSite",
-        "Missing Secure Cookie Attribute: HttpOnly",
-        "Misconfigured Secure Cookie Attribute: SameSite",
-        "Missing Secure Cookie Attribute: Secure"
+        "Cookies: Missing SameSite Attribute",
+        "Cookies: Missing HttpOnly Flag",
+        "Cookies: Misconfigured SameSite Attribute",
+        "Cookies: Missing Secure Flag"
       ],
       "source_tools": [
         "fracture"
@@ -20712,12 +20712,12 @@
     },
     {
       "id": "FR-314",
-      "title": "Missing Secure Cookie Attribute: HttpOnly",
+      "title": "Cookies: Missing HttpOnly Flag",
       "aliases": [
-        "Missing Secure Cookie Attribute: SameSite",
-        "Missing Secure Cookie Attribute: HttpOnly",
-        "Misconfigured Secure Cookie Attribute: SameSite",
-        "Missing Secure Cookie Attribute: Secure"
+        "Cookies: Missing SameSite Attribute",
+        "Cookies: Missing HttpOnly Flag",
+        "Cookies: Misconfigured SameSite Attribute",
+        "Cookies: Missing Secure Flag"
       ],
       "source_tools": [
         "fracture"
@@ -20829,12 +20829,12 @@
     },
     {
       "id": "FR-315",
-      "title": "Missing Secure Cookie Attribute: SameSite",
+      "title": "Cookies: Missing SameSite Attribute",
       "aliases": [
-        "Missing Secure Cookie Attribute: SameSite",
-        "Missing Secure Cookie Attribute: HttpOnly",
-        "Misconfigured Secure Cookie Attribute: SameSite",
-        "Missing Secure Cookie Attribute: Secure"
+        "Cookies: Missing SameSite Attribute",
+        "Cookies: Missing HttpOnly Flag",
+        "Cookies: Misconfigured SameSite Attribute",
+        "Cookies: Missing Secure Flag"
       ],
       "source_tools": [
         "fracture"
@@ -20946,12 +20946,12 @@
     },
     {
       "id": "FR-316",
-      "title": "Misconfigured Secure Cookie Attribute: SameSite",
+      "title": "Cookies: Misconfigured SameSite Attribute",
       "aliases": [
-        "Missing Secure Cookie Attribute: SameSite",
-        "Missing Secure Cookie Attribute: HttpOnly",
-        "Misconfigured Secure Cookie Attribute: SameSite",
-        "Missing Secure Cookie Attribute: Secure"
+        "Cookies: Missing SameSite Attribute",
+        "Cookies: Missing HttpOnly Flag",
+        "Cookies: Misconfigured SameSite Attribute",
+        "Cookies: Missing Secure Flag"
       ],
       "source_tools": [
         "fracture"
@@ -32490,7 +32490,7 @@
     },
     {
       "id": "FR-520",
-      "title": "Potential Session Puzzling",
+      "title": "Session: Potential Session Puzzling",
       "aliases": [
         "Session Variable Overloading",
         "Session Context Confusion"

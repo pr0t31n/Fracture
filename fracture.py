@@ -18673,7 +18673,7 @@ def _phase_endpoint_tools(
                 _ep_sc_out = f"Set-Cookie: {_ep_sc[:300]}"
                 if "httponly" not in _ep_sc_low:
                     out.add_finding(
-                        title="Missing Secure Cookie Attribute: HttpOnly",
+                        title="Cookies: Missing HttpOnly Flag",
                         url=ep_url, port=target["port"], risk="LOW",
                         description=(
                             f"Cookie '{_ep_cname}' does not have the HttpOnly attribute. "
@@ -18689,7 +18689,7 @@ def _phase_endpoint_tools(
                     )
                 if target["is_https"] and "secure" not in _ep_sc_low:
                     out.add_finding(
-                        title="Missing Secure Cookie Attribute: Secure",
+                        title="Cookies: Missing Secure Flag",
                         url=ep_url, port=target["port"], risk="LOW",
                         description=(
                             f"Cookie '{_ep_cname}' does not have the Secure attribute on an HTTPS site. "
@@ -18704,7 +18704,7 @@ def _phase_endpoint_tools(
                     )
                 if not re.search(r'samesite\s*=\s*', _ep_sc_low):
                     out.add_finding(
-                        title="Missing Secure Cookie Attribute: SameSite",
+                        title="Cookies: Missing SameSite Attribute",
                         url=ep_url, port=target["port"], risk="LOW",
                         description=(
                             f"Cookie '{_ep_cname}' does not have the SameSite attribute. "
@@ -21724,7 +21724,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         # HttpOnly
         if "httponly" not in sc_lower:
             out.add_finding(
-                title="Missing Secure Cookie Attribute: HttpOnly",
+                title="Cookies: Missing HttpOnly Flag",
                 url=url, port=target["port"], risk="LOW",
                 description=(
                     f"Cookie '{cname}' does not have the HttpOnly attribute. "
@@ -21741,7 +21741,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         # Secure
         if is_https and "secure" not in sc_lower:
             out.add_finding(
-                title="Missing Secure Cookie Attribute: Secure",
+                title="Cookies: Missing Secure Flag",
                 url=url, port=target["port"], risk="LOW",
                 description=(
                     f"Cookie '{cname}' does not have the Secure attribute on an HTTPS site. "
@@ -21758,7 +21758,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
         _ss_m = re.search(r'samesite\s*=\s*([^\s;,]+)', sc_lower)
         if not _ss_m:
             out.add_finding(
-                title="Missing Secure Cookie Attribute: SameSite",
+                title="Cookies: Missing SameSite Attribute",
                 url=url, port=target["port"], risk="LOW",
                 description=(
                     f"Cookie '{cname}' does not have the SameSite attribute. "
@@ -21775,7 +21775,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             _ss_val = _ss_m.group(1).strip()
             if _ss_val not in ("strict", "lax", "none"):
                 out.add_finding(
-                    title="Misconfigured Secure Cookie Attribute: SameSite",
+                    title="Cookies: Misconfigured SameSite Attribute",
                     url=url, port=target["port"], risk="LOW",
                     description=(
                         f"Cookie '{cname}' has SameSite set to an unrecognised value "
@@ -21790,7 +21790,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
             elif _ss_val == "none":
                 if "secure" not in sc_lower:
                     out.add_finding(
-                        title="Misconfigured Secure Cookie Attribute: SameSite",
+                        title="Cookies: Misconfigured SameSite Attribute",
                         url=url, port=target["port"], risk="LOW",
                         description=(
                             f"Cookie '{cname}' has SameSite=None without the Secure attribute. "
@@ -29710,15 +29710,15 @@ _NIKTO_NORM: "list[tuple]" = [
      "Disable deprecated TLS/SSL protocols; require TLS 1.2+."),
     # ── Cookies ──
     (r"cookie.*httponly|httponly.*flag.*not set",
-     "Missing Secure Cookie Attribute: HttpOnly", "MEDIUM",
+     "Cookies: Missing HttpOnly Flag", "MEDIUM",
      "A05:2025 Security Misconfiguration", "SC-23",
      "Set the HttpOnly flag on session cookies."),
     (r"cookie.*secure.*flag|secure.*flag.*not set",
-     "Missing Secure Cookie Attribute: Secure", "MEDIUM",
+     "Cookies: Missing Secure Flag", "MEDIUM",
      "A05:2025 Security Misconfiguration", "SC-23",
      "Set the Secure flag on session cookies."),
     (r"cookie.*samesite|samesite.*not\s+set",
-     "Missing Secure Cookie Attribute: SameSite", "LOW",
+     "Cookies: Missing SameSite Attribute", "LOW",
      "A05:2025 Security Misconfiguration", "SC-23",
      "Set SameSite=Strict or SameSite=Lax on session cookies."),
     # ── Directory listing ──
@@ -30063,15 +30063,15 @@ def _normalize_nikto(vuln: dict) -> dict:
                             "risk": "INFO", "owasp": _owasp, "nist": _nist,
                             "remediation": "Informational — login pages are expected on web applications."}
             # Cookie FP gate — validate nikto output against actual attrs
-            if _title.startswith("Missing Secure Cookie Attribute:"):
+            if _title.startswith("Cookies: Missing"):
                 _nik_msg_low = msg.lower()
-                if _title.endswith(": SameSite"):
+                if _title.endswith("SameSite Attribute"):
                     if re.search(r'samesite\s*=\s*\w+', _nik_msg_low):
                         return None
-                elif _title.endswith(": HttpOnly"):
+                elif _title.endswith("HttpOnly Flag"):
                     if "httponly" in _nik_msg_low.split("not")[0] if "not" in _nik_msg_low else False:
                         pass  # "httponly not set" — legit finding
-                elif _title.endswith(": Secure"):
+                elif _title.endswith("Secure Flag"):
                     pass
                 if _is_deletion_cookie_from_output(_nik_msg_low):
                     return None
@@ -30245,15 +30245,15 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Disable unnecessary HTTP methods; review and restrict allowed methods to only those required."),
     # ── Cookies ──
     (r"cookies-without-httponly|cookie-httponly|httponly-cookie",
-     "Missing Secure Cookie Attribute: HttpOnly", "MEDIUM",
+     "Cookies: Missing HttpOnly Flag", "MEDIUM",
      "A05:2025 Security Misconfiguration", "SC-23",
      "Set the HttpOnly flag on all session and sensitive cookies."),
     (r"cookies-without-secure|cookie-secure|secure-cookie|cookie-without-secure",
-     "Missing Secure Cookie Attribute: Secure", "MEDIUM",
+     "Cookies: Missing Secure Flag", "MEDIUM",
      "A05:2025 Security Misconfiguration", "SC-23",
      "Set the Secure flag on all cookies transmitted over HTTPS."),
     (r"missing-cookie-samesite|samesite|cookie-samesite",
-     "Missing Secure Cookie Attribute: SameSite", "LOW",
+     "Cookies: Missing SameSite Attribute", "LOW",
      "A05:2025 Security Misconfiguration", "SC-23",
      "Set the SameSite attribute on session cookies."),
     # ── Weak/permissive security headers ──
@@ -30941,15 +30941,15 @@ def _normalize_nuclei(item: dict) -> dict:
             if _title == "__SUPPRESS__":
                 return {}  # Intentionally suppressed — known FP template
             # ── Cookie FP gate: validate nuclei output against actual attrs ──
-            if _title.startswith("Missing Secure Cookie Attribute:"):
+            if _title.startswith("Cookies: Missing"):
                 _nuc_out_low = (str(_output) or "").lower()
-                if _title.endswith(": SameSite"):
+                if _title.endswith("SameSite Attribute"):
                     if re.search(r'samesite\s*=\s*\w+', _nuc_out_low):
                         return {}
-                elif _title.endswith(": HttpOnly"):
+                elif _title.endswith("HttpOnly Flag"):
                     if "httponly" in _nuc_out_low:
                         return {}
-                elif _title.endswith(": Secure"):
+                elif _title.endswith("Secure Flag"):
                     if re.search(r'[;\s]secure[;\s]|[;\s]secure$', _nuc_out_low):
                         return {}
                 if _is_deletion_cookie_from_output(_nuc_out_low):
@@ -34284,7 +34284,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
         out.add_finding(
-            title="Active Session Management Interface Detected",
+            title="Session: Active Management Interface Detected",
             url=_sess_mgmt_found, port=target["port"], risk="INFO",
             description=(
                 f"An active session management endpoint was found at "
@@ -34427,7 +34427,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
 
     if _miss_secure:
         out.add_finding(
-            title="Session Cookie Missing Secure Flag",
+            title="Cookies: Missing Secure Flag",
             url=url, port=target["port"], risk="MEDIUM",
             description=(
                 f"The following session cookie(s) are transmitted without the Secure "
@@ -34449,7 +34449,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
 
     if _miss_httponly:
         out.add_finding(
-            title="Session Cookie Missing HttpOnly Flag",
+            title="Cookies: Missing HttpOnly Flag",
             url=url, port=target["port"], risk="MEDIUM",
             description=(
                 f"The following cookie(s) lack the HttpOnly attribute: "
@@ -34472,7 +34472,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
 
     if _miss_samesite:
         out.add_finding(
-            title="Session Cookie Missing SameSite Attribute",
+            title="Cookies: Missing SameSite Attribute",
             url=url, port=target["port"], risk="MEDIUM",
             description=(
                 f"The following cookie(s) have no SameSite attribute: "
@@ -34497,7 +34497,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
 
     if _bad_samesite_none:
         out.add_finding(
-            title="Session Cookie SameSite=None Without Secure Flag",
+            title="Cookies: SameSite=None Without Secure Flag",
             url=url, port=target["port"], risk="MEDIUM",
             description=(
                 f"The following cookie(s) are set with SameSite=None but without "
@@ -35518,7 +35518,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Potential Session Puzzling",
+                        title="Session: Potential Session Puzzling",
                         url=url, port=target["port"], risk="LOW",
                         description=(
                             f"The same session cookie name(s) ({', '.join(_context_varying)}) "
