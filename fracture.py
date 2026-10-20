@@ -37077,7 +37077,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                     and _latencies[-1] > _latencies[0] * 2
                 )
                 out.add_finding(
-                    title="Insufficient Auth Failure Logging / No Brute-Force Detection",
+                    title="Authentication: Insufficient Failure Logging / No Brute-Force Detection",
                     url=login_url, port=target["port"], risk="MEDIUM",
                     description=(
                         f"Five consecutive failed login attempts to "
@@ -40748,7 +40748,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 pass
             _authed_roles = [r for r in cred_roles if _ok(ep_access.get(r), r, ep)]
             out.add_finding(
-                title="Unauthenticated Access to Protected Path",
+                title="Broken Access Control: Unauthenticated Access to Protected Path",
                 url=ep["url"], port=port, risk="MEDIUM",
                 description=(
                     f"Path {ep['path']} returned HTTP {unauth_st} without "
