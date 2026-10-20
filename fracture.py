@@ -6288,9 +6288,12 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                     ([_sxa] if _sxa and _os.path.isfile(_sxa) else [])
                     + [_os.path.expanduser("~/.Xauthority")]
                     + sorted(_glob.glob("/home/*/.Xauthority"))
+                    + sorted(_glob.glob("/home/*/.vnc/Xauthority"))
                     + sorted(_glob.glob("/tmp/.gdm-xauth-*"))
                     + sorted(_glob.glob("/tmp/.xauth*"))
+                    + sorted(_glob.glob("/tmp/xrdp_*"))
                     + sorted(_glob.glob("/run/user/*/.mutter-Xwaylandauth.*"))
+                    + sorted(_glob.glob("/run/user/*/xrdp_*"))
                 )
                 # xhost grant (best-effort)
                 _owner = None
@@ -6410,9 +6413,6 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         break
 
         # Helper: apply one session's env vars before a browser launch attempt.
-        # XAUTHORITY must be root-owned for Firefox; if no root-owned file was
-        # prepared for this session, remove the var so Firefox's ownership check
-        # sees nothing rather than a non-root-owned file.
         def _apply_sess(sc: dict) -> None:
             if sc.get("DISPLAY"):
                 _os.environ["DISPLAY"] = sc["DISPLAY"]
@@ -6424,10 +6424,10 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 _os.environ["XDG_RUNTIME_DIR"] = sc["XDG_RUNTIME_DIR"]
             if sc.get("_xauth_file"):
                 _os.environ["XAUTHORITY"] = sc["_xauth_file"]
+            elif sc.get("XAUTHORITY") and _os.path.isfile(sc["XAUTHORITY"]):
+                _os.environ["XAUTHORITY"] = sc["XAUTHORITY"]
             else:
-                _xa = _os.environ.get("XAUTHORITY", "")
-                if _xa and _os.path.isfile(_xa) and _os.stat(_xa).st_uid != 0:
-                    _os.environ.pop("XAUTHORITY", None)
+                _os.environ.pop("XAUTHORITY", None)
 
         # ── Driver / browser resolution ───────────────────────────────────────
         _explicit_drv = (
