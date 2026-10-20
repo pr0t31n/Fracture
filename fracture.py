@@ -17420,6 +17420,33 @@ def _add_url_bar(png_path: Path, url: str) -> bool:
         return False
 
 
+def _probe_screenshot_meta(url: str, sess=None) -> "tuple[int | None, str, str]":
+    """Quick HTTP probe for screenshot metadata.
+
+    Returns (status_code, server_header, page_title_from_html).
+    Uses allow_redirects=False so SSO redirects don't trip _ScopedSession.
+    Falls back to GET if HEAD fails.
+    """
+    _probe = sess if sess is not None else requests
+    code = None
+    server = ""
+    html_title = ""
+    for _method in ("head", "get"):
+        try:
+            _fn = getattr(_probe, _method)
+            r = _fn(url, timeout=5, verify=False, allow_redirects=False)
+            code = r.status_code
+            server = r.headers.get("Server", "")
+            if _method == "get" and hasattr(r, "text") and r.text:
+                _m = re.search(r'<title[^>]*>([^<]{1,200})</title>', r.text, re.I)
+                if _m:
+                    html_title = _m.group(1).strip()
+            break
+        except Exception:
+            continue
+    return code, server, html_title
+
+
 def _classify_screenshot(page_title, server, status_code, url_path=""):
     t = (page_title or "").lower()
     s = (server or "").lower()
@@ -22232,16 +22259,10 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                                   auth_session=sess, _meta=_ss_meta):
             _ss_nav_url = _ss_meta.get("final_url", url)
             _ss_rel = urllib.parse.urlparse(_ss_nav_url).path or "/"
-            _ss_phase_code = None
-            _ss_server = ""
             _ss_page_title = _ss_meta.get("page_title", "")
-            try:
-                _ss_probe = sess if sess is not None else requests
-                _ss_head = _ss_probe.head(url, timeout=5, verify=False, allow_redirects=True)
-                _ss_phase_code = _ss_head.status_code
-                _ss_server = _ss_head.headers.get("Server", "")
-            except Exception:
-                pass
+            _ss_phase_code, _ss_server, _ss_html_title = _probe_screenshot_meta(url, sess)
+            if not _ss_page_title and _ss_html_title:
+                _ss_page_title = _ss_html_title
             _ss_classification = _classify_screenshot(
                 _ss_page_title, _ss_server, _ss_phase_code,
                 url_path=_ss_rel)
@@ -22288,18 +22309,10 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             _root_meta = {}
             if _capture_screenshot_to(_root_url, _root_out, target, cfg,
                                       auth_session=sess, _meta=_root_meta):
-                _root_code = None
-                _root_server = ""
                 _root_page_title = _root_meta.get("page_title", "")
-                try:
-                    _root_probe = sess if sess is not None else requests
-                    _root_head = _root_probe.head(
-                        _root_url, timeout=5, verify=False,
-                        allow_redirects=True)
-                    _root_code = _root_head.status_code
-                    _root_server = _root_head.headers.get("Server", "")
-                except Exception:
-                    pass
+                _root_code, _root_server, _root_html_title = _probe_screenshot_meta(_root_url, sess)
+                if not _root_page_title and _root_html_title:
+                    _root_page_title = _root_html_title
                 _root_cls = _classify_screenshot(
                     _root_page_title, _root_server, _root_code,
                     url_path="/")
@@ -22341,20 +22354,11 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
     _err_out = save_dir / f"screenshot_{safe_host}_{port}_errorpage.png"
     vc.status(phase, "Screenshot", "running", "Error page", 2, 3)
     try:
-        _err_code = None
-        _err_server = ""
-        try:
-            _err_probe = sess if sess is not None else requests
-            _err_resp = _err_probe.get(
-                _err_url, timeout=5, verify=False, allow_redirects=True)
-            _err_code = _err_resp.status_code
-            _err_server = _err_resp.headers.get("Server", "")
-        except Exception:
-            pass
+        _err_code, _err_server, _err_html_title = _probe_screenshot_meta(_err_url, sess)
         _err_meta = {}
         if _capture_screenshot_to(_err_url, _err_out, target, cfg,
                                   auth_session=sess, _meta=_err_meta):
-            _err_page_title = _err_meta.get("page_title", "")
+            _err_page_title = _err_meta.get("page_title", "") or _err_html_title
             _err_cls = _classify_screenshot(
                 _err_page_title, _err_server, _err_code,
                 url_path="/fracture_nonexistent_path_404_test")
@@ -46384,8 +46388,13 @@ def main() -> None:
                                 / f"screenshot_{_ss_safe_host}_{_ss_port}"
                                   f"_login_{_ss_role_slug}.png"
                             )
-                            if _capture_screenshot_to(_ss_login_url, _ss_lp, target, cfg):
+                            _ss_lp_meta = {}
+                            if _capture_screenshot_to(_ss_login_url, _ss_lp, target, cfg, _meta=_ss_lp_meta):
                                 _ss_lp_rel = urllib.parse.urlparse(_ss_login_url).path or "/"
+                                _ss_lp_code, _ss_lp_srv, _ss_lp_ht = _probe_screenshot_meta(_ss_login_url)
+                                _ss_lp_pt = _ss_lp_meta.get("page_title", "") or _ss_lp_ht
+                                _ss_lp_cls = _classify_screenshot(_ss_lp_pt, _ss_lp_srv, _ss_lp_code, url_path=_ss_lp_rel)
+                                _ss_lp_cs = f" HTTP {_ss_lp_code}." if _ss_lp_code is not None else ""
                                 out.add_finding(
                                     title="Discovery: Web Screenshot Captured",
                                     url=_ss_login_url, port=_ss_port, risk="INFO",
@@ -46398,10 +46407,19 @@ def main() -> None:
                                     sources="fracture-screenshot",
                                     service=target["scheme"],
                                     output_file=str(_ss_lp),
+                                    http_code=_ss_lp_code,
                                     owasp="A05:2025 Security Misconfiguration",
                                     nist="CM-7",
                                     remediation="Review screenshot for exposed sensitive content.",
                                 )
+                                _register_screenshot(out.root, _ss_lp, url=_ss_login_url,
+                                                     ip=target.get("ip", ""), port=_ss_port,
+                                                     hostname=target["hostname"], scheme=target["scheme"],
+                                                     title=f"Web Screenshot: {_ss_lp_cls}",
+                                                     description=f"Login page screenshot ({_ctx_label}).{_ss_lp_cs}",
+                                                     classification=_ss_lp_cls,
+                                                     status_code=_ss_lp_code,
+                                                     server=_ss_lp_srv, page_title=_ss_lp_pt)
                                 vc.log(
                                     f"[screenshot] Login page [{_ctx_label}]: {_ss_lp.name}",
                                     "SUCCESS",
@@ -46422,14 +46440,21 @@ def main() -> None:
                             / f"screenshot_{_ss_safe_host}_{_ss_port}"
                               f"_landing_{_ss_role_slug}.png"
                         )
+                        _ss_lnd_meta = {}
                         if _capture_screenshot_to(
                                 _as_landing_url, _ss_lnd, target, cfg,
-                                auth_session=_as_session):
+                                auth_session=_as_session, _meta=_ss_lnd_meta):
                             _ss_lnd_rel = urllib.parse.urlparse(_as_landing_url).path or "/"
+                            _ss_lnd_code, _ss_lnd_srv, _ss_lnd_ht = _probe_screenshot_meta(
+                                _as_landing_url, _as_session)
+                            _ss_lnd_pt = _ss_lnd_meta.get("page_title", "") or _ss_lnd_ht
+                            _ss_lnd_cls = _classify_screenshot(_ss_lnd_pt, _ss_lnd_srv,
+                                _ss_lnd_code or _as_landing_code, url_path=_ss_lnd_rel)
                             _lnd_ctx = (
                                 f" (role: {_ctx_label})"
                                 if _ctx_label != "unauthenticated" else ""
                             )
+                            _ss_lnd_cs = f" HTTP {_ss_lnd_code or _as_landing_code}."
                             out.add_finding(
                                 title="Discovery: Web Screenshot Captured",
                                 url=_as_landing_url, port=_ss_port, risk="INFO",
@@ -46448,6 +46473,14 @@ def main() -> None:
                                 nist="CM-7",
                                 remediation="Review screenshot for exposed sensitive content.",
                             )
+                            _register_screenshot(out.root, _ss_lnd, url=_as_landing_url,
+                                                 ip=target.get("ip", ""), port=_ss_port,
+                                                 hostname=target["hostname"], scheme=target["scheme"],
+                                                 title=f"Web Screenshot: {_ss_lnd_cls}",
+                                                 description=f"Authenticated landing page{_lnd_ctx}.{_ss_lnd_cs}",
+                                                 classification=_ss_lnd_cls,
+                                                 status_code=_ss_lnd_code or _as_landing_code,
+                                                 server=_ss_lnd_srv, page_title=_ss_lnd_pt)
                             vc.log(
                                 f"[screenshot] Landing page [{_ctx_label}]: {_ss_lnd.name}",
                                 "SUCCESS",
