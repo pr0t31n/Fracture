@@ -36647,7 +36647,25 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
     # 4. Insufficient logging probe — check if repeated failed auth attempts are detected
     vc.status(phase, "Logging & Monitoring", "running", "Auth logging probe", 3, 4)
     login_url = cfg.get("auth", {}).get("login_url", "")
+    _LM_SSO_PATH_RE = re.compile(
+        r'[/_-](?:okta|saml|azure|adfs|ping|auth0|onelogin|duo|'
+        r'cyberark|jumpcloud|keycloak|cognito)(?:[/_-]|$)'
+        r'|/oauth2?/'
+        r'|/\.well-known/openid',
+        re.IGNORECASE,
+    )
+    _lm_sso_skip = False
     if login_url:
+        _lm_login_path = urllib.parse.urlparse(login_url).path or ""
+        if _LM_SSO_PATH_RE.search(_lm_login_path):
+            _lm_sso_skip = True
+            vc.log(
+                f"[logging_monitoring] Login URL path contains IdP identifier "
+                f"({_lm_login_path}) — authentication is delegated to an "
+                f"external IdP; brute-force test skipped",
+                "INFO",
+            )
+    if login_url and not _lm_sso_skip:
         # Keep the actual Response objects so each attempt can be saved as
         # req/resp evidence. Previous version stored only the status codes
         # and emitted the finding with no Evidence.
@@ -39825,7 +39843,11 @@ _P20_VIEWSTATE_RE = re.compile(
 _P20_SRI_RE = re.compile(
     r'(\bintegrity=["\'"])sha\d+-[A-Za-z0-9+/=]{20,}(?:\s+sha\d+-[A-Za-z0-9+/=]{20,})*')
 _P20_INLINE_STATE_RE = re.compile(
-    r'(<script[^>]*>\s*(?:window\.__\w+|window\.\w+_STATE|__NEXT_DATA__)\s*=\s*)\{[^<]{0,8000}\}')
+    r'(<script[^>]*>\s*(?:window\.__\w+|window\.\w+_STATE|__NEXT_DATA__'
+    r'|window\.(?:__)?(?:APP|INITIAL|PRELOADED|SERVER|RUNTIME|REDUX)[-_]?\w*'
+    r'|self\.__next_f\.push)\s*=?\s*(?:\(?\[?))\{[^<]{0,8000}\}')
+_P20_SCRIPT_ID_STATE_RE = re.compile(
+    r'(<script[^>]*\bid=["\']__\w+["\'][^>]*>)\{[^<]{0,8000}\}')
 
 def _p20_normalize_body(body: str) -> str:
     """Strip per-request entropy from an HTML body for consistent comparison."""
@@ -39835,6 +39857,7 @@ def _p20_normalize_body(body: str) -> str:
     s = _P20_VIEWSTATE_RE.sub(r'\1_VS_', s)
     s = _P20_SRI_RE.sub(r'\1_SRI_', s)
     s = _P20_INLINE_STATE_RE.sub(r'\1_STATE_', s)
+    s = _P20_SCRIPT_ID_STATE_RE.sub(r'\1_STATE_', s)
     return s
 
 def _p20_body_hash(body: str) -> str:
@@ -40138,26 +40161,29 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     # so both _phase_access_matrix and _phase_bfla can use them.
     # Capture baselines: unauth body hash + per-role body hash for root path
     _p20_baseline_hashes: set = set()
-    try:
-        _bl_r = unauth_sess.get(
-            base_url + "/", timeout=timeout, allow_redirects=True,
-            headers={"Accept": "text/html,application/json"})
-        if _bl_r.status_code == 200:
-            _bl_body = (_bl_r.text or "").strip()
-            _p20_baseline_hashes.add(_p20_body_hash(_bl_body))
-    except Exception:
-        pass
-    # Also hash well-known SPA shell paths to catch catchall routers
-    for _bl_probe in ("/nonexistent-path-" + str(int(time.time())),):
-        try:
-            _bl_r2 = unauth_sess.get(
-                base_url + _bl_probe, timeout=timeout, allow_redirects=True,
-                headers={"Accept": "text/html,application/json"})
-            if _bl_r2.status_code == 200:
-                _bl_body2 = (_bl_r2.text or "").strip()
-                _p20_baseline_hashes.add(_p20_body_hash(_bl_body2))
-        except Exception:
-            pass
+    # Probe root and nonexistent paths with BOTH redirect modes.
+    # Per-path probes use allow_redirects=False; mismatched redirect
+    # behaviour between baseline and per-path probes causes SPAs to
+    # produce different hashes → false "unique" classifications.
+    _bl_probes = [
+        "/",
+        "/nonexistent-path-" + str(int(time.time())),
+        "/fracture_nonexistent_path_404_test",
+    ]
+    for _bl_probe in _bl_probes:
+        for _bl_redir in (True, False):
+            try:
+                _bl_r = unauth_sess.get(
+                    base_url + _bl_probe, timeout=timeout,
+                    allow_redirects=_bl_redir,
+                    headers={"Accept": "text/html,application/json"})
+                if _bl_r.status_code == 200:
+                    _bl_body = (_bl_r.text or "").strip()
+                    _bl_h = _p20_body_hash(_bl_body)
+                    if _bl_h:
+                        _p20_baseline_hashes.add(_bl_h)
+            except Exception:
+                pass
 
     # URL path patterns that indicate an error/catch-all page.  SPAs render
     # error content client-side so the server HTML shell has no error markers —
