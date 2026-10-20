@@ -620,6 +620,7 @@ _TITLE_NORM_SUBS = [
     (re.compile(r'TLSv?[\s_]?1\.?1',     re.IGNORECASE), 'TLS 1.1'),
     (re.compile(r'SSLv?[\s_]?2(?:\.0)?', re.IGNORECASE), 'SSLv2'),
     (re.compile(r'SSLv?[\s_]?3(?:\.0)?', re.IGNORECASE), 'SSLv3'),
+    (re.compile(r'^Web Screenshot:\s*.+', re.IGNORECASE), 'Discovery: Web Screenshot Captured'),
 ]
 
 # ─────────────────────────────────────────────
@@ -3623,6 +3624,10 @@ class OutputManager:
         # occurrence per title+hostname is recorded.  Subsequent calls for the
         # same header on different paths are silently dropped.
         self._hdr_disclosure_seen: set = set()
+        # SPA dedup: baseline response body sizes from Phase 0b
+        # (login, root, error pages).  endpoint_tools compares
+        # against these to skip duplicate SPA-shell screenshots.
+        self._spa_baseline_sizes: set = set()
         # ── Action items (Siphon recommendations) ─────────────────────────
         self._action_items_lock = threading.Lock()
         self.action_items_json  = self.root / "action_items.json"
@@ -3646,6 +3651,20 @@ class OutputManager:
             self._write_findings_csv_header()
         if not self.action_items_json.exists():
             self.action_items_json.write_text("[]\n", encoding="utf-8")
+
+    _SPA_SIZE_TOLERANCE = 200  # bytes — accounts for CSRF tokens / nonces
+
+    def record_spa_baseline(self, body_len: int) -> None:
+        if body_len and body_len > 0:
+            self._spa_baseline_sizes.add(body_len)
+
+    def is_spa_duplicate(self, body_len: int) -> bool:
+        if not self._spa_baseline_sizes or not body_len or body_len <= 0:
+            return False
+        for bl in self._spa_baseline_sizes:
+            if abs(body_len - bl) <= self._SPA_SIZE_TOLERANCE:
+                return True
+        return False
 
     def _write_log_header(self) -> None:
         header = (
@@ -17420,10 +17439,10 @@ def _add_url_bar(png_path: Path, url: str) -> bool:
         return False
 
 
-def _probe_screenshot_meta(url: str, sess=None) -> "tuple[int | None, str, str]":
+def _probe_screenshot_meta(url: str, sess=None) -> "tuple[int | None, str, str, int]":
     """Quick HTTP probe for screenshot metadata.
 
-    Returns (status_code, server_header, page_title_from_html).
+    Returns (status_code, server_header, page_title_from_html, body_len).
     Uses allow_redirects=False so SSO redirects don't trip _ScopedSession.
     Falls back to GET if HEAD fails.
     """
@@ -17431,6 +17450,7 @@ def _probe_screenshot_meta(url: str, sess=None) -> "tuple[int | None, str, str]"
     code = None
     server = ""
     html_title = ""
+    body_len = 0
     for _method in ("head", "get"):
         try:
             _fn = getattr(_probe, _method)
@@ -17438,13 +17458,18 @@ def _probe_screenshot_meta(url: str, sess=None) -> "tuple[int | None, str, str]"
             code = r.status_code
             server = r.headers.get("Server", "")
             if _method == "get" and hasattr(r, "text") and r.text:
+                body_len = len(r.content)
                 _m = re.search(r'<title[^>]*>([^<]{1,200})</title>', r.text, re.I)
                 if _m:
                     html_title = _m.group(1).strip()
+            elif _method == "head":
+                _cl = r.headers.get("Content-Length", "")
+                if _cl.isdigit():
+                    body_len = int(_cl)
             break
         except Exception:
             continue
-    return code, server, html_title
+    return code, server, html_title, body_len
 
 
 def _classify_screenshot(page_title, server, status_code, url_path=""):
@@ -18380,10 +18405,14 @@ def _phase_endpoint_tools(
         _ss_ep_server = ""
         if _ep_screenshot_ok:
             try:
-                _ss_check = sess.head(ep_url, timeout=min(timeout, 5), allow_redirects=True)
-                _ss_http_code = _ss_check.status_code
-                _ss_ep_server = _ss_check.headers.get("Server", "")
-                _ep_screenshot_ok = (200 <= _ss_http_code < 300) or (400 <= _ss_http_code < 500)
+                _ss_http_code, _ss_ep_server, _, _ep_body_len = _probe_screenshot_meta(ep_url, sess)
+                _ep_screenshot_ok = (_ss_http_code is not None
+                                     and ((200 <= _ss_http_code < 300)
+                                          or (400 <= _ss_http_code < 500)))
+                if _ep_screenshot_ok and out.is_spa_duplicate(_ep_body_len):
+                    _ep_screenshot_ok = False
+                    vc.log(f"[endpoint_tools] [{idx+1}/{len(endpoints)}] screenshot — "
+                           f"skipped (SPA duplicate, body {_ep_body_len}b matches baseline)", "INFO")
             except Exception:
                 _ep_screenshot_ok = False
         if _ep_screenshot_ok and _capture_screenshot_to(ep_url, ep_shot, target, cfg, auth_session=sess):
@@ -18391,9 +18420,9 @@ def _phase_endpoint_tools(
             _ep_cls = _classify_screenshot("", _ss_ep_server, _ss_http_code)
             _ep_oos = not _ep_scope_ok
             out.add_finding(
-                title=f"Web Screenshot: {_ep_cls}",
+                title="Discovery: Web Screenshot Captured",
                 url=ep_url, port=target["port"], risk="INFO",
-                description=f"A screenshot of discovered endpoint {ep_url} was captured. HTTP {_ss_http_code}.",
+                description=f"A screenshot of discovered endpoint {ep_url} was captured ({_ep_cls}). HTTP {_ss_http_code}.",
                 affected=out._rel_affected(_ep_rel),
                 output=f"Saved: {ep_shot.name}",
                 sources="fracture-screenshot", service=target["scheme"],
@@ -22260,7 +22289,8 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             _ss_nav_url = _ss_meta.get("final_url", url)
             _ss_rel = urllib.parse.urlparse(_ss_nav_url).path or "/"
             _ss_page_title = _ss_meta.get("page_title", "")
-            _ss_phase_code, _ss_server, _ss_html_title = _probe_screenshot_meta(url, sess)
+            _ss_phase_code, _ss_server, _ss_html_title, _ss_body_len = _probe_screenshot_meta(url, sess)
+            out.record_spa_baseline(_ss_body_len)
             if not _ss_page_title and _ss_html_title:
                 _ss_page_title = _ss_html_title
             _ss_classification = _classify_screenshot(
@@ -22268,9 +22298,9 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                 url_path=_ss_rel)
             _ss_code_str = f" HTTP {_ss_phase_code}." if _ss_phase_code is not None else ""
             out.add_finding(
-                title=f"Web Screenshot: {_ss_classification}",
+                title="Discovery: Web Screenshot Captured",
                 url=url, port=port, risk="INFO",
-                description=f"A screenshot of {url} was captured during reconnaissance.{_ss_code_str}",
+                description=f"A screenshot of {url} was captured during reconnaissance ({_ss_classification}).{_ss_code_str}",
                 affected=out._rel_affected(_ss_rel),
                 output=f"Saved: {out_path.name}",
                 sources="fracture-screenshot", service=target["scheme"],
@@ -22310,7 +22340,8 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             if _capture_screenshot_to(_root_url, _root_out, target, cfg,
                                       auth_session=sess, _meta=_root_meta):
                 _root_page_title = _root_meta.get("page_title", "")
-                _root_code, _root_server, _root_html_title = _probe_screenshot_meta(_root_url, sess)
+                _root_code, _root_server, _root_html_title, _root_body_len = _probe_screenshot_meta(_root_url, sess)
+                out.record_spa_baseline(_root_body_len)
                 if not _root_page_title and _root_html_title:
                     _root_page_title = _root_html_title
                 _root_cls = _classify_screenshot(
@@ -22318,11 +22349,11 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                     url_path="/")
                 _root_code_str = f" HTTP {_root_code}." if _root_code is not None else ""
                 out.add_finding(
-                    title=f"Web Screenshot: {_root_cls}",
+                    title="Discovery: Web Screenshot Captured",
                     url=_root_url, port=port, risk="INFO",
                     description=(
                         f"A screenshot of the site root {_root_url} was "
-                        f"captured during reconnaissance.{_root_code_str}"
+                        f"captured during reconnaissance ({_root_cls}).{_root_code_str}"
                     ),
                     affected="/",
                     output=f"Saved: {_root_out.name}",
@@ -22354,7 +22385,8 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
     _err_out = save_dir / f"screenshot_{safe_host}_{port}_errorpage.png"
     vc.status(phase, "Screenshot", "running", "Error page", 2, 3)
     try:
-        _err_code, _err_server, _err_html_title = _probe_screenshot_meta(_err_url, sess)
+        _err_code, _err_server, _err_html_title, _err_body_len = _probe_screenshot_meta(_err_url, sess)
+        out.record_spa_baseline(_err_body_len)
         _err_meta = {}
         if _capture_screenshot_to(_err_url, _err_out, target, cfg,
                                   auth_session=sess, _meta=_err_meta):
@@ -22364,11 +22396,11 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                 url_path="/fracture_nonexistent_path_404_test")
             _err_code_str = f" HTTP {_err_code}." if _err_code is not None else ""
             out.add_finding(
-                title=f"Web Screenshot: {_err_cls}",
+                title="Discovery: Web Screenshot Captured",
                 url=_err_url, port=port, risk="INFO",
                 description=(
                     f"A screenshot of the application's error page was "
-                    f"captured.{_err_code_str} Custom error pages may "
+                    f"captured ({_err_cls}).{_err_code_str} Custom error pages may "
                     f"reveal framework information."
                 ),
                 affected="/fracture_nonexistent_path_404_test",
@@ -46391,7 +46423,8 @@ def main() -> None:
                             _ss_lp_meta = {}
                             if _capture_screenshot_to(_ss_login_url, _ss_lp, target, cfg, _meta=_ss_lp_meta):
                                 _ss_lp_rel = urllib.parse.urlparse(_ss_login_url).path or "/"
-                                _ss_lp_code, _ss_lp_srv, _ss_lp_ht = _probe_screenshot_meta(_ss_login_url)
+                                _ss_lp_code, _ss_lp_srv, _ss_lp_ht, _ss_lp_blen = _probe_screenshot_meta(_ss_login_url)
+                                out.record_spa_baseline(_ss_lp_blen)
                                 _ss_lp_pt = _ss_lp_meta.get("page_title", "") or _ss_lp_ht
                                 _ss_lp_cls = _classify_screenshot(_ss_lp_pt, _ss_lp_srv, _ss_lp_code, url_path=_ss_lp_rel)
                                 _ss_lp_cs = f" HTTP {_ss_lp_code}." if _ss_lp_code is not None else ""
@@ -46445,8 +46478,9 @@ def main() -> None:
                                 _as_landing_url, _ss_lnd, target, cfg,
                                 auth_session=_as_session, _meta=_ss_lnd_meta):
                             _ss_lnd_rel = urllib.parse.urlparse(_as_landing_url).path or "/"
-                            _ss_lnd_code, _ss_lnd_srv, _ss_lnd_ht = _probe_screenshot_meta(
+                            _ss_lnd_code, _ss_lnd_srv, _ss_lnd_ht, _ss_lnd_blen = _probe_screenshot_meta(
                                 _as_landing_url, _as_session)
+                            out.record_spa_baseline(_ss_lnd_blen)
                             _ss_lnd_pt = _ss_lnd_meta.get("page_title", "") or _ss_lnd_ht
                             _ss_lnd_cls = _classify_screenshot(_ss_lnd_pt, _ss_lnd_srv,
                                 _ss_lnd_code or _as_landing_code, url_path=_ss_lnd_rel)
