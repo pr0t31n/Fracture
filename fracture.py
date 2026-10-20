@@ -6586,7 +6586,7 @@ document.addEventListener('submit', function(e) {
                         _bal_cur_url = driver.current_url or ""
                         _bal_cur_nl  = _ulp_bal(_bal_cur_url).netloc
                         if _bal_cur_nl and _bal_cur_nl != _bal_netloc:
-                            auth["login_url"] = _bal_cur_url
+                            auth["_idp_login_url"] = _bal_cur_url
                             vc.log(
                                 f"[auth] Browser redirected to IdP login URL: "
                                 f"{_bal_cur_url}",
@@ -6731,7 +6731,7 @@ document.addEventListener('submit', function(e) {
                 _nav_origin = _ulp_nav(login_url).netloc
                 for _n_url in _nav_urls:
                     if _ulp_nav(_n_url).netloc != _nav_origin:
-                        auth["login_url"] = _n_url
+                        auth["_idp_login_url"] = _n_url
                         vc.log(
                             f"[auth] Login URL confirmed from CDP nav chain: {_n_url}",
                             "INFO",
@@ -7297,13 +7297,15 @@ document.addEventListener('submit', function(e) {
                 try:
                     _ar_r = sess.get(_loc_abs, timeout=timeout, allow_redirects=True)
                     _ar_p = _analyse_form_page(_ar_r.text, _ar_r.url)
-                    if _ar_p["login_form"] or (_ar_p["has_username"] and _ar_p["has_checkbox"]):
-                        vc.log(f"[auth] Login form found via auth redirect: {_ar_r.url}",
-                               "SUCCESS")
-                        return _ar_r.url
-                    if _ar_p.get("js_rendered_login"):
-                        vc.log(f"[auth] JS-rendered login via auth redirect: {_ar_r.url}",
-                               "INFO")
+                    if _ar_p["login_form"] or (_ar_p["has_username"] and _ar_p["has_checkbox"]) or _ar_p.get("js_rendered_login"):
+                        from urllib.parse import urlparse as _up_dlu
+                        _base_nl = _up_dlu(base).netloc
+                        if _up_dlu(_ar_r.url).netloc != _base_nl:
+                            _ret = _loc_abs if _up_dlu(_loc_abs).netloc == _base_nl else base + _ap
+                            vc.log(f"[auth] Login detected at external IdP ({_up_dlu(_ar_r.url).netloc}) — using local entry: {_ret}", "INFO")
+                            return _ret
+                        _lbl = "Login form found" if _ar_p.get("login_form") or (_ar_p.get("has_username") and _ar_p.get("has_checkbox")) else "JS-rendered login"
+                        vc.log(f"[auth] {_lbl} via auth redirect: {_ar_r.url}", "SUCCESS" if "found" in _lbl else "INFO")
                         return _ar_r.url
                 except Exception:
                     pass
@@ -7343,15 +7345,12 @@ document.addEventListener('submit', function(e) {
                     if _nr.status_code not in (200, 301, 302):
                         return ""
                     _np = _analyse_form_page(_nr.text, _nr.url)
-                    if _np["login_form"] or (_np["has_username"] and _np["has_checkbox"]):
-                        vc.log(
-                            f"[auth] Login form found via nav '{label}': {_nr.url}",
-                            "SUCCESS")
-                        return _nr.url
-                    if _np.get("js_rendered_login"):
-                        vc.log(
-                            f"[auth] JS-rendered login via nav '{label}': {_nr.url}",
-                            "INFO")
+                    if _np["login_form"] or (_np["has_username"] and _np["has_checkbox"]) or _np.get("js_rendered_login"):
+                        if _up5(_nr.url).netloc != _pg_host:
+                            vc.log(f"[auth] Login at external IdP via nav '{label}' ({_up5(_nr.url).netloc}) — using local entry: {cand}", "INFO")
+                            return cand
+                        _lbl2 = "Login form found" if _np.get("login_form") or (_np.get("has_username") and _np.get("has_checkbox")) else "JS-rendered login"
+                        vc.log(f"[auth] {_lbl2} via nav '{label}': {_nr.url}", "SUCCESS" if "found" in _lbl2 else "INFO")
                         return _nr.url
                 except Exception:
                     pass
