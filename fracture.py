@@ -4529,6 +4529,10 @@ def _deregister_proc(proc: subprocess.Popen) -> None:
 def _signal_handler(sig, frame) -> None:
     _action = "killed_user" if sig == signal.SIGINT else "killed_crucible"
     _reason = "KeyboardInterrupt / Ctrl-C" if sig == signal.SIGINT else "SIGTERM"
+    if _pause_mgr is not None and _pause_mgr.is_pause_requested():
+        vc.log("SIGTERM during pending pause — checkpointing and exiting as paused", "WARNING")
+        if _pause_mgr.check_and_pause():
+            sys.exit(_pp.EXIT_PAUSED)
     vc.log("Interrupted — killing subprocesses and saving checkpoint ...", "WARNING")
     with _procs_lock:
         for p in _active_procs:
@@ -38048,7 +38052,7 @@ def _phase_request_smuggling(target: dict, cfg: dict, pm: ProgressManager,
     def _raw_connect(connect_timeout=None):
         ct = connect_timeout or timeout
         sock = _sock.create_connection((hostname, port), timeout=ct)
-        sock.settimeout(None)
+        sock.settimeout(30)
         if use_tls:
             ctx = _ssl2.create_default_context()
             if not cfg.get("verify_ssl", False):
@@ -38283,6 +38287,8 @@ def _phase_request_smuggling(target: dict, cfg: dict, pm: ProgressManager,
     if not _cl0_found:
         vc.log("[request_smuggling] No CL.0 desync detected", "INFO")
 
+    _check_pause()
+
     # ── Test 2: TE.CL Smuggling ─────────────────────────────────────────
     # Front-end uses Transfer-Encoding, back-end uses Content-Length.
     # Phase A: timing probe — an incomplete chunk causes the TE side to
@@ -38431,6 +38437,8 @@ def _phase_request_smuggling(target: dict, cfg: dict, pm: ProgressManager,
     if not _tecl_found:
         vc.log("[request_smuggling] No TE.CL smuggling detected", "INFO")
 
+    _check_pause()
+
     # ── Test 3: CL.TE Smuggling ─────────────────────────────────────────
     # Front-end uses Content-Length, back-end uses Transfer-Encoding.
     vc.status(phase, "Request Smuggling", "running", "CL.TE smuggling", 3, 4)
@@ -38562,6 +38570,8 @@ def _phase_request_smuggling(target: dict, cfg: dict, pm: ProgressManager,
 
     if not _clte_found:
         vc.log("[request_smuggling] No CL.TE smuggling detected", "INFO")
+
+    _check_pause()
 
     # ── Test 4: Transfer-Encoding obfuscation ─────────────────────────────
     # Some proxies only recognise the canonical "chunked" token.  Obfuscated
@@ -41629,7 +41639,7 @@ def _test_trace_xst(target: dict, cfg: dict, out: "OutputManager",
 
     try:
         sock = _sock.create_connection((hostname, port), timeout=timeout)
-        sock.settimeout(None)
+        sock.settimeout(30)
         if use_tls:
             ctx = _ssl2.create_default_context()
             if not cfg.get("verify_ssl", False):
@@ -42653,7 +42663,7 @@ def _phase_websocket(target: dict, cfg: dict, pm: ProgressManager,
     def _ws_connect(host, p, tls, connect_timeout=None):
         ct = connect_timeout or timeout
         sock = _sock.create_connection((host, p), timeout=ct)
-        sock.settimeout(None)
+        sock.settimeout(30)
         if tls:
             ctx = _ssl2.create_default_context()
             if not cfg.get("verify_ssl", False):
@@ -44680,7 +44690,7 @@ def _test_h2c_smuggling(target: dict, cfg: dict, out: "OutputManager",
     def _raw_connect(connect_timeout=None):
         ct = connect_timeout or 3
         sock = _sock.create_connection((hostname, port), timeout=ct)
-        sock.settimeout(None)
+        sock.settimeout(30)
         if use_tls:
             ctx = _ssl2.create_default_context()
             if not cfg.get("verify_ssl", False):
