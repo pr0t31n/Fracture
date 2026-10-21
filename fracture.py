@@ -21957,6 +21957,8 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                     continue  # already tested as baseline
                 try:
                     _shr = sess.get(_sh_full, timeout=timeout, allow_redirects=True)
+                    if _shr.headers.get("X-Fracture-Scope-Blocked"):
+                        continue
                     if _shr.status_code not in _SH_USEFUL_CODES:
                         continue
                     _sh_checked += 1
@@ -47615,6 +47617,8 @@ def main() -> None:
                 try:
                     _ep_resp = effective_auth.get(
                         _ep_url, timeout=_ep_timeout, allow_redirects=True)
+                    if _ep_resp.headers.get("X-Fracture-Scope-Blocked"):
+                        continue
                     _ep_path_statuses[_ep_url] = _ep_resp.status_code
                     _ep_hdrs = _ep_resp.headers
                     _ep_rel  = _url_rel_path(_ep_url, target["url"])
