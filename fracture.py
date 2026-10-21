@@ -11410,6 +11410,97 @@ def _load_settings(path: str) -> dict:
 
 
 # ─────────────────────────────────────────────
+# DNS resolution helpers
+# ─────────────────────────────────────────────
+_DNS_LOCK = threading.Lock()
+
+
+def _update_dns_resolution(hostname: str, ip_str: str, source: str,
+                           out: "OutputManager") -> bool:
+    """Add or update an IP in dns_resolution.json.  Returns True when the IP
+    was newly added (not previously seen)."""
+    now = datetime.now().astimezone().isoformat()
+    dns_path = out.root / "dns_resolution.json"
+    with _DNS_LOCK:
+        try:
+            data = json.loads(dns_path.read_text()) if dns_path.exists() else {}
+        except Exception:
+            data = {}
+        data.setdefault("hostname", hostname)
+        entries = data.setdefault("resolved_ips", [])
+        found = False
+        for entry in entries:
+            if entry.get("ip") == ip_str:
+                entry["last_seen"] = now
+                if source not in entry.get("sources", []):
+                    entry.setdefault("sources", []).append(source)
+                found = True
+                break
+        is_new = not found
+        if is_new:
+            entries.append({
+                "ip": ip_str,
+                "first_seen": now,
+                "last_seen": now,
+                "sources": [source],
+            })
+        unique_ips = list({e["ip"] for e in entries})
+        data["total_unique_ips"] = len(unique_ips)
+        data["load_balancer_detected"] = len(unique_ips) > 1
+        data["last_updated"] = now
+        tmp = dns_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(dns_path)
+    if is_new:
+        vc.log(f"[dns] New IP resolved for {hostname}: {ip_str} (source: {source})", "INFO")
+    _write_target_profile(
+        out,
+        resolved_ips=unique_ips,
+        load_balancer_detected=data["load_balancer_detected"],
+    )
+    return is_new
+
+
+def _resolve_dns(hostname: str, out: "OutputManager",
+                 source: str = "dns-resolution") -> None:
+    """Perform multiple DNS resolution attempts to detect load-balancer
+    rotation.  Results are persisted to dns_resolution.json and merged
+    into target_profile.json."""
+    vc.status("recon", "Recon", "running", "DNS resolution", 0, 10)
+    vc.log(f"[dns] Resolving {hostname} (5 attempts, 0.5 s apart)", "INFO")
+    all_ips: set = set()
+    for attempt in range(5):
+        try:
+            infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC,
+                                       socket.SOCK_STREAM)
+            for family, _type, _proto, _canon, sockaddr in infos:
+                ip = sockaddr[0]
+                all_ips.add(ip)
+        except socket.gaierror:
+            pass
+        except Exception:
+            pass
+        if attempt < 4:
+            time.sleep(0.5)
+    if not all_ips:
+        vc.log(f"[dns] Could not resolve {hostname} — skipping DNS intelligence", "WARNING")
+        return
+    for ip in sorted(all_ips):
+        _update_dns_resolution(hostname, ip, source, out)
+    lb = len(all_ips) > 1
+    vc.log(
+        f"[dns] {hostname} → {len(all_ips)} unique IP(s): "
+        f"{', '.join(sorted(all_ips))}"
+        f"{' (load balancer detected)' if lb else ''}",
+        "INFO",
+    )
+    out.log(
+        f"EVENT DNS resolution: {hostname} → {', '.join(sorted(all_ips))}"
+        f"{' [LB detected]' if lb else ''}",
+    )
+
+
+# ─────────────────────────────────────────────
 # Argument parsing
 # ─────────────────────────────────────────────
 PHASE_LIST = [
@@ -14653,6 +14744,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             if _parent_url not in _recon_bases:
                 _recon_bases.append(_parent_url)
     vc.status(phase, "Recon", "running", "HTTP probe", 0, 10)
+
+    _resolve_dns(target["hostname"], out)
 
     # Wildcard detection — run before any path-based checks so brute-forcers
     # can be skipped and individual URL findings can be validated.
@@ -19129,6 +19222,9 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 started=_ssl_started, ended=_ssl_ended,
                 exit_code=proc.returncode,
             )
+            _ssl_ip_m = re.search(r'Connected to (\d+\.\d+\.\d+\.\d+)', stdout)
+            if _ssl_ip_m:
+                _update_dns_resolution(hostname, _ssl_ip_m.group(1), "sslscan", out)
             # Filter "not vulnerable" lines and bare section headers.
             # sslscan emits lines like "  Heartbleed:" (header only, no result)
             # followed by per-protocol result lines. The header line survives a
@@ -19541,6 +19637,20 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             _deregister_proc(proc)
             out_f.write_text(stdout, encoding="utf-8")
             out.log_command("testssl.sh", cmd, out_f)
+            if _ts_json_f.exists():
+                try:
+                    _ts_findings = json.loads(_ts_json_f.read_text())
+                    _ts_ips = set()
+                    for _tf in _ts_findings:
+                        _tip = _tf.get("ip", "")
+                        if "/" in _tip:
+                            _tip = _tip.split("/", 1)[1]
+                        if _tip and re.match(r'\d+\.\d+\.\d+\.\d+', _tip):
+                            _ts_ips.add(_tip)
+                    for _tip in _ts_ips:
+                        _update_dns_resolution(hostname, _tip, "testssl", out)
+                except Exception:
+                    pass
             # ── No-TLS-service guard ─────────────────────────────────
             # When testssl reports no protocol offered and can't determine the
             # service, the port isn't running TLS.  Skip all finding generation
@@ -25773,6 +25883,14 @@ def _write_target_profile(out: "OutputManager", **updates) -> None:
                 if _m and _m not in _mfa:
                     _mfa.append(_m)
             existing["mfa_providers"] = _mfa
+        elif key == "resolved_ips":
+            _ri = existing.get("resolved_ips", [])
+            for _ip in (val if isinstance(val, list) else [val]):
+                if _ip and _ip not in _ri:
+                    _ri.append(_ip)
+            existing["resolved_ips"] = _ri
+        elif key == "load_balancer_detected":
+            existing["load_balancer_detected"] = val
         else:
             if existing.get(key) and not val:
                 continue
