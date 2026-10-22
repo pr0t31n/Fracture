@@ -17545,10 +17545,10 @@ def _add_url_bar(png_path: Path, url: str) -> bool:
         return False
 
 
-def _probe_screenshot_meta(url: str, sess=None) -> "tuple[int | None, str, str, int]":
+def _probe_screenshot_meta(url: str, sess=None) -> "tuple[int | None, str, str, int, str]":
     """Quick HTTP probe for screenshot metadata.
 
-    Returns (status_code, server_header, page_title_from_html, body_len).
+    Returns (status_code, server_header, page_title_from_html, body_len, body_snippet).
     Uses allow_redirects=False so SSO redirects don't trip _ScopedSession.
     Falls back to GET if HEAD fails.
     """
@@ -17557,6 +17557,7 @@ def _probe_screenshot_meta(url: str, sess=None) -> "tuple[int | None, str, str, 
     server = ""
     html_title = ""
     body_len = 0
+    body_snippet = ""
     for _method in ("head", "get"):
         try:
             _fn = getattr(_probe, _method)
@@ -17565,6 +17566,7 @@ def _probe_screenshot_meta(url: str, sess=None) -> "tuple[int | None, str, str, 
             server = r.headers.get("Server", "")
             if _method == "get" and hasattr(r, "text") and r.text:
                 body_len = len(r.content)
+                body_snippet = r.text[:2000]
                 _m = re.search(r'<title[^>]*>([^<]{1,200})</title>', r.text, re.I)
                 if _m:
                     html_title = _m.group(1).strip()
@@ -17575,35 +17577,301 @@ def _probe_screenshot_meta(url: str, sess=None) -> "tuple[int | None, str, str, 
             break
         except Exception:
             continue
-    return code, server, html_title, body_len
+    return code, server, html_title, body_len, body_snippet
 
 
-def _classify_screenshot(page_title, server, status_code, url_path=""):
+_RE_BODY_SERVER = re.compile(
+    r'(?:Apache Tomcat|Apache|Nginx|Microsoft-IIS|LiteSpeed|Caddy|Jetty|'
+    r'WildFly|GlassFish|Oracle HTTP Server|IBM HTTP Server|Lighttpd|Cherokee|'
+    r'OpenResty|Tengine|Gunicorn|Uvicorn|Puma|Phusion Passenger)'
+    r'[/ ]*[\d]+(?:\.[\d]+)*', re.IGNORECASE)
+
+
+def _emit_body_info_findings(out, url, port, target, hostname,
+                              server, body_snippet, page_title):
+    if not body_snippet:
+        return
+    _bs_low = body_snippet.lower()
+    _ip = target.get("ip", "")
+
+    if "you know, for search" in _bs_low or ("lucene_version" in _bs_low and "cluster_name" in _bs_low):
+        _es_ver = ""
+        _es_m = re.search(r'"number"\s*:\s*"([\d.]+)"', body_snippet)
+        if _es_m:
+            _es_ver = _es_m.group(1)
+        _es_cluster = ""
+        _cm = re.search(r'"cluster_name"\s*:\s*"([^"]+)"', body_snippet)
+        if _cm:
+            _es_cluster = _cm.group(1)
+        _es_desc = "Elasticsearch instance exposed"
+        _es_parts = []
+        if _es_ver:
+            _es_parts.append(f"version {_es_ver}")
+        if _es_cluster:
+            _es_parts.append(f"cluster '{_es_cluster}'")
+        if _es_parts:
+            _es_desc += f" ({', '.join(_es_parts)})"
+        _es_desc += ". The default Elasticsearch landing page reveals version, cluster name, build information, and Lucene version."
+        out.add_finding(
+            title="Information Disclosure: Elasticsearch Instance Exposed",
+            url=url, port=port, risk="MEDIUM",
+            description=_es_desc,
+            affected=f"{_ip}:{port}",
+            output=body_snippet[:500],
+            sources="fracture-screenshot", service=target.get("scheme", ""),
+            owasp="A05:2025 Security Misconfiguration", nist="CM-6",
+            remediation="Restrict access to the Elasticsearch instance. Do not expose it directly to untrusted networks. Use a reverse proxy with authentication.",
+        )
+
+    if "soap-env:fault" in _bs_low or ("soap-env:envelope" in _bs_low and "fault" in _bs_low):
+        _soap_is_cognos = "cam:" in _bs_low or "cognos" in _bs_low
+        _soap_title = "Information Disclosure: IBM Cognos SOAP Fault" if _soap_is_cognos else "Information Disclosure: SOAP Fault Exposed"
+        _soap_desc = "A SOAP fault response was returned, exposing internal service information."
+        if _soap_is_cognos:
+            _soap_desc = "An IBM Cognos BI Server SOAP fault was returned, confirming the technology stack and exposing internal error details."
+        out.add_finding(
+            title=_soap_title,
+            url=url, port=port, risk="LOW",
+            description=_soap_desc,
+            affected=f"{_ip}:{port}",
+            output=body_snippet[:500],
+            sources="fracture-screenshot", service=target.get("scheme", ""),
+            owasp="A05:2025 Security Misconfiguration", nist="SI-11",
+            remediation="Configure the SOAP service to return generic fault messages. Suppress stack traces and internal error details in production.",
+        )
+
+    if "esxi host client" in _bs_low or ("vmware" in (page_title or "").lower() and "esxi" in _bs_low):
+        out.add_finding(
+            title="Information Disclosure: VMware ESXi Management Interface",
+            url=url, port=port, risk="MEDIUM",
+            description="VMware ESXi Host Client management interface is exposed. This provides direct access to hypervisor management.",
+            affected=f"{_ip}:{port}",
+            output=body_snippet[:300],
+            sources="fracture-screenshot", service=target.get("scheme", ""),
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation="Restrict ESXi management interface access to dedicated management networks. Use vCenter for centralized management with proper RBAC.",
+        )
+
+    if "sign in to jenkins" in _bs_low or ("jenkins" in _bs_low and ("dashboard" in _bs_low or "login" in _bs_low)):
+        out.add_finding(
+            title="Information Disclosure: Jenkins CI/CD Server Exposed",
+            url=url, port=port, risk="LOW",
+            description="A Jenkins CI/CD server login page is exposed. Jenkins servers may contain source code, credentials, and deployment pipelines.",
+            affected=f"{_ip}:{port}",
+            output=body_snippet[:300],
+            sources="fracture-screenshot", service=target.get("scheme", ""),
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation="Restrict Jenkins access to authorized networks. Enable authentication and configure the security realm. Disable anonymous read access.",
+        )
+
+    if port == 9090 and "cockpit" in _bs_low:
+        out.add_finding(
+            title="Information Disclosure: Cockpit System Console Exposed",
+            url=url, port=port, risk="LOW",
+            description="Cockpit system management console is exposed on port 9090. Cockpit provides web-based server administration with system-level access.",
+            affected=f"{_ip}:{port}",
+            output=body_snippet[:300],
+            sources="fracture-screenshot", service=target.get("scheme", ""),
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation="Restrict Cockpit access to management networks. Configure AllowedOrigins and RequireHost in cockpit.conf.",
+        )
+
+    if "the agent does not service request submitted" in _bs_low:
+        out.add_finding(
+            title="Information Disclosure: Oracle EM Agent Exposed",
+            url=url, port=port, risk="LOW",
+            description="Oracle Enterprise Manager Agent is exposed. The agent management port reveals the Oracle EM infrastructure.",
+            affected=f"{_ip}:{port}",
+            output=body_snippet[:300],
+            sources="fracture-screenshot", service=target.get("scheme", ""),
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation="Restrict Oracle EM Agent ports to management networks only. Use EM Console for administration.",
+        )
+
+    if "the requested url was rejected" in _bs_low and "support id" in _bs_low:
+        out.add_finding(
+            title="Information Disclosure: F5 BIG-IP WAF Identified",
+            url=url, port=port, risk="INFO",
+            description="An F5 BIG-IP Application Security Manager (ASM) WAF block page was detected. The Support ID in the response confirms F5 WAF technology.",
+            affected=f"{_ip}:{port}",
+            output=body_snippet[:300],
+            sources="fracture-screenshot", service=target.get("scheme", ""),
+            owasp="A05:2025 Security Misconfiguration", nist="SC-7",
+            remediation="Customize the WAF block page to avoid revealing the underlying technology. Use a generic error page.",
+        )
+
+    _sc_server = (server or "").lower()
+    if "sentinelprotectionserver" in _sc_server:
+        _sent_ver = ""
+        _sent_m = re.search(r'SentinelProtectionServer[/ ]*([\d.]+)', server or "", re.I)
+        if _sent_m:
+            _sent_ver = _sent_m.group(1)
+        _sent_desc = "Sentinel License Server is exposed"
+        if _sent_ver:
+            _sent_desc += f" (version {_sent_ver})"
+        _sent_desc += ". License servers should not be accessible from untrusted networks."
+        out.add_finding(
+            title="Information Disclosure: Sentinel License Server",
+            url=url, port=port, risk="LOW",
+            description=_sent_desc,
+            affected=f"{_ip}:{port}",
+            output=f"Server: {server}",
+            sources="fracture-screenshot", service=target.get("scheme", ""),
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation="Restrict license server access to internal networks. Do not expose management ports externally.",
+        )
+
+
+def _classify_screenshot(page_title, server, status_code, url_path="", *, body_snippet=""):
     t = (page_title or "").lower()
     s = (server or "").lower()
     sc = status_code or 0
     p = (url_path or "").lower().rstrip("/")
-    if sc == 400: return "Bad Request (400)"
-    if sc == 401: return "Unauthorized (401)"
-    if sc == 403: return "Forbidden (403)"
-    if sc == 404 or (sc == 0 and "404" in t): return "Not Found (404)"
-    if sc == 405: return "Method Not Allowed (405)"
-    if sc == 429: return "Too Many Requests (429)"
-    if sc == 500: return "Internal Server Error (500)"
-    if sc == 502: return "Bad Gateway (502)"
-    if sc == 503: return "Service Unavailable (503)"
-    if 400 <= sc < 500: return f"Client Error ({sc})"
-    if 500 <= sc < 600: return f"Server Error ({sc})"
-    if any(k in t for k in ("login", "sign in", "log in", "signin", "logon")): return "Login Page"
+    b = (body_snippet or "").lower()
+
+    # ── Appliance / service fingerprints (body-based, before error codes) ──
+    if b:
+        if "the requested url was rejected" in b and "support id" in b:
+            return "F5 BIG-IP WAF Block Page"
+        if "the agent does not service request submitted" in b:
+            return "Oracle EM Agent"
+        if "vmware" in t or "esxi host client" in b:
+            if "esxi" in b or "esxi" in t:
+                return "VMware ESXi Host Client"
+            return "VMware vCenter"
+        if "soap-env:fault" in b or ("soap-env:envelope" in b and "fault" in b):
+            if "cam:" in b or "cognos" in b:
+                return "IBM Cognos BI — SOAP Fault"
+            if "sharepoint" in b:
+                return "SharePoint — SOAP Fault"
+            if "exchange" in b:
+                return "Exchange — SOAP Fault"
+            return "SOAP Fault Response"
+        if "you know, for search" in b or ("lucene_version" in b and "cluster_name" in b):
+            return "Elasticsearch"
+        if b.lstrip().startswith("{") and ('"errorkey"' in b or '"error_code"' in b or '"errorcode"' in b):
+            return "JSON API Error Response"
+        if "this xml file does not appear to have any style information" in b:
+            return "XML Service Endpoint"
+        if "sentinelprotectionserver" in s:
+            return "Sentinel License Server"
+        if "<applet>" in b and "ignoring the <applet> tag" in b:
+            return "Legacy Java Applet Page"
+        if "sign in to jenkins" in b:
+            return "Jenkins CI/CD"
+        if "cockpit" in b and ("cockpit" in t or "login" in b):
+            return "Cockpit Web Console"
+
+    # ── Title-based fingerprints ──
+    if "splunk" in t: return "Splunk Web"
+    if "fortigate" in t or "fortinet" in t: return "FortiGate Management"
+    if "grafana" in t: return "Grafana Dashboard"
+    if "kibana" in t: return "Kibana Dashboard"
+    if "jenkins" in t: return "Jenkins CI/CD"
+    if "gitlab" in t: return "GitLab"
+    if "bitbucket" in t: return "Bitbucket"
+    if "jira" in t: return "Jira"
+    if "confluence" in t: return "Confluence"
+    if "sonarqube" in t or "sonar" in t: return "SonarQube"
+    if "prometheus" in t and "graph" in t: return "Prometheus"
+    if "pgadmin" in t: return "pgAdmin"
+    if "phpmyadmin" in t: return "phpMyAdmin"
+    if "adminer" in t: return "Adminer"
+    if "webmin" in t: return "Webmin"
+    if "proxmox" in t: return "Proxmox VE"
+    if "synology" in t: return "Synology DSM"
+    if "qnap" in t: return "QNAP QTS"
+    if "unifi" in t: return "UniFi Controller"
+    if "pfsense" in t: return "pfSense"
+    if "opnsense" in t: return "OPNsense"
+    if "netdata" in t: return "Netdata Dashboard"
+    if "zabbix" in t: return "Zabbix"
+    if "nagios" in t: return "Nagios"
+    if "cacti" in t and ("monitor" in t or "graph" in t): return "Cacti"
+    if "roundcube" in t: return "Roundcube Webmail"
+    if "horde" in t: return "Horde Webmail"
+    if "zimbra" in t: return "Zimbra"
+    if "keycloak" in t: return "Keycloak"
+    if "portainer" in t: return "Portainer"
+    if "rancher" in t: return "Rancher"
+    if "argocd" in t or "argo cd" in t: return "Argo CD"
+    if "harbor" in t: return "Harbor Registry"
+    if "minio" in t: return "MinIO Console"
+    if "vault" in t and "hashicorp" in t: return "HashiCorp Vault"
+    if "consul" in t: return "HashiCorp Consul"
+    if "traefik" in t: return "Traefik Dashboard"
+    if "haproxy" in t: return "HAProxy Stats"
+    if "caddy" in t and ("admin" in t or "dashboard" in t): return "Caddy Admin"
+    if "tomcat" in t and "manager" in t: return "Tomcat Manager"
+
+    # ── Default page body checks (before error codes) ──
+    if b:
+        if "it works" in b or "apache2 default page" in b or "testing 123" in b:
+            if "apache" in t or "apache" in s or "apache" in b:
+                return "Default Apache Page"
+        if "welcome to nginx" in b:
+            return "Default Nginx Page"
+        if "iis" in b:
+            if "welcome" in b or "iis windows" in b:
+                return "Default IIS Welcome Page"
+
+    # ── Server-labeled error pages ──
+    _ecode_map = {
+        400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+        404: "Not Found", 405: "Method Not Allowed", 429: "Too Many Requests",
+        500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable",
+    }
+    _ec = _ecode_map.get(sc)
+    if _ec or (400 <= sc < 600):
+        _ecode = _ec or (f"Client Error" if sc < 500 else "Server Error")
+        _srv_label = ""
+        _sl = s
+        _bl = b
+        if "tomcat" in _sl or "tomcat" in _bl: _srv_label = "Tomcat"
+        elif "iis" in _sl or "microsoft" in _sl: _srv_label = "IIS"
+        elif "nginx" in _sl: _srv_label = "Nginx"
+        elif "apache" in _sl: _srv_label = "Apache"
+        elif "jetty" in _sl: _srv_label = "Jetty"
+        elif "wildfly" in _sl: _srv_label = "WildFly"
+        elif "glassfish" in _sl: _srv_label = "GlassFish"
+        elif "litespeed" in _sl: _srv_label = "LiteSpeed"
+        elif "caddy" in _sl: _srv_label = "Caddy"
+        elif "gunicorn" in _sl: _srv_label = "Gunicorn"
+        if _srv_label:
+            return f"{_srv_label} — {_ecode} ({sc})"
+        if _ec:
+            return f"{_ecode} ({sc})"
+        return f"{_ecode} ({sc})"
+    if sc == 0 and "404" in t:
+        return "Not Found (404)"
+
+    # ── Body-based error detection ──
+    if b and ("error" in b or "exception" in b or "stack trace" in b) and len(b) > 20:
+        if not any(k in t for k in ("login", "sign in", "log in", "dashboard")):
+            return "Error Page"
+
+    # ── Login / auth detection from title ──
+    if any(k in t for k in ("login", "sign in", "log in", "signin", "logon")):
+        return "Login Page"
+
+    # ── Management console titles ──
     if "dashboard" in t or "admin panel" in t: return "Dashboard / Admin Panel"
+
+    # ── CMS / framework from title ──
     if "wordpress" in t or "wp-" in t: return "WordPress Site"
+
+    # ── Default pages from title ──
     if "iis" in t and ("windows" in t or "default" in t): return "Default IIS Page"
     if "apache" in t and ("it works" in t or "test page" in t or "default" in t): return "Default Apache Page"
     if "nginx" in t and ("welcome" in t or "default" in t): return "Default Nginx Page"
     if "default" in t or "welcome" in t or "placeholder" in t: return "Default Web Page"
+
+    # ── Content indicators from title ──
     if "index of" in t: return "Directory Listing"
     if any(k in t for k in ("api", "swagger", "openapi")): return "API Documentation"
     if "error" in t or "exception" in t: return "Error Page"
+
+    # ── URL path classification (Fracture-specific) ──
     if any(k in p for k in ("/login", "/signin", "/logon", "/sso", "/auth/", "/oauth")):
         return "Login Page"
     if any(k in p for k in ("/dashboard", "/home", "/landing", "/main", "/portal")):
@@ -17618,14 +17886,29 @@ def _classify_screenshot(page_title, server, status_code, url_path=""):
         return "File Upload Page"
     if "error" in p or "404" in p or "not-found" in p or "notfound" in p:
         return "Error Page"
+
+    # ── No-title fallback ──
     if not page_title or page_title.strip() == "":
         if sc and 200 <= sc < 300: return "Web Page (no title)"
         if sc and 300 <= sc < 400: return f"Redirect ({sc})"
         if not p or p == "/": return "Landing Page"
         return "Interesting Page"
+
+    # ── Plain text body detection ──
+    _b_stripped = (body_snippet or "").strip()
+    if _b_stripped and len(_b_stripped) <= 80 and "<" not in _b_stripped:
+        _b_oneline = " ".join(_b_stripped.split())
+        if _b_oneline:
+            _trunc = _b_oneline[:60] + ("..." if len(_b_oneline) > 60 else "")
+            return f"Plain Text Response: {_trunc}"
+
+    # ── Server header / body server fallback ──
     if "apache" in s: return "Web Page (Apache)"
     if "nginx" in s: return "Web Page (Nginx)"
     if "iis" in s or "microsoft" in s: return "Web Page (IIS)"
+    _body_srv = _RE_BODY_SERVER.search(body_snippet or "")
+    if _body_srv:
+        return f"Web Page ({_body_srv.group().split('/')[0].split()[0]})"
     return "Web Page Detected"
 
 
@@ -17636,7 +17919,7 @@ def _register_screenshot(root: Path, png_path, url: str = "",
                          classification: str = "",
                          status_code: "int | None" = None,
                          server: str = "", page_title: str = "",
-                         oos: bool = False):
+                         oos: bool = False, body_snippet: str = ""):
     """Copy a screenshot PNG into <root>/screenshots/ with a JSON sidecar.
 
     The screenshots/ directory is the canonical location for the Intelligence
@@ -17674,7 +17957,7 @@ def _register_screenshot(root: Path, png_path, url: str = "",
             "url": url, "ip": ip, "port": int(port) if port else 0,
             "hostname": hostname, "scheme": _sc,
             "title": title, "description": description,
-            "classification": classification or _classify_screenshot(page_title, server, status_code),
+            "classification": classification or _classify_screenshot(page_title, server, status_code, body_snippet=body_snippet),
             "status_code": status_code,
             "server": server, "page_title": page_title,
             "oos": oos,
@@ -18511,7 +18794,7 @@ def _phase_endpoint_tools(
         _ss_ep_server = ""
         if _ep_screenshot_ok:
             try:
-                _ss_http_code, _ss_ep_server, _, _ep_body_len = _probe_screenshot_meta(ep_url, sess)
+                _ss_http_code, _ss_ep_server, _, _ep_body_len, _ss_ep_body = _probe_screenshot_meta(ep_url, sess)
                 _ep_screenshot_ok = (_ss_http_code is not None
                                      and ((200 <= _ss_http_code < 300)
                                           or (400 <= _ss_http_code < 500)))
@@ -18523,7 +18806,7 @@ def _phase_endpoint_tools(
                 _ep_screenshot_ok = False
         if _ep_screenshot_ok and _capture_screenshot_to(ep_url, ep_shot, target, cfg, auth_session=sess):
             _ep_rel = urllib.parse.urlparse(ep_url).path or "/"
-            _ep_cls = _classify_screenshot("", _ss_ep_server, _ss_http_code)
+            _ep_cls = _classify_screenshot("", _ss_ep_server, _ss_http_code, body_snippet=_ss_ep_body)
             _ep_oos = not _ep_scope_ok
             out.add_finding(
                 title="Discovery: Web Screenshot Captured",
@@ -22415,13 +22698,13 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             _ss_nav_url = _ss_meta.get("final_url", url)
             _ss_rel = urllib.parse.urlparse(_ss_nav_url).path or "/"
             _ss_page_title = _ss_meta.get("page_title", "")
-            _ss_phase_code, _ss_server, _ss_html_title, _ss_body_len = _probe_screenshot_meta(url, sess)
+            _ss_phase_code, _ss_server, _ss_html_title, _ss_body_len, _ss_body = _probe_screenshot_meta(url, sess)
             out.record_spa_baseline(_ss_body_len)
             if not _ss_page_title and _ss_html_title:
                 _ss_page_title = _ss_html_title
             _ss_classification = _classify_screenshot(
                 _ss_page_title, _ss_server, _ss_phase_code,
-                url_path=_ss_rel)
+                url_path=_ss_rel, body_snippet=_ss_body)
             _ss_code_str = f" HTTP {_ss_phase_code}." if _ss_phase_code is not None else ""
             out.add_finding(
                 title="Discovery: Web Screenshot Captured",
@@ -22442,7 +22725,10 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                                  description=f"A screenshot of {url} was captured during reconnaissance.{_ss_code_str}",
                                  classification=_ss_classification,
                                  status_code=_ss_phase_code,
-                                 server=_ss_server, page_title=_ss_page_title)
+                                 server=_ss_server, page_title=_ss_page_title,
+                                 body_snippet=_ss_body)
+            _emit_body_info_findings(out, url, port, target, hostname,
+                                     _ss_server, _ss_body, _ss_page_title)
             vc.log(f"[screenshot] Saved: {out_path} ({_ss_classification})", "SUCCESS")
         else:
             vc.status(phase, "Screenshot", "complete", "Done", 1, 1)
@@ -22466,13 +22752,13 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             if _capture_screenshot_to(_root_url, _root_out, target, cfg,
                                       auth_session=sess, _meta=_root_meta):
                 _root_page_title = _root_meta.get("page_title", "")
-                _root_code, _root_server, _root_html_title, _root_body_len = _probe_screenshot_meta(_root_url, sess)
+                _root_code, _root_server, _root_html_title, _root_body_len, _root_body = _probe_screenshot_meta(_root_url, sess)
                 out.record_spa_baseline(_root_body_len)
                 if not _root_page_title and _root_html_title:
                     _root_page_title = _root_html_title
                 _root_cls = _classify_screenshot(
                     _root_page_title, _root_server, _root_code,
-                    url_path="/")
+                    url_path="/", body_snippet=_root_body)
                 _root_code_str = f" HTTP {_root_code}." if _root_code is not None else ""
                 out.add_finding(
                     title="Discovery: Web Screenshot Captured",
@@ -22497,7 +22783,10 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                                      classification=_root_cls,
                                      status_code=_root_code,
                                      server=_root_server,
-                                     page_title=_root_page_title)
+                                     page_title=_root_page_title,
+                                     body_snippet=_root_body)
+                _emit_body_info_findings(out, _root_url, port, target, hostname,
+                                         _root_server, _root_body, _root_page_title)
                 vc.log(f"[screenshot] Root page saved: {_root_out} ({_root_cls})", "SUCCESS")
         except Exception as _re:
             vc.log(f"[screenshot] Root page failed: {_re}", "WARNING")
@@ -22514,7 +22803,7 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Screenshot", "running", "Error page", 2, 3)
     _err_skip_spa = False
     try:
-        _err_code, _err_server, _err_html_title, _err_body_len = _probe_screenshot_meta(_err_url, sess)
+        _err_code, _err_server, _err_html_title, _err_body_len, _err_body = _probe_screenshot_meta(_err_url, sess)
         if out.is_spa_duplicate(_err_body_len):
             _err_skip_spa = True
             vc.log("[screenshot] Error page skipped — SPA duplicate of landing/root page", "INFO")
@@ -22525,7 +22814,7 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             _err_page_title = _err_meta.get("page_title", "") or _err_html_title
             _err_cls = _classify_screenshot(
                 _err_page_title, _err_server, _err_code,
-                url_path="/fracture_nonexistent_path_404_test")
+                url_path="/fracture_nonexistent_path_404_test", body_snippet=_err_body)
             _err_code_str = f" HTTP {_err_code}." if _err_code is not None else ""
             out.add_finding(
                 title="Discovery: Web Screenshot Captured",
@@ -22551,7 +22840,10 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                                  classification=_err_cls,
                                  status_code=_err_code,
                                  server=_err_server,
-                                 page_title=_err_page_title)
+                                 page_title=_err_page_title,
+                                 body_snippet=_err_body)
+            _emit_body_info_findings(out, _err_url, port, target, hostname,
+                                     _err_server, _err_body, _err_page_title)
             vc.log(f"[screenshot] Error page saved: {_err_out} ({_err_cls})", "SUCCESS")
     except Exception as _ee:
         vc.log(f"[screenshot] Error page failed: {_ee}", "WARNING")
@@ -46835,10 +47127,10 @@ def main() -> None:
                             _ss_lp_meta = {}
                             if _capture_screenshot_to(_ss_login_url, _ss_lp, target, cfg, _meta=_ss_lp_meta):
                                 _ss_lp_rel = urllib.parse.urlparse(_ss_login_url).path or "/"
-                                _ss_lp_code, _ss_lp_srv, _ss_lp_ht, _ss_lp_blen = _probe_screenshot_meta(_ss_login_url)
+                                _ss_lp_code, _ss_lp_srv, _ss_lp_ht, _ss_lp_blen, _ss_lp_body = _probe_screenshot_meta(_ss_login_url)
                                 out.record_spa_baseline(_ss_lp_blen)
                                 _ss_lp_pt = _ss_lp_meta.get("page_title", "") or _ss_lp_ht
-                                _ss_lp_cls = _classify_screenshot(_ss_lp_pt, _ss_lp_srv, _ss_lp_code, url_path=_ss_lp_rel)
+                                _ss_lp_cls = _classify_screenshot(_ss_lp_pt, _ss_lp_srv, _ss_lp_code, url_path=_ss_lp_rel, body_snippet=_ss_lp_body)
                                 _ss_lp_cs = f" HTTP {_ss_lp_code}." if _ss_lp_code is not None else ""
                                 out.add_finding(
                                     title="Discovery: Web Screenshot Captured",
@@ -46890,12 +47182,12 @@ def main() -> None:
                                 _as_landing_url, _ss_lnd, target, cfg,
                                 auth_session=_as_session, _meta=_ss_lnd_meta):
                             _ss_lnd_rel = urllib.parse.urlparse(_as_landing_url).path or "/"
-                            _ss_lnd_code, _ss_lnd_srv, _ss_lnd_ht, _ss_lnd_blen = _probe_screenshot_meta(
+                            _ss_lnd_code, _ss_lnd_srv, _ss_lnd_ht, _ss_lnd_blen, _ss_lnd_body = _probe_screenshot_meta(
                                 _as_landing_url, _as_session)
                             out.record_spa_baseline(_ss_lnd_blen)
                             _ss_lnd_pt = _ss_lnd_meta.get("page_title", "") or _ss_lnd_ht
                             _ss_lnd_cls = _classify_screenshot(_ss_lnd_pt, _ss_lnd_srv,
-                                _ss_lnd_code or _as_landing_code, url_path=_ss_lnd_rel)
+                                _ss_lnd_code or _as_landing_code, url_path=_ss_lnd_rel, body_snippet=_ss_lnd_body)
                             _lnd_ctx = (
                                 f" (role: {_ctx_label})"
                                 if _ctx_label != "unauthenticated" else ""
