@@ -19577,7 +19577,7 @@ _TESTSSL_PROTO_IDS = {
 }
 # testssl JSON ids that produce no useful pentest finding — skip entirely
 _TS_SKIP_IDS = frozenset({
-    "overall_grade", "cert_revocation", "cert_trust", "cert_trust_wildcard",
+    "overall_grade", "cert_revocation",
     "security_headers",
     "TLS1_2",
 })
@@ -19675,6 +19675,20 @@ _TLS_VULN_PATTERNS = {
     "SSL/TLS Certificate: Self-Signed":     (re.compile(r'self.signed|Self signed', re.I),    "MEDIUM", "", ""),
     "SSL/TLS Certificate: Expired":         (re.compile(r'expired|NOT after.*passed', re.I),  "HIGH",   "", ""),
 }
+# Scope-aware risk downgrade for internal scope — applied to _TLS_VULN_PATTERNS matches.
+# Keys that don't appear here keep their original risk.
+_TLS_INTERNAL_RISK = {
+    "Deprecated Protocol Enabled: SSLv3":   "MEDIUM",
+    "SSL/TLS Vulnerability: POODLE":        "MEDIUM",
+    "SSL/TLS Vulnerability: BEAST":         "LOW",
+    "SSL/TLS Vulnerability: CRIME":         "MEDIUM",
+    "SSL/TLS Vulnerability: DROWN":         "MEDIUM",
+    "SSL/TLS Vulnerability: LOGJAM":        "MEDIUM",
+    "SSL/TLS Vulnerability: SWEET32":       "LOW",
+    "SSL/TLS Vulnerability: LUCKY13":       "LOW",
+    "SSL/TLS Certificate: Self-Signed":     "LOW",
+    "SSL/TLS Certificate: Expired":         "MEDIUM",
+}
 
 
 def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
@@ -19686,6 +19700,14 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
     hostname  = target["hostname"]
     port      = target["port"]
     host_port = f"{hostname}:{port}"
+    # Scope-aware risk: detect ext/int from config, env, or target IP
+    _tls_scope = (cfg.get("scope") or os.environ.get("CRUCIBLE_SCOPE") or "").lower().strip()
+    if not _tls_scope:
+        try:
+            _tls_scope = "int" if ipaddress.ip_address(hostname).is_private else "ext"
+        except ValueError:
+            _tls_scope = "ext"
+    _tls_ext = _tls_scope.startswith("ext")
     vc.status(phase, "TLS Analysis", "running", "sslscan", 0, 4)
 
     _tls_profile_info: dict = {}
@@ -19733,7 +19755,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             for ftitle, (pat, risk, cve, _affected) in _TLS_VULN_PATTERNS.items():
                 if pat.search(_sslscan_filtered):
                     _emit_title = "SSL/TLS Ciphers: Obsolete Ciphers" if _affected else ftitle
-                    # Build highlights from the title and CVE
+                    _tvp_risk = _TLS_INTERNAL_RISK.get(ftitle, risk) if not _tls_ext else risk
                     _tvp_hl = []
                     _tvp_key = ftitle.split(":")[-1].strip().split("(")[0].strip()
                     if _tvp_key and len(_tvp_key) >= 3:
@@ -19744,7 +19766,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         _tvp_hl.extend(c.strip() for c in cve.split(",") if c.strip())
                     out.add_finding(
                         title=_emit_title, url=target["url"], port=port,
-                        risk=risk, description=f"TLS issue: {_emit_title}",
+                        risk=_tvp_risk, description=f"TLS issue: {_emit_title}",
                         cves=cve, sources="sslscan", service="https",
                         output_file=str(out_f),
                         affected=_affected or "",
@@ -19870,7 +19892,8 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     if _exp_date and _exp_date < _dt.now(__import__('datetime').timezone.utc).replace(tzinfo=None):
                         out.add_finding(
                             title="SSL/TLS Certificate: Expired",
-                            url=target["url"], port=port, risk="HIGH",
+                            url=target["url"], port=port,
+                            risk="HIGH" if _tls_ext else "MEDIUM",
                             description="The server's TLS certificate has passed its expiry date, causing browser trust errors and indicating a breakdown in certificate lifecycle management.",
                             output=f"Not valid after: {_ss_cert_expiry}",
                             sources="sslscan", service="https",
@@ -19884,7 +19907,8 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             if _ss_cert_valid == "self-signed":
                 out.add_finding(
                     title="SSL/TLS Certificate: Self-Signed",
-                    url=target["url"], port=port, risk="MEDIUM",
+                    url=target["url"], port=port,
+                    risk="MEDIUM" if _tls_ext else "LOW",
                     description="The server presented a self-signed TLS certificate that is not anchored to a publicly trusted CA, preventing clients from verifying the server's identity and enabling trivial MITM attacks.",
                     sources="sslscan", service="https",
                     output_file=str(out_f),
@@ -19899,7 +19923,8 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             if _3des_suites:
                 out.add_finding(
                     title="SSL/TLS Vulnerability: SWEET32",
-                    url=target["url"], port=port, risk="MEDIUM",
+                    url=target["url"], port=port,
+                    risk="MEDIUM" if _tls_ext else "LOW",
                     description=(
                         f"sslscan: 3DES cipher suites accepted — susceptible to SWEET32 "
                         f"(CVE-2016-2183): {', '.join(_3des_suites[:5])}"
@@ -19913,7 +19938,8 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             if _tls10_on and _cbc_suites:
                 out.add_finding(
                     title="SSL/TLS Vulnerability: BEAST",
-                    url=target["url"], port=port, risk="MEDIUM",
+                    url=target["url"], port=port,
+                    risk="MEDIUM" if _tls_ext else "LOW",
                     description=(
                         "sslscan: TLSv1.0 enabled with CBC cipher suites — "
                         "susceptible to BEAST (CVE-2011-3389)"
@@ -20003,7 +20029,8 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             if _no_fs_ciphers:
                 out.add_finding(
                     title="SSL/TLS Forward Secrecy: Cipher Suites",
-                    url=target["url"], port=port, risk="MEDIUM",
+                    url=target["url"], port=port,
+                    risk="MEDIUM" if _tls_ext else "LOW",
                     description=(
                         f"The server accepts {len(_no_fs_ciphers)} cipher "
                         f"suite(s) that do not use ephemeral key exchange "
@@ -20189,6 +20216,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             for ftitle, (pat, risk, cve, _affected) in _TLS_VULN_PATTERNS.items():
                 if pat.search(_ok_filtered):
                     _emit_title = "SSL/TLS Ciphers: Obsolete Ciphers" if _affected else ftitle
+                    _tvp_risk2 = _TLS_INTERNAL_RISK.get(ftitle, risk) if not _tls_ext else risk
                     _tvp_hl2 = []
                     _tvp_key2 = ftitle.split(":")[-1].strip().split("(")[0].strip()
                     if _tvp_key2 and len(_tvp_key2) >= 3:
@@ -20199,7 +20227,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                         _tvp_hl2.extend(c.strip() for c in cve.split(",") if c.strip())
                     out.add_finding(
                         title=_emit_title, url=target["url"], port=port,
-                        risk=risk, description=f"TLS issue: {_emit_title}",
+                        risk=_tvp_risk2, description=f"TLS issue: {_emit_title}",
                         cves=cve, sources="testssl.sh", service="https",
                         output_file=str(out_f),
                         affected=_affected or "",
@@ -20221,7 +20249,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             if _logjam_cp and not _logjam_has_export:
                 _dh_bits = int(_logjam_cp.group(1))
                 if _dh_bits <= 1024:
-                    _lj_risk = "HIGH"
+                    _lj_risk = "HIGH" if _tls_ext else "MEDIUM"
                     _lj_title = "SSL/TLS Vulnerability: LOGJAM"
                     _lj_desc = (
                         f"TLS service uses a {_dh_bits}-bit "
@@ -20363,7 +20391,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     _ts_findings = []
                 for _tsf in _ts_findings:
                     try:
-                        _tsf_id          = re.sub(r'\s*<hostCert#\d+>', '', _tsf.get("id", ""))
+                        _tsf_id          = re.sub(r'\s*<[^>]*>\s*$', '', _tsf.get("id", "")).strip()
                         _tsf_sev         = (_tsf.get("severity") or "INFO").upper()
                         _tsf_risk        = _TESTSSL_RISK_MAP.get(_tsf_sev, "INFO")
                         _tsf_finding     = _tsf.get("finding") or ""
@@ -20379,8 +20407,12 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                                 continue
                             _tsf_proto = _TESTSSL_PROTO_IDS[_tsf_id]
                             _tsf_title = f"Deprecated Protocol Enabled: {_tsf_proto}"
-                            _tsf_risk  = ("CRITICAL" if "SSLv2" in _tsf_proto else
-                                          "HIGH"     if "SSLv3" in _tsf_proto else "MEDIUM")
+                            if "SSLv2" in _tsf_proto:
+                                _tsf_risk = "CRITICAL" if _tls_ext else "HIGH"
+                            elif "SSLv3" in _tsf_proto:
+                                _tsf_risk = "HIGH" if _tls_ext else "MEDIUM"
+                            else:
+                                _tsf_risk = "MEDIUM" if _tls_ext else "LOW"
                             _tsf_cve   = _TESTSSL_CVES_JSON.get(_tsf_id, "")
                         else:
                             _tsf_cve = _TESTSSL_CVES_JSON.get(_tsf_id, "")
@@ -20393,24 +20425,20 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                             # "SSL/TLS Forward Secrecy: Cipher Suites" finding
                             # so both tools show as source pills.
                             elif _tsf_id.startswith("FS"):
-                                # FS / FS_ciphers: same concept as the sslscan
-                                # cipher-level finding — merge title.
-                                # FS_ECDHE_curves / FS_DH_groups /
-                                # FS_TLS12_sig_algs: parameter-quality sub-findings
-                                # that stand on their own.
                                 if "offered" in _tsf_finding_lo and "not" not in _tsf_finding_lo:
-                                    continue  # FS offered and OK — not a finding
+                                    continue
                                 if _tsf_id in ("FS", "FS_offered", "FS_ciphers"):
                                     _tsf_title = "SSL/TLS Forward Secrecy: Cipher Suites"
-                                    _tsf_risk  = "MEDIUM"
+                                    _tsf_risk  = "MEDIUM" if _tls_ext else "LOW"
                                 elif _tsf_id == "FS_TLS12_sig_algs":
                                     _tsf_title = "SSL/TLS Vulnerability: Signature Algorithms"
                                     _tsf_risk  = "LOW"
                                 else:
                                     _tsf_title = f"SSL/TLS Forward Secrecy: {_tsf_id}"
+                                    _tsf_risk  = "MEDIUM" if _tls_ext else "LOW"
                             elif "self-signed" in _tsf_finding_lo or "self signed" in _tsf_finding_lo:
                                 _tsf_title = "SSL/TLS Certificate: Self-Signed"
-                                _tsf_risk  = "MEDIUM"
+                                _tsf_risk  = "MEDIUM" if _tls_ext else "LOW"
                             elif "chain incomplete" in _tsf_finding_lo:
                                 _tsf_title = "SSL/TLS Certificate: Chain Incomplete"
                                 _tsf_risk  = "LOW"
@@ -20432,23 +20460,28 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                                     continue
                             elif _tsf_id.lower() == "cert_extlifespan":
                                 _tsf_title = "SSL/TLS Certificate: Long Duration"
-                                _tsf_risk  = "MEDIUM"
+                                _tsf_risk  = "MEDIUM" if _tls_ext else "LOW"
                             elif _tsf_id == "cert_subjectAltName":
                                 _tsf_title = "SSL/TLS Certificate: Missing SAN"
                                 _tsf_risk  = "LOW"
-                            elif _tsf_id.startswith("hsts"):
+                            elif _tsf_id.lower().startswith("hsts"):
                                 if ("offered" in _tsf_finding_lo
                                         and "not offered" not in _tsf_finding_lo):
                                     continue
-                                _tsf_title    = "Missing Security Header: Strict-Transport-Security"
-                                _tsf_affected = "Strict-Transport-Security"
-                                _tsf_risk     = "MEDIUM"
+                                if _tsf_id == "HSTS_time":
+                                    _tsf_title    = "SSL/TLS Vulnerability: HSTS Short Duration"
+                                    _tsf_affected = "Strict-Transport-Security"
+                                    _tsf_risk     = "LOW" if _tls_ext else "INFO"
+                                else:
+                                    _tsf_title    = "Missing Security Header: Strict-Transport-Security"
+                                    _tsf_affected = "Strict-Transport-Security"
+                                    _tsf_risk     = "MEDIUM" if _tls_ext else "LOW"
                             elif _tsf_id in ("cert_notAfter", "cert_expirationStatus",
                                              "expiration"):
                                 if any(kw in _tsf_finding_lo
                                        for kw in ("expired", "already past", "has expired")):
                                     _tsf_title = "SSL/TLS Certificate: Expired"
-                                    _tsf_risk  = "HIGH"
+                                    _tsf_risk  = "HIGH" if _tls_ext else "MEDIUM"
                                 else:
                                     continue
                             elif _tsf_id == "cert_keySize":
@@ -20457,26 +20490,77 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                                 _tsf_title = "SSL/TLS Certificate: Serial Number Entropy"
                             elif _tsf_id == "cipherlist_OBSOLETED":
                                 _tsf_title = "SSL/TLS Ciphers: Obsolete Ciphers"
+                                _tsf_risk  = "MEDIUM" if _tls_ext else "LOW"
                             elif _tsf_id == "DNS_CAArecord":
                                 _tsf_title = "DNS Information: Missing CAA Record"
                                 _tsf_risk  = "LOW"
                             elif _tsf_id == "TLS_session_ticket":
                                 _tsf_title = "SSL/TLS Session: Long Duration"
                             elif _tsf_id == "TLS_misses_extension_23":
-                                # Missing Extended Master Secret (RFC 7627) —
-                                # vulnerable to Triple Handshake (CVE-2014-1295)
-                                # on TLS ≤ 1.2.
                                 _tsf_title = "SSL/TLS Vulnerability: TLS_misses_extension_23"
-                                _tsf_risk  = "MEDIUM"
+                                _tsf_risk  = "MEDIUM" if _tls_ext else "LOW"
                             elif _tsf_id == "secure_client_renego":
                                 if "not vulnerable" in _tsf_finding_lo:
                                     continue
                                 _tsf_title = "SSL/TLS Vulnerability: Client-Initiated Renegotiation"
                                 _tsf_risk  = "LOW"
+                            elif _tsf_id == "cert_trust":
+                                if _tsf_sev in ("OK", "INFO"):
+                                    continue
+                                _tsf_title = "SSL/TLS Certificate: Trust Issue"
+                                _tsf_risk  = "HIGH" if _tls_ext else "MEDIUM"
+                            elif _tsf_id == "cert_trust_wildcard":
+                                _tsf_title = "SSL/TLS Certificate: Wildcard Certificate"
+                                _tsf_risk  = "LOW" if _tls_ext else "INFO"
+                            elif _tsf_id == "cert_keyUsage":
+                                if _tsf_sev in ("OK", "INFO"):
+                                    continue
+                                _tsf_title = "SSL/TLS Certificate: Key Usage Violation"
+                                _tsf_risk  = "HIGH" if _tls_ext else "MEDIUM"
+                            elif _tsf_id == "cipherlist_LOW":
+                                if "not offered" in _tsf_finding_lo:
+                                    continue
+                                _tsf_title = "SSL/TLS Ciphers: LOW-Grade Ciphers Accepted"
+                                _tsf_risk  = "HIGH" if _tls_ext else "MEDIUM"
+                            elif _tsf_id == "cipherlist_3DES_IDEA":
+                                if "not offered" in _tsf_finding_lo:
+                                    continue
+                                _tsf_title = "SSL/TLS Ciphers: 3DES/IDEA Ciphers Accepted"
+                                _tsf_risk  = "MEDIUM" if _tls_ext else "LOW"
+                            elif _tsf_id == "BEAST_CBC_TLS1":
+                                if "not vulnerable" in _tsf_finding_lo:
+                                    continue
+                                _tsf_title = "SSL/TLS Vulnerability: BEAST (CBC/TLS1)"
+                                _tsf_risk  = "MEDIUM" if _tls_ext else "LOW"
+                            elif _tsf_id == "fallback_SCSV":
+                                if _tsf_sev in ("OK", "INFO"):
+                                    continue
+                                if "offered" in _tsf_finding_lo and "not" not in _tsf_finding_lo:
+                                    continue
+                                _tsf_title = "SSL/TLS Vulnerability: TLS_FALLBACK_SCSV Not Supported"
+                                _tsf_risk  = "MEDIUM" if _tls_ext else "LOW"
+                            elif _tsf_id == "Cache-Control_multiple":
+                                _tsf_title = "HTTP Header: Conflicting Cache-Control Directives"
+                                _tsf_risk  = "LOW" if _tls_ext else "INFO"
+                            elif _tsf_id == "cert_signatureAlgorithm":
+                                if _tsf_sev in ("OK", "INFO"):
+                                    continue
+                                _tsf_title = "SSL/TLS Certificate: Weak Signature Algorithm"
+                                _tsf_risk  = "HIGH" if _tls_ext else "MEDIUM"
+                            elif _tsf_id.startswith("intermediate_cert"):
+                                if _tsf_sev in ("OK", "INFO"):
+                                    continue
+                                _tsf_title = f"SSL/TLS Certificate: Intermediate Certificate Issue ({_tsf_id})"
+                                _tsf_risk  = "HIGH" if _tls_ext else "MEDIUM"
+                            elif _tsf_id == "certs_list_ordering_problem":
+                                _tsf_title = "SSL/TLS Certificate: Chain Ordering Issue"
+                                _tsf_risk  = "INFO"
                             else:
                                 if _tsf_risk == "INFO":
                                     continue
                                 _tsf_title = f"SSL/TLS Vulnerability: {_tsf_id}"
+                                if _tsf_risk in ("HIGH", "CRITICAL") and not _tls_ext:
+                                    _tsf_risk = {"CRITICAL": "HIGH", "HIGH": "MEDIUM"}.get(_tsf_risk, _tsf_risk)
                         # Build highlights from the testssl ID mapping
                         _tsf_hl = list(_TESTSSL_HL_MAP.get(_tsf_id, []))
                         if not _tsf_hl:
@@ -20539,7 +20623,8 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     else:
                         out.add_finding(
                             title="SSL/TLS Certificate: Hostname Mismatch",
-                            url=target["url"], port=port, risk="HIGH",
+                            url=target["url"], port=port,
+                            risk="HIGH" if _tls_ext else "MEDIUM",
                             description=(
                                 f"The TLS certificate's Subject Alternative Names do not cover "
                                 f"{hostname}. Clients will display a certificate mismatch warning, "
