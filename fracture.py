@@ -16926,6 +16926,22 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                         remediation="Restrict admin interfaces by IP allowlist or VPN.",
                         http_code=r.status_code,
                     )
+                    out.add_finding(
+                        title="Discovery: Admin Console",
+                        url=_admin_full_url, port=target["port"], risk="INFO",
+                        description=(
+                            f"An administrative console path was discovered at "
+                            f"{_adm_full_path}. Administrative consoles are "
+                            "high-value targets that may allow system configuration "
+                            "or infrastructure control."
+                        ),
+                        output=f"Path: {_adm_full_path}\nHTTP Status: {r.status_code}",
+                        sources="fracture-recon",
+                        service=target["scheme"],
+                        affected=_admin_full_url,
+                        owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                        remediation="Restrict administrative console access to authorized networks.",
+                    )
                     vc.log(f"[recon] Admin panel: {_adm_full_path} → {r.status_code}", "SUCCESS")
                     try:
                         _admin_redir = None
@@ -17642,9 +17658,9 @@ def _emit_body_info_findings(out, url, port, target, hostname,
 
     if "esxi host client" in _bs_low or ("vmware" in (page_title or "").lower() and "esxi" in _bs_low):
         out.add_finding(
-            title="Information Disclosure: VMware ESXi Management Interface",
+            title="Discovery: VMware ESXi Management Interface",
             url=url, port=port, risk="MEDIUM",
-            description="VMware ESXi Host Client management interface is exposed. This provides direct access to hypervisor management.",
+            description="VMware ESXi Host Client management interface is accessible on the network. This provides direct access to hypervisor management.",
             affected=f"{_ip}:{port}",
             output=body_snippet[:300],
             sources="fracture-screenshot", service=target.get("scheme", ""),
@@ -17654,9 +17670,9 @@ def _emit_body_info_findings(out, url, port, target, hostname,
 
     if "sign in to jenkins" in _bs_low or ("jenkins" in _bs_low and ("dashboard" in _bs_low or "login" in _bs_low)):
         out.add_finding(
-            title="Information Disclosure: Jenkins CI/CD Server Exposed",
+            title="Discovery: Jenkins CI/CD Server",
             url=url, port=port, risk="LOW",
-            description="A Jenkins CI/CD server login page is exposed. Jenkins servers may contain source code, credentials, and deployment pipelines.",
+            description="A Jenkins CI/CD server is accessible on the network. Jenkins servers may contain source code, credentials, and deployment pipelines.",
             affected=f"{_ip}:{port}",
             output=body_snippet[:300],
             sources="fracture-screenshot", service=target.get("scheme", ""),
@@ -17666,9 +17682,9 @@ def _emit_body_info_findings(out, url, port, target, hostname,
 
     if port == 9090 and "cockpit" in _bs_low:
         out.add_finding(
-            title="Information Disclosure: Cockpit System Console Exposed",
+            title="Discovery: System Management Console (Cockpit)",
             url=url, port=port, risk="LOW",
-            description="Cockpit system management console is exposed on port 9090. Cockpit provides web-based server administration with system-level access.",
+            description="Cockpit system management console is accessible on port 9090. Cockpit provides web-based server administration with terminal, log, and service management capabilities.",
             affected=f"{_ip}:{port}",
             output=body_snippet[:300],
             sources="fracture-screenshot", service=target.get("scheme", ""),
@@ -17678,9 +17694,9 @@ def _emit_body_info_findings(out, url, port, target, hostname,
 
     if "the agent does not service request submitted" in _bs_low:
         out.add_finding(
-            title="Information Disclosure: Oracle EM Agent Exposed",
+            title="Discovery: Oracle EM Agent",
             url=url, port=port, risk="LOW",
-            description="Oracle Enterprise Manager Agent is exposed. The agent management port reveals the Oracle EM infrastructure.",
+            description="Oracle Enterprise Manager Agent endpoint is accessible on the network, revealing the Oracle management infrastructure.",
             affected=f"{_ip}:{port}",
             output=body_snippet[:300],
             sources="fracture-screenshot", service=target.get("scheme", ""),
@@ -17706,12 +17722,12 @@ def _emit_body_info_findings(out, url, port, target, hostname,
         _sent_m = re.search(r'SentinelProtectionServer[/ ]*([\d.]+)', server or "", re.I)
         if _sent_m:
             _sent_ver = _sent_m.group(1)
-        _sent_desc = "Sentinel License Server is exposed"
+        _sent_desc = "Sentinel License Server is accessible on the network"
         if _sent_ver:
             _sent_desc += f" (version {_sent_ver})"
         _sent_desc += ". License servers should not be accessible from untrusted networks."
         out.add_finding(
-            title="Information Disclosure: Sentinel License Server",
+            title="Discovery: License Server (Sentinel)",
             url=url, port=port, risk="LOW",
             description=_sent_desc,
             affected=f"{_ip}:{port}",
@@ -17910,6 +17926,96 @@ def _classify_screenshot(page_title, server, status_code, url_path="", *, body_s
     if _body_srv:
         return f"Web Page ({_body_srv.group().split('/')[0].split()[0]})"
     return "Web Page Detected"
+
+
+_ADMIN_CONSOLE_LABELS = frozenset({
+    "VMware ESXi Host Client", "VMware vCenter", "Oracle EM Agent",
+    "Jenkins CI/CD", "Cockpit Web Console",
+    "Splunk Web", "FortiGate Management", "Grafana Dashboard",
+    "Kibana Dashboard", "SonarQube", "Prometheus",
+    "pgAdmin", "phpMyAdmin", "Adminer", "Webmin",
+    "Proxmox VE", "Synology DSM", "QNAP QTS",
+    "UniFi Controller", "pfSense", "OPNsense",
+    "Netdata Dashboard", "Zabbix", "Nagios", "Cacti",
+    "Keycloak", "Portainer", "Rancher", "Argo CD",
+    "Harbor Registry", "MinIO Console",
+    "HashiCorp Vault", "HashiCorp Consul",
+    "Traefik Dashboard", "HAProxy Stats", "Caddy Admin",
+    "Tomcat Manager", "Dashboard / Admin Panel", "Admin Page",
+})
+
+
+def _emit_classification_findings(out, url, port, target, hostname,
+                                  classification, body_snippet):
+    _ip = target.get("ip", "") if isinstance(target, dict) else ""
+    if classification and classification in _ADMIN_CONSOLE_LABELS:
+        out.add_finding(
+            title="Discovery: Admin Console",
+            url=url, port=port, risk="INFO",
+            description=(
+                f"An administrative console was identified: {classification}. "
+                "Administrative consoles are high-value targets that may "
+                "allow system configuration, user management, or "
+                "infrastructure control if accessed with valid or default "
+                "credentials."
+            ),
+            affected=f"{_ip}:{port}",
+            output=f"Identified: {classification}\nURL: {url}",
+            sources="fracture-screenshot-classification",
+            service=target.get("scheme", "") if isinstance(target, dict) else "",
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation=(
+                "Restrict administrative console access to authorized "
+                "networks and personnel. Use strong authentication and "
+                "consider VPN or jump-host requirements."
+            ),
+        )
+    if classification == "Login Page" or classification == "Admin Page":
+        out.add_finding(
+            title="Discovery: Login Page",
+            url=url, port=port, risk="INFO",
+            description=(
+                "A login page was detected via page title or URL path "
+                "analysis during screenshot capture. Login pages expose "
+                "authentication endpoints that may be susceptible to "
+                "brute-force attacks, credential stuffing, or default "
+                "credentials."
+            ),
+            affected=f"{_ip}:{port}",
+            output=f"Classification: {classification}\nURL: {url}",
+            sources="fracture-screenshot-classification",
+            service=target.get("scheme", "") if isinstance(target, dict) else "",
+            owasp="A07:2025 Identification and Authentication Failures",
+            nist="IA-5",
+            remediation=(
+                "Enforce account lockout policies, rate limiting, CAPTCHA, "
+                "and multi-factor authentication on login endpoints."
+            ),
+        )
+    if body_snippet and re.search(
+            r'<input[^>]*\btype\s*=\s*["\']?password["\']?',
+            body_snippet, re.IGNORECASE):
+        out.add_finding(
+            title="Discovery: Login Page",
+            url=url, port=port, risk="INFO",
+            description=(
+                "A password input field was detected in the page body "
+                "during screenshot capture, indicating a login form. "
+                "Login pages expose authentication endpoints that may be "
+                "susceptible to brute-force attacks, credential stuffing, "
+                "or default credentials."
+            ),
+            affected=f"{_ip}:{port}",
+            output=f"URL: {url}\nDetected: password input field in page body",
+            sources="fracture-screenshot-body",
+            service=target.get("scheme", "") if isinstance(target, dict) else "",
+            owasp="A07:2025 Identification and Authentication Failures",
+            nist="IA-5",
+            remediation=(
+                "Enforce account lockout policies, rate limiting, CAPTCHA, "
+                "and multi-factor authentication on login endpoints."
+            ),
+        )
 
 
 def _register_screenshot(root: Path, png_path, url: str = "",
@@ -18932,7 +19038,7 @@ def _phase_endpoint_tools(
                                + (f", Fields: {_fm_fields}" if _fm_fields else ""))
                 if _fm_has_pwd:
                     out.add_finding(
-                        title="Login Page Identified",
+                        title="Discovery: Login Page",
                         url=ep_url, port=target["port"], risk="INFO",
                         description=(
                             f"A login form containing a password field was identified at "
@@ -22729,6 +22835,8 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                                  body_snippet=_ss_body)
             _emit_body_info_findings(out, url, port, target, hostname,
                                      _ss_server, _ss_body, _ss_page_title)
+            _emit_classification_findings(out, url, port, target, hostname,
+                                          _ss_classification, _ss_body)
             vc.log(f"[screenshot] Saved: {out_path} ({_ss_classification})", "SUCCESS")
         else:
             vc.status(phase, "Screenshot", "complete", "Done", 1, 1)
@@ -22787,6 +22895,8 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                                      body_snippet=_root_body)
                 _emit_body_info_findings(out, _root_url, port, target, hostname,
                                          _root_server, _root_body, _root_page_title)
+                _emit_classification_findings(out, _root_url, port, target, hostname,
+                                              _root_cls, _root_body)
                 vc.log(f"[screenshot] Root page saved: {_root_out} ({_root_cls})", "SUCCESS")
         except Exception as _re:
             vc.log(f"[screenshot] Root page failed: {_re}", "WARNING")
@@ -30475,7 +30585,7 @@ def _normalize_nikto(vuln: dict) -> dict:
             if _title == "Admin Panel Exposed" and _nik_url:
                 _url_parts = _nik_url.lower().replace("/", " ").replace("-", " ").replace("_", " ").split()
                 if not (_ADMIN_PATH_KEYWORDS & set(_url_parts)):
-                    return {"title": "Login Page Identified",
+                    return {"title": "Discovery: Login Page",
                             "risk": "INFO", "owasp": _owasp, "nist": _nist,
                             "remediation": "Informational — login pages are expected on web applications."}
             # Cookie FP gate — validate nikto output against actual attrs
@@ -46768,7 +46878,7 @@ def main() -> None:
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Login Page Identified",
+                        title="Discovery: Login Page",
                         url=_lp_found_url,
                         port=target["port"],
                         risk="INFO",
