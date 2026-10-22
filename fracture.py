@@ -15002,6 +15002,97 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         )
         vc.log(f"[recon] Server error: HTTP {resp.status_code}", "SUCCESS")
 
+    # ── Admin console / login page classification from initial probe ──
+    _rp_title_m = re.search(r'<title[^>]*>([^<]{1,200})</title>', body, re.IGNORECASE)
+    _rp_title = _rp_title_m.group(1).strip() if _rp_title_m else ""
+    _rp_cls = _classify_screenshot(
+        _rp_title, server_hdr, status_code,
+        port=target["port"], body_snippet=body[:4096])
+    if _rp_cls and _rp_cls in _ADMIN_CONSOLE_LABELS:
+        out.add_finding(
+            title="Discovery: Admin Console",
+            url=url, port=target["port"], risk="INFO",
+            description=(
+                f"An administrative console ({_rp_cls}) was identified "
+                f"at {url} during initial HTTP recon probe. Admin consoles "
+                "are high-value targets that may allow system configuration "
+                "or access to sensitive operational data."
+            ),
+            output=(
+                f"Classification: {_rp_cls}\n"
+                f"Title: {_rp_title}\n"
+                f"Server: {server_hdr}\n"
+                f"HTTP Status: {status_code}"
+            ),
+            sources="fracture-recon", service=target["scheme"],
+            affected=_url_rel_path(url, target["url"]),
+            output_file=_probe_files,
+            command=f"GET {url}",
+        )
+    elif _rp_cls and _rp_cls in ("Login Page", "Admin Page"):
+        out.add_finding(
+            title="Discovery: Login Page",
+            url=url, port=target["port"], risk="INFO",
+            description=(
+                f"A login page was identified at {url} during initial "
+                f"HTTP recon probe via page classification."
+            ),
+            output=(
+                f"Classification: {_rp_cls}\n"
+                f"Title: {_rp_title}\n"
+                f"HTTP Status: {status_code}"
+            ),
+            sources="fracture-recon", service=target["scheme"],
+            affected=_url_rel_path(url, target["url"]),
+            output_file=_probe_files,
+            command=f"GET {url}",
+        )
+    # Password field detection in recon probe body
+    if re.search(r'<input[^>]+type=["\']password["\']', body, re.IGNORECASE):
+        _rp_has_user = bool(re.search(
+            r'<input[^>]+(?:type=["\'](?:text|email)["\']|name=["\'](?:user|login|email|account))',
+            body, re.IGNORECASE))
+        if _rp_has_user:
+            out.add_finding(
+                title="Discovery: Login Page",
+                url=url, port=target["port"], risk="INFO",
+                description=(
+                    f"A login form with username and password fields was "
+                    f"detected at {url} during initial HTTP recon probe."
+                ),
+                output=(
+                    f"Title: {_rp_title}\n"
+                    f"HTTP Status: {status_code}\n"
+                    f"Detection: password + username input fields"
+                ),
+                sources="fracture-recon", service=target["scheme"],
+                affected=_url_rel_path(url, target["url"]),
+                output_file=_probe_files,
+                command=f"GET {url}",
+            )
+    # HTTP 401 / WWW-Authenticate on initial probe
+    if status_code == 401:
+        _rp_www_auth = headers.get("WWW-Authenticate", "")
+        _rp_auth_scheme = _rp_www_auth.split()[0] if _rp_www_auth else "Unknown"
+        out.add_finding(
+            title="Discovery: Login Page",
+            url=url, port=target["port"], risk="INFO",
+            description=(
+                f"The target at {url} returned HTTP 401 Unauthorized with "
+                f"{_rp_auth_scheme} authentication. This indicates an active "
+                "authentication gate protecting the application."
+            ),
+            output=(
+                f"HTTP Status: 401\n"
+                f"WWW-Authenticate: {_rp_www_auth or '(not present)'}\n"
+                f"Auth Scheme: {_rp_auth_scheme}"
+            ),
+            sources="fracture-recon", service=target["scheme"],
+            affected=_url_rel_path(url, target["url"]),
+            output_file=_probe_files,
+            command=f"GET {url}",
+        )
+
     # ── Outdated / unnecessary website indicators (#13 FR-465) ──
     _outdated_signals: list = []
     _body_lower = (resp.text or "")[:16384].lower()
@@ -18286,6 +18377,10 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                     _meta["final_url"] = driver.current_url or ""
                 except Exception:
                     pass
+                try:
+                    _meta["rendered_body"] = (driver.page_source or "")[:8192]
+                except Exception:
+                    pass
             total_h = driver.execute_script(
                 "return Math.max("
                 "  document.body.scrollHeight,"
@@ -18910,9 +19005,13 @@ def _phase_endpoint_tools(
                            f"skipped (SPA duplicate, body {_ep_body_len}b matches baseline)", "INFO")
             except Exception:
                 _ep_screenshot_ok = False
-        if _ep_screenshot_ok and _capture_screenshot_to(ep_url, ep_shot, target, cfg, auth_session=sess):
+        _ep_ss_meta = {}
+        if _ep_screenshot_ok and _capture_screenshot_to(ep_url, ep_shot, target, cfg, auth_session=sess, _meta=_ep_ss_meta):
+            _ep_rendered = _ep_ss_meta.get("rendered_body", "")
+            if _ep_rendered and len(_ep_rendered) > len(_ss_ep_body):
+                _ss_ep_body = _ep_rendered
             _ep_rel = urllib.parse.urlparse(ep_url).path or "/"
-            _ep_cls = _classify_screenshot("", _ss_ep_server, _ss_http_code, body_snippet=_ss_ep_body)
+            _ep_cls = _classify_screenshot(_ep_ss_meta.get("page_title", ""), _ss_ep_server, _ss_http_code, body_snippet=_ss_ep_body)
             _ep_oos = not _ep_scope_ok
             out.add_finding(
                 title="Discovery: Web Screenshot Captured",
@@ -22808,6 +22907,12 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
             out.record_spa_baseline(_ss_body_len)
             if not _ss_page_title and _ss_html_title:
                 _ss_page_title = _ss_html_title
+            # SPA fix: when Selenium rendered the page, use the rendered DOM
+            # for classification and login detection instead of the raw HTTP
+            # body (which may be a minimal SPA shell with no content).
+            _ss_rendered = _ss_meta.get("rendered_body", "")
+            if _ss_rendered and len(_ss_rendered) > len(_ss_body):
+                _ss_body = _ss_rendered
             _ss_classification = _classify_screenshot(
                 _ss_page_title, _ss_server, _ss_phase_code,
                 url_path=_ss_rel, body_snippet=_ss_body)
@@ -22864,6 +22969,9 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
                 out.record_spa_baseline(_root_body_len)
                 if not _root_page_title and _root_html_title:
                     _root_page_title = _root_html_title
+                _root_rendered = _root_meta.get("rendered_body", "")
+                if _root_rendered and len(_root_rendered) > len(_root_body):
+                    _root_body = _root_rendered
                 _root_cls = _classify_screenshot(
                     _root_page_title, _root_server, _root_code,
                     url_path="/", body_snippet=_root_body)
@@ -32010,6 +32118,56 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                     **_nuc_v11,
                 )
                 _nuc_count += 1
+                # ── Companion findings: exposed-panels / default-login ──
+                _nuc_tags_raw = item.get("info", {}).get("tags", [])
+                _nuc_tags_l = _nuc_tags_raw if isinstance(_nuc_tags_raw, list) else [_nuc_tags_raw]
+                _nuc_tags_set = {t.lower().strip() for t in _nuc_tags_l if isinstance(t, str)}
+                _nuc_tpath_low = item.get("template-path", "").replace("\\", "/").lower()
+                if ("exposed-panels" in _nuc_tags_set
+                        or "exposed-panels" in _nuc_tpath_low):
+                    out.add_finding(
+                        title="Discovery: Admin Console",
+                        url=matched, port=target["port"],
+                        risk="INFO",
+                        description=(
+                            f"Nuclei template '{item.get('template-id', '')}' "
+                            f"(tagged exposed-panels) identified an "
+                            f"administrative panel at {matched}. Admin panels "
+                            "are high-value targets that may allow system "
+                            "configuration or access to sensitive data."
+                        ),
+                        output=(
+                            f"Template: {item.get('template-id', '')}\n"
+                            f"Name: {item.get('info', {}).get('name', '')}\n"
+                            f"Matched: {matched}"
+                        ),
+                        sources="nuclei",
+                        affected=matched,
+                        output_file=str(nuc_out),
+                        command=" ".join(handle["nuclei_cmd"]),
+                    )
+                if ("default-login" in _nuc_tags_set
+                        or "default-logins" in _nuc_tpath_low):
+                    out.add_finding(
+                        title="Discovery: Login Page",
+                        url=matched, port=target["port"],
+                        risk="INFO",
+                        description=(
+                            f"Nuclei template '{item.get('template-id', '')}' "
+                            f"(tagged default-login) identified a login "
+                            f"interface at {matched} that may accept default "
+                            "credentials."
+                        ),
+                        output=(
+                            f"Template: {item.get('template-id', '')}\n"
+                            f"Name: {item.get('info', {}).get('name', '')}\n"
+                            f"Matched: {matched}"
+                        ),
+                        sources="nuclei",
+                        affected=matched,
+                        output_file=str(nuc_out),
+                        command=" ".join(handle["nuclei_cmd"]),
+                    )
                 # ── Action item: CVE exploit verification ─────────────
                 _ai_cves = _norm.get("cves", "")
                 _ai_risk = _norm["risk"]
@@ -47239,6 +47397,9 @@ def main() -> None:
                                 _ss_lp_rel = urllib.parse.urlparse(_ss_login_url).path or "/"
                                 _ss_lp_code, _ss_lp_srv, _ss_lp_ht, _ss_lp_blen, _ss_lp_body = _probe_screenshot_meta(_ss_login_url)
                                 out.record_spa_baseline(_ss_lp_blen)
+                                _ss_lp_rendered = _ss_lp_meta.get("rendered_body", "")
+                                if _ss_lp_rendered and len(_ss_lp_rendered) > len(_ss_lp_body):
+                                    _ss_lp_body = _ss_lp_rendered
                                 _ss_lp_pt = _ss_lp_meta.get("page_title", "") or _ss_lp_ht
                                 _ss_lp_cls = _classify_screenshot(_ss_lp_pt, _ss_lp_srv, _ss_lp_code, url_path=_ss_lp_rel, body_snippet=_ss_lp_body)
                                 _ss_lp_cs = f" HTTP {_ss_lp_code}." if _ss_lp_code is not None else ""
@@ -47295,6 +47456,9 @@ def main() -> None:
                             _ss_lnd_code, _ss_lnd_srv, _ss_lnd_ht, _ss_lnd_blen, _ss_lnd_body = _probe_screenshot_meta(
                                 _as_landing_url, _as_session)
                             out.record_spa_baseline(_ss_lnd_blen)
+                            _ss_lnd_rendered = _ss_lnd_meta.get("rendered_body", "")
+                            if _ss_lnd_rendered and len(_ss_lnd_rendered) > len(_ss_lnd_body):
+                                _ss_lnd_body = _ss_lnd_rendered
                             _ss_lnd_pt = _ss_lnd_meta.get("page_title", "") or _ss_lnd_ht
                             _ss_lnd_cls = _classify_screenshot(_ss_lnd_pt, _ss_lnd_srv,
                                 _ss_lnd_code or _as_landing_code, url_path=_ss_lnd_rel, body_snippet=_ss_lnd_body)
