@@ -16890,7 +16890,7 @@
     },
     {
       "id": "FR-272",
-      "title": "Misconfigured Security Header: Endpoint-Specific Security Header Found",
+      "title": "Discovery: Endpoint-Specific Security Header Found",
       "aliases": [
         "Interesting Endpoint Discovered",
         "Wildcard (*) Detected",
