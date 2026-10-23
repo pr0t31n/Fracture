@@ -36,24 +36,35 @@ def step(msg):     print(f"{B}[>]{W} {msg}")
 # ---------------------------------------------------------------------------
 # OS detection
 # ---------------------------------------------------------------------------
+def _read_os_release():
+    try:
+        with open("/etc/os-release") as f:
+            return f.read().lower()
+    except FileNotFoundError:
+        return ""
+
+_OS_RELEASE = _read_os_release()
+
+
 def detect_os():
     system = platform.system()
     if system == "Darwin":
         return "macos"
     if system == "Windows":
         return "windows"
-    try:
-        with open("/etc/os-release") as f:
-            data = f.read().lower()
-    except FileNotFoundError:
+    if not _OS_RELEASE:
         return "linux-unknown"
-    if "kali" in data or "debian" in data or "ubuntu" in data:
+    if "kali" in _OS_RELEASE or "debian" in _OS_RELEASE or "ubuntu" in _OS_RELEASE:
         return "apt"
-    if "rhel" in data or "centos" in data or "rocky" in data or "fedora" in data:
+    if "rhel" in _OS_RELEASE or "centos" in _OS_RELEASE or "rocky" in _OS_RELEASE or "fedora" in _OS_RELEASE:
         return "dnf"
-    if "suse" in data or "opensuse" in data:
+    if "suse" in _OS_RELEASE or "opensuse" in _OS_RELEASE:
         return "zypper"
     return "linux-unknown"
+
+
+def is_kali():
+    return "kali" in _OS_RELEASE
 
 
 OS = detect_os()
@@ -260,16 +271,14 @@ def zypper_install(packages):
 # ---------------------------------------------------------------------------
 APT_PACKAGES = [
     "gobuster", "nikto", "sqlmap", "sslscan", "whatweb",
-    "feroxbuster", "ffuf", "exploitdb",
+    "ffuf",
     "python3-pip", "python3-dev",
     "git", "golang-go",
     "ruby", "ruby-dev", "ruby-bundler",
     "libssl-dev", "libcurl4-openssl-dev",
-    # Java 17+ runtime required by OWASP ZAP (21 is current on Kali)
-    "openjdk-21-jre-headless",
-    # Headless browser for SPA crawl (chromium-driver provides chromedriver)
-    "chromium", "chromium-driver",
 ]
+# Kali-only packages — not in standard Ubuntu/Debian repos.
+APT_PACKAGES_KALI = ["feroxbuster", "exploitdb"]
 # Best-effort packages — names/versions vary across distros and releases.
 # Kali ships firefox-esr (not firefox) and geckodriver (no firefox- prefix).
 # mitmproxy via apt can have broken deps on ARM (python3-mitmproxy-rs lag).
@@ -345,10 +354,106 @@ def _install_mitmproxy():
     warn("╚══════════════════════════════════════════════════════════╝")
 
 
+def _apt_best_jdk():
+    """Return the best available openjdk-*-jre-headless package (21 → 17 fallback)."""
+    for ver in ("21", "17"):
+        pkg = f"openjdk-{ver}-jre-headless"
+        r = subprocess.run(["apt-cache", "show", pkg],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if r.returncode == 0:
+            return pkg
+    return None
+
+
+def _install_chromium_apt():
+    """Install Chromium + chromedriver with Kali/Ubuntu-aware fallbacks."""
+    if shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome"):
+        info("✓ Chromium/Chrome already installed")
+        _install_chromedriver_apt()
+        return
+    if is_kali():
+        apt_install_optional(["chromium", "chromium-driver"])
+        return
+    # Ubuntu 22.04+ removed chromium from apt — try chromium-browser (snap transition pkg)
+    info("Installing Chromium (non-Kali: trying chromium-browser, then snap fallback) ...")
+    r = subprocess.run(["apt-get", "install", "-y", "chromium-browser"],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if r.returncode == 0:
+        info("✓ chromium-browser installed")
+    else:
+        if shutil.which("snap"):
+            info("apt chromium unavailable — trying snap ...")
+            subprocess.run(["snap", "install", "chromium"], check=False)
+        else:
+            note("chromium not available via apt or snap — SPA crawl may need manual Chromium/Chrome install")
+    _install_chromedriver_apt()
+
+
+def _install_chromedriver_apt():
+    """Install chromedriver if not present (webdriver-manager handles this at runtime too)."""
+    if shutil.which("chromedriver"):
+        info("✓ chromedriver already installed")
+        return
+    apt_install_optional(["chromium-chromedriver", "chromium-driver"])
+    if not shutil.which("chromedriver"):
+        note("chromedriver not available via apt — webdriver-manager will download it at runtime")
+
+
+def _install_feroxbuster():
+    """Install feroxbuster: apt on Kali, GitHub binary release otherwise."""
+    if shutil.which("feroxbuster"):
+        info("✓ feroxbuster already installed")
+        return
+    if is_kali():
+        apt_install_optional(["feroxbuster"])
+        if shutil.which("feroxbuster"):
+            return
+    # GitHub binary release fallback
+    info("Installing feroxbuster from GitHub release ...")
+    arch = platform.machine()
+    if arch in ("x86_64", "amd64"):
+        _arch = "x86_64"
+    elif arch in ("aarch64", "arm64"):
+        _arch = "aarch64"
+    else:
+        note(f"feroxbuster: unsupported architecture {arch} — install manually (cargo install feroxbuster)")
+        return
+    _url = f"https://github.com/epi052/feroxbuster/releases/latest/download/feroxbuster_{_arch}-linux.zip"
+    _tmp = "/tmp/_feroxbuster_install"
+    os.makedirs(_tmp, exist_ok=True)
+    _zip = os.path.join(_tmp, "feroxbuster.zip")
+    try:
+        urllib.request.urlretrieve(_url, _zip)
+        subprocess.run(["unzip", "-o", _zip, "-d", _tmp], check=True,
+                       stdout=subprocess.DEVNULL)
+        _bin = os.path.join(_tmp, "feroxbuster")
+        if os.path.isfile(_bin):
+            shutil.copy2(_bin, "/usr/local/bin/feroxbuster")
+            os.chmod("/usr/local/bin/feroxbuster", 0o755)
+            info("✓ feroxbuster installed to /usr/local/bin/feroxbuster")
+        else:
+            warn("feroxbuster binary not found in zip — install manually")
+    except Exception as e:
+        warn(f"feroxbuster GitHub install failed: {e}")
+        note("Install manually: cargo install feroxbuster")
+    finally:
+        shutil.rmtree(_tmp, ignore_errors=True)
+
+
 def install_system():
     banner("Phase: system packages")
     if OS == "apt":
         apt_install(APT_PACKAGES)
+        if is_kali():
+            apt_install_optional(APT_PACKAGES_KALI)
+        # Java for ZAP — version varies by distro release
+        _jdk = _apt_best_jdk()
+        if _jdk:
+            apt_install_optional([_jdk])
+        else:
+            note("No openjdk JRE found in apt — ZAP requires Java 17+; install manually")
+        _install_chromium_apt()
+        _install_feroxbuster()
         info("Installing optional Firefox / geckodriver (Chromium remains primary)...")
         apt_install_optional(APT_PACKAGES_OPTIONAL)
         _install_mitmproxy()
