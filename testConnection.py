@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "2.3.2"
+VERSION = "2.4.0"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -648,6 +648,7 @@ def build_auth_session(
     # ── Auto-Detect ──────────────────────────────────────────────────────────
     elif method == "auto":
         import re as _re
+        import html as _html_mod
         from urllib.parse import urljoin, urlparse
 
         login_url  = auth.get("login_url", "").strip()
@@ -1006,6 +1007,97 @@ def build_auth_session(
                     f"HTTP {_vr.status_code} at {_vr.url}")
             except Exception as _e:
                 return False, str(_e)
+
+        # ── SSO / login link discovery ────────────────────────────────
+        # Landing pages for SSO-protected apps (OKTA, Azure AD, ADFS,
+        # Auth0, OneLogin, PingFederate, Duo, CAS, Keycloak, etc.)
+        # often have NO login form — only a link/button to the IdP
+        # login endpoint.  Scan baseline HTML for SSO-related anchors
+        # and onclick redirects; follow them and use the resulting
+        # page as effective_login when it contains a password form.
+        # Purely additive: only runs when the baseline page lacks a
+        # password field; only updates effective_login when a form is
+        # found behind the link.  All prior detection paths remain.
+        _SSO_HREF_KW = _re.compile(
+            r'(?:login|log.in|signin|sign.in|sso|saml'
+            r'|oauth|oidc|okta|azure|adfs|onelogin|ping'
+            r'|cas/login|idp|duo|auth0|cognito|keycloak'
+            r'|forgerock|auth/)',
+            _re.IGNORECASE,
+        )
+        _SSO_TEXT_KW = _re.compile(
+            r'(?:sign\s*in|log\s*in|okta|azure|microsoft|google'
+            r'|saml|sso|single.sign.on|onelogin|ping|duo|auth0'
+            r'|keycloak|authenticate)',
+            _re.IGNORECASE,
+        )
+        if _baseline_html and target_url:
+            _has_pw_form = bool(_re.search(
+                r'<input[^>]+type=["\']?password',
+                _baseline_html[:65536], _re.IGNORECASE,
+            ))
+            if not _has_pw_form:
+                _sso_candidates: list[str] = []
+                # Pass 1: anchor hrefs matching SSO keywords
+                for _link_m in _re.finditer(
+                    r'<a\b[^>]*\bhref=["\']([^"\'#][^"\']*)["\']',
+                    _baseline_html, _re.IGNORECASE,
+                ):
+                    _href_raw = _html_mod.unescape(
+                        _link_m.group(1).strip())
+                    if _STATIC_EXT.search(_href_raw):
+                        continue
+                    if _SSO_HREF_KW.search(_href_raw):
+                        _abs_href = urljoin(target_url, _href_raw)
+                        if _abs_href not in _sso_candidates:
+                            _sso_candidates.append(_abs_href)
+                # Pass 2: anchor text mentions SSO provider (href may
+                # be opaque like /provider-signin)
+                for _link_m in _re.finditer(
+                    r'<a\b[^>]*\bhref=["\']([^"\'#][^"\']*)["\']'
+                    r'[^>]*>(.*?)</a>',
+                    _baseline_html, _re.IGNORECASE | _re.DOTALL,
+                ):
+                    _href_raw = _html_mod.unescape(
+                        _link_m.group(1).strip())
+                    _link_text = _link_m.group(2).strip()
+                    if _STATIC_EXT.search(_href_raw):
+                        continue
+                    _abs_href = urljoin(target_url, _href_raw)
+                    if _abs_href in _sso_candidates:
+                        continue
+                    if _SSO_TEXT_KW.search(_link_text):
+                        _sso_candidates.append(_abs_href)
+                # Pass 3: onclick / JS location redirects in HTML
+                for _oc_m in _re.finditer(
+                    r"""(?:location\.href|window\.location"""
+                    r"""|location\.assign|location\.replace)"""
+                    r"""\s*[=(]\s*["']([^"']+)["']""",
+                    _baseline_html, _re.IGNORECASE,
+                ):
+                    _oc_raw = _html_mod.unescape(
+                        _oc_m.group(1).strip())
+                    if _SSO_HREF_KW.search(_oc_raw):
+                        _abs_href = urljoin(target_url, _oc_raw)
+                        if _abs_href not in _sso_candidates:
+                            _sso_candidates.append(_abs_href)
+                # Follow candidates and check for password form
+                if _sso_candidates:
+                    _sso_probe = _make_session(verify_ssl, proxy)
+                    for _sso_url in _sso_candidates[:8]:
+                        try:
+                            _sso_r = _sso_probe.get(
+                                _sso_url, timeout=timeout,
+                                allow_redirects=True)
+                            _sso_html = _sso_r.text[:131072]
+                            if _re.search(
+                                r'<input[^>]+type=["\']?password',
+                                _sso_html, _re.IGNORECASE,
+                            ):
+                                effective_login = _sso_r.url
+                                break
+                        except Exception:
+                            continue
 
         # ── Build method order ───────────────────────────────────────────
         _auto_order: list[str] = []
