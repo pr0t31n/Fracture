@@ -35399,7 +35399,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
 
     if _broad_domain_cookies:
         out.add_finding(
-            title="Cookie Domain Scope Overly Broad",
+            title="Cookies: Overly Broad Cookie Domain Scope",
             url=url, port=target["port"], risk="LOW",
             description=(
                 f"The following cookie(s) are scoped to a parent domain broader than "
