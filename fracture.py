@@ -9870,10 +9870,149 @@ return null;
         elif _login_url:
             _stepped = _step_to_login_form(_login_url)
 
-            # Sentinel: JS-driven button detected and --browser-auth is set
+            # Sentinel: JS-driven button detected — try OKTA authn API
+            # before falling back to browser-assisted login.
             if _stepped == "__BROWSER_AUTH__":
-                _b_sess = _browser_assisted_login(
-                    auth.get("login_url", "").strip() or _login_url)
+                _ba_url = auth.get("login_url", "").strip() or _login_url
+                # ── OKTA authn API attempt (initial login) ──────────
+                import re as _re_ba
+                _okta_tried = False
+                try:
+                    _ba_r = sess.get(_ba_url, timeout=timeout,
+                                     allow_redirects=True)
+                    _ba_html = _ba_r.text
+                    _OKTA_IND_BA = (
+                        'okta-sign-in.min.js', 'okta-signin-widget',
+                        'id="okta-login-container"',
+                        "id='okta-login-container'",
+                    )
+                    if any(_ib in _ba_html for _ib in _OKTA_IND_BA):
+                        def _js_unesc_ba(s):
+                            return _re_ba.sub(
+                                r'\\x([0-9a-fA-F]{2})',
+                                lambda m: chr(int(m.group(1), 16)), s)
+                        _ba_base_m = _re_ba.search(
+                            r'"baseUrl"\s*:\s*"([^"]+)"', _ba_html)
+                        if _ba_base_m:
+                            _ba_okta_base = _js_unesc_ba(
+                                _ba_base_m.group(1)).rstrip("/")
+                            _ba_st_m = _re_ba.search(
+                                r'"stateToken"\s*:\s*"([^"]+)"', _ba_html)
+                            _ba_state_token = (
+                                _js_unesc_ba(_ba_st_m.group(1))
+                                if _ba_st_m else None)
+                            _ba_ru_m = _re_ba.search(
+                                r'"redirectUri"\s*:\s*"([^"]+)"', _ba_html)
+                            _ba_okta_redir = (
+                                _js_unesc_ba(_ba_ru_m.group(1))
+                                if _ba_ru_m else None)
+                            _ba_u = auth.get("username", "")
+                            _ba_p = auth.get("password", "")
+                            if _ba_u and _ba_p:
+                                from urllib.parse import quote as _q_ba
+                                _okta_tried = True
+                                vc.log(
+                                    f"[auth] OKTA Sign-In Widget detected at "
+                                    f"{_ba_okta_base} — trying authn API",
+                                    "INFO")
+
+                                def _ba_do_authn(_s, _pl, _lbl):
+                                    try:
+                                        _ar = _s.post(
+                                            f"{_ba_okta_base}/api/v1/authn",
+                                            json=_pl, timeout=timeout)
+                                        _aj = _ar.json()
+                                    except Exception as _pe:
+                                        vc.log(
+                                            f"[auth] OKTA authn ({_lbl})"
+                                            f": request failed: {_pe}",
+                                            "INFO")
+                                        return None
+                                    _ast = _aj.get("status", "")
+                                    if _ast == "SUCCESS":
+                                        _stok = _aj.get("sessionToken", "")
+                                        if _stok:
+                                            _rt = (
+                                                _ba_okta_redir
+                                                if (_ba_okta_redir and (
+                                                    '/authorize' in _ba_okta_redir
+                                                    or '/oauth2/' in _ba_okta_redir))
+                                                else _ba_url)
+                                            _cr = _s.get(
+                                                f"{_ba_okta_base}/login"
+                                                f"/sessionCookieRedirect"
+                                                f"?checkAccountSetupComplete=true"
+                                                f"&token={_stok}"
+                                                f"&redirectUrl="
+                                                f"{_q_ba(_rt, safe='')}",
+                                                timeout=timeout,
+                                                allow_redirects=True)
+                                            if _cr.cookies or _s.cookies:
+                                                vc.log(
+                                                    f"[auth] OKTA authn ({_lbl})"
+                                                    f": session established"
+                                                    f" ({len(list(_s.cookies))}"
+                                                    f" cookies, final:"
+                                                    f" {_cr.url})",
+                                                    "SUCCESS")
+                                                return _s
+                                        return None
+                                    if _ast == "MFA_REQUIRED":
+                                        vc.log(
+                                            f"[auth] OKTA authn ({_lbl})"
+                                            f": MFA required — falling"
+                                            " back to browser", "INFO")
+                                        return None
+                                    _err = _aj.get(
+                                        "errorSummary",
+                                        _ast or "unknown")
+                                    vc.log(
+                                        f"[auth] OKTA authn ({_lbl})"
+                                        f": {_err}", "INFO")
+                                    return None
+
+                                _ba_ok = None
+                                _ba_ok = _ba_do_authn(
+                                    sess,
+                                    {"username": _ba_u,
+                                     "password": _ba_p},
+                                    "primary")
+                                if not _ba_ok and _ba_state_token:
+                                    _ba_ok = _ba_do_authn(
+                                        sess,
+                                        {"username": _ba_u,
+                                         "password": _ba_p,
+                                         "stateToken": _ba_state_token},
+                                        "stateToken+session")
+                                if not _ba_ok and _ba_state_token:
+                                    _ba_fresh = _make_session(cfg, None)
+                                    _ba_ok = _ba_do_authn(
+                                        _ba_fresh,
+                                        {"username": _ba_u,
+                                         "password": _ba_p,
+                                         "stateToken": _ba_state_token},
+                                        "stateToken+fresh")
+                                if _ba_ok:
+                                    if scope_hostnames is not None:
+                                        try:
+                                            _okta_h = urllib.parse.urlparse(
+                                                _ba_okta_base).hostname
+                                            if _okta_h:
+                                                scope_hostnames.add(_okta_h)
+                                        except Exception:
+                                            pass
+                                    return _ba_ok
+                                vc.log(
+                                    "[auth] OKTA authn API failed — "
+                                    "falling back to browser/profile",
+                                    "INFO")
+                except Exception as _ba_exc:
+                    if _okta_tried:
+                        vc.log(
+                            f"[auth] OKTA authn API error: {_ba_exc}",
+                            "INFO")
+                # ── End OKTA authn attempt; fall through to browser ──
+                _b_sess = _browser_assisted_login(_ba_url)
                 if _b_sess is not None:
                     return _b_sess
                 return None
