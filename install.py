@@ -276,6 +276,7 @@ APT_PACKAGES = [
     "git", "golang-go",
     "ruby", "ruby-dev", "ruby-bundler",
     "libssl-dev", "libcurl4-openssl-dev",
+    "libyaml-dev",
 ]
 # Kali-only packages — not in standard Ubuntu/Debian repos.
 APT_PACKAGES_KALI = ["feroxbuster", "exploitdb"]
@@ -292,6 +293,7 @@ DNF_PACKAGES = [
     "git", "golang",
     "ruby", "ruby-devel",
     "openssl-devel", "libcurl-devel",
+    "libyaml-devel",
     # Java 17+ runtime required by OWASP ZAP
     "java-21-openjdk-headless",
     # Headless browser for SPA crawl
