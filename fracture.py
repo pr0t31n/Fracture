@@ -3842,6 +3842,24 @@ class OutputManager:
             with self.error_log.open("a", encoding="utf-8") as f:
                 f.write(f"[{ts}] ERROR  TOOL={tool}\n  Command : {cmd_str}\n  Error   : {error}\n\n")
 
+    def log_event(self, message: str, level: str = "EVENT") -> None:
+        """Append a timestamped event to scan.log + scan.log.json."""
+        ts = self._ts()
+        with self._log_lock:
+            with self.log_file.open("a", encoding="utf-8") as f:
+                f.write(f"[{ts}] {level} {message}\n")
+            try:
+                _arr = json.loads(
+                    self.json_log_file.read_text(encoding="utf-8") or "[]")
+                if not isinstance(_arr, list):
+                    _arr = []
+            except Exception:
+                _arr = []
+            _arr.append({"timestamp": ts, "level": level,
+                         "message": message})
+            self.json_log_file.write_text(
+                json.dumps(_arr, indent=2), encoding="utf-8")
+
     def set_auth_context(self, accounts: list) -> None:
         """Set the active auth context for subsequent add_finding calls."""
         self._current_accounts = list(accounts)
@@ -11494,8 +11512,8 @@ def _resolve_dns(hostname: str, out: "OutputManager",
         f"{' (load balancer detected)' if lb else ''}",
         "INFO",
     )
-    out.log(
-        f"EVENT DNS resolution: {hostname} → {', '.join(sorted(all_ips))}"
+    out.log_event(
+        f"DNS resolution: {hostname} → {', '.join(sorted(all_ips))}"
         f"{' [LB detected]' if lb else ''}",
     )
 
