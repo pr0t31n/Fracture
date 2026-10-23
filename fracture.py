@@ -1816,6 +1816,16 @@ def _filter_dominant_code(
                     "INFO",
                 )
                 return [e for e in results if e[1] != dominant_code]
+            elif _cat_hits == 0:
+                _cat_total = sum(1 for _, s, _ in results if s == dominant_code)
+                vc.log(
+                    f"[buster-filter] 0/3 session probes under '{_base_path or '/'}' "
+                    f"returned HTTP {dominant_code} — scanner tool was selectively "
+                    f"blocked (TLS fingerprint / header mismatch / cookie scoping); "
+                    f"suppressing all {_cat_total} HTTP {dominant_code} result(s)",
+                    "WARNING",
+                )
+                return [e for e in results if e[1] != dominant_code]
         except Exception:
             pass  # if anything goes wrong fall through to per-entry logic
 
@@ -1851,7 +1861,8 @@ def _filter_dominant_code(
     return kept
 
 
-def _buster_auth_flags(sess: "requests.Session") -> list:
+def _buster_auth_flags(sess: "requests.Session",
+                       target_url: str = "") -> list:
     """Return repeated -H flag pairs for gobuster/feroxbuster.
 
     Extracts cookies, Authorization, and common auth headers from the
@@ -1859,8 +1870,22 @@ def _buster_auth_flags(sess: "requests.Session") -> list:
     access level as the requests session — preventing thousands of
     false-positive 403 results caused by unauthenticated discovery
     against a site that requires login.
+
+    When *target_url* is provided, only cookies whose domain matches the
+    target hostname are included — mirroring the browser's domain-scoping
+    behaviour and preventing SSO-domain cookies (e.g. OKTA ``JSESSIONID``,
+    ``idx``, ``DT``) from being sent to the application server, which can
+    trigger 403 blocks on servers that reject unexpected cookies.
     """
     flags: list = []
+
+    # Determine target hostname for cookie domain filtering
+    _target_host = ""
+    if target_url:
+        try:
+            _target_host = urllib.parse.urlparse(target_url).hostname or ""
+        except Exception:
+            pass
 
     # Session cookies → Cookie header.
     # Some SSO/CAS servers set cookies with RFC-invalid quoted names or values
@@ -1870,7 +1895,13 @@ def _buster_auth_flags(sess: "requests.Session") -> list:
     # Sanitise aggressively: strip outer quote pairs, drop inner quotes and
     # control characters so the assembled Cookie: header is clean ASCII.
     _ck_parts = []
+    _ck_skipped = 0
     for _ck in sess.cookies:
+        if _target_host and _ck.domain:
+            _cd = _ck.domain.lstrip(".")
+            if not (_cd == _target_host or _target_host.endswith("." + _cd)):
+                _ck_skipped += 1
+                continue
         _ck_name = (_ck.name or "").strip()
         # Remove balanced outer quote pairs ("foo" → foo, 'foo' → foo)
         for _q in ('"', "'"):
@@ -1889,6 +1920,8 @@ def _buster_auth_flags(sess: "requests.Session") -> list:
         _ck_value = _ck_value.replace("\n", "").replace("\r", "").replace('"', "")
         _ck_parts.append(f"{_ck_name}={_ck_value}")
     cookie_str = "; ".join(_ck_parts)
+    if _ck_skipped:
+        vc.log(f"[buster] Skipped {_ck_skipped} cookie(s) from non-target domain(s)", "INFO")
     if cookie_str:
         vc.log(f"[buster] Cookie header: {cookie_str[:120]}{'...' if len(cookie_str) > 120 else ''}", "INFO")
         flags += ["-H", f"Cookie: {cookie_str}"]
@@ -17487,7 +17520,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         # Run gobuster against each app-base parent for broad coverage.
         # For a target at /OMT/Client/Login, this scans /, /OMT/, /OMT/Client/,
         # /OMT/Client/Login/ — discovering paths at every level of the app tree.
-        _gob_auth = _buster_auth_flags(sess)
+        _gob_auth = _buster_auth_flags(sess, _recon_origin)
         for _gob_idx, _gob_base in enumerate(_recon_bases):
             _gob_label = urllib.parse.urlparse(_gob_base).path or "/"
             _gob_slug = _gob_label.strip("/").replace("/", "_") or "root"
@@ -17627,6 +17660,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     "INFO",
                 )
                 _fer_rate_flag = ["--rate-limit", str(_safe_rate)]
+            else:
+                vc.log("[recon] Rate-limit probe: no throttling detected", "INFO")
         except Exception as _rl_exc:
             vc.log(f"[recon] Rate-limit probe failed: {_rl_exc}", "WARNING")
     if feroxbuster and Path(wordlist).exists():
@@ -17650,7 +17685,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             cmd += _fer_rate_flag
         elif _recon_cdn:
             cmd += ["--rate-limit", "25"]
-        cmd += _buster_auth_flags(sess)
+        cmd += _buster_auth_flags(sess, _recon_origin)
         _fer_ua = _subprocess_ua(sess)
         if _fer_ua:
             cmd += ["--user-agent", _fer_ua]
@@ -17710,7 +17745,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             gob_files_out = out.output_path(phase, "gobuster_files_" + target["hostname"])
             cmd = [gobuster, "dir", "-u", _recon_origin, "-w", wordlist_files, "-t", "30",
                    "-q", "-k", "-o", str(gob_files_out)]
-            cmd += _buster_auth_flags(sess)
+            cmd += _buster_auth_flags(sess, _recon_origin)
             vc.log("[recon] Running gobuster (files) ...", "INFO")
             _gobuster_run(cmd, gob_files_out, "recon", out)
             # Write gobuster files to structure map
@@ -17744,7 +17779,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             ]
             if _recon_cdn:
                 cmd += ["--rate-limit", "25"]
-            cmd += _buster_auth_flags(sess)
+            cmd += _buster_auth_flags(sess, _recon_origin)
             vc.log("[recon] Running feroxbuster (files) ...", "INFO")
             _fer_files_proc = None
             try:
@@ -19770,7 +19805,7 @@ def _phase_endpoint_tools(
             ep_gob = out.output_path("recon", f"gobuster_ep_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_dir,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob)]
-            cmd += _buster_auth_flags(sess)
+            cmd += _buster_auth_flags(sess, ep_url)
             _ep_gob_ua = _subprocess_ua(sess)
             if _ep_gob_ua:
                 cmd += ["--useragent", _ep_gob_ua]
@@ -19798,7 +19833,7 @@ def _phase_endpoint_tools(
             ep_gob_f = out.output_path("recon", f"gobuster_ep_files_{ep_safe}")
             cmd = [gobuster, "dir", "-u", ep_url, "-w", wordlist_file,
                    "-t", "20", "-q", "-k", "-o", str(ep_gob_f)]
-            cmd += _buster_auth_flags(sess)
+            cmd += _buster_auth_flags(sess, ep_url)
             _epf_gob_ua = _subprocess_ua(sess)
             if _epf_gob_ua:
                 cmd += ["--useragent", _epf_gob_ua]
@@ -19831,7 +19866,7 @@ def _phase_endpoint_tools(
                    "--time-limit", "2m"]
             if _ep_tools_cdn:
                 cmd += ["--rate-limit", "25"]
-            cmd += _buster_auth_flags(sess)
+            cmd += _buster_auth_flags(sess, ep_url)
             vc.log(f"[endpoint_tools] feroxbuster on {ep_url}", "INFO")
             _ep_fer_proc = None
             try:
@@ -22058,7 +22093,7 @@ def _build_gobuster_dir_cmd(gobuster_bin: str, url: str, wordlist: str,
     Sess-derived auth flags are appended via `_buster_auth_flags()`."""
     cmd = [gobuster_bin, "dir", "-u", url, "-w", wordlist, "-t", str(threads),
             "-q", "-k", "-o", str(out_f)]
-    cmd += _buster_auth_flags(sess)
+    cmd += _buster_auth_flags(sess, url)
     _gob_ua = _subprocess_ua(sess)
     if _gob_ua:
         cmd += ["--useragent", _gob_ua]
@@ -22082,7 +22117,7 @@ def _build_feroxbuster_dir_cmd(feroxbuster_bin: str, url: str, wordlist: str,
     ]
     if cdn:
         cmd += ["--rate-limit", "25"]
-    cmd += _buster_auth_flags(sess)
+    cmd += _buster_auth_flags(sess, url)
     _fer_ua = _subprocess_ua(sess)
     if _fer_ua:
         cmd += ["--user-agent", _fer_ua]
@@ -41064,7 +41099,7 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
         gob_files_out = out.output_path(phase, f"gobuster_files_{target['hostname']}{sfx}")
         cmd = [gobuster, "dir", "-u", url, "-w", wordlist_file, "-t", _rbo_threads,
                "-q", "-k", "-o", str(gob_files_out)]
-        cmd += _buster_auth_flags(sess)
+        cmd += _buster_auth_flags(sess, url)
         vc.log(f"[recon] Running gobuster (files){' for ' + role_label if role_label else ''} ...", "INFO")
         _gobuster_run(cmd, gob_files_out, "recon", out)
         if gob_files_out.exists():
@@ -41098,7 +41133,7 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
         ]
         if _rbo_cdn:
             cmd += ["--rate-limit", "25"]
-        cmd += _buster_auth_flags(sess)
+        cmd += _buster_auth_flags(sess, url)
         vc.log(f"[recon] Running feroxbuster (files){' for ' + role_label if role_label else ''} ...", "INFO")
         _fer_files_proc = None
         try:
@@ -48287,7 +48322,7 @@ def main() -> None:
                                     "-t", str(cfg.get("threads", 20)),
                                     "-q", "-k",
                                     "-o", str(_lnd_gob_out),
-                                ] + _buster_auth_flags(effective_auth)
+                                ] + _buster_auth_flags(effective_auth, _lnd_base)
                                 _lnd_gob_ua = _subprocess_ua(effective_auth)
                                 if _lnd_gob_ua:
                                     _lnd_cmd += ["--useragent", _lnd_gob_ua]
@@ -48716,8 +48751,11 @@ def main() -> None:
                 if _spa_routes:
                     for _sr in _spa_routes:
                         _sr_full = _sr.get("full_url", "")
-                        if _sr_full and _sr_full not in _all_crawl_links:
-                            _all_crawl_links.append(_sr_full)
+                        if not _sr_full or _sr_full in _all_crawl_links:
+                            continue
+                        if _TEMPLATE_SYNTAX_RE.search(_sr_full):
+                            continue
+                        _all_crawl_links.append(_sr_full)
                     vc.log(f"[spa-routes] Added {len(_spa_routes)} SPA routes "
                            f"to crawl links for access matrix", "INFO")
             except Exception as _spa_err:
@@ -49843,7 +49881,8 @@ def main() -> None:
         # Deduplicate crawl links accumulated across all contexts
         _seen_lnk: set = set()
         _dedup_links = [l for l in _all_crawl_links
-                        if l not in _seen_lnk and not _seen_lnk.add(l)]
+                        if l not in _seen_lnk and not _seen_lnk.add(l)
+                        and not _TEMPLATE_SYNTAX_RE.search(l)]
         if not _skip("access_matrix"):
             pm.set_phase_status("access_matrix", "running", "Access Matrix")
             try:
