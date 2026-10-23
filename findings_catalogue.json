@@ -8,7 +8,7 @@
   "findings": [
     {
       "id": "FR-001",
-      "title": "Internal Redirect: Trailing Slash Mismatch",
+      "title": "Web Misconfiguration: Internal Redirect: Trailing Slash Mismatch",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -54,7 +54,7 @@
     },
     {
       "id": "FR-002",
-      "title": "HTTP Redirect to In-Scope URL",
+      "title": "Web Misconfiguration: HTTP Redirect to In-Scope URL",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -100,7 +100,7 @@
     },
     {
       "id": "FR-003",
-      "title": "HTTP Redirect to External URL",
+      "title": "Web Misconfiguration: HTTP Redirect to External URL",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -146,7 +146,7 @@
     },
     {
       "id": "FR-004",
-      "title": "WordPress readme.html Accessible",
+      "title": "Information Disclosure: WordPress readme.html Accessible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -192,7 +192,7 @@
     },
     {
       "id": "FR-005",
-      "title": "WordPress license.txt Accessible",
+      "title": "Information Disclosure: WordPress license.txt Accessible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -284,7 +284,7 @@
     },
     {
       "id": "FR-007",
-      "title": "WordPress Login Page Accessible",
+      "title": "Web Misconfiguration: WordPress Login Page Accessible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -330,7 +330,7 @@
     },
     {
       "id": "FR-008",
-      "title": "WordPress User Registration Enabled",
+      "title": "Web Misconfiguration: WordPress User Registration Enabled",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -376,7 +376,7 @@
     },
     {
       "id": "FR-009",
-      "title": "WordPress Password Reset Form Accessible",
+      "title": "Web Misconfiguration: WordPress Password Reset Form Accessible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -652,7 +652,7 @@
     },
     {
       "id": "FR-015",
-      "title": "WordPress REST API Exposed",
+      "title": "Web Misconfiguration: WordPress REST API Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -992,7 +992,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -1109,7 +1109,7 @@
     },
     {
       "id": "FR-024",
-      "title": "WordPress uploads Directory Browsing Enabled",
+      "title": "Information Disclosure: WordPress uploads Directory Browsing Enabled",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1155,7 +1155,7 @@
     },
     {
       "id": "FR-025",
-      "title": "Robots.txt Discloses Hidden Paths",
+      "title": "Information Disclosure: Robots.txt Discloses Hidden Paths",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1247,7 +1247,7 @@
     },
     {
       "id": "FR-027",
-      "title": "Server Banner Disclosure",
+      "title": "Information Disclosure: Server Banner Disclosure",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1293,7 +1293,7 @@
     },
     {
       "id": "FR-028",
-      "title": "X-Powered-By Header Discloses Technology Stack",
+      "title": "Information Disclosure: X-Powered-By Header Discloses Technology Stack",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1339,7 +1339,7 @@
     },
     {
       "id": "FR-029",
-      "title": "Application Error Message Disclosure",
+      "title": "Information Disclosure: Application Error Message Disclosure",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1385,7 +1385,7 @@
     },
     {
       "id": "FR-030",
-      "title": "Directory Listing Enabled",
+      "title": "Information Disclosure: Directory Listing Enabled",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1478,7 +1478,7 @@
     },
     {
       "id": "FR-032",
-      "title": "GraphQL Endpoint Detected",
+      "title": "Discovery: GraphQL Endpoint Detected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3659,7 +3659,7 @@
     },
     {
       "id": "FR-077",
-      "title": "JWT Sensitive Data in Payload",
+      "title": "Information Disclosure: JWT Sensitive Data in Payload",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3751,7 +3751,7 @@
     },
     {
       "id": "FR-079",
-      "title": "JWT kid Header Injection",
+      "title": "Injection: JWT kid Header Injection",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3797,7 +3797,7 @@
     },
     {
       "id": "FR-080",
-      "title": "JWT jwk Header Injection",
+      "title": "Injection: JWT jwk Header Injection",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3843,7 +3843,7 @@
     },
     {
       "id": "FR-081",
-      "title": "SQL Injection",
+      "title": "Injection: SQL Injection",
       "aliases": [
         "SQLi",
         "Database Injection",
@@ -3889,7 +3889,7 @@
         150024
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "DE.CM-01",
         "PR.DS-02"
@@ -3962,7 +3962,7 @@
           "url": "https://github.com/r0oth3x49/ghauri",
           "install": "pip install ghauri",
           "command": "ghauri -u 'https://TARGET/page?id=1' --dbs --batch",
-          "description": "Advanced SQL injection detection tool \u2014 alternative to sqlmap with improved WAF bypass"
+          "description": "Advanced SQL injection detection tool — alternative to sqlmap with improved WAF bypass"
         },
         {
           "name": "nuclei",
@@ -3978,7 +3978,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "SQL injection was detected. User-supplied input is incorporated into SQL queries without proper parameterization or escaping. An attacker can manipulate database queries to extract, modify, or delete data, bypass authentication, or execute operating system commands.",
@@ -3995,7 +3995,7 @@
     },
     {
       "id": "FR-082",
-      "title": "Blind SQL Injection (Boolean-Based)",
+      "title": "Injection: Blind SQL Injection (Boolean-Based)",
       "aliases": [
         "SQLi",
         "Database Injection",
@@ -4041,7 +4041,7 @@
         150024
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "DE.CM-01",
         "PR.DS-02"
@@ -4114,7 +4114,7 @@
           "url": "https://github.com/r0oth3x49/ghauri",
           "install": "pip install ghauri",
           "command": "ghauri -u 'https://TARGET/page?id=1' --dbs --batch",
-          "description": "Advanced SQL injection detection tool \u2014 alternative to sqlmap with improved WAF bypass"
+          "description": "Advanced SQL injection detection tool — alternative to sqlmap with improved WAF bypass"
         },
         {
           "name": "nuclei",
@@ -4130,7 +4130,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "Boolean-based blind SQL injection was detected. The application does not return error messages, but its behavior changes based on the truth value of injected conditions, allowing data extraction through binary search.",
@@ -4147,7 +4147,7 @@
     },
     {
       "id": "FR-083",
-      "title": "Blind SQL Injection (Time-Based)",
+      "title": "Injection: Blind SQL Injection (Time-Based)",
       "aliases": [
         "SQLi",
         "Database Injection",
@@ -4193,7 +4193,7 @@
         150024
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "DE.CM-01",
         "PR.DS-02"
@@ -4266,7 +4266,7 @@
           "url": "https://github.com/r0oth3x49/ghauri",
           "install": "pip install ghauri",
           "command": "ghauri -u 'https://TARGET/page?id=1' --dbs --batch",
-          "description": "Advanced SQL injection detection tool \u2014 alternative to sqlmap with improved WAF bypass"
+          "description": "Advanced SQL injection detection tool — alternative to sqlmap with improved WAF bypass"
         },
         {
           "name": "nuclei",
@@ -4282,7 +4282,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "Time-based blind SQL injection was detected. The server introduces measurable response delays when injected time-delay SQL functions (e.g., SLEEP, WAITFOR DELAY) are executed, confirming SQL injection without visible output.",
@@ -4299,7 +4299,7 @@
     },
     {
       "id": "FR-084",
-      "title": "NoSQL Injection",
+      "title": "Injection: NoSQL Injection",
       "aliases": [
         "NoSQL Injection in API Parameter",
         "CouchDB Injection",
@@ -4329,7 +4329,7 @@
         150044
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -4390,7 +4390,7 @@
           "url": "https://github.com/stampery/mongoaudit",
           "install": "pip install mongoaudit",
           "command": "mongoaudit --host TARGET --port 27017",
-          "description": "Automated MongoDB security auditing tool \u2014 checks authentication, SSL, and authorization"
+          "description": "Automated MongoDB security auditing tool — checks authentication, SSL, and authorization"
         },
         {
           "name": "nuclei",
@@ -4423,7 +4423,7 @@
     },
     {
       "id": "FR-085",
-      "title": "Command Injection (OS Command Injection)",
+      "title": "Injection: Command Injection (OS Command Injection)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4469,7 +4469,7 @@
     },
     {
       "id": "FR-086",
-      "title": "Server-Side Template Injection (SSTI)",
+      "title": "Injection: Server-Side Template Injection (SSTI)",
       "aliases": [
         "Freemarker Injection",
         "Template Injection",
@@ -4502,7 +4502,7 @@
         150046
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -4595,7 +4595,7 @@
     },
     {
       "id": "FR-087",
-      "title": "Cross-Site Scripting (XSS) \u2014 Reflected",
+      "title": "Injection: Cross-Site Scripting (XSS) — Reflected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4641,7 +4641,7 @@
     },
     {
       "id": "FR-088",
-      "title": "Cross-Site Scripting (XSS) \u2014 Stored",
+      "title": "Injection: Cross-Site Scripting (XSS) — Stored",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4687,7 +4687,7 @@
     },
     {
       "id": "FR-089",
-      "title": "Cross-Site Scripting (XSS) \u2014 DOM-Based",
+      "title": "Injection: Cross-Site Scripting (XSS) — DOM-Based",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -4733,7 +4733,7 @@
     },
     {
       "id": "FR-090",
-      "title": "LDAP Injection",
+      "title": "Injection: LDAP Injection",
       "aliases": [
         "LDAP Authentication Bypass",
         "Directory Service Injection",
@@ -4853,7 +4853,7 @@
     },
     {
       "id": "FR-091",
-      "title": "XPath Injection",
+      "title": "Injection: XPath Injection",
       "aliases": [
         "XML Document Injection",
         "XQuery Injection",
@@ -4872,7 +4872,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A03:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.DS-02"
       ],
@@ -4939,7 +4939,7 @@
     },
     {
       "id": "FR-092",
-      "title": "XML External Entity (XXE) Injection",
+      "title": "Injection: XML External Entity (XXE) Injection",
       "aliases": [
         "XXE",
         "XXE in API",
@@ -4975,7 +4975,7 @@
         150041
       ],
       "owasp_web": "A05:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -5077,7 +5077,7 @@
     },
     {
       "id": "FR-093",
-      "title": "HTTP Parameter Pollution",
+      "title": "Injection: HTTP Parameter Pollution",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5215,7 +5215,7 @@
     },
     {
       "id": "FR-096",
-      "title": "Hidden Form Fields Disclose Sensitive Data",
+      "title": "Information Disclosure: Hidden Form Fields Disclose Sensitive Data",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5261,7 +5261,7 @@
     },
     {
       "id": "FR-097",
-      "title": "Client-Side Redirect via open() or location",
+      "title": "Web Misconfiguration: Client-Side Redirect via open() or location",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5353,7 +5353,7 @@
     },
     {
       "id": "FR-099",
-      "title": "Path Traversal / Local File Inclusion",
+      "title": "Injection: Path Traversal / Local File Inclusion",
       "aliases": [
         "File Path Traversal",
         "Arbitrary File Read",
@@ -5391,7 +5391,7 @@
         150061
       ],
       "owasp_web": "A01:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.AA-05",
         "PR.DS-02"
@@ -5483,7 +5483,7 @@
     },
     {
       "id": "FR-100",
-      "title": "Remote File Inclusion",
+      "title": "Injection: Remote File Inclusion",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5529,7 +5529,7 @@
     },
     {
       "id": "FR-101",
-      "title": "Server-Side Request Forgery (SSRF)",
+      "title": "Injection: Server-Side Request Forgery (SSRF)",
       "aliases": [
         "SSRF to Cloud Metadata",
         "Internal Service Access via SSRF",
@@ -5552,7 +5552,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A10:2025",
-      "owasp_api": "API7:2023 \u2013 Server Side Request Forgery",
+      "owasp_api": "API7:2023 – Server Side Request Forgery",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -5654,7 +5654,7 @@
     },
     {
       "id": "FR-102",
-      "title": "SSRF via Cloud Metadata Endpoint Access",
+      "title": "Information Disclosure: SSRF via Cloud Metadata Endpoint Access",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5700,7 +5700,7 @@
     },
     {
       "id": "FR-103",
-      "title": "SSRF via Internal Network Access",
+      "title": "Injection: SSRF via Internal Network Access",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5746,7 +5746,7 @@
     },
     {
       "id": "FR-104",
-      "title": "Broken Authentication \u2014 Default Credentials",
+      "title": "Broken Authentication — Default Credentials",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5977,7 +5977,7 @@
     },
     {
       "id": "FR-109",
-      "title": "Sensitive File Exposed \u2014 /etc/passwd",
+      "title": "Sensitive File Exposed — /etc/passwd",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6069,7 +6069,7 @@
     },
     {
       "id": "FR-111",
-      "title": "Sensitive File Exposed \u2014 Private Key",
+      "title": "Sensitive File Exposed — Private Key",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6115,7 +6115,7 @@
     },
     {
       "id": "FR-112",
-      "title": "Sensitive File Exposed \u2014 phpinfo()",
+      "title": "Sensitive File Exposed — phpinfo()",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6161,7 +6161,7 @@
     },
     {
       "id": "FR-113",
-      "title": "Sensitive File Exposed \u2014 Composer/NPM Metadata",
+      "title": "Sensitive File Exposed — Composer/NPM Metadata",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6207,7 +6207,7 @@
     },
     {
       "id": "FR-114",
-      "title": "Vulnerability Scanner Finding \u2014 Known CVE",
+      "title": "Vulnerability Scanner Finding — Known CVE",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6253,7 +6253,7 @@
     },
     {
       "id": "FR-115",
-      "title": "Vulnerability Scanner Finding \u2014 Exposed Panel",
+      "title": "Vulnerability Scanner Finding — Exposed Panel",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6299,7 +6299,7 @@
     },
     {
       "id": "FR-116",
-      "title": "Vulnerability Scanner Finding \u2014 Misconfiguration",
+      "title": "Web Misconfiguration: Vulnerability Scanner Finding — Misconfiguration",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6575,7 +6575,7 @@
     },
     {
       "id": "FR-122",
-      "title": "Verbose Error Messages Logged to Client",
+      "title": "Information Disclosure: Verbose Error Messages Logged to Client",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6827,7 +6827,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A07:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AA-01"
       ],
@@ -6885,7 +6885,7 @@
           "url": "https://hashcat.net",
           "install": "apt-get install hashcat  OR  brew install hashcat",
           "command": "hashcat -m 0 hashes.txt /usr/share/wordlists/rockyou.txt  # MD5\nhashcat -m 1000 hashes.txt rockyou.txt  # NTLM",
-          "description": "World's fastest password recovery tool \u2014 GPU-accelerated with 300+ hash types"
+          "description": "World's fastest password recovery tool — GPU-accelerated with 300+ hash types"
         },
         {
           "name": "CrackMapExec",
@@ -6960,7 +6960,7 @@
       "aliases": [
         "Unauthorized Object Access",
         "Sequential ID Enumeration",
-        "BOLA \u2013 Broken Object Level Authorization",
+        "BOLA – Broken Object Level Authorization",
         "Object-Level Authorization Bypass",
         "IDOR"
       ],
@@ -6984,7 +6984,7 @@
         150140
       ],
       "owasp_web": "A01:2025",
-      "owasp_api": "API1:2023 \u2013 Broken Object Level Authorization",
+      "owasp_api": "API1:2023 – Broken Object Level Authorization",
       "nist_csf2": [
         "PR.AA-05",
         "DE.CM-01"
@@ -7039,9 +7039,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "Arjun",
@@ -7049,7 +7049,7 @@
           "url": "https://github.com/s0md3v/Arjun",
           "install": "pip3 install arjun",
           "command": "arjun -u https://TARGET/api/endpoint --stable -t 3",
-          "description": "HTTP parameter discovery scanner \u2014 finds hidden GET/POST/JSON parameters"
+          "description": "HTTP parameter discovery scanner — finds hidden GET/POST/JSON parameters"
         },
         {
           "name": "ffuf",
@@ -7101,7 +7101,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A01:2025",
-      "owasp_api": "API1:2023 \u2013 Broken Object Level Authorization",
+      "owasp_api": "API1:2023 – Broken Object Level Authorization",
       "nist_csf2": [
         "PR.AA-05"
       ],
@@ -7149,9 +7149,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "ffuf",
@@ -7212,7 +7212,7 @@
         150150
       ],
       "owasp_web": "A01:2025",
-      "owasp_api": "API5:2023 \u2013 Broken Function Level Authorization",
+      "owasp_api": "API5:2023 – Broken Function Level Authorization",
       "nist_csf2": [
         "PR.AA-05",
         "DE.CM-03"
@@ -7265,9 +7265,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "ffuf",
@@ -7328,7 +7328,7 @@
         150145
       ],
       "owasp_web": "A01:2025",
-      "owasp_api": "API5:2023 \u2013 Broken Function Level Authorization",
+      "owasp_api": "API5:2023 – Broken Function Level Authorization",
       "nist_csf2": [
         "PR.AA-05"
       ],
@@ -7382,9 +7382,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "ffuf",
@@ -7444,7 +7444,7 @@
         150120
       ],
       "owasp_web": "A07:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AA-01"
       ],
@@ -7859,12 +7859,12 @@
     },
     {
       "id": "FR-140",
-      "title": "Open Redirect",
+      "title": "Web Vulnerability: Open Redirect",
       "aliases": [
         "Open URL Redirect",
         "Redirect Parameter Manipulation",
         "Unvalidated Redirect",
-        "Unsafe Consumption \u2014 Open Redirect to External URL"
+        "Unsafe Consumption — Open Redirect to External URL"
       ],
       "source_tools": [
         "fracture"
@@ -7960,7 +7960,7 @@
     },
     {
       "id": "FR-141",
-      "title": "Insecure Deserialization",
+      "title": "Injection: Insecure Deserialization",
       "aliases": [
         "Pickle Deserialization",
         "PHP Object Injection",
@@ -8074,7 +8074,7 @@
     },
     {
       "id": "FR-142",
-      "title": "Java Deserialization via Gadget Chains",
+      "title": "Injection: Java Deserialization via Gadget Chains",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8120,7 +8120,7 @@
     },
     {
       "id": "FR-143",
-      "title": "PHP Object Injection via unserialize()",
+      "title": "Injection: PHP Object Injection via unserialize()",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8166,7 +8166,7 @@
     },
     {
       "id": "FR-144",
-      "title": "Unrestricted File Upload \u2014 Executable File",
+      "title": "Web Vulnerability: Unrestricted File Upload — Executable File",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8212,7 +8212,7 @@
     },
     {
       "id": "FR-145",
-      "title": "Unrestricted File Upload \u2014 MIME Type Bypass",
+      "title": "Web Vulnerability: Unrestricted File Upload — MIME Type Bypass",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8258,7 +8258,7 @@
     },
     {
       "id": "FR-146",
-      "title": "File Upload \u2014 Path Traversal in Filename",
+      "title": "Injection: File Upload — Path Traversal in Filename",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8307,7 +8307,7 @@
       "title": "Mass Assignment Vulnerability",
       "aliases": [
         "Over-Posted Parameters",
-        "Mass Assignment \u2014 Accepted",
+        "Mass Assignment — Accepted",
         "Hidden Field Tampering",
         "Auto-Binding Vulnerability",
         "Mass Assignment",
@@ -8334,7 +8334,7 @@
         150146
       ],
       "owasp_web": "A04:2025",
-      "owasp_api": "API6:2023 \u2013 Unrestricted Access to Sensitive Business Flows",
+      "owasp_api": "API6:2023 – Unrestricted Access to Sensitive Business Flows",
       "nist_csf2": [
         "PR.AA-05"
       ],
@@ -8386,7 +8386,7 @@
           "url": "https://github.com/s0md3v/Arjun",
           "install": "pip3 install arjun",
           "command": "arjun -u https://TARGET/api/endpoint --stable -t 3",
-          "description": "HTTP parameter discovery scanner \u2014 finds hidden GET/POST/JSON parameters"
+          "description": "HTTP parameter discovery scanner — finds hidden GET/POST/JSON parameters"
         },
         {
           "name": "ffuf",
@@ -8419,7 +8419,7 @@
     },
     {
       "id": "FR-148",
-      "title": "Mass Assignment \u2014 Privilege Escalation via Role Field",
+      "title": "Mass Assignment — Privilege Escalation via Role Field",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8559,7 +8559,7 @@
     },
     {
       "id": "FR-151",
-      "title": "HTTP Method Override Accepted",
+      "title": "Web Misconfiguration: HTTP Method Override Accepted",
       "aliases": [
         "HTTP Method Override Abuse",
         "HTTP Verb Tampering",
@@ -8581,7 +8581,7 @@
       ],
       "qualys_qids": [],
       "owasp_web": "A01:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01"
       ],
@@ -8655,7 +8655,7 @@
     },
     {
       "id": "FR-152",
-      "title": "CORS Misconfiguration \u2014 Arbitrary Origin Reflected",
+      "title": "CORS Misconfiguration — Arbitrary Origin Reflected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8702,7 +8702,7 @@
     },
     {
       "id": "FR-153",
-      "title": "CORS Misconfiguration \u2014 Null Origin Allowed",
+      "title": "CORS Misconfiguration — Null Origin Allowed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8748,7 +8748,7 @@
     },
     {
       "id": "FR-154",
-      "title": "Business Logic Flaw \u2014 Negative Value Accepted",
+      "title": "Business Logic Flaw — Negative Value Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8794,7 +8794,7 @@
     },
     {
       "id": "FR-155",
-      "title": "Business Logic Flaw \u2014 Price Manipulation",
+      "title": "Business Logic Flaw — Price Manipulation",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8840,7 +8840,7 @@
     },
     {
       "id": "FR-156",
-      "title": "Business Logic Flaw \u2014 Coupon/Discount Abuse",
+      "title": "Business Logic Flaw — Coupon/Discount Abuse",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8886,7 +8886,7 @@
     },
     {
       "id": "FR-157",
-      "title": "Business Logic Flaw \u2014 Workflow Step Bypass",
+      "title": "Business Logic Flaw — Workflow Step Bypass",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8932,7 +8932,7 @@
     },
     {
       "id": "FR-158",
-      "title": "Business Logic Flaw \u2014 Race Condition",
+      "title": "Business Logic Flaw — Race Condition",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9072,7 +9072,7 @@
     },
     {
       "id": "FR-161",
-      "title": "Screenshot Captured \u2014 Web Application Surface",
+      "title": "Discovery: Screenshot Captured — Web Application Surface",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9118,7 +9118,7 @@
     },
     {
       "id": "FR-162",
-      "title": "FFUF Directory/File Discovered",
+      "title": "Discovery: FFUF Directory/File Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9164,7 +9164,7 @@
     },
     {
       "id": "FR-163",
-      "title": "FFUF \u2014 Administrative Path Discovered",
+      "title": "FFUF — Administrative Path Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9210,7 +9210,7 @@
     },
     {
       "id": "FR-164",
-      "title": "shcheck \u2014 Missing Security Header",
+      "title": "shcheck — Missing Security Header",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9256,7 +9256,7 @@
     },
     {
       "id": "FR-165",
-      "title": "Crawl \u2014 Undocumented Endpoint Discovered",
+      "title": "Discovery: Crawl — Undocumented Endpoint Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9302,7 +9302,7 @@
     },
     {
       "id": "FR-166",
-      "title": "Crawl \u2014 External Domain Reference Found",
+      "title": "Discovery: Crawl — External Domain Reference Found",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9395,7 +9395,7 @@
     },
     {
       "id": "FR-168",
-      "title": "Authentication \u2014 Concurrent Session Not Restricted",
+      "title": "Authentication — Concurrent Session Not Restricted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9441,9 +9441,9 @@
     },
     {
       "id": "FR-169",
-      "title": "HTTP Methods: Unsafe Methods Enabled",
+      "title": "Web Misconfiguration: Unsafe Methods Enabled",
       "aliases": [
-        "HTTP Methods \u2014 Dangerous Methods Enabled (PUT/DELETE/TRACE)"
+        "HTTP Methods — Dangerous Methods Enabled (PUT/DELETE/TRACE)"
       ],
       "source_tools": [
         "fracture"
@@ -9475,7 +9475,7 @@
       "remediation_category": "",
       "remediation_effort": "",
       "validation_tools": [],
-      "description": "The web server responds to dangerous HTTP methods including PUT (file upload), DELETE (file deletion), or TRACE (XST \u2014 Cross-Site Tracing). These methods may enable unauthorized modification of server content or session token theft.",
+      "description": "The web server responds to dangerous HTTP methods including PUT (file upload), DELETE (file deletion), or TRACE (XST — Cross-Site Tracing). These methods may enable unauthorized modification of server content or session token theft.",
       "impact": "",
       "_x_owasp": "A05:2025",
       "_x_nist": "CM-7,AC-3",
@@ -9489,7 +9489,7 @@
     },
     {
       "id": "FR-170",
-      "title": "Clickjacking Vulnerability",
+      "title": "Web Vulnerability: Clickjacking Vulnerability",
       "aliases": [
         "Clickjacking Vulnerability",
         "Frame Injection",
@@ -9573,7 +9573,7 @@
     },
     {
       "id": "FR-171",
-      "title": "Sensitive Data Exposure \u2014 PII in Response",
+      "title": "Information Disclosure: Sensitive Data Exposure — PII in Response",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9620,7 +9620,7 @@
     },
     {
       "id": "FR-172",
-      "title": "Insecure Password Storage (Cleartext or Weak Hash)",
+      "title": "Information Disclosure: Insecure Password Storage (Cleartext or Weak Hash)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9667,7 +9667,7 @@
     },
     {
       "id": "FR-173",
-      "title": "Subdomain Takeover \u2014 S3 Bucket Not Found",
+      "title": "Subdomain Takeover — S3 Bucket Not Found",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9713,7 +9713,7 @@
     },
     {
       "id": "FR-174",
-      "title": "Subdomain Takeover \u2014 GitHub Pages",
+      "title": "Subdomain Takeover — GitHub Pages",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9759,7 +9759,7 @@
     },
     {
       "id": "FR-175",
-      "title": "Subdomain Takeover \u2014 Heroku",
+      "title": "Subdomain Takeover — Heroku",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9805,7 +9805,7 @@
     },
     {
       "id": "FR-176",
-      "title": "Prototype Pollution in JavaScript",
+      "title": "Injection: Prototype Pollution in JavaScript",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9851,7 +9851,7 @@
     },
     {
       "id": "FR-177",
-      "title": "HTTP Request Smuggling",
+      "title": "Web Vulnerability: HTTP Request Smuggling",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9897,7 +9897,7 @@
     },
     {
       "id": "FR-178",
-      "title": "Web Cache Poisoning",
+      "title": "Web Vulnerability: Web Cache Poisoning",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10036,7 +10036,7 @@
     },
     {
       "id": "FR-181",
-      "title": "Access Matrix \u2014 Unauthenticated Access to Authenticated Endpoint",
+      "title": "Access Matrix — Unauthenticated Access to Authenticated Endpoint",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10082,7 +10082,7 @@
     },
     {
       "id": "FR-182",
-      "title": "Access Matrix \u2014 Lower-Role Access to Higher-Role Endpoint",
+      "title": "Access Matrix — Lower-Role Access to Higher-Role Endpoint",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10128,7 +10128,7 @@
     },
     {
       "id": "FR-183",
-      "title": "Access Matrix \u2014 User A Can Read User B Data",
+      "title": "Access Matrix — User A Can Read User B Data",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10174,7 +10174,7 @@
     },
     {
       "id": "FR-184",
-      "title": "Access Matrix \u2014 User A Can Modify User B Data",
+      "title": "Access Matrix — User A Can Modify User B Data",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10220,7 +10220,7 @@
     },
     {
       "id": "FR-185",
-      "title": "Access Matrix \u2014 Admin Functionality Accessible by Regular User",
+      "title": "Access Matrix — Admin Functionality Accessible by Regular User",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10266,7 +10266,7 @@
     },
     {
       "id": "FR-186",
-      "title": "HTTP Security Header \u2014 X-Frame-Options Incorrectly Configured",
+      "title": "HTTP Security Header — X-Frame-Options Incorrectly Configured",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10312,7 +10312,7 @@
     },
     {
       "id": "FR-187",
-      "title": "Content-Security-Policy \u2014 Unsafe-Eval Allowed",
+      "title": "Content-Security-Policy — Unsafe-Eval Allowed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10450,7 +10450,7 @@
     },
     {
       "id": "FR-190",
-      "title": "GraphQL SQL Injection via Argument",
+      "title": "Injection: GraphQL SQL Injection via Argument",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10496,7 +10496,7 @@
     },
     {
       "id": "FR-191",
-      "title": "Sensitive Data in GET Request Parameters",
+      "title": "Information Disclosure: Sensitive Data in GET Request Parameters",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10682,7 +10682,7 @@
     },
     {
       "id": "FR-195",
-      "title": "HTTP/2 Rapid Reset Attack Exposure",
+      "title": "Web Vulnerability: HTTP/2 Rapid Reset Attack Exposure",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10806,12 +10806,12 @@
       "searchsploit_terms": [],
       "metasploit_modules": [],
       "kev": false,
-      "remediation_brief": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection \u2014 fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform.",
+      "remediation_brief": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection — fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform.",
       "remediation_component": "",
       "remediation_category": "",
       "remediation_effort": "",
       "validation_tools": [],
-      "description": "A WAF or edge security platform was identified in front of the target via response headers or body signatures. WAF rules may suppress injection probes \u2014 absence of a finding does not confirm absence of the vulnerability. Bot-protection may interrupt automated probes.",
+      "description": "A WAF or edge security platform was identified in front of the target via response headers or body signatures. WAF rules may suppress injection probes — absence of a finding does not confirm absence of the vulnerability. Bot-protection may interrupt automated probes.",
       "impact": "",
       "_x_owasp": "A05:2025",
       "_x_nist": "SC-7",
@@ -10821,7 +10821,7 @@
       "_x_cves": [],
       "_x_service": "http",
       "_x_phase": "recon",
-      "_x_remediation": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection \u2014 fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform."
+      "_x_remediation": "Keep WAF rule sets up to date covering OWASP Top 10 2025. Do not rely solely on WAF protection — fix underlying vulnerabilities. Review WAF bypass techniques relevant to the identified platform."
     },
     {
       "id": "FR-198",
@@ -11009,7 +11009,7 @@
     },
     {
       "id": "FR-202",
-      "title": "Web Cache Poisoning",
+      "title": "Web Vulnerability: Web Cache Poisoning",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -11055,7 +11055,7 @@
     },
     {
       "id": "FR-203",
-      "title": "Wildcard (*) Detected",
+      "title": "Discovery: Wildcard (*) Detected",
       "aliases": [
         "Interesting Endpoint Discovered",
         "Wildcard (*) Detected",
@@ -11155,7 +11155,7 @@
           "description": "Fast template-based vulnerability scanner with 5000+ community templates"
         }
       ],
-      "description": "A wildcard/catch-all response was detected \u2014 the server returns the same response for all unknown paths. Directory brute-forcing may be unreliable; all path-based findings are validated against the wildcard baseline.",
+      "description": "A wildcard/catch-all response was detected — the server returns the same response for all unknown paths. Directory brute-forcing may be unreliable; all path-based findings are validated against the wildcard baseline.",
       "impact": "",
       "_x_owasp": "A05:2025",
       "_x_nist": "CM-7",
@@ -11169,7 +11169,7 @@
     },
     {
       "id": "FR-204",
-      "title": "CMS Detected",
+      "title": "Discovery: CMS Detected",
       "aliases": [
         "CMS Detected",
         "Software Version Disclosed",
@@ -11279,7 +11279,7 @@
     },
     {
       "id": "FR-205",
-      "title": "Web Structure Identified",
+      "title": "Discovery: Web Structure Identified",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -11449,7 +11449,7 @@
         86002
       ],
       "owasp_web": "A05:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01",
         "DE.CM-01"
@@ -11566,7 +11566,7 @@
         86002
       ],
       "owasp_web": "A05:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01",
         "DE.CM-01"
@@ -11683,7 +11683,7 @@
         86002
       ],
       "owasp_web": "A05:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01",
         "DE.CM-01"
@@ -11801,7 +11801,7 @@
         86002
       ],
       "owasp_web": "A05:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01",
         "DE.CM-01"
@@ -11986,7 +11986,7 @@
     },
     {
       "id": "FR-213",
-      "title": "Unknown Header Identified",
+      "title": "Discovery: Unknown Header Identified",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -12033,7 +12033,7 @@
     },
     {
       "id": "FR-214",
-      "title": "Software Version Disclosed",
+      "title": "Information Disclosure: Software Version Disclosed",
       "aliases": [
         "CMS Detected",
         "Software Version Disclosed",
@@ -12144,7 +12144,7 @@
     },
     {
       "id": "FR-215",
-      "title": "Virtual Host Discovered",
+      "title": "Discovery: Virtual Host Discovered",
       "aliases": [
         "CMS Detected",
         "Software Version Disclosed",
@@ -12254,7 +12254,7 @@
     },
     {
       "id": "FR-216",
-      "title": "Subdomain Takeover \u2014 Dangling CNAME",
+      "title": "Subdomain Takeover — Dangling CNAME",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -12477,7 +12477,7 @@
     },
     {
       "id": "FR-219",
-      "title": "Interesting Endpoint Discovered",
+      "title": "Discovery: Interesting Endpoint Discovered",
       "aliases": [
         "Interesting Endpoint Discovered",
         "Wildcard (*) Detected",
@@ -12593,7 +12593,7 @@
     },
     {
       "id": "FR-220",
-      "title": "Authenticated Interesting Endpoint",
+      "title": "Discovery: Authenticated Interesting Endpoint",
       "aliases": [
         "Interesting Endpoint Discovered",
         "Wildcard (*) Detected",
@@ -12814,7 +12814,7 @@
     },
     {
       "id": "FR-222",
-      "title": "Sensitive Path Accessible",
+      "title": "Web Misconfiguration: Sensitive Path Accessible",
       "aliases": [
         "Interesting Endpoint Discovered",
         "Wildcard (*) Detected",
@@ -13023,7 +13023,7 @@
     },
     {
       "id": "FR-225",
-      "title": "Web Files Downloaded",
+      "title": "Discovery: Web Files Downloaded",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13070,7 +13070,7 @@
     },
     {
       "id": "FR-226",
-      "title": "Web Screenshot Captured",
+      "title": "Discovery: Web Screenshot Captured",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13116,7 +13116,7 @@
     },
     {
       "id": "FR-227",
-      "title": "Hidden Parameter Discovered",
+      "title": "Discovery: Hidden Parameter Discovered",
       "aliases": [
         "JWT Token Identified",
         "Hidden Parameter Discovered"
@@ -13135,7 +13135,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A05:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "ID.AM-01"
       ],
@@ -13190,7 +13190,7 @@
           "url": "https://github.com/s0md3v/Arjun",
           "install": "pip3 install arjun",
           "command": "arjun -u https://TARGET/api/endpoint --stable -t 3",
-          "description": "HTTP parameter discovery scanner \u2014 finds hidden GET/POST/JSON parameters"
+          "description": "HTTP parameter discovery scanner — finds hidden GET/POST/JSON parameters"
         },
         {
           "name": "ffuf",
@@ -13232,7 +13232,7 @@
     },
     {
       "id": "FR-228",
-      "title": "Non-Login Form Detected",
+      "title": "Discovery: Non-Login Form Detected",
       "aliases": [
         "Login Page Detected",
         "Authentication Method Identified",
@@ -13340,7 +13340,7 @@
     },
     {
       "id": "FR-229",
-      "title": "Login Page Detected",
+      "title": "Discovery: Login Page Detected",
       "aliases": [
         "Login Page Detected",
         "Authentication Method Identified",
@@ -13449,7 +13449,7 @@
     },
     {
       "id": "FR-230",
-      "title": "Application Identified at Login Page",
+      "title": "Discovery: Application Identified at Login Page",
       "aliases": [
         "Default Page Detected",
         "Default Webpage Detected",
@@ -13669,7 +13669,7 @@
     },
     {
       "id": "FR-232",
-      "title": "Password Reset Endpoint Exposed",
+      "title": "Discovery: Password Reset Endpoint Exposed",
       "aliases": [
         "Password Reset Endpoint Exposed"
       ],
@@ -13823,7 +13823,7 @@
     },
     {
       "id": "FR-234",
-      "title": "File Upload Endpoint Detected",
+      "title": "Discovery: File Upload Endpoint Detected",
       "aliases": [
         "Interesting Endpoint Discovered",
         "Wildcard (*) Detected",
@@ -13983,7 +13983,7 @@
     },
     {
       "id": "FR-236",
-      "title": "WordPress Vulnerability / Misconfiguration",
+      "title": "Web Vulnerability: WordPress Vulnerability / Misconfiguration",
       "aliases": [
         "Sensitive WordPress Path Accessible",
         "WordPress Vulnerability / Misconfiguration",
@@ -14064,7 +14064,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -14323,7 +14323,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -14356,7 +14356,7 @@
     },
     {
       "id": "FR-241",
-      "title": "WordPress wp-cron.php Publicly Accessible",
+      "title": "Web Misconfiguration: WordPress wp-cron.php Publicly Accessible",
       "aliases": [
         "Sensitive WordPress Path Accessible",
         "WordPress Vulnerability / Misconfiguration",
@@ -14437,7 +14437,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -14470,7 +14470,7 @@
     },
     {
       "id": "FR-242",
-      "title": "WordPress Multisite Installation Detected",
+      "title": "Discovery: WordPress Multisite Installation Detected",
       "aliases": [
         "WordPress Plugins Detected in Page Source",
         "WordPress Parent Theme Detected",
@@ -14551,7 +14551,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -14576,7 +14576,7 @@
     },
     {
       "id": "FR-243",
-      "title": "WordPress Plugins Detected in Page Source",
+      "title": "Discovery: WordPress Plugins Detected in Page Source",
       "aliases": [
         "WordPress Plugins Detected in Page Source",
         "WordPress Parent Theme Detected",
@@ -14657,7 +14657,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -14763,7 +14763,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -14874,7 +14874,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "ffuf",
@@ -14955,7 +14955,7 @@
     },
     {
       "id": "FR-247",
-      "title": "WordPress Directory Listing Enabled",
+      "title": "Information Disclosure: WordPress Directory Listing Enabled",
       "aliases": [
         "WordPress Plugins Detected in Page Source",
         "WordPress Parent Theme Detected",
@@ -15036,7 +15036,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -15190,7 +15190,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -15296,7 +15296,7 @@
           "url": "https://github.com/wpscanteam/wpscan",
           "install": "gem install wpscan  OR  docker pull wpscanteam/wpscan",
           "command": "wpscan --url https://TARGET --enumerate vp,vt,u --api-token YOUR_TOKEN",
-          "description": "WordPress vulnerability scanner \u2014 enumerates plugins, themes, users, and known CVEs"
+          "description": "WordPress vulnerability scanner — enumerates plugins, themes, users, and known CVEs"
         },
         {
           "name": "nuclei",
@@ -15782,7 +15782,7 @@
         38172
       ],
       "owasp_web": "A02:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.DS-01",
         "PR.DS-02"
@@ -15921,7 +15921,7 @@
         38172
       ],
       "owasp_web": "A02:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.DS-01",
         "PR.DS-02"
@@ -16062,7 +16062,7 @@
         38172
       ],
       "owasp_web": "A02:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.DS-01",
         "PR.DS-02"
@@ -16399,7 +16399,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         },
         {
           "name": "testssl.sh",
@@ -17004,7 +17004,7 @@
     },
     {
       "id": "FR-273",
-      "title": "SQL Injection (Error-Based)",
+      "title": "Injection: SQL Injection (Error-Based)",
       "aliases": [
         "SQLi",
         "Database Injection",
@@ -17050,7 +17050,7 @@
         150024
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "DE.CM-01",
         "PR.DS-02"
@@ -17123,7 +17123,7 @@
           "url": "https://github.com/r0oth3x49/ghauri",
           "install": "pip install ghauri",
           "command": "ghauri -u 'https://TARGET/page?id=1' --dbs --batch",
-          "description": "Advanced SQL injection detection tool \u2014 alternative to sqlmap with improved WAF bypass"
+          "description": "Advanced SQL injection detection tool — alternative to sqlmap with improved WAF bypass"
         },
         {
           "name": "nuclei",
@@ -17139,7 +17139,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "Error-based SQL injection was detected. Database error messages containing SQL syntax are returned in response to crafted input, confirming the application is vulnerable to SQL injection and disclosing database version/structure information.",
@@ -17156,7 +17156,7 @@
     },
     {
       "id": "FR-274",
-      "title": "SQL Injection Confirmed by sqlmap",
+      "title": "Injection: SQL Injection Confirmed by sqlmap",
       "aliases": [
         "SQLi",
         "Database Injection",
@@ -17202,7 +17202,7 @@
         150024
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "DE.CM-01",
         "PR.DS-02"
@@ -17275,7 +17275,7 @@
           "url": "https://github.com/r0oth3x49/ghauri",
           "install": "pip install ghauri",
           "command": "ghauri -u 'https://TARGET/page?id=1' --dbs --batch",
-          "description": "Advanced SQL injection detection tool \u2014 alternative to sqlmap with improved WAF bypass"
+          "description": "Advanced SQL injection detection tool — alternative to sqlmap with improved WAF bypass"
         },
         {
           "name": "nuclei",
@@ -17291,7 +17291,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "sqlmap confirmed SQL injection on the target parameter. SQL injection allows attackers to read, modify, or delete database contents and may enable operating system command execution.",
@@ -17308,7 +17308,7 @@
     },
     {
       "id": "FR-275",
-      "title": "Second-Order SQL Injection",
+      "title": "Injection: Second-Order SQL Injection",
       "aliases": [
         "SQLi",
         "Database Injection",
@@ -17354,7 +17354,7 @@
         150024
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "DE.CM-01",
         "PR.DS-02"
@@ -17427,7 +17427,7 @@
           "url": "https://github.com/r0oth3x49/ghauri",
           "install": "pip install ghauri",
           "command": "ghauri -u 'https://TARGET/page?id=1' --dbs --batch",
-          "description": "Advanced SQL injection detection tool \u2014 alternative to sqlmap with improved WAF bypass"
+          "description": "Advanced SQL injection detection tool — alternative to sqlmap with improved WAF bypass"
         },
         {
           "name": "nuclei",
@@ -17443,7 +17443,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "A second-order (stored) SQL injection vector was identified. User-supplied input stored in the database is later included in SQL queries without sanitisation when retrieved and processed.",
@@ -17460,7 +17460,7 @@
     },
     {
       "id": "FR-276",
-      "title": "OS Command Injection",
+      "title": "Injection: OS Command Injection",
       "aliases": [
         "Shell Injection",
         "Remote Code Execution",
@@ -17498,7 +17498,7 @@
         150051
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -17577,7 +17577,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         }
       ],
       "description": "OS command injection was detected. User-supplied input is passed to an operating system shell without sanitisation, allowing arbitrary command execution on the server.",
@@ -17594,7 +17594,7 @@
     },
     {
       "id": "FR-277",
-      "title": "Remote Code Execution via Code Injection",
+      "title": "Injection: Remote Code Execution via Code Injection",
       "aliases": [
         "Remote Code Execution via Code Injection"
       ],
@@ -17613,7 +17613,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A03:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.DS-02",
         "PR.PS-01",
@@ -17693,7 +17693,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         },
         {
           "name": "commix",
@@ -17718,7 +17718,7 @@
     },
     {
       "id": "FR-278",
-      "title": "Reflected Cross-Site Scripting (XSS)",
+      "title": "Injection: Reflected Cross-Site Scripting (XSS)",
       "aliases": [
         "Cross-Site Scripting",
         "XSS Vulnerability",
@@ -17759,7 +17759,7 @@
         150014
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -17862,7 +17862,7 @@
     },
     {
       "id": "FR-279",
-      "title": "Stored Cross-Site Scripting (XSS)",
+      "title": "Injection: Stored Cross-Site Scripting (XSS)",
       "aliases": [
         "Stored XSS",
         "Second-Order XSS",
@@ -17975,7 +17975,7 @@
     },
     {
       "id": "FR-280",
-      "title": "DOM-Based Cross-Site Scripting (XSS)",
+      "title": "Injection: DOM-Based Cross-Site Scripting (XSS)",
       "aliases": [
         "Cross-Site Scripting",
         "XSS Vulnerability",
@@ -18016,7 +18016,7 @@
         150014
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -18119,7 +18119,7 @@
     },
     {
       "id": "FR-281",
-      "title": "XSS Confirmed by dalfox",
+      "title": "Injection: XSS Confirmed by dalfox",
       "aliases": [
         "Cross-Site Scripting",
         "XSS Vulnerability",
@@ -18160,7 +18160,7 @@
         150014
       ],
       "owasp_web": "A03:2025",
-      "owasp_api": "API3:2023 \u2013 Injection",
+      "owasp_api": "API3:2023 – Injection",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -18263,7 +18263,7 @@
     },
     {
       "id": "FR-282",
-      "title": "CSV / Formula Injection",
+      "title": "Injection: CSV / Formula Injection",
       "aliases": [
         "CSV / Formula Injection"
       ],
@@ -18363,7 +18363,7 @@
     },
     {
       "id": "FR-283",
-      "title": "CRLF Injection",
+      "title": "Injection: CRLF Injection",
       "aliases": [
         "CRLF Injection"
       ],
@@ -18479,7 +18479,7 @@
     },
     {
       "id": "FR-284",
-      "title": "Log Injection / CRLF in Log Entries",
+      "title": "Injection: Log Injection / CRLF in Log Entries",
       "aliases": [
         "Log Injection / CRLF in Log Entries"
       ],
@@ -18585,7 +18585,7 @@
     },
     {
       "id": "FR-285",
-      "title": "HTTP Parameter Pollution (HPP)",
+      "title": "Injection: HTTP Parameter Pollution (HPP)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -18631,7 +18631,7 @@
     },
     {
       "id": "FR-286",
-      "title": "HTTP Method Tampering",
+      "title": "Web Misconfiguration: HTTP Method Tampering",
       "aliases": [
         "HTTP Method Override Abuse",
         "HTTP Verb Tampering",
@@ -18653,7 +18653,7 @@
       ],
       "qualys_qids": [],
       "owasp_web": "A04:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01"
       ],
@@ -18727,7 +18727,7 @@
     },
     {
       "id": "FR-287",
-      "title": "HTTP Methods: Unsafe Methods Enabled",
+      "title": "Web Misconfiguration: Unsafe Methods Enabled",
       "aliases": [
         "HTTP TRACE Method Enabled (Cross-Site Tracing)"
       ],
@@ -18843,7 +18843,7 @@
     },
     {
       "id": "FR-288",
-      "title": "Server-Side Request Forgery (SSRF)",
+      "title": "Injection: Server-Side Request Forgery (SSRF)",
       "aliases": [
         "SSRF to Cloud Metadata",
         "Internal Service Access via SSRF",
@@ -18866,7 +18866,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A10:2025",
-      "owasp_api": "API7:2023 \u2013 Server Side Request Forgery",
+      "owasp_api": "API7:2023 – Server Side Request Forgery",
       "nist_csf2": [
         "PR.DS-02",
         "DE.CM-01"
@@ -18969,7 +18969,7 @@
     },
     {
       "id": "FR-289",
-      "title": "Blind SSRF \u2014 Internal Network Probing",
+      "title": "Injection: Blind SSRF — Internal Network Probing",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19015,7 +19015,7 @@
     },
     {
       "id": "FR-290",
-      "title": "Insecure Deserialization \u2014 Serialized Object Accepted",
+      "title": "Injection: Insecure Deserialization — Serialized Object Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19061,7 +19061,7 @@
     },
     {
       "id": "FR-291",
-      "title": "Insecure Deserialization \u2014 YAML Tag Injection",
+      "title": "Injection: Insecure Deserialization — YAML Tag Injection",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19107,7 +19107,7 @@
     },
     {
       "id": "FR-292",
-      "title": "Insecure Deserialization \u2014 Error Disclosure",
+      "title": "Injection: Insecure Deserialization — Error Disclosure",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19153,7 +19153,7 @@
     },
     {
       "id": "FR-293",
-      "title": "Verbose Error Messages \u2014 Stack Trace Disclosed",
+      "title": "Information Disclosure: Verbose Error Messages — Stack Trace Disclosed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19221,7 +19221,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A02:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.DS-01"
       ],
@@ -19301,7 +19301,7 @@
     },
     {
       "id": "FR-295",
-      "title": "Sensitive Information in Source",
+      "title": "Information Disclosure: Sensitive Information in Source",
       "aliases": [
         "Sensitive Information in Source"
       ],
@@ -19445,7 +19445,7 @@
         150101
       ],
       "owasp_web": "A07:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AA-01",
         "DE.CM-01"
@@ -19527,7 +19527,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         },
         {
           "name": "nuclei",
@@ -19645,9 +19645,9 @@
     },
     {
       "id": "FR-299",
-      "title": "Timing Attack \u2014 Non-Constant-Time Authentication",
+      "title": "Timing Attack — Non-Constant-Time Authentication",
       "aliases": [
-        "Timing Attack \u2014 Non-Constant-Time Authentication"
+        "Timing Attack — Non-Constant-Time Authentication"
       ],
       "source_tools": [
         "fracture"
@@ -19663,7 +19663,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A07:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AC-01"
       ],
@@ -19768,7 +19768,7 @@
         150130
       ],
       "owasp_web": "A02:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AA-01",
         "PR.DS-01"
@@ -19946,9 +19946,9 @@
     },
     {
       "id": "FR-303",
-      "title": "JWT \u2014 Missing Expiry Claim (No exp)",
+      "title": "JWT — Missing Expiry Claim (No exp)",
       "aliases": [
-        "JWT \u2014 Missing Expiry Claim (No exp)"
+        "JWT — Missing Expiry Claim (No exp)"
       ],
       "source_tools": [
         "fracture"
@@ -19964,7 +19964,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A02:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AC-01",
         "PR.AC-07"
@@ -20053,7 +20053,7 @@
     },
     {
       "id": "FR-304",
-      "title": "JWT Token Identified: Algorithm",
+      "title": "Discovery: JWT Token Identified: Algorithm",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -20120,7 +20120,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A07:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AC-01",
         "PR.DS-01"
@@ -20229,7 +20229,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A07:2025",
-      "owasp_api": "API2:2023 \u2013 Broken Authentication",
+      "owasp_api": "API2:2023 – Broken Authentication",
       "nist_csf2": [
         "PR.AC-01",
         "PR.DS-01"
@@ -21232,7 +21232,7 @@
         150116
       ],
       "owasp_web": "A05:2025",
-      "owasp_api": "API8:2023 \u2013 Security Misconfiguration",
+      "owasp_api": "API8:2023 – Security Misconfiguration",
       "nist_csf2": [
         "PR.PS-01"
       ],
@@ -21282,7 +21282,7 @@
           "url": "https://github.com/RUB-NDS/CORStest",
           "install": "git clone https://github.com/RUB-NDS/CORStest.git",
           "command": "python corstest.py -i targets.txt -v",
-          "description": "CORS misconfiguration tester \u2014 checks for wildcard, null origin, and prefix bypass"
+          "description": "CORS misconfiguration tester — checks for wildcard, null origin, and prefix bypass"
         },
         {
           "name": "Corsy",
@@ -21316,9 +21316,9 @@
     },
     {
       "id": "FR-321",
-      "title": "JSONP Endpoint \u2014 Cross-Origin Data Leakage",
+      "title": "Information Disclosure: JSONP Endpoint — Cross-Origin Data Leakage",
       "aliases": [
-        "JSONP Endpoint \u2014 Cross-Origin Data Leakage"
+        "JSONP Endpoint — Cross-Origin Data Leakage"
       ],
       "source_tools": [
         "fracture"
@@ -21334,7 +21334,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A05:2025",
-      "owasp_api": "API7:2023 \u2013 Server Side Request Forgery",
+      "owasp_api": "API7:2023 – Server Side Request Forgery",
       "nist_csf2": [
         "PR.DS-02",
         "PR.AC-05"
@@ -21424,7 +21424,7 @@
     },
     {
       "id": "FR-322",
-      "title": "Cross-Site Request Forgery (CSRF) \u2014 Missing Token",
+      "title": "Cross-Site Request Forgery (CSRF) — Missing Token",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -21490,7 +21490,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A01:2025",
-      "owasp_api": "API5:2023 \u2013 Broken Function Level Authorization",
+      "owasp_api": "API5:2023 – Broken Function Level Authorization",
       "nist_csf2": [
         "PR.AC-04",
         "PR.AC-03"
@@ -21552,9 +21552,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "nuclei",
@@ -21711,7 +21711,7 @@
         150141
       ],
       "owasp_web": "A01:2025",
-      "owasp_api": "API1:2023 \u2013 Broken Object Level Authorization",
+      "owasp_api": "API1:2023 – Broken Object Level Authorization",
       "nist_csf2": [
         "PR.AA-05"
       ],
@@ -21761,9 +21761,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "Arjun",
@@ -21771,7 +21771,7 @@
           "url": "https://github.com/s0md3v/Arjun",
           "install": "pip3 install arjun",
           "command": "arjun -u https://TARGET/api/endpoint --stable -t 3",
-          "description": "HTTP parameter discovery scanner \u2014 finds hidden GET/POST/JSON parameters"
+          "description": "HTTP parameter discovery scanner — finds hidden GET/POST/JSON parameters"
         },
         {
           "name": "nuclei",
@@ -21824,7 +21824,7 @@
         150145
       ],
       "owasp_web": "A01:2025",
-      "owasp_api": "API5:2023 \u2013 Broken Function Level Authorization",
+      "owasp_api": "API5:2023 – Broken Function Level Authorization",
       "nist_csf2": [
         "PR.AA-05"
       ],
@@ -21878,9 +21878,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "ffuf",
@@ -21962,7 +21962,7 @@
       "title": "Mass Assignment / Privilege Escalation via Parameter Binding",
       "aliases": [
         "Over-Posted Parameters",
-        "Mass Assignment \u2014 Accepted",
+        "Mass Assignment — Accepted",
         "Hidden Field Tampering",
         "Auto-Binding Vulnerability",
         "Mass Assignment",
@@ -21989,7 +21989,7 @@
         150146
       ],
       "owasp_web": "A04:2025",
-      "owasp_api": "API6:2023 \u2013 Unrestricted Access to Sensitive Business Flows",
+      "owasp_api": "API6:2023 – Unrestricted Access to Sensitive Business Flows",
       "nist_csf2": [
         "PR.AA-05"
       ],
@@ -22041,7 +22041,7 @@
           "url": "https://github.com/s0md3v/Arjun",
           "install": "pip3 install arjun",
           "command": "arjun -u https://TARGET/api/endpoint --stable -t 3",
-          "description": "HTTP parameter discovery scanner \u2014 finds hidden GET/POST/JSON parameters"
+          "description": "HTTP parameter discovery scanner — finds hidden GET/POST/JSON parameters"
         },
         {
           "name": "ffuf",
@@ -22093,7 +22093,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A01:2025",
-      "owasp_api": "API1:2023 \u2013 Broken Object Level Authorization",
+      "owasp_api": "API1:2023 – Broken Object Level Authorization",
       "nist_csf2": [
         "PR.AC-04",
         "PR.DS-02"
@@ -22153,9 +22153,9 @@
           "name": "Autorize (Burp extension)",
           "type": "gui",
           "url": "https://github.com/PortSwigger/autorize",
-          "install": "Burp Suite \u2192 BApp Store \u2192 search 'Autorize'",
+          "install": "Burp Suite → BApp Store → search 'Autorize'",
           "command": "# Setup: Log in as low-priv user, set auth header. Then browse as high-priv user.\n# Autorize replays requests with low-priv session and flags discrepancies.",
-          "description": "Automated authorization testing \u2014 replays every request with a lower-privileged session to detect BOLA/IDOR"
+          "description": "Automated authorization testing — replays every request with a lower-privileged session to detect BOLA/IDOR"
         },
         {
           "name": "nuclei",
@@ -22188,7 +22188,7 @@
     },
     {
       "id": "FR-331",
-      "title": "Exposed Metrics Endpoint with Sensitive Data",
+      "title": "Information Disclosure: Exposed Metrics Endpoint with Sensitive Data",
       "aliases": [
         "Exposed Metrics Endpoint with Sensitive Data"
       ],
@@ -22207,7 +22207,7 @@
       "nessus_plugin_ids": [],
       "qualys_qids": [],
       "owasp_web": "A05:2025",
-      "owasp_api": "API7:2023 \u2013 Server Side Request Forgery",
+      "owasp_api": "API7:2023 – Server Side Request Forgery",
       "nist_csf2": [
         "PR.PS-01",
         "ID.AM-01",
@@ -22310,7 +22310,7 @@
     },
     {
       "id": "FR-332",
-      "title": "Business Logic \u2014 Hidden Price/Value Field Tampering",
+      "title": "Business Logic — Hidden Price/Value Field Tampering",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22357,7 +22357,7 @@
     },
     {
       "id": "FR-333",
-      "title": "Business Logic \u2014 Numeric Field Accepts Negative/Zero Value",
+      "title": "Business Logic — Numeric Field Accepts Negative/Zero Value",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22404,7 +22404,7 @@
     },
     {
       "id": "FR-334",
-      "title": "Business Logic \u2014 Potential Race Condition (Duplicate Submission)",
+      "title": "Business Logic — Potential Race Condition (Duplicate Submission)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22450,7 +22450,7 @@
     },
     {
       "id": "FR-335",
-      "title": "Business Logic \u2014 Workflow Step Directly Accessible",
+      "title": "Business Logic — Workflow Step Directly Accessible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22668,7 +22668,7 @@
           "url": "https://github.com/rapid7/metasploit-framework",
           "install": "curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && bash msfinstall",
           "command": "msfconsole -x 'use auxiliary/scanner/mysql/mysql_login; set RHOSTS TARGET; set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt; run'",
-          "description": "World's most used penetration testing framework \u2014 modules for DB auth testing, exploitation"
+          "description": "World's most used penetration testing framework — modules for DB auth testing, exploitation"
         },
         {
           "name": "nuclei",
@@ -22868,7 +22868,7 @@
     },
     {
       "id": "FR-343",
-      "title": "CMS Detected: {cms}",
+      "title": "Discovery: CMS Detected: {cms}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23063,7 +23063,7 @@
     },
     {
       "id": "FR-348",
-      "title": "Hidden Parameter Discovered: {param}",
+      "title": "Discovery: Hidden Parameter Discovered: {param}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23102,7 +23102,7 @@
     },
     {
       "id": "FR-349",
-      "title": "HTTP Header Fingerprints {_fp_tech}: {hdr_name}",
+      "title": "Discovery: HTTP Header Fingerprints {_fp_tech}: {hdr_name}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23141,7 +23141,7 @@
     },
     {
       "id": "FR-350",
-      "title": "HTTP Header Fingerprints {_pn_fp_tech}: {pname}",
+      "title": "Discovery: HTTP Header Fingerprints {_pn_fp_tech}: {pname}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23180,7 +23180,7 @@
     },
     {
       "id": "FR-351",
-      "title": "HTTP Method Tampering: {method} Accepted",
+      "title": "Web Misconfiguration: HTTP Method Tampering: {method} Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23219,7 +23219,7 @@
     },
     {
       "id": "FR-352",
-      "title": "JWT Token Identified: Algorithm {alg}",
+      "title": "Discovery: JWT Token Identified: Algorithm {alg}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23609,7 +23609,7 @@
     },
     {
       "id": "FR-362",
-      "title": "Sensitive Information in Source: {_sp_label}",
+      "title": "Information Disclosure: Sensitive Information in Source: {_sp_label}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23648,7 +23648,7 @@
     },
     {
       "id": "FR-363",
-      "title": "Sensitive Path Accessible: {cpath}",
+      "title": "Web Misconfiguration: Sensitive Path Accessible: {cpath}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23726,7 +23726,7 @@
     },
     {
       "id": "FR-365",
-      "title": "Server-Side Request Forgery (SSRF) \u2014 {ssrf_desc}",
+      "title": "Injection: Server-Side Request Forgery (SSRF) — {ssrf_desc}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23765,7 +23765,7 @@
     },
     {
       "id": "FR-366",
-      "title": "Software Version Disclosed: {_vname} {_vver}",
+      "title": "Information Disclosure: Software Version Disclosed: {_vname} {_vver}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23960,7 +23960,7 @@
     },
     {
       "id": "FR-371",
-      "title": "Subdomain Takeover \u2014 Dangling CNAME ({service})",
+      "title": "Subdomain Takeover — Dangling CNAME ({service})",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24077,7 +24077,7 @@
     },
     {
       "id": "FR-374",
-      "title": "Unknown Header Identified: {hdr_name}",
+      "title": "Discovery: Unknown Header Identified: {hdr_name}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24116,7 +24116,7 @@
     },
     {
       "id": "FR-375",
-      "title": "Unknown Header Identified: {pname}",
+      "title": "Discovery: Unknown Header Identified: {pname}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24155,7 +24155,7 @@
     },
     {
       "id": "FR-376",
-      "title": "Virtual Host Discovered: {full_vhost}",
+      "title": "Discovery: Virtual Host Discovered: {full_vhost}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24389,7 +24389,7 @@
     },
     {
       "id": "FR-382",
-      "title": "Web Cache Poisoning: {_wcp_hdr} Reflected",
+      "title": "Web Vulnerability: Web Cache Poisoning: {_wcp_hdr} Reflected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24428,7 +24428,7 @@
     },
     {
       "id": "FR-383",
-      "title": "Wildcard (*) Detected: {url}",
+      "title": "Discovery: Wildcard (*) Detected: {url}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24545,7 +24545,7 @@
     },
     {
       "id": "FR-386",
-      "title": "WordPress Directory Listing Enabled: {_dp}",
+      "title": "Information Disclosure: WordPress Directory Listing Enabled: {_dp}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24623,7 +24623,7 @@
     },
     {
       "id": "FR-388",
-      "title": "WordPress Plugins Detected in Page Source ({len(_passive_plugins)} plugin(s))",
+      "title": "Discovery: WordPress Plugins Detected in Page Source ({len(_passive_plugins)} plugin(s))",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24818,7 +24818,7 @@
     },
     {
       "id": "FR-393",
-      "title": "Login Page Identified",
+      "title": "Discovery: Login Page Identified",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24935,7 +24935,7 @@
     },
     {
       "id": "FR-396",
-      "title": "No Web Structure Identified",
+      "title": "Discovery: No Web Structure Identified",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24968,7 +24968,7 @@
       "remediation_effort": "",
       "validation_tools": [],
       "description": "",
-      "impact": "The absence of web directory structure may indicate a single-page application, API-only service, or heavily restricted web root. This finding informs testing methodology \u2014 the tester should pivot to API enumeration and client-side analysis.",
+      "impact": "The absence of web directory structure may indicate a single-page application, API-only service, or heavily restricted web root. This finding informs testing methodology — the tester should pivot to API enumeration and client-side analysis.",
       "_scaffold_from": "fracture.py:22827",
       "_template": false
     },
@@ -25004,7 +25004,7 @@
         38140,
         38143
       ],
-      "owasp_web": "A05:2021 \u2013 Security Misconfiguration",
+      "owasp_web": "A05:2021 – Security Misconfiguration",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -25121,7 +25121,7 @@
         38140,
         38143
       ],
-      "owasp_web": "A05:2021 \u2013 Security Misconfiguration",
+      "owasp_web": "A05:2021 – Security Misconfiguration",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -25238,7 +25238,7 @@
         38140,
         38143
       ],
-      "owasp_web": "A05:2021 \u2013 Security Misconfiguration",
+      "owasp_web": "A05:2021 – Security Misconfiguration",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -25438,7 +25438,7 @@
         38140,
         38143
       ],
-      "owasp_web": "A05:2021 \u2013 Security Misconfiguration",
+      "owasp_web": "A05:2021 – Security Misconfiguration",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -25558,7 +25558,7 @@
         38170,
         38601
       ],
-      "owasp_web": "A02:2021 \u2013 Cryptographic Failures",
+      "owasp_web": "A02:2021 – Cryptographic Failures",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -25683,7 +25683,7 @@
         38170,
         38601
       ],
-      "owasp_web": "A02:2021 \u2013 Cryptographic Failures",
+      "owasp_web": "A02:2021 – Cryptographic Failures",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -25808,7 +25808,7 @@
         38170,
         38601
       ],
-      "owasp_web": "A02:2021 \u2013 Cryptographic Failures",
+      "owasp_web": "A02:2021 – Cryptographic Failures",
       "owasp_api": "",
       "nist_csf2": [
         "PR.DS-02",
@@ -26045,7 +26045,7 @@
     },
     {
       "id": "FR-408",
-      "title": "HTTP Request Smuggling \u2014 CL.0 Client-Side Desync",
+      "title": "Web Vulnerability: HTTP Request Smuggling — CL.0 Client-Side Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26093,7 +26093,7 @@
     },
     {
       "id": "FR-409",
-      "title": "HTTP Request Smuggling \u2014 CL.TE Desync",
+      "title": "Web Vulnerability: HTTP Request Smuggling — CL.TE Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26135,7 +26135,7 @@
     },
     {
       "id": "FR-410",
-      "title": "HTTP Request Smuggling \u2014 TE Obfuscation Desync",
+      "title": "Web Vulnerability: HTTP Request Smuggling — TE Obfuscation Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26177,7 +26177,7 @@
     },
     {
       "id": "FR-411",
-      "title": "HTTP Request Smuggling \u2014 TE.CL Desync",
+      "title": "Web Vulnerability: HTTP Request Smuggling — TE.CL Desync",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26219,7 +26219,7 @@
     },
     {
       "id": "FR-412",
-      "title": "Host-Header SSRF Surface ({label})",
+      "title": "Injection: Host-Header SSRF Surface ({label})",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26319,7 +26319,7 @@
     },
     {
       "id": "FR-414",
-      "title": "Load Balancer Detected: {_lb_label}",
+      "title": "Discovery: Load Balancer Detected: {_lb_label}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26358,7 +26358,7 @@
     },
     {
       "id": "FR-415",
-      "title": "Missing Subresource Integrity \u2014 {entry['tag']} from {entry['host']}",
+      "title": "Missing Subresource Integrity — {entry['tag']} from {entry['host']}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26488,7 +26488,7 @@
     },
     {
       "id": "FR-418",
-      "title": "Reflected Cross-Site Scripting (XSS) \u2014 POST Parameter",
+      "title": "Injection: Reflected Cross-Site Scripting (XSS) — POST Parameter",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -27181,7 +27181,7 @@
     },
     {
       "id": "FR-432",
-      "title": "Server-Side Prototype Pollution",
+      "title": "Injection: Server-Side Prototype Pollution",
       "aliases": [
         "__proto__ injection",
         "constructor.prototype pollution"
@@ -27243,7 +27243,7 @@
     },
     {
       "id": "FR-433",
-      "title": "Potential Client-Side Prototype Pollution",
+      "title": "Injection: Potential Client-Side Prototype Pollution",
       "aliases": [
         "Client-side PP sink",
         "JS merge pollution"
@@ -27293,7 +27293,7 @@
     },
     {
       "id": "FR-434",
-      "title": "Server-Side Include (SSI) Injection",
+      "title": "Injection: Server-Side Include (SSI) Injection",
       "aliases": [
         "SSI injection",
         "SSI code execution"
@@ -27352,7 +27352,7 @@
     },
     {
       "id": "FR-435",
-      "title": "Edge Side Include (ESI) Injection",
+      "title": "Injection: Edge Side Include (ESI) Injection",
       "aliases": [
         "ESI injection",
         "Cache-layer injection"
@@ -27409,7 +27409,7 @@
     },
     {
       "id": "FR-436",
-      "title": "Email Header Injection",
+      "title": "Injection: Email Header Injection",
       "aliases": [
         "SMTP header injection",
         "CRLF email injection"
@@ -27671,7 +27671,7 @@
     },
     {
       "id": "FR-441",
-      "title": "Web Cache Deception",
+      "title": "Web Vulnerability: Web Cache Deception",
       "aliases": [
         "Cache poisoning via extension",
         "CDN cache deception"
@@ -27719,7 +27719,7 @@
     },
     {
       "id": "FR-442",
-      "title": "OAuth redirect_uri Open Redirect",
+      "title": "Web Vulnerability: OAuth redirect_uri Open Redirect",
       "aliases": [
         "OAuth redirect manipulation",
         "redirect_uri bypass"
@@ -27911,7 +27911,7 @@
     },
     {
       "id": "FR-446",
-      "title": "MFA Bypass \u2014 Direct Navigation",
+      "title": "MFA Bypass — Direct Navigation",
       "aliases": [
         "2FA bypass",
         "MFA skip"
@@ -28259,7 +28259,7 @@
     },
     {
       "id": "FR-453",
-      "title": "HTTP/2 Cleartext Upgrade (h2c) Accepted",
+      "title": "Web Misconfiguration: HTTP/2 Cleartext Upgrade (h2c) Accepted",
       "aliases": [
         "h2c upgrade accepted",
         "HTTP/2 cleartext"
@@ -28308,7 +28308,7 @@
     },
     {
       "id": "FR-454",
-      "title": "h2c Smuggling \u2014 Internal Endpoint Accessible",
+      "title": "Web Vulnerability: h2c Smuggling — Internal Endpoint Accessible",
       "aliases": [
         "h2c bypass",
         "h2c internal access"
@@ -28429,7 +28429,7 @@
     },
     {
       "id": "FR-456",
-      "title": "Application Responses Identify Valid Accounts",
+      "title": "Information Disclosure: Application Responses Identify Valid Accounts",
       "aliases": [
         "User enumeration via response differential",
         "Username enumeration",
@@ -28487,7 +28487,7 @@
     },
     {
       "id": "FR-457",
-      "title": "Authorization Gaps \u2014 Unauthenticated Access to Restricted Paths",
+      "title": "Authorization Gaps — Unauthenticated Access to Restricted Paths",
       "aliases": [
         "Forced browsing",
         "Missing access control on admin paths",
@@ -28549,7 +28549,7 @@
     },
     {
       "id": "FR-458",
-      "title": "HTTP Parameter Pollution (Reflected)",
+      "title": "Injection: HTTP Parameter Pollution (Reflected)",
       "aliases": [
         "HPP",
         "Duplicate parameter injection",
@@ -28601,7 +28601,7 @@
     },
     {
       "id": "FR-459",
-      "title": "Improper Error Handling \u2014 Server Error Exposed",
+      "title": "Information Disclosure: Improper Error Handling — Server Error Exposed",
       "aliases": [
         "500 error exposed",
         "Internal server error disclosure",
@@ -28660,7 +28660,7 @@
     },
     {
       "id": "FR-460",
-      "title": "Insecure HTTPS to HTTP Redirect Detected",
+      "title": "Web Misconfiguration: Insecure HTTPS to HTTP Redirect Detected",
       "aliases": [
         "HTTPS-HTTP state transition",
         "Protocol downgrade redirect",
@@ -28720,7 +28720,7 @@
     },
     {
       "id": "FR-460b",
-      "title": "Form Submits to HTTP from HTTPS Page",
+      "title": "Web Misconfiguration: Form Submits to HTTP from HTTPS Page",
       "aliases": [
         "Mixed content form action",
         "HTTP form on HTTPS page"
@@ -28830,7 +28830,7 @@
     },
     {
       "id": "FR-464",
-      "title": "Unhandled Application Exception Disclosed",
+      "title": "Information Disclosure: Unhandled Application Exception Disclosed",
       "aliases": [
         "Stack trace disclosure",
         "Exception leak",
@@ -28885,7 +28885,7 @@
     },
     {
       "id": "FR-465",
-      "title": "Outdated or Unnecessary Website Detected",
+      "title": "Discovery: Outdated or Unnecessary Website Detected",
       "aliases": [
         "Abandoned website",
         "Under construction page",
@@ -29122,7 +29122,7 @@
       ],
       "risk": "CRITICAL",
       "description": "Terraform state file is accessible via the web, containing infrastructure secrets, API keys, database passwords, and complete cloud resource inventory.",
-      "impact": "Full infrastructure credential compromise \u2014 database passwords, API keys, cloud resource details enabling lateral movement and data exfiltration.",
+      "impact": "Full infrastructure credential compromise — database passwords, API keys, cloud resource details enabling lateral movement and data exfiltration.",
       "cwe": [
         "CWE-312"
       ],
@@ -29346,7 +29346,7 @@
     },
     {
       "id": "FR-473",
-      "title": "WebDAV PROPFIND Response Discloses Server Information",
+      "title": "Information Disclosure: WebDAV PROPFIND Response Discloses Server Information",
       "aliases": [
         "PROPFIND Response Disclosure"
       ],
@@ -29410,7 +29410,7 @@
     },
     {
       "id": "FR-474",
-      "title": "WebDAV Methods Enabled",
+      "title": "Web Misconfiguration: WebDAV Methods Enabled",
       "aliases": [
         "WebDAV Enabled on Web Server"
       ],
@@ -29474,7 +29474,7 @@
     },
     {
       "id": "FR-475",
-      "title": "Password Reset Token Exposed in URL",
+      "title": "Information Disclosure: Password Reset Token Exposed in URL",
       "aliases": [
         "Reset Token in URL Query String"
       ],
@@ -29632,7 +29632,7 @@
     },
     {
       "id": "FR-478",
-      "title": "Cloud Storage Bucket URL Exposed",
+      "title": "Information Disclosure: Cloud Storage Bucket URL Exposed",
       "aliases": [
         "S3 Bucket URL Exposed",
         "GCS Bucket URL Exposed",
@@ -29752,7 +29752,7 @@
     },
     {
       "id": "FR-480",
-      "title": "HTTP Methods: Unsafe Methods Enabled",
+      "title": "Web Misconfiguration: Unsafe Methods Enabled",
       "aliases": [
         "Dangerous HTTP Methods",
         "PUT/DELETE Methods Allowed",
@@ -30023,7 +30023,7 @@
       ],
       "risk": "MEDIUM",
       "description": "The TLS certificate presented by the server does not match the hostname being accessed. The certificate's Common Name (CN) and Subject Alternative Name (SAN) entries do not include the domain name used to reach the service. This may indicate a misconfiguration, a shared certificate, or a reused certificate from a different service.",
-      "impact": "Browsers and TLS clients will reject the connection or display warnings, which users may bypass. A hostname mismatch can indicate the service was deployed hastily, is using a certificate intended for another domain, or is sharing infrastructure with other services \u2014 all of which leak information about the environment.",
+      "impact": "Browsers and TLS clients will reject the connection or display warnings, which users may bypass. A hostname mismatch can indicate the service was deployed hastily, is using a certificate intended for another domain, or is sharing infrastructure with other services — all of which leak information about the environment.",
       "cwe": [
         "CWE-295",
         "CWE-297"
@@ -30146,7 +30146,7 @@
       "searchsploit_terms": [],
       "metasploit_modules": [],
       "kev": false,
-      "remediation_brief": "Replace the revoked certificate immediately with a new certificate from a trusted CA. Investigate the reason for revocation \u2014 if key compromise is suspected, generate a new key pair. Rotate any credentials or secrets that may have been exposed.",
+      "remediation_brief": "Replace the revoked certificate immediately with a new certificate from a trusted CA. Investigate the reason for revocation — if key compromise is suspected, generate a new key pair. Rotate any credentials or secrets that may have been exposed.",
       "remediation_component": "Configuration",
       "remediation_category": "Cryptography",
       "remediation_effort": "Easy",
@@ -30529,7 +30529,7 @@
         "auxiliary/gather/citrix_bleed_cve_2023_4966"
       ],
       "kev": true,
-      "remediation_brief": "Apply Citrix security patches immediately. After patching Citrix Bleed, terminate all active sessions and rotate all credentials \u2014 the patch does not invalidate stolen session tokens. Run Citrix-provided IoC scanning tools to check for compromise.",
+      "remediation_brief": "Apply Citrix security patches immediately. After patching Citrix Bleed, terminate all active sessions and rotate all credentials — the patch does not invalidate stolen session tokens. Run Citrix-provided IoC scanning tools to check for compromise.",
       "remediation_component": "Application",
       "remediation_category": "Patch Management",
       "remediation_effort": "Significant",
@@ -30993,7 +30993,7 @@
     },
     {
       "id": "FR-497",
-      "title": "Technology Stack Identified (Wappalyzer)",
+      "title": "Information Disclosure: Technology Stack Identified (Wappalyzer)",
       "aliases": [
         "Web Technology Fingerprint",
         "Technology Detection",
@@ -31056,7 +31056,7 @@
     },
     {
       "id": "FR-498",
-      "title": "Hidden HTTP Parameters Discovered",
+      "title": "Discovery: Hidden HTTP Parameters Discovered",
       "aliases": [
         "Arjun Hidden Parameters",
         "Hidden GET/POST Parameters"
@@ -31121,7 +31121,7 @@
     },
     {
       "id": "FR-499",
-      "title": "Security-Sensitive Hidden Parameter",
+      "title": "Information Disclosure: Security-Sensitive Hidden Parameter",
       "aliases": [
         "Debug Parameter Exposed",
         "Admin Parameter Discovered",
@@ -31201,7 +31201,7 @@
     },
     {
       "id": "FR-500",
-      "title": "Server-Side Template Injection (SSTI) \u2014 SSTImap Confirmed",
+      "title": "Injection: Server-Side Template Injection (SSTI) — SSTImap Confirmed",
       "aliases": [
         "SSTI Confirmed",
         "Template Injection RCE",
@@ -31293,7 +31293,7 @@
     },
     {
       "id": "FR-501",
-      "title": "SSTI \u2014 Template Engine Identified",
+      "title": "Injection: SSTI — Template Engine Identified",
       "aliases": [
         "Template Engine Detected",
         "Template Engine Fingerprint"
@@ -31360,7 +31360,7 @@
     },
     {
       "id": "FR-502",
-      "title": "OS Command Injection \u2014 commix Confirmed",
+      "title": "Injection: OS Command Injection — commix Confirmed",
       "aliases": [
         "Command Injection RCE",
         "OS Command Execution",
@@ -31451,7 +31451,7 @@
     },
     {
       "id": "FR-503",
-      "title": "Blind Command Injection (Time-Based) \u2014 commix",
+      "title": "Injection: Blind Command Injection (Time-Based) — commix",
       "aliases": [
         "Blind OS Command Injection",
         "Time-Based Command Injection"
@@ -31530,7 +31530,7 @@
     },
     {
       "id": "FR-504",
-      "title": "Web Cache Poisoning",
+      "title": "Web Vulnerability: Web Cache Poisoning",
       "aliases": [
         "Cache Poisoning",
         "HTTP Cache Poisoning",
@@ -31605,7 +31605,7 @@
     },
     {
       "id": "FR-505",
-      "title": "Web Cache Deception",
+      "title": "Web Vulnerability: Web Cache Deception",
       "aliases": [
         "Cache Deception",
         "Path Confusion Cache Attack"
@@ -31675,7 +31675,7 @@
     },
     {
       "id": "FR-506",
-      "title": "Unkeyed Header in Cache Response",
+      "title": "Web Misconfiguration: Unkeyed Header in Cache Response",
       "aliases": [
         "Unkeyed Input in Cache",
         "Cache Key Missing Header"
@@ -32146,7 +32146,7 @@
     },
     {
       "id": "FR-514",
-      "title": "JWT Contains Sensitive Data",
+      "title": "Information Disclosure: JWT Contains Sensitive Data",
       "aliases": [
         "JWT Payload Data Leakage",
         "Sensitive Data in JWT"
