@@ -1081,7 +1081,9 @@ def build_auth_session(
                         _abs_href = urljoin(target_url, _oc_raw)
                         if _abs_href not in _sso_candidates:
                             _sso_candidates.append(_abs_href)
-                # Follow candidates and check for password form
+                # Follow candidates — check for password form OR
+                # OKTA/IdP widget pages (JS-rendered, no <input> in HTML)
+                _sso_followed_pages: list[tuple[str, str]] = []
                 if _sso_candidates:
                     _sso_probe = _make_session(verify_ssl, proxy)
                     for _sso_url in _sso_candidates[:8]:
@@ -1090,6 +1092,8 @@ def build_auth_session(
                                 _sso_url, timeout=timeout,
                                 allow_redirects=True)
                             _sso_html = _sso_r.text[:131072]
+                            _sso_followed_pages.append(
+                                (_sso_html, _sso_r.url))
                             if _re.search(
                                 r'<input[^>]+type=["\']?password',
                                 _sso_html, _re.IGNORECASE,
@@ -1099,13 +1103,131 @@ def build_auth_session(
                         except Exception:
                             continue
 
+        # ── OKTA Sign-In Widget detection & authn API ─────────────────
+        # OKTA widget pages render the login form via JavaScript — the
+        # raw HTML has no <input type="password">.  Detect the widget
+        # by its script URL / mount point, then authenticate via OKTA's
+        # Authentication API (/api/v1/authn) with username + password.
+        # Checks both the baseline page (target may redirect directly
+        # to OKTA) and any pages reached via SSO link discovery above.
+        _OKTA_INDICATORS = (
+            'okta-sign-in.min.js',
+            'okta-signin-widget',
+            'id="okta-login-container"',
+            "id='okta-login-container'",
+        )
+        _errors: list[str] = []
+
+        def _unescape_js(s: str) -> str:
+            """Decode JS \\xHH and \\uHHHH escapes."""
+            try:
+                return s.encode("raw_unicode_escape").decode(
+                    "unicode_escape")
+            except Exception:
+                return s.replace("\\x3A", ":").replace(
+                    "\\x2F", "/").replace("\\x2D", "-")
+
+        def _try_okta_authn(
+            page_html: str, page_url: str,
+        ) -> "tuple[requests.Session, str] | None":
+            """Try OKTA authn API if page is an OKTA widget.
+            Returns (session, info) on success, None otherwise."""
+            if not any(ind in page_html for ind in _OKTA_INDICATORS):
+                return None
+            # Extract baseUrl from oktaData
+            _base_m = _re.search(
+                r'"baseUrl"\s*:\s*"([^"]+)"', page_html)
+            if not _base_m:
+                _base_m = _re.search(
+                    r"'baseUrl'\s*:\s*'([^']+)'", page_html)
+            if not _base_m:
+                return None
+            _okta_base = _unescape_js(_base_m.group(1)).rstrip("/")
+            _u = auth.get("username", "")
+            _p = auth.get("password", "")
+            if not _u or not _p:
+                _errors.append(
+                    f"OKTA ({_okta_base}): no credentials")
+                return None
+            _ok_sess = _make_session(verify_ssl, proxy)
+            try:
+                _authn_payload: dict = {
+                    "username": _u, "password": _p}
+                # Include stateToken if available (preserves OIDC
+                # context for the session exchange step)
+                _st_m = _re.search(
+                    r'"stateToken"\s*:\s*"([^"]+)"', page_html)
+                if _st_m:
+                    _authn_payload["stateToken"] = _unescape_js(
+                        _st_m.group(1))
+                _ar = _ok_sess.post(
+                    f"{_okta_base}/api/v1/authn",
+                    json=_authn_payload, timeout=timeout)
+                _aj = _ar.json()
+                _ast = _aj.get("status", "")
+                if _ast == "SUCCESS":
+                    _stok = _aj.get("sessionToken", "")
+                    if _stok and target_url:
+                        from urllib.parse import quote
+                        _redir = (
+                            f"{_okta_base}/login/"
+                            f"sessionCookieRedirect"
+                            f"?token={_stok}"
+                            f"&redirectUrl="
+                            f"{quote(target_url, safe='')}")
+                        _ok_sess.get(
+                            _redir, timeout=timeout,
+                            allow_redirects=True)
+                    _ok, _det = _verify_session(
+                        _ok_sess, "okta_authn")
+                    if _ok:
+                        return _ok_sess, (
+                            f"auto-detect → OKTA Sign-In Widget "
+                            f"({_okta_base}): authenticated via "
+                            f"/api/v1/authn — verified: {_det}")
+                    _errors.append(
+                        f"OKTA ({_okta_base}): authn SUCCESS "
+                        f"but session verify failed: {_det}")
+                elif _ast == "MFA_REQUIRED":
+                    _errors.append(
+                        f"OKTA ({_okta_base}): credentials valid "
+                        f"— MFA required (cannot complete in "
+                        f"auto-detect)")
+                elif _ast in ("PASSWORD_EXPIRED", "PASSWORD_WARN"):
+                    _errors.append(
+                        f"OKTA ({_okta_base}): credentials valid "
+                        f"— password expired")
+                elif _ast == "LOCKED_OUT":
+                    _errors.append(
+                        f"OKTA ({_okta_base}): account locked")
+                else:
+                    _sc = _ar.status_code
+                    _msg = _aj.get("errorSummary", _ast or f"HTTP {_sc}")
+                    _errors.append(f"OKTA ({_okta_base}): {_msg}")
+            except Exception as _e:
+                _errors.append(f"OKTA ({_okta_base}): {_e}")
+            return None
+
+        # Check baseline page first (target may redirect to OKTA)
+        if _baseline_html:
+            _okta_result = _try_okta_authn(
+                _baseline_html, _baseline_final or target_url)
+            if _okta_result:
+                return _okta_result
+        # Check pages reached via SSO link discovery
+        if _baseline_html and target_url:
+            for _fp_html, _fp_url in locals().get(
+                    "_sso_followed_pages", []):
+                _okta_result = _try_okta_authn(_fp_html, _fp_url)
+                if _okta_result:
+                    return _okta_result
+
         # ── Build method order ───────────────────────────────────────────
         _auto_order: list[str] = []
         if effective_login:
             _auto_order.extend(["form_login", "token_login"])
         _auto_order.extend(["basic", "digest", "ntlm"])
 
-        _errors: list[str] = []
         _tried_api_urls: set[str] = set()
 
         for _am in _auto_order:
