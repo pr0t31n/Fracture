@@ -1153,6 +1153,10 @@ def build_auth_session(
                 r'"stateToken"\s*:\s*"([^"]+)"', page_html)
             _state_token = (
                 _unescape_js(_st_m.group(1)) if _st_m else None)
+            _ru_m = _re.search(
+                r'"redirectUri"\s*:\s*"([^"]+)"', page_html)
+            _okta_redir = (
+                _unescape_js(_ru_m.group(1)) if _ru_m else None)
             from urllib.parse import quote
 
             def _do_authn(sess, payload, label):
@@ -1165,12 +1169,19 @@ def build_auth_session(
                 if _ast == "SUCCESS":
                     _stok = _aj.get("sessionToken", "")
                     if _stok and target_url:
+                        _redir_target = (
+                            _okta_redir
+                            if (_okta_redir and (
+                                '/authorize' in _okta_redir
+                                or '/oauth2/' in _okta_redir))
+                            else target_url)
                         _redir = (
                             f"{_okta_base}/login/"
                             f"sessionCookieRedirect"
-                            f"?token={_stok}"
+                            f"?checkAccountSetupComplete=true"
+                            f"&token={_stok}"
                             f"&redirectUrl="
-                            f"{quote(target_url, safe='')}")
+                            f"{quote(_redir_target, safe='')}")
                         sess.get(
                             _redir, timeout=timeout,
                             allow_redirects=True)

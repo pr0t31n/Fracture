@@ -7111,7 +7111,7 @@ document.addEventListener('submit', function(e) {
         to locate a form with username + password fields.  Returns the
         discovered URL or empty string if none found.
         """
-        import re as _re4
+        import re as _re4, html as _html_ent4
         from urllib.parse import urljoin as _uj4, urlparse as _up4
         base       = base_url.rstrip("/")
         _base_host = _up4(base).netloc
@@ -8048,17 +8048,17 @@ return null;
             for _am in _re4.finditer(
                     r'<a\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
                     html, _re4.IGNORECASE | _re4.DOTALL):
-                _cands.append((_am.group(1),
+                _cands.append((_html_ent4.unescape(_am.group(1)),
                                _re4.sub(r'<[^>]+>', '', _am.group(2)).strip()))
             # href= not inside <a> (standalone attribute scan for other tags)
             for _h in _re4.findall(
                     r'(?<!<a\b[^>]{0,200})\bhref=["\']([^"\']+)["\']',
                     html, _re4.IGNORECASE):
-                _cands.append((_h, ""))
+                _cands.append((_html_ent4.unescape(_h), ""))
             # Form action attributes — critical for .action / .do / .jsf pages
             for _a in _re4.findall(
                     r'<form\b[^>]+\baction=["\']([^"\']+)["\']', html, _re4.IGNORECASE):
-                _cands.append((_a, ""))
+                _cands.append((_html_ent4.unescape(_a), ""))
             # onclick / data-href / data-url / data-action containing URL-like values
             for _attr_val in _re4.findall(
                     r'(?:onclick|data-href|data-url|data-action|data-link)\s*='
@@ -8069,7 +8069,7 @@ return null;
                         r'["\']?([/\w\-\.%]+\.(?:action|do|jsf|faces|xhtml|cfm'
                         r'|asp|aspx|jsp|php|html?))["\']?',
                         _attr_val, _re4.IGNORECASE):
-                    _cands.append((_m.group(1), ""))
+                    _cands.append((_html_ent4.unescape(_m.group(1)), ""))
             return _cands
 
         while _queue:
@@ -9938,6 +9938,128 @@ return null;
                 else:
                     _guard_p = _analyse_form_page(_guard_r.text, _guard_r.url)
                     if _guard_p.get("js_rendered_login"):
+                        # ── OKTA authn API attempt ──────────────────────
+                        # Before any browser fallback, try programmatic
+                        # auth via the OKTA Authentication API.  This
+                        # enables multi-role auth without manual browser
+                        # login for each role.
+                        _OKTA_IND_G = (
+                            'okta-sign-in.min.js',
+                            'okta-signin-widget',
+                            'id="okta-login-container"',
+                            "id='okta-login-container'",
+                        )
+                        _guard_html_g = _guard_r.text
+                        if any(_ig in _guard_html_g for _ig in _OKTA_IND_G):
+                            def _js_unesc_g(s):
+                                return _re7.sub(
+                                    r'\\x([0-9a-fA-F]{2})',
+                                    lambda m: chr(int(m.group(1), 16)), s)
+                            _g_base_m = _re7.search(
+                                r'"baseUrl"\s*:\s*"([^"]+)"', _guard_html_g)
+                            if _g_base_m:
+                                _g_okta_base = _js_unesc_g(
+                                    _g_base_m.group(1)).rstrip("/")
+                                _g_st_m = _re7.search(
+                                    r'"stateToken"\s*:\s*"([^"]+)"',
+                                    _guard_html_g)
+                                _g_state_token = (
+                                    _js_unesc_g(_g_st_m.group(1))
+                                    if _g_st_m else None)
+                                _g_ru_m = _re7.search(
+                                    r'"redirectUri"\s*:\s*"([^"]+)"',
+                                    _guard_html_g)
+                                _g_okta_redir = (
+                                    _js_unesc_g(_g_ru_m.group(1))
+                                    if _g_ru_m else None)
+                                _g_u = auth.get("username", "")
+                                _g_p = auth.get("password", "")
+                                if _g_u and _g_p:
+                                    from urllib.parse import quote as _q_g
+                                    def _g_do_authn(_g_s, _g_pl, _g_lbl):
+                                        try:
+                                            _g_ar = _g_s.post(
+                                                f"{_g_okta_base}/api/v1/authn",
+                                                json=_g_pl, timeout=timeout)
+                                            _g_aj = _g_ar.json()
+                                        except Exception as _g_pe:
+                                            vc.log(
+                                                f"[auth] OKTA authn ({_g_lbl})"
+                                                f": request failed: {_g_pe}",
+                                                "INFO")
+                                            return None
+                                        _g_ast = _g_aj.get("status", "")
+                                        if _g_ast == "SUCCESS":
+                                            _g_stok = _g_aj.get(
+                                                "sessionToken", "")
+                                            if _g_stok:
+                                                _g_rt = (
+                                                    _g_okta_redir
+                                                    if (_g_okta_redir and (
+                                                        '/authorize' in _g_okta_redir
+                                                        or '/oauth2/' in _g_okta_redir))
+                                                    else _base_target_url)
+                                                _g_cr = _g_s.get(
+                                                    f"{_g_okta_base}/login"
+                                                    f"/sessionCookieRedirect"
+                                                    f"?checkAccountSetupComplete=true"
+                                                    f"&token={_g_stok}"
+                                                    f"&redirectUrl="
+                                                    f"{_q_g(_g_rt, safe='')}",
+                                                    timeout=timeout,
+                                                    allow_redirects=True)
+                                                if _g_cr.cookies or _g_s.cookies:
+                                                    vc.log(
+                                                        f"[auth] OKTA authn ({_g_lbl})"
+                                                        f": session established "
+                                                        f"({len(list(_g_s.cookies))}"
+                                                        f" cookies, final: {_g_cr.url})",
+                                                        "SUCCESS")
+                                                    return _g_s
+                                            return None
+                                        if _g_ast == "MFA_REQUIRED":
+                                            vc.log(
+                                                f"[auth] OKTA authn ({_g_lbl})"
+                                                f": MFA required — falling "
+                                                "back to browser", "INFO")
+                                            return None
+                                        _g_err = _g_aj.get(
+                                            "errorSummary",
+                                            _g_ast or "unknown")
+                                        vc.log(
+                                            f"[auth] OKTA authn ({_g_lbl})"
+                                            f": {_g_err}", "INFO")
+                                        return None
+
+                                    _g_ok = None
+                                    # Strategy 1: primary auth (no stateToken)
+                                    _g_ok = _g_do_authn(
+                                        _make_session(cfg, None),
+                                        {"username": _g_u,
+                                         "password": _g_p},
+                                        "primary")
+                                    # Strategy 2: stateToken + guard session
+                                    if not _g_ok and _g_state_token:
+                                        _g_ok = _g_do_authn(
+                                            sess,
+                                            {"username": _g_u,
+                                             "password": _g_p,
+                                             "stateToken": _g_state_token},
+                                            "stateToken+session")
+                                    # Strategy 3: stateToken + fresh session
+                                    if not _g_ok and _g_state_token:
+                                        _g_ok = _g_do_authn(
+                                            _make_session(cfg, None),
+                                            {"username": _g_u,
+                                             "password": _g_p,
+                                             "stateToken": _g_state_token},
+                                            "stateToken+fresh")
+                                    if _g_ok:
+                                        return _g_ok
+                                    vc.log(
+                                        "[auth] OKTA authn API failed — "
+                                        "falling back to browser/profile",
+                                        "INFO")
                         # JS-rendered login shell detected.  When the operator
                         # explicitly configured a login_url, attempt a direct
                         # POST first (matches testConnection behaviour) — the
