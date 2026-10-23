@@ -19607,6 +19607,125 @@ def _capture_error_screenshot(error_url: str, out: "OutputManager",
     return ""
 
 
+def _chrome_okta_authn_login(driver, cfg: dict, login_url: str,
+                             timeout: int = 30) -> bool:
+    """Authenticate headless Chrome via the OKTA authn API.
+
+    Instead of filling the OKTA Sign-In Widget form (which is JS-heavy and
+    often fails to render in headless Chrome within the timeout), this function
+    uses the programmatic OKTA authn API to obtain a sessionToken, then
+    navigates Chrome to OKTA's sessionCookieRedirect endpoint.  OKTA sets all
+    cookies natively in the browser and redirects back to the application —
+    bypassing the cross-domain cookie injection problem entirely.
+
+    Returns True if Chrome lands on a non-login URL after the flow.
+    """
+    import re as _re_oa
+    _auth_cfg = cfg.get("auth", {})
+    _user = _auth_cfg.get("username", "")
+    _pass = _auth_cfg.get("password", "")
+    if not _user or not _pass:
+        return False
+
+    try:
+        _cur = driver.current_url or ""
+    except Exception:
+        _cur = ""
+    _target_url = login_url
+
+    _okta_base = None
+    _OKTA_HOST_RE = _re_oa.compile(r'https?://[^/]*\.okta\.com', _re_oa.I)
+    _m = _OKTA_HOST_RE.search(_cur)
+    if _m:
+        _okta_base = _m.group(0).rstrip("/")
+    if not _okta_base:
+        _m = _OKTA_HOST_RE.search(login_url)
+        if _m:
+            _okta_base = _m.group(0).rstrip("/")
+    if not _okta_base:
+        for ck in (cfg.get("_auth_session_cookies") or []):
+            if hasattr(ck, "domain") and ".okta.com" in (ck.domain or ""):
+                _okta_base = f"https://{ck.domain.lstrip('.')}"
+                break
+    if not _okta_base:
+        try:
+            _page_src = driver.page_source or ""
+            _bm = _re_oa.search(r'"baseUrl"\s*:\s*"([^"]+)"', _page_src)
+            if _bm:
+                _okta_base = _re_oa.sub(
+                    r'\\x([0-9a-fA-F]{2})',
+                    lambda m: chr(int(m.group(1), 16)),
+                    _bm.group(1)).rstrip("/")
+        except Exception:
+            pass
+    if not _okta_base:
+        return False
+
+    vc.log(
+        f"[crawl/spa] OKTA authn API login via {_okta_base}",
+        "INFO",
+    )
+
+    try:
+        import requests as _rq_oa
+        _s = _rq_oa.Session()
+        _s.verify = False
+        _s.headers["User-Agent"] = cfg.get(
+            "user_agent",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        )
+        _ar = _s.post(
+            f"{_okta_base}/api/v1/authn",
+            json={"username": _user, "password": _pass},
+            timeout=timeout,
+        )
+        _aj = _ar.json()
+        if _aj.get("status") != "SUCCESS":
+            _err = _aj.get("errorSummary", _aj.get("status", "unknown"))
+            vc.log(f"[crawl/spa] OKTA authn API: {_err}", "INFO")
+            return False
+        _session_token = _aj.get("sessionToken", "")
+        if not _session_token:
+            vc.log("[crawl/spa] OKTA authn API: no sessionToken in response", "INFO")
+            return False
+    except Exception as _oa_exc:
+        vc.log(f"[crawl/spa] OKTA authn API request failed: {_oa_exc}", "INFO")
+        return False
+
+    from urllib.parse import quote as _q_oa
+    _redirect_url = (
+        f"{_okta_base}/login/sessionCookieRedirect"
+        f"?checkAccountSetupComplete=true"
+        f"&token={_session_token}"
+        f"&redirectUrl={_q_oa(_target_url, safe='')}"
+    )
+
+    try:
+        driver.delete_all_cookies()
+        driver.get(_redirect_url)
+    except Exception:
+        pass
+
+    import time as _t_oa
+    _deadline = _t_oa.time() + 20.0
+    while _t_oa.time() < _deadline:
+        _t_oa.sleep(1.0)
+        try:
+            _final = driver.current_url or ""
+            if _final and not _WAF_LOGIN_URL_RE.search(_final):
+                vc.log(
+                    f"[crawl/spa] OKTA authn API login succeeded — "
+                    f"Chrome now at {_final}",
+                    "SUCCESS",
+                )
+                return True
+        except Exception:
+            pass
+    vc.log("[crawl/spa] OKTA authn API login: redirect wait expired", "INFO")
+    return False
+
+
 def _chrome_form_login(driver, cfg: dict, login_url: str) -> bool:
     """Perform a full form-based login in headless Chrome.
 
@@ -25313,19 +25432,24 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
         _spa_transfer_cookies(sess, driver, url)
 
         # Detect if initial navigation landed on a login page.
-        # Cookie injection alone is insufficient for JS-state auth apps
-        # (React/Angular SPAs that store tokens in JS, not just cookies).
-        # Perform a full Chrome form login to authenticate the headless
-        # session — same approach as _resolve_spa_landing Phase 2.
+        # Cookie injection alone is insufficient for OKTA / JS-state auth apps
+        # because cross-domain cookies (login.*.okta.com) can't be injected
+        # into Chrome from the target origin, and the OKTA Sign-In Widget is
+        # too JS-heavy to reliably render in headless Chrome.
+        #
+        # Auth cascade:
+        #   1. Cookie injection + re-navigate (works for simple cookie-auth)
+        #   2. OKTA authn API → sessionCookieRedirect (programmatic, no form)
+        #   3. Chrome form login (generic fallback for non-OKTA apps)
         try:
             _setup_url = driver.current_url or ""
             if _WAF_LOGIN_URL_RE.search(_setup_url):
                 vc.log(
                     f"[crawl/spa] Setup navigation redirected to login page ({_setup_url}). "
-                    "Attempting full Chrome form login.",
+                    "Attempting authentication cascade.",
                     "WARNING",
                 )
-                # First try navigating with the injected cookies
+                # Step 1: try navigating with the injected cookies
                 try:
                     driver.get(url)
                 except Exception:
@@ -25337,25 +25461,32 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
                 except Exception:
                     _after_retry = ""
                 if _WAF_LOGIN_URL_RE.search(_after_retry):
-                    # Cookies didn't work — full form login required
                     vc.log(
                         "[crawl/spa] Cookie injection insufficient — "
-                        "performing full Chrome form login for SPA crawl",
+                        "trying OKTA authn API",
                         "INFO",
                     )
-                    _login_url = url  # navigate to the app root; it'll redirect to login
-                    if _chrome_form_login(driver, cfg, _login_url):
+                    # Step 2: OKTA authn API (programmatic, bypasses form rendering)
+                    _okta_ok = _chrome_okta_authn_login(driver, cfg, url)
+                    if not _okta_ok:
+                        # Step 3: generic form login fallback
                         vc.log(
-                            f"[crawl/spa] Chrome form login succeeded — "
-                            f"now at {driver.current_url}",
+                            "[crawl/spa] OKTA authn unavailable — "
+                            "trying Chrome form login",
                             "INFO",
                         )
-                    else:
-                        vc.log(
-                            "[crawl/spa] Chrome form login failed — "
-                            "SPA crawl will run unauthenticated",
-                            "WARNING",
-                        )
+                        if _chrome_form_login(driver, cfg, url):
+                            vc.log(
+                                f"[crawl/spa] Chrome form login succeeded — "
+                                f"now at {driver.current_url}",
+                                "INFO",
+                            )
+                        else:
+                            vc.log(
+                                "[crawl/spa] All auth methods failed — "
+                                "SPA crawl will run unauthenticated",
+                                "WARNING",
+                            )
                 else:
                     vc.log(
                         f"[crawl/spa] Cookie re-navigation recovered — "
@@ -25466,20 +25597,23 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
                         except Exception:
                             pass
                         time.sleep(_spa_settle_time)
-                        # Check if still on login — if so, full form login
+                        # Check if still on login — try OKTA authn API, then form
                         try:
                             _retry_url = driver.current_url or ""
                         except Exception:
                             _retry_url = ""
                         if _WAF_LOGIN_URL_RE.search(_retry_url):
-                            vc.log(
-                                "[crawl/spa] Cookie re-injection failed — "
-                                "performing full Chrome form login",
-                                "INFO",
-                            )
-                            if _chrome_form_login(driver, cfg, url):
+                            _mid_ok = _chrome_okta_authn_login(driver, cfg, url)
+                            if not _mid_ok:
                                 vc.log(
-                                    f"[crawl/spa] Mid-crawl Chrome login "
+                                    "[crawl/spa] Cookie re-injection failed — "
+                                    "trying Chrome form login",
+                                    "INFO",
+                                )
+                                _mid_ok = _chrome_form_login(driver, cfg, url)
+                            if _mid_ok:
+                                vc.log(
+                                    f"[crawl/spa] Mid-crawl re-auth "
                                     f"succeeded — resuming from {current}",
                                     "INFO",
                                 )
