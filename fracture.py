@@ -1995,6 +1995,267 @@ def _waf_session_health(
     return "ok"
 
 
+# ── WAF block heartbeat probe ────────────────────────────────────────────────
+# Periodic unauthenticated check between phases to detect IP-level WAF blocks
+# before they corrupt test results.  When a block is detected the scan pauses,
+# polls until the block clears, re-authenticates, and resumes.
+
+_HEARTBEAT_POLL_INTERVAL = 30          # seconds between block-clear polls
+_HEARTBEAT_MAX_WAIT      = 1800        # 30 min max wait before giving up
+_HEARTBEAT_GRACE_DELAY   = 5           # seconds to wait after unblock before re-auth
+
+
+def _heartbeat_capture_baseline(
+    target_url: str, timeout: int = 10,
+) -> "dict | None":
+    """Capture an unauthenticated baseline response from the target.
+
+    Called once at scan start.  The baseline tells us what "not blocked" looks
+    like — the status code and body fingerprint an unauthenticated visitor
+    normally sees (login page, redirect to SSO, etc.).
+    """
+    import requests as _rq
+    try:
+        _s = _rq.Session()
+        _s.verify = False
+        _s.headers["User-Agent"] = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        )
+        r = _s.get(target_url, timeout=timeout, allow_redirects=False)
+        return {
+            "status": r.status_code,
+            "location": (r.headers.get("Location") or "")[:500],
+            "body_len": len(r.text or ""),
+            "body_hash": hash((r.text or "")[:4096]),
+            "is_waf_block": _is_waf_block(r),
+            "has_challenge": bool(_WAF_CHALLENGE_RE.search((r.text or "")[:4096])),
+        }
+    except Exception as _e:
+        vc.log(f"[heartbeat] Baseline capture failed: {_e}", "WARNING")
+        return None
+
+
+def _heartbeat_check(
+    target_url: str, baseline: "dict | None", timeout: int = 10,
+) -> "tuple[bool, str, dict]":
+    """Unauthenticated probe — returns (is_blocked, reason, probe_info).
+
+    Makes a plain GET with no session cookies.  Compares against baseline to
+    distinguish a genuine WAF block from normal target behaviour.
+    """
+    import requests as _rq
+    _info: dict = {}
+    try:
+        _s = _rq.Session()
+        _s.verify = False
+        _s.headers["User-Agent"] = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        )
+        r = _s.get(target_url, timeout=timeout, allow_redirects=False)
+    except requests.exceptions.ConnectTimeout:
+        return True, "connection_timeout", {"error": "connect timeout"}
+    except requests.exceptions.ConnectionError:
+        return True, "connection_refused", {"error": "connection refused"}
+    except Exception as _e:
+        return True, "request_error", {"error": str(_e)}
+
+    _status = r.status_code
+    _body = (r.text or "")[:4096]
+    _info = {
+        "status": _status,
+        "body_len": len(r.text or ""),
+        "is_waf_block": _is_waf_block(r),
+        "has_challenge": bool(_WAF_CHALLENGE_RE.search(_body)),
+    }
+
+    if _is_waf_block(r):
+        return True, "waf_block_page", _info
+
+    if _WAF_CHALLENGE_RE.search(_body):
+        return True, "challenge_page", _info
+
+    if _status in (403, 406, 429, 503):
+        if baseline and baseline["status"] not in (403, 406, 429, 503):
+            return True, f"http_{_status}_vs_baseline_{baseline['status']}", _info
+
+    if baseline and baseline["status"] in (200, 301, 302, 307, 308):
+        if _status in (403, 406, 429, 503):
+            return True, f"http_{_status}_was_{baseline['status']}", _info
+
+    return False, "ok", _info
+
+
+def _heartbeat_wait_for_unblock(
+    target_url: str,
+    baseline: "dict | None",
+    out: "OutputManager",
+    timeout: int = 10,
+) -> bool:
+    """Poll until the WAF block clears or we hit the max wait time.
+
+    Returns True if the block cleared, False if we timed out.
+    """
+    import time as _time
+    _start = _time.monotonic()
+    _poll_count = 0
+
+    while (_time.monotonic() - _start) < _HEARTBEAT_MAX_WAIT:
+        _poll_count += 1
+        _elapsed = int(_time.monotonic() - _start)
+
+        vc.log(
+            f"[heartbeat] Block check #{_poll_count} — "
+            f"waiting {_elapsed}s/{_HEARTBEAT_MAX_WAIT}s",
+            "INFO",
+        )
+        vc.status("heartbeat", "WAF Block", f"blocked — poll #{_poll_count} ({_elapsed}s)")
+
+        _time.sleep(_HEARTBEAT_POLL_INTERVAL)
+
+        blocked, reason, info = _heartbeat_check(target_url, baseline, timeout)
+        if not blocked:
+            _elapsed = int(_time.monotonic() - _start)
+            vc.log(
+                f"[heartbeat] Block CLEARED after {_elapsed}s "
+                f"({_poll_count} polls) — HTTP {info.get('status', '?')}",
+                "SUCCESS",
+            )
+            _time.sleep(_HEARTBEAT_GRACE_DELAY)
+            return True
+
+        vc.log(
+            f"[heartbeat] Still blocked — {reason} "
+            f"(HTTP {info.get('status', '?')}, "
+            f"waf_page={info.get('is_waf_block', '?')})",
+            "WARNING",
+        )
+
+    _elapsed = int(_time.monotonic() - _start)
+    vc.log(
+        f"[heartbeat] Block did NOT clear after {_elapsed}s "
+        f"({_poll_count} polls) — aborting wait",
+        "ERROR",
+    )
+    return False
+
+
+def _heartbeat_between_phases(
+    target: dict,
+    cfg: dict,
+    baseline: "dict | None",
+    out: "OutputManager",
+    effective_auth: "requests.Session | None",
+    last_phase: str,
+    scope_hostnames: "set | None" = None,
+    role_label: str = "",
+    ctx_cfg: "dict | None" = None,
+) -> "requests.Session | None":
+    """Check for WAF block between phases; pause/wait/re-auth if blocked.
+
+    Called between every phase in the dispatch loop.  Returns the (possibly
+    refreshed) authenticated session.  If the block never clears, returns
+    the original session and logs an error — the scan continues but results
+    are flagged as potentially unreliable.
+
+    *last_phase* is the name of the phase that just completed — logged when a
+    block is detected so we can identify which tool/phase triggered it.
+    """
+    if baseline is None:
+        return effective_auth
+
+    target_url = target["url"]
+    _timeout = cfg.get("timeout", 10)
+    _lbl = f" [{role_label}]" if role_label else ""
+
+    blocked, reason, info = _heartbeat_check(target_url, baseline, _timeout)
+    if not blocked:
+        return effective_auth
+
+    # ── Block detected — log which phase triggered it ────────────────────
+    vc.log(
+        f"[heartbeat] WAF BLOCK DETECTED after phase '{last_phase}'{_lbl} — "
+        f"{reason} (HTTP {info.get('status', '?')})",
+        "WARNING",
+    )
+    out.add_finding(
+        title=f"Discovery: WAF Block Triggered After Phase: {last_phase}",
+        url=target_url, port=target.get("port", 443), risk="INFO",
+        description=(
+            f"An unauthenticated heartbeat probe detected a WAF/CDN IP block "
+            f"immediately after phase '{last_phase}'{_lbl} completed. "
+            f"Probe returned HTTP {info.get('status', '?')} "
+            f"(baseline was HTTP {baseline.get('status', '?')}). "
+            f"Block reason: {reason}. "
+            f"The scan was paused until the block cleared. "
+            f"Results from '{last_phase}' may have been affected if the block "
+            f"was triggered mid-phase."
+        ),
+        output=json.dumps(info, indent=2),
+        affected=target_url, sources="fracture-heartbeat",
+        service=target.get("scheme", "https"),
+        command=f"GET {target_url} (unauthenticated heartbeat probe)",
+        owasp="A05:2021 – Security Misconfiguration", nist="SI-4",
+        remediation=(
+            "Informational — the WAF blocked the scanner IP during the "
+            f"'{last_phase}' phase. Consider allowlisting the scanner IP, "
+            "reducing scan aggressiveness, or adding inter-phase delays."
+        ),
+    )
+
+    # ── Pause and wait for unblock ───────────────────────────────────────
+    vc.status("heartbeat", "WAF Block", f"blocked after {last_phase} — waiting")
+    cleared = _heartbeat_wait_for_unblock(target_url, baseline, out, _timeout)
+
+    if not cleared:
+        vc.log(
+            f"[heartbeat] Block did not clear — continuing scan with "
+            f"potentially unreliable results{_lbl}",
+            "ERROR",
+        )
+        vc.status("heartbeat", "WAF Block", "timed out — resuming anyway")
+        return effective_auth
+
+    # ── Re-authenticate ──────────────────────────────────────────────────
+    if effective_auth is not None and (ctx_cfg or cfg).get("auth", {}).get("enabled"):
+        vc.log(f"[heartbeat] Re-authenticating after WAF block cleared{_lbl}", "INFO")
+        vc.status("heartbeat", "WAF Block", "cleared — re-authenticating")
+        try:
+            _reauth_cfg = ctx_cfg if ctx_cfg else cfg
+            new_sess = _build_auth_session(
+                _reauth_cfg, "auth",
+                scope_hostnames=scope_hostnames,
+                role_label=role_label,
+                no_interactive=True,
+            )
+            if new_sess is not None:
+                vc.log(
+                    f"[heartbeat] Re-authentication SUCCESSFUL{_lbl} — "
+                    f"scan resuming with fresh session",
+                    "SUCCESS",
+                )
+                vc.status("heartbeat", "WAF Block", "cleared + re-authenticated")
+                return new_sess
+            else:
+                vc.log(
+                    f"[heartbeat] Re-authentication returned None{_lbl} — "
+                    f"continuing with original session",
+                    "WARNING",
+                )
+        except Exception as _e:
+            vc.log(
+                f"[heartbeat] Re-authentication FAILED{_lbl}: {_e} — "
+                f"continuing with original session",
+                "ERROR",
+            )
+    else:
+        vc.log(f"[heartbeat] Block cleared — no auth to refresh{_lbl}", "INFO")
+        vc.status("heartbeat", "WAF Block", "cleared — resuming")
+
+    return effective_auth
+
+
 def _filter_dominant_code(
     results: "list[tuple[str, int | None, str | None]]",
     sess: "requests.Session",
@@ -47641,6 +47902,8 @@ def main() -> None:
         _role1_accessible_endpoints: list = []
         # CDN/WAF detected by _phase_recon; used to modulate injection/testing phases.
         _scan_waf_cdn: str = ""
+        # Heartbeat baseline — unauthenticated response fingerprint for WAF block detection.
+        _heartbeat_baseline: "dict | None" = None
 
         # ── Checkpoint resume: restore accumulated state ─────────────────────
         if args.resume and pm.has_resumable_state():
@@ -47656,6 +47919,7 @@ def main() -> None:
             _role1_accessible_endpoints = _ss.get("role1_accessible_endpoints",
                                                    _role1_accessible_endpoints)
             _scan_waf_cdn               = _ss.get("scan_waf_cdn", _scan_waf_cdn)
+            _heartbeat_baseline         = _ss.get("heartbeat_baseline", _heartbeat_baseline)
             wc_baseline                 = _ss.get("wc_baseline", wc_baseline)
             _discovered_creds_seen      = set(_ss.get("discovered_creds_seen", []))
             # Discovery leader
@@ -47757,6 +48021,7 @@ def main() -> None:
                     "discovered_creds_seen":      list(_discovered_creds_seen),
                     # Target state
                     "scan_waf_cdn":          _scan_waf_cdn,
+                    "heartbeat_baseline":    _heartbeat_baseline,
                     "processed_urls":        list(_processed_urls),
                     "pending_urls":          list(_pending_urls),
                     "pending_idx":           _pending_idx,
@@ -48516,6 +48781,21 @@ def main() -> None:
                         out, target, _scan_waf_cdn, role_label=_ctx_label,
                     )
 
+                # ── Heartbeat baseline capture ───────────────────────────────
+                # Capture what "not blocked" looks like via an unauthenticated
+                # probe.  Done once after recon so we have the WAF/CDN info and
+                # a stable baseline before testing phases start hammering.
+                if _heartbeat_baseline is None:
+                    _heartbeat_baseline = _heartbeat_capture_baseline(
+                        target["url"], cfg.get("timeout", 10))
+                    if _heartbeat_baseline:
+                        vc.log(
+                            f"[heartbeat] Baseline captured — HTTP {_heartbeat_baseline['status']} "
+                            f"(waf_block={_heartbeat_baseline['is_waf_block']}, "
+                            f"challenge={_heartbeat_baseline['has_challenge']})",
+                            "INFO",
+                        )
+
                 # Phase 0b: screenshot
                 if not _skip("screenshot"):
                     pm.set_phase_status(f"screenshot#{_ctx_label}", "running", "Screenshot")
@@ -48528,6 +48808,12 @@ def main() -> None:
                         vc.error(f"Phase screenshot [{_ctx_label}] error: {e}")
                         pm.set_phase_status(f"screenshot#{_ctx_label}", "error", detail=str(e))
 
+                # ── Heartbeat: after screenshot ──
+                effective_auth = _heartbeat_between_phases(
+                    target, cfg, _heartbeat_baseline, out, effective_auth,
+                    "screenshot", scope_hostnames=_scope_hostnames,
+                    role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+
                 # Phase 0c: webfiles
                 if not _skip("webfiles"):
                     pm.set_phase_status(f"webfiles#{_ctx_label}", "running", "Web Files")
@@ -48538,6 +48824,12 @@ def main() -> None:
                     except Exception as e:
                         vc.error(f"Phase webfiles [{_ctx_label}] error: {e}")
                         pm.set_phase_status(f"webfiles#{_ctx_label}", "error", detail=str(e))
+
+                # ── Heartbeat: after webfiles ──
+                effective_auth = _heartbeat_between_phases(
+                    target, cfg, _heartbeat_baseline, out, effective_auth,
+                    "webfiles", scope_hostnames=_scope_hostnames,
+                    role_label=_ctx_label, ctx_cfg=_ctx_cfg)
 
                 # Phase 1: tls
                 if not _skip("tls"):
@@ -48550,6 +48842,12 @@ def main() -> None:
                         vc.error(f"Phase tls [{_ctx_label}] error: {e}")
                         pm.set_phase_status(f"tls#{_ctx_label}", "error", detail=str(e))
 
+                # ── Heartbeat: after tls ──
+                effective_auth = _heartbeat_between_phases(
+                    target, cfg, _heartbeat_baseline, out, effective_auth,
+                    "tls", scope_hostnames=_scope_hostnames,
+                    role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+
                 # Phase 1b: subdomain_takeover
                 if not _skip("subdomain_takeover"):
                     pm.set_phase_status(f"subdomain_takeover#{_ctx_label}", "running", "Subdomain Takeover")
@@ -48560,6 +48858,12 @@ def main() -> None:
                     except Exception as e:
                         vc.error(f"Phase subdomain_takeover [{_ctx_label}] error: {e}")
                         pm.set_phase_status(f"subdomain_takeover#{_ctx_label}", "error", detail=str(e))
+
+                # ── Heartbeat: after subdomain_takeover ──
+                effective_auth = _heartbeat_between_phases(
+                    target, cfg, _heartbeat_baseline, out, effective_auth,
+                    "subdomain_takeover", scope_hostnames=_scope_hostnames,
+                    role_label=_ctx_label, ctx_cfg=_ctx_cfg)
 
                 # Phase 2c: ffuf
                 if not _skip("ffuf"):
@@ -48936,6 +49240,12 @@ def main() -> None:
                 except Exception:
                     pass
 
+            # ── Heartbeat: after discovery/recon block ──
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "recon_discovery", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+
             # ── Phase 2: headers ──
             if not _skip("headers"):
                 pm.set_phase_status(f"headers#{_ctx_label}", "running", "Security Headers")
@@ -48976,6 +49286,12 @@ def main() -> None:
                                f"~{_detected_st}s", "SUCCESS")
                 except Exception as _st_err:
                     vc.error(f"[session-timeout] Detection failed: {_st_err}")
+
+            # ── Heartbeat: after headers/shcheck ──
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "headers", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
 
             # ── Phase 3: crawl ──
             if not _skip("crawl"):
@@ -49290,8 +49606,12 @@ def main() -> None:
                     pm.set_phase_status(f"jwt#{_ctx_label}", "error", detail=str(e))
 
             # ── Phase 4: injection ──
-            # Pre-injection WAF health check: detect session termination or IP
-            # block before running injection probes that depend on a valid session.
+            # Pre-injection heartbeat + WAF health check: detect IP block or
+            # session termination before running injection probes.
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "vulnscan_crawl", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
             if _scan_waf_cdn and effective_auth is not None:
                 _waf_session_health(
                     target["url"], effective_auth, cfg.get("timeout", 10),
@@ -49309,6 +49629,12 @@ def main() -> None:
                     out.log_error("injection", "phase-level exception", str(e))
                     pm.set_phase_status(f"injection#{_ctx_label}", "error", detail=str(e))
 
+            # ── Heartbeat: after injection ──
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "injection", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+
             # ── Phase 5: traversal ──
             if not _skip("traversal"):
                 pm.set_phase_status(f"traversal#{_ctx_label}", "running", "Path Traversal")
@@ -49319,6 +49645,12 @@ def main() -> None:
                 except Exception as e:
                     vc.error(f"Phase traversal [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"traversal#{_ctx_label}", "error", detail=str(e))
+
+            # ── Heartbeat: after traversal ──
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "traversal", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
 
             # ── Phase 5b: business_logic ──
             if not _skip("business_logic"):
@@ -49332,6 +49664,12 @@ def main() -> None:
                     vc.error(f"Phase business_logic [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"business_logic#{_ctx_label}", "error", detail=str(e))
 
+            # ── Heartbeat: after business_logic ──
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "business_logic", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+
             # ── Phase 6: ssrf ──
             if not _skip("ssrf"):
                 pm.set_phase_status(f"ssrf#{_ctx_label}", "running", "SSRF Testing")
@@ -49342,6 +49680,12 @@ def main() -> None:
                 except Exception as e:
                     vc.error(f"Phase ssrf [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"ssrf#{_ctx_label}", "error", detail=str(e))
+
+            # ── Heartbeat: after ssrf ──
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "ssrf", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
 
             # ── Phase 7: auth_bypass ──
             if not _skip("auth_bypass"):
@@ -49371,6 +49715,12 @@ def main() -> None:
                     vc.error(f"Phase auth_bypass [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"auth_bypass#{_ctx_label}", "error", detail=str(e))
 
+            # ── Heartbeat: after auth_bypass ──
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "auth_bypass", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+
             # ── Phase 7b: account_lockout ──
             if not _skip("account_lockout"):
                 pm.set_phase_status(f"account_lockout#{_ctx_label}", "running", "Account Lockout")
@@ -49383,6 +49733,12 @@ def main() -> None:
                     vc.error(f"Phase account_lockout [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"account_lockout#{_ctx_label}", "error", detail=str(e))
 
+            # ── Heartbeat: after account_lockout ──
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "account_lockout", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+
             # ── Phase 8: files ──
             if not _skip("files"):
                 pm.set_phase_status(f"files#{_ctx_label}", "running", "Sensitive Files")
@@ -49393,6 +49749,12 @@ def main() -> None:
                 except Exception as e:
                     vc.error(f"Phase files [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"files#{_ctx_label}", "error", detail=str(e))
+
+            # ── Heartbeat: after files ──
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "files", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
 
             # ── Phase 10: graphql ──
             if not _skip("graphql"):
@@ -49536,6 +49898,12 @@ def main() -> None:
                     vc.error(f"Phase mass_assignment [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"mass_assignment#{_ctx_label}", "error", detail=str(e))
 
+            # ── Heartbeat: after logging_monitoring ──
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "logging_monitoring", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+
             # ── Gap Coverage Tests (v2.42.0) ─────────────────────────────
             # These run once on the primary context (not reduced) unless the
             # test is specifically relevant to per-role comparison.
@@ -49640,6 +50008,12 @@ def main() -> None:
                 except Exception as _e:
                     vc.error(f"[h2c_smuggling] {_e}")
 
+            # ── Heartbeat: after gap coverage tests ──
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "gap_coverage", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+
             # ── WebSocket testing (new phase) ──
             if not _skip("websocket") and not _is_reduced_ctx:
                 pm.set_phase_status(f"websocket#{_ctx_label}", "running", "WebSocket Testing")
@@ -49666,6 +50040,12 @@ def main() -> None:
                     vc.error(f"[oauth_flows] {_e}")
 
             # ── End gap coverage tests ───────────────────────────────────
+
+            # ── Heartbeat: before bfla ──
+            effective_auth = _heartbeat_between_phases(
+                target, cfg, _heartbeat_baseline, out, effective_auth,
+                "websocket_oauth", scope_hostnames=_scope_hostnames,
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
 
             # ── Phase 21: bfla ──
             if not _skip("bfla"):
