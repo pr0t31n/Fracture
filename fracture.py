@@ -1671,12 +1671,22 @@ def _probe_buster_tool_block(
                 "INFO",
             )
         elif len(fer_codes) < 3:
+            _sess_non404 = [c for c in sess_codes if c not in (404, 410)]
+            if _sess_non404:
+                vc.log(
+                    f"[buster-probe] feroxbuster produced {len(fer_codes)} result(s) "
+                    f"but session got {_sess_non404} — tool is blocked "
+                    f"(session sees content, feroxbuster sees nothing)",
+                    "WARNING",
+                )
+                return True
             vc.log(
-                f"[buster-probe] Insufficient feroxbuster results ({len(fer_codes)}/3 needed) "
-                f"— cannot determine tool-block status; treating as blocked (precautionary)",
-                "WARNING",
+                f"[buster-probe] feroxbuster produced {len(fer_codes)} result(s), "
+                f"session got {sess_codes} (all 404/410) — server returns clean 404s, "
+                f"feroxbuster is working normally",
+                "INFO",
             )
-            return True
+            return False
         return False
     except Exception as _probe_exc:
         vc.log(f"[buster-probe] Probe failed with exception: {_probe_exc}", "WARNING")
