@@ -4808,7 +4808,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
         with template-rendered tokens, etc.), which invalidates the token
         captured here and causes the POST to be silently rejected.
         """
-        import re as _re2
+        import re as _re2, html as _html_ent2
         from urllib.parse import urljoin as _urljoin2
         try:
             r    = sess.get(url, timeout=timeout)
@@ -4824,7 +4824,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 continue
             act_m = _re2.search(r'\baction=["\']([^"\']*)["\']', form_tag, _re2.IGNORECASE)
             if act_m:
-                raw = act_m.group(1).strip()
+                raw = _html_ent2.unescape(act_m.group(1).strip())
                 if raw:
                     form_action = _urljoin2(url, raw)
             for inp in _re2.finditer(r"<input[^>]+>", form_body, _re2.IGNORECASE):
@@ -4857,7 +4857,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                              (Login, Accept, Continue, …) but excludes backward/
                              negative labels (Cancel, Decline, Back, …)
         """
-        import re as _re3
+        import re as _re3, html as _html_ent3
         from urllib.parse import urljoin as _uj3
 
         # Affirmative button/link label patterns
@@ -4985,7 +4985,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
             act_raw = ""
             act_m   = _re3.search(r'\baction=["\']([^"\']*)["\']', form_tag, _re3.IGNORECASE)
             if act_m:
-                act_raw = act_m.group(1).strip()
+                act_raw = _html_ent3.unescape(act_m.group(1).strip())
             action = _uj3(page_url, act_raw) if act_raw else page_url
 
             has_pw  = bool(_re3.search(r'<input[^>]+type=["\']?password["\']?',       form_body, _re3.IGNORECASE))
@@ -5168,7 +5168,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                 continue
 
             href_m   = _re3.search(r'\bhref=["\']([^"\']*)["\']', attrs, _re3.IGNORECASE)
-            href_raw = href_m.group(1).strip() if href_m else ""
+            href_raw = _html_ent3.unescape(href_m.group(1).strip()) if href_m else ""
 
             # Skip hard non-navigable hrefs (but NOT plain "#" — those may have onclick)
             if href_raw.lower().startswith(("javascript:void", "mailto:", "tel:")):
@@ -7223,7 +7223,7 @@ document.addEventListener('submit', function(e) {
                         r'\bhref=["\']([^"\']+)["\']', _a_attrs, _re4.IGNORECASE)
                     if not _a_href_m:
                         continue
-                    _a_href = _a_href_m.group(1).strip()
+                    _a_href = _html_ent4.unescape(_a_href_m.group(1).strip())
                     # For href="#" / "javascript:..." try to extract the target
                     # URL from an onclick attribute (common pattern for login buttons).
                     if _a_href.lower().startswith(
@@ -7294,7 +7294,7 @@ document.addEventListener('submit', function(e) {
                         _fa_m = _re4.search(
                             r'\baction=["\']([^"\']+)["\']',
                             _fm.group(1), _re4.IGNORECASE)
-                        _fa_url = _uj4(_base_r0.url, _fa_m.group(1).strip()) if _fa_m else ""
+                        _fa_url = _uj4(_base_r0.url, _html_ent4.unescape(_fa_m.group(1).strip())) if _fa_m else ""
                         _form_actions.append((_fm.start(), _fa_url))
 
                     for _bm in _re4.finditer(
@@ -7441,7 +7441,7 @@ document.addEventListener('submit', function(e) {
             Scan an already-fetched page for login-text <a> / <button> elements.
             Returns the discovered login URL or empty string.
             """
-            import re as _re5
+            import re as _re5, html as _html_ent5
             from urllib.parse import urljoin as _uj5, urlparse as _up5
             _pg_host = _up5(resp_obj.url).netloc
             _LT_RE   = _LOGIN_TEXT_RE  # closure
@@ -7489,7 +7489,7 @@ document.addEventListener('submit', function(e) {
                 if not (_LT_RE.search(_atxt) or _LT_RE.search(_atitl)):
                     continue
                 _ah_m  = _re5.search(r'\bhref=["\']([^"\']+)["\']', _at, _re5.IGNORECASE)
-                _ah    = _ah_m.group(1).strip() if _ah_m else ""
+                _ah    = _html_ent5.unescape(_ah_m.group(1).strip()) if _ah_m else ""
                 if _ah.lower().startswith(("javascript:", "mailto:", "tel:", "#", "data:")):
                     _oc_m = _re5.search(r'\bonclick=["\']([^"\']+)["\']', _at, _re5.IGNORECASE)
                     _ah   = _onclick_url(_oc_m.group(1)) if _oc_m else ""
@@ -8732,7 +8732,7 @@ return null;
           {name, type, label, value, checked, options}
         Skips forms that contain a password input (those are login forms).
         """
-        import re as _re6
+        import re as _re6, html as _html_ent6
         from urllib.parse import urljoin as _uj6
 
         _INTERACTIVE = frozenset({
@@ -8754,7 +8754,7 @@ return null;
 
             _am = _re6.search(r'\baction=["\']([^"\']*)["\']', _ftag, _re6.IGNORECASE)
             _mm = _re6.search(r'\bmethod=["\']([^"\']*)["\']', _ftag, _re6.IGNORECASE)
-            _action = _uj6(page_url, _am.group(1).strip()) if _am else page_url
+            _action = _uj6(page_url, _html_ent6.unescape(_am.group(1).strip())) if _am else page_url
             _method = _mm.group(1).strip().lower() if _mm else "post"
 
             _has_pw = bool(_re6.search(
