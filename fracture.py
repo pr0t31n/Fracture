@@ -16565,7 +16565,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 if exploits:
                     titles_list = [e.get("Title", "") for e in exploits[:5]]
                     out.add_finding(
-                        title=f"Software Version Detected: Public Exploit Available: {term}",
+                        title=f"Uncategorized: Public Exploit Available: {term}",
                         url=url, port=target["port"], risk="HIGH",
                         description=(
                             f"{len(exploits)} public exploit(s) found in ExploitDB for "
@@ -20696,7 +20696,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="Software Version Detected: TLS Version Identified",
+                    title="Insecure Protocol Detected: TLS Version Identified",
                     url=target["url"], port=port, risk="INFO",
                     description=f"Server negotiated {proto}.",
                     output=f"Negotiated protocol: {proto}",
@@ -29729,7 +29729,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Authentication: Timing Attack — Non-Constant-Time Authentication",
+                        title="Uncategorized: Timing Attack — Non-Constant-Time Authentication",
                         url=login_u, port=target["port"], risk="MEDIUM",
                         description=(f"Login endpoint {lpath} shows a {(avg_valid - avg_invalid)*1000:.0f}ms "
                                      f"average response time difference between a non-existent username and "
@@ -37149,7 +37149,7 @@ def _phase_csrf(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Authentication: Cross-Site Request Forgery (CSRF) — Missing Token",
+                        title="Broken Access Control: Cross-Site Request Forgery (CSRF) — Missing Token",
                         url=action, port=target["port"], risk="HIGH",
                         description=f"State-changing form at {action} lacks a CSRF token. A cross-origin POST was accepted.",
                         output=f"Form action: {action}\nInputs: {[i['name'] for i in inputs]}",
@@ -44222,7 +44222,7 @@ def _test_oauth_flows(target: dict, cfg: dict, out: OutputManager,
                 if _proceeds:
                     _rq, _rp = _save_http_evidence(out, phase, "oauth_no_state", r)
                     out.add_finding(
-                        title="Authentication: OAuth Missing State Parameter (CSRF)",
+                        title="Broken Access Control: OAuth Missing State Parameter (CSRF)",
                         url=_authorize_url, port=target["port"], risk="MEDIUM",
                         description=(
                             f"The OAuth authorization endpoint processed a request without "

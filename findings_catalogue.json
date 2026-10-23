@@ -5307,7 +5307,7 @@
     },
     {
       "id": "FR-098",
-      "title": "Sensitive File Exposed: HTML Comment Discloses Sensitive Information",
+      "title": "Information Disclosure: HTML Comment Discloses Sensitive Information",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6207,7 +6207,7 @@
     },
     {
       "id": "FR-114",
-      "title": "Software Version Detected: Vulnerability Scanner Finding — Known CVE",
+      "title": "Uncategorized: Vulnerability Scanner Finding — Known CVE",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7666,7 +7666,7 @@
     },
     {
       "id": "FR-137",
-      "title": "Authentication: Cross-Site Request Forgery (CSRF)",
+      "title": "Broken Access Control: Cross-Site Request Forgery (CSRF)",
       "aliases": [
         "XSRF",
         "Cross-Site Request Forgery on State-Changing Endpoint",
@@ -7767,7 +7767,7 @@
     },
     {
       "id": "FR-138",
-      "title": "Authentication: CSRF Token Not Validated Server-Side",
+      "title": "Broken Access Control: CSRF Token Not Validated Server-Side",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9164,7 +9164,7 @@
     },
     {
       "id": "FR-163",
-      "title": "Unauthenticated Access: FFUF — Administrative Path Discovered",
+      "title": "Uncategorized: FFUF — Administrative Path Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -16022,7 +16022,7 @@
     },
     {
       "id": "FR-259",
-      "title": "Software Version Detected: TLS Version Identified",
+      "title": "Insecure Protocol Detected: TLS Version Identified",
       "aliases": [
         "Weak SSL/TLS",
         "POODLE Vulnerability",
@@ -19645,7 +19645,7 @@
     },
     {
       "id": "FR-299",
-      "title": "Authentication: Timing Attack — Non-Constant-Time Authentication",
+      "title": "Uncategorized: Timing Attack — Non-Constant-Time Authentication",
       "aliases": [
         "Timing Attack — Non-Constant-Time Authentication"
       ],
@@ -21424,7 +21424,7 @@
     },
     {
       "id": "FR-322",
-      "title": "Authentication: Cross-Site Request Forgery (CSRF) — Missing Token",
+      "title": "Broken Access Control: Cross-Site Request Forgery (CSRF) — Missing Token",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22589,7 +22589,7 @@
     },
     {
       "id": "FR-338",
-      "title": "Software Version Detected: Public Exploit Available",
+      "title": "Uncategorized: Public Exploit Available",
       "aliases": [
         "Sploitus: Public Exploit Available for Detected Version",
         "Metasploit Module Available",
@@ -23531,7 +23531,7 @@
     },
     {
       "id": "FR-360",
-      "title": "Software Version Detected: Public Exploit Available: {term}",
+      "title": "Uncategorized: Public Exploit Available: {term}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -27772,7 +27772,7 @@
     },
     {
       "id": "FR-443",
-      "title": "Authentication: OAuth Missing State Parameter (CSRF)",
+      "title": "Broken Access Control: OAuth Missing State Parameter (CSRF)",
       "aliases": [
         "OAuth CSRF",
         "Missing state parameter"
