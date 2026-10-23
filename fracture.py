@@ -1427,6 +1427,74 @@ _DEAD_BODY_PHRASES: tuple = (
 )
 
 
+def _probe_waf_rate_limit(
+    base_url: str,
+    sess: "requests.Session",
+    timeout: int = 10,
+    *,
+    max_retries: int = 10,
+    burst_size: int = 8,
+    pass_threshold: int = 6,
+    initial_rate: float = 50.0,
+    decay: float = 0.6,
+) -> "dict | None":
+    """Pre-flight burst probe to detect WAF/server rate-limiting before feroxbuster.
+
+    Sends *burst_size* rapid GET requests to random UUID paths.  If ≥ *pass_threshold*
+    return the same status as each other (expected: the site's baseline, e.g. 200 for
+    SPA catch-all) the path is clear and ``None`` is returned.
+
+    When the majority degrade to 403/429/503, the function enters an adaptive
+    back-off loop: pace at *initial_rate* req/s, halve via *decay*, re-burst.
+    If a passing rate is found, returns ``{"rate_limit": <int>}`` — the caller
+    should pass ``--rate-limit`` to feroxbuster.  After *max_retries* failures,
+    returns ``{"skip": True, "last_rate": <float>, "block_code": <int>}`` — the
+    caller should skip feroxbuster and emit a Discovery finding.
+    """
+    import time as _t
+
+    base = base_url.rstrip("/")
+
+    def _burst(delay: float = 0.0) -> "list[int]":
+        codes = []
+        for i in range(burst_size):
+            if delay and i > 0:
+                _t.sleep(delay)
+            try:
+                r = sess.get(
+                    f"{base}/{secrets.token_hex(12)}-probe",
+                    timeout=timeout,
+                    allow_redirects=False,
+                )
+                codes.append(r.status_code)
+            except Exception:
+                codes.append(0)
+        return codes
+
+    _BLOCK_CODES = {403, 429, 503}
+
+    # ── Initial burst (no pacing) ────────────────────────────────────────────
+    initial = _burst()
+    blocked = sum(1 for c in initial if c in _BLOCK_CODES)
+    if blocked < (burst_size - pass_threshold + 1):
+        return None
+
+    block_code = max(set(initial) & _BLOCK_CODES, key=initial.count) if set(initial) & _BLOCK_CODES else 403
+
+    # ── Adaptive back-off loop ───────────────────────────────────────────────
+    rate = initial_rate
+    for attempt in range(max_retries):
+        delay = 1.0 / rate if rate > 0 else 1.0
+        codes = _burst(delay)
+        blocked = sum(1 for c in codes if c in _BLOCK_CODES)
+        if blocked < (burst_size - pass_threshold + 1):
+            return {"rate_limit": max(1, int(rate))}
+        block_code = max(set(codes) & _BLOCK_CODES, key=codes.count) if set(codes) & _BLOCK_CODES else block_code
+        rate = max(1.0, rate * decay)
+
+    return {"skip": True, "last_rate": rate, "block_code": block_code}
+
+
 def _is_dead_endpoint_body(text: str) -> bool:
     """Return True if *text* (raw HTTP response body) indicates a dead or
     non-existent endpoint — i.e. the server is serving a 404-equivalent page
@@ -17511,6 +17579,56 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             "INFO",
         )
         feroxbuster = None
+    # ── Adaptive WAF rate-limit probe ────────────────────────────────────
+    _fer_rate_flag: "list[str]" = []
+    if feroxbuster and not _recon_cdn and Path(wordlist).exists():
+        vc.log("[recon] Pre-flight rate-limit probe for feroxbuster ...", "INFO")
+        try:
+            _rl_result = _probe_waf_rate_limit(_recon_origin, sess, timeout)
+            if _rl_result and _rl_result.get("skip"):
+                _rl_code = _rl_result.get("block_code", 403)
+                vc.log(
+                    f"[recon] Rate-limiting persists after 10 back-off attempts "
+                    f"(HTTP {_rl_code}) — skipping feroxbuster",
+                    "WARNING",
+                )
+                out.add_finding(
+                    title="Discovery: WAF Rate Limiting Detected",
+                    url=_recon_origin, port=target["port"], risk="INFO",
+                    description=(
+                        f"The target or an upstream WAF/load-balancer is rate-limiting "
+                        f"rapid requests (HTTP {_rl_code}). A pre-flight burst probe "
+                        f"detected that sequential requests degrade from the expected "
+                        f"baseline to {_rl_code} responses. After 10 adaptive rate-down "
+                        f"attempts (from 50 req/s down to ~{_rl_result.get('last_rate', 1):.1f} "
+                        f"req/s) the throttling persisted. Feroxbuster directory discovery "
+                        f"has been skipped to avoid generating thousands of false-positive "
+                        f"403 results and risking an IP block."
+                    ),
+                    output=f"Block code: HTTP {_rl_code}\nFinal rate attempted: {_rl_result.get('last_rate', 1):.1f} req/s",
+                    sources="fracture-recon", service=target.get("scheme", "https"),
+                    affected=_recon_origin,
+                    owasp="A05:2025 Security Misconfiguration", nist="SC-5",
+                    command="GET (burst probe with random UUID paths)",
+                    remediation=(
+                        "This is an informational finding indicating the target's "
+                        "rate-limiting posture. If directory discovery is required, "
+                        "consider allowlisting the scanner IP in the WAF/load-balancer "
+                        "for the duration of the authorised engagement, or use a slower "
+                        "manual approach."
+                    ),
+                )
+                feroxbuster = None
+            elif _rl_result and _rl_result.get("rate_limit"):
+                _safe_rate = _rl_result["rate_limit"]
+                vc.log(
+                    f"[recon] Rate-limiting detected — feroxbuster will use "
+                    f"--rate-limit {_safe_rate}",
+                    "INFO",
+                )
+                _fer_rate_flag = ["--rate-limit", str(_safe_rate)]
+        except Exception as _rl_exc:
+            vc.log(f"[recon] Rate-limit probe failed: {_rl_exc}", "WARNING")
     if feroxbuster and Path(wordlist).exists():
         _fer_subdir = out.root / phase / "feroxbuster" / target["hostname"]
         _fer_subdir.mkdir(parents=True, exist_ok=True)
@@ -17528,7 +17646,9 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             "--output", str(fer_out), "--insecure",
             "--auto-tune", "--time-limit", "4m",
         ]
-        if _recon_cdn:
+        if _fer_rate_flag:
+            cmd += _fer_rate_flag
+        elif _recon_cdn:
             cmd += ["--rate-limit", "25"]
         cmd += _buster_auth_flags(sess)
         _fer_ua = _subprocess_ua(sess)
