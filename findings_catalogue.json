@@ -1572,7 +1572,7 @@
     },
     {
       "id": "FR-034",
-      "title": "Sensitive File Exposed: Admin Interface Exposed",
+      "title": "Admin Endpoint Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9164,7 +9164,7 @@
     },
     {
       "id": "FR-163",
-      "title": "Uncategorized: FFUF — Administrative Path Discovered",
+      "title": "Admin Endpoint Exposed: Administrative Path Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -12929,7 +12929,7 @@
     },
     {
       "id": "FR-223",
-      "title": "Debug Endpoint Exposed: Admin Panel Exposed",
+      "title": "Admin Endpoint Exposed: Admin Panel",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -12976,7 +12976,7 @@
     },
     {
       "id": "FR-224",
-      "title": "Debug Endpoint Exposed: Exposed Admin/Debug Endpoint",
+      "title": "Admin Endpoint Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13777,7 +13777,7 @@
     },
     {
       "id": "FR-233",
-      "title": "Session: Active Management Interface Detected",
+      "title": "Admin Endpoint Exposed: Management Interface Detected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22790,7 +22790,7 @@
     },
     {
       "id": "FR-341",
-      "title": "Debug Endpoint Exposed: Admin Panel Exposed: {apath}",
+      "title": "Admin Endpoint Exposed: {apath}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22946,7 +22946,7 @@
     },
     {
       "id": "FR-345",
-      "title": "Insecure Protocol Detected: Deprecated Protocol Enabled: {_tsf_proto}",
+      "title": "Deprecated Protocol Enabled: {_tsf_proto}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23024,7 +23024,7 @@
     },
     {
       "id": "FR-347",
-      "title": "Debug Endpoint Exposed: Exposed Admin/Debug Endpoint: {path}",
+      "title": "Admin Endpoint Exposed: {path}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23765,7 +23765,7 @@
     },
     {
       "id": "FR-366",
-      "title": "Information Disclosure: Software Version Disclosed: {_vname} {_vver}",
+      "title": "Software Version Detected: {_vname} {_vver}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -29234,7 +29234,7 @@
     },
     {
       "id": "FR-471",
-      "title": "Debug Endpoint Exposed: Exposed Admin/Debug Endpoint: /_ray/api/health",
+      "title": "Debug Endpoint Exposed: Laravel Ray Health Endpoint Exposed",
       "aliases": [
         "Spatie Ray Debug Tool Exposed"
       ],
@@ -29295,7 +29295,7 @@
     },
     {
       "id": "FR-472",
-      "title": "Debug Endpoint Exposed: Exposed Admin/Debug Endpoint: Express.js Default Error",
+      "title": "Debug Endpoint Exposed: Express.js Default Error Page",
       "aliases": [
         "Express Default Error Handler"
       ],
@@ -29688,7 +29688,7 @@
     },
     {
       "id": "FR-479",
-      "title": "Debug Endpoint Exposed: Exposed Admin/Debug Endpoint: /_ignition/execute-solution",
+      "title": "Debug Endpoint Exposed: Laravel Ignition Execute-Solution Exposed",
       "aliases": [
         "Laravel Ignition RCE",
         "Ignition Error Page Exposed"
@@ -32675,6 +32675,92 @@
         "tilde_enum",
         "curl"
       ]
+    },
+    {
+      "id": "FR-523",
+      "title": "Debug Endpoint Exposed",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "cwe": [],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Remove debug endpoints from production deployments. Restrict access to any legitimate admin endpoints by IP allowlist and authentication.",
+      "remediation_component": "",
+      "remediation_category": "",
+      "remediation_effort": "",
+      "validation_tools": [],
+      "description": "A debug or administrative endpoint was found publicly accessible. These endpoints may expose configuration data, heap dumps, environment variables, or allow remote code execution.",
+      "impact": "",
+      "_x_owasp": "A05:2025",
+      "_x_nist": "CM-7",
+      "_x_sources": [
+        "fracture-discovery",
+        "fracture-recon"
+      ],
+      "_x_cves": [],
+      "_x_service": "http",
+      "_x_phase": "discovery",
+      "_x_remediation": "Remove debug endpoints from production deployments. Restrict access to any legitimate admin endpoints by IP allowlist and authentication."
+    },
+    {
+      "id": "FR-524",
+      "title": "Debug Endpoint Exposed: {path}",
+      "aliases": [],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "cwe": [],
+      "cve_examples": [],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [],
+      "iso_27002": [],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "",
+      "remediation_component": "",
+      "remediation_category": "",
+      "remediation_effort": "",
+      "validation_tools": [],
+      "description": "",
+      "impact": "",
+      "_scaffold_from": "fracture.py:19351",
+      "_template": true
     }
   ]
 }

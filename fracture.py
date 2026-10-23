@@ -17007,7 +17007,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     _admin_rq, _admin_rp = _save_http_evidence(out, phase, f"admin_{_admin_safe}", r)
                     _admin_full_url = _adm_base.rstrip("/") + apath
                     out.add_finding(
-                        title=f"Admin Panel Exposed: {_adm_full_path}",
+                        title=f"Admin Endpoint Exposed: {_adm_full_path}",
                         url=_admin_full_url, port=target["port"], risk=_admin_risk,
                         description=_admin_desc,
                         output=f"GET {_adm_full_path} → {r.status_code}",
@@ -19639,14 +19639,10 @@ _TLS_VULN_PATTERNS = {
     # affected_cipher is non-empty only for weak cipher entries; callers use it
     # to emit title="SSL/TLS Ciphers: Obsolete Ciphers" with the cipher type in affected.
     # Risk levels based on NVD CVSS scores and pentest industry consensus.
-    "Deprecated Protocol Enabled: SSLv2":   (re.compile(r'SSLv2\s+enabled|Accepted\s+SSLv2', re.I),   "CRITICAL", "CVE-2016-0800", ""),
-    "Deprecated Protocol Enabled: SSLv3":   (re.compile(r'SSLv3\s+enabled|Accepted\s+SSLv3', re.I),   "HIGH",     "CVE-2014-3566", ""),
-    # TLSv1.0: MEDIUM — BEAST (CVE-2011-3389, CVSS 4.3) is largely mitigated by browser 1/n-1 splitting;
-    # non-trivially exploitable in practice. PCI DSS prohibits it post-2018. CWE-326.
-    "Deprecated Protocol Enabled: TLSv1.0": (re.compile(r'TLSv1\.0\s+enabled|Accepted\s+TLSv1\.0\b', re.I), "MEDIUM", "CVE-2011-3389", ""),
-    # TLSv1.1: MEDIUM — deprecated per RFC 8996 (2021); no forward secrecy; SHA-1 integrity.
-    # No single exploited CVE but formally deprecated and prohibited by PCI DSS. CWE-326.
-    "Deprecated Protocol Enabled: TLSv1.1": (re.compile(r'TLSv1\.1\s+enabled|Accepted\s+TLSv1\.1', re.I), "MEDIUM", "", ""),
+    "Deprecated Protocol Enabled: SSLv2":   (re.compile(r'SSLv2\s+enabled|Accepted\s+SSLv2', re.I),   "HIGH", "CVE-2016-0800", ""),
+    "Deprecated Protocol Enabled: SSLv3":   (re.compile(r'SSLv3\s+enabled|Accepted\s+SSLv3', re.I),   "MEDIUM", "CVE-2014-3566", ""),
+    "Deprecated Protocol Enabled: TLSv1.0": (re.compile(r'TLSv1\.0\s+enabled|Accepted\s+TLSv1\.0\b', re.I), "LOW", "CVE-2011-3389", ""),
+    "Deprecated Protocol Enabled: TLSv1.1": (re.compile(r'TLSv1\.1\s+enabled|Accepted\s+TLSv1\.1', re.I), "LOW", "", ""),
     # RC4: MEDIUM — statistical bias (CVE-2013-2566 CVSS 4.3); Bar Mitzvah attack (CVE-2015-2808 CVSS 4.3).
     # RFC 7465 prohibits RC4 in TLS. CWE-327.
     "Weak Cipher Identified: RC4":          (re.compile(r'\bRC4\b', re.I),          "MEDIUM",   "CVE-2013-2566, CVE-2015-2808", "RC4"),
@@ -20406,13 +20402,13 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                                     or "connect timeout" in _tsf_finding_lo):
                                 continue
                             _tsf_proto = _TESTSSL_PROTO_IDS[_tsf_id]
-                            _tsf_title = f"Insecure Protocol Detected: Deprecated Protocol Enabled: {_tsf_proto}"
+                            _tsf_title = f"Deprecated Protocol Enabled: {_tsf_proto}"
                             if "SSLv2" in _tsf_proto:
-                                _tsf_risk = "CRITICAL" if _tls_ext else "HIGH"
+                                _tsf_risk = "HIGH"
                             elif "SSLv3" in _tsf_proto:
-                                _tsf_risk = "HIGH" if _tls_ext else "MEDIUM"
+                                _tsf_risk = "MEDIUM"
                             else:
-                                _tsf_risk = "MEDIUM" if _tls_ext else "LOW"
+                                _tsf_risk = "LOW"
                             _tsf_cve   = _TESTSSL_CVES_JSON.get(_tsf_id, "")
                         else:
                             _tsf_cve = _TESTSSL_CVES_JSON.get(_tsf_id, "")
@@ -30472,7 +30468,7 @@ _NIKTO_NORM: "list[tuple]" = [
      "A05:2025 Security Misconfiguration", "CM-7",
      "Remove backup files from production web roots."),
     (r"(?:admin|administrator|manager|console|dashboard).*(?:found|accessible|interface|panel)",
-     "Debug Endpoint Exposed: Admin Panel Exposed", "HIGH",
+     "Admin Endpoint Exposed: Admin Panel", "HIGH",
      "A05:2025 Security Misconfiguration", "AC-3",
      "Restrict admin interfaces by IP allowlist or VPN."),
     (r"/icons/(?:README|small|apache_pb\b)",
@@ -30775,7 +30771,7 @@ def _normalize_nikto(vuln: dict) -> dict:
         if _rx.search(msg):
             if _risk == "DROP":
                 return None
-            if _title == "Debug Endpoint Exposed: Admin Panel Exposed" and _nik_url:
+            if _title == "Admin Endpoint Exposed: Admin Panel" and _nik_url:
                 _url_parts = _nik_url.lower().replace("/", " ").replace("-", " ").replace("_", " ").split()
                 if not (_ADMIN_PATH_KEYWORDS & set(_url_parts)):
                     return {"title": "Discovery: Login Page",
@@ -30924,7 +30920,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Remove the X-AspNet-Version header via web.config."),
     # ── Exposed panels / admin ──
     (r"^exposed-panels?/|admin-panel|phpmyadmin|adminer|grafana-default|jenkins",
-     "Debug Endpoint Exposed: Admin Panel Exposed", "HIGH",
+     "Admin Endpoint Exposed: Admin Panel", "HIGH",
      "A05:2025 Security Misconfiguration", "AC-3",
      "Restrict admin interfaces by IP allowlist or VPN."),
     # ── Sensitive files ──
@@ -31636,7 +31632,7 @@ def _normalize_nuclei(item: dict) -> dict:
             _panel_path = urllib.parse.urlparse(_matched).path or ""
         except Exception:
             pass
-        _panel_title = f"Admin Panel Exposed: {_panel_path}" if _panel_path else f"Admin Panel Exposed: {_name}"
+        _panel_title = f"Admin Endpoint Exposed: {_panel_path}" if _panel_path else f"Admin Endpoint Exposed: {_name}"
         return {
             "title": _panel_title, "risk": "HIGH",
             "description": _desc or f"{_name} detected by nuclei ({_tid}).",
@@ -31701,7 +31697,7 @@ def _normalize_nuclei(item: dict) -> dict:
                 if _clean.endswith(_sfx):
                     _clean = _clean[:-len(_sfx)].strip()
                     break
-            _ep_title = f"Admin Panel Exposed: {_ep_path}" if _ep_path else f"Admin Panel Exposed: {_clean}"
+            _ep_title = f"Admin Endpoint Exposed: {_ep_path}" if _ep_path else f"Admin Endpoint Exposed: {_clean}"
             return {
                 "title": _ep_title, "risk": _sev or "MEDIUM",
                 "description": _desc or f"{_name} ({_tid})",
@@ -35053,7 +35049,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
         out.add_finding(
-            title="Session: Active Management Interface Detected",
+            title="Admin Endpoint Exposed: Management Interface Detected",
             url=_sess_mgmt_found, port=target["port"], risk="INFO",
             description=(
                 f"An active session management endpoint was found at "
@@ -37503,12 +37499,19 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                         [{"url": probe_url, "req": str(_adm_rq), "resp": str(_adm_rp)}])
                 except Exception:
                     pass
+                _is_admin_ep = path.startswith("/admin")
+                if _is_admin_ep:
+                    _ep_cat = "Admin Endpoint Exposed"
+                    _ep_desc_kind = "administrative"
+                else:
+                    _ep_cat = "Debug Endpoint Exposed"
+                    _ep_desc_kind = "diagnostic"
                 out.add_finding(
-                    title=f"Debug Endpoint Exposed: Exposed Admin/Debug Endpoint: {path}",
+                    title=f"{_ep_cat}: {path}",
                     url=probe_url, port=target["port"], risk="HIGH",
                     description=(
                         f"The endpoint '{path}' returned HTTP 200 without authentication. "
-                        f"Exposed diagnostic endpoints can reveal environment variables, "
+                        f"Exposed {_ep_desc_kind} endpoints can reveal environment variables, "
                         f"heap dumps, log files, and configuration data."
                     ),
                     output=f"GET {probe_url} → HTTP {r.status_code}\n{r.text[:500]}",
@@ -37517,8 +37520,8 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                     affected=probe_url,
                     owasp="A09:2025 Security Logging and Monitoring Failures", nist="AU-9",
                     remediation=(
-                        "Restrict admin/actuator endpoints to localhost or protected networks. "
-                        "Require authentication for all diagnostic endpoints."
+                        f"Restrict {_ep_desc_kind} endpoints to localhost or protected networks. "
+                        f"Require authentication for all {_ep_desc_kind} endpoints."
                     ),
                 )
                 vc.log(f"[logging_monitoring] Exposed endpoint: {probe_url}", "SUCCESS")
