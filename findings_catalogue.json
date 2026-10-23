@@ -422,7 +422,7 @@
     },
     {
       "id": "FR-010",
-      "title": "WordPress X-Pingback Header Present",
+      "title": "Misconfigured Security Header: WordPress X-Pingback Header Present",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -468,7 +468,7 @@
     },
     {
       "id": "FR-011",
-      "title": "WordPress XML-RPC Interface Enabled",
+      "title": "RPC: WordPress XML-RPC Interface Enabled",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -514,7 +514,7 @@
     },
     {
       "id": "FR-012",
-      "title": "WordPress XML-RPC Multicall Brute-Force Vector",
+      "title": "RPC: WordPress XML-RPC Multicall Brute-Force Vector",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -560,7 +560,7 @@
     },
     {
       "id": "FR-013",
-      "title": "WordPress XML-RPC Pingback SSRF Vector",
+      "title": "RPC: WordPress XML-RPC Pingback SSRF Vector",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -606,7 +606,7 @@
     },
     {
       "id": "FR-014",
-      "title": "WordPress XML-RPC Interface Accessible",
+      "title": "RPC: WordPress XML-RPC Interface Accessible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -698,7 +698,7 @@
     },
     {
       "id": "FR-016",
-      "title": "WordPress Users Exposed via REST API",
+      "title": "Enumeration: WordPress Users Exposed via REST API",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -744,7 +744,7 @@
     },
     {
       "id": "FR-017",
-      "title": "WordPress Media Files Enumerable via REST API",
+      "title": "Enumeration: WordPress Media Files Enumerable via REST API",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -790,7 +790,7 @@
     },
     {
       "id": "FR-018",
-      "title": "WordPress User Enumeration via Author Archives",
+      "title": "Enumeration: WordPress User Enumeration via Author Archives",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -836,7 +836,7 @@
     },
     {
       "id": "FR-019",
-      "title": "WordPress Username Disclosed via oEmbed API",
+      "title": "Enumeration: WordPress Username Disclosed via oEmbed API",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -882,7 +882,7 @@
     },
     {
       "id": "FR-020",
-      "title": "WordPress Configuration Backup Exposed",
+      "title": "Sensitive File Exposed: WordPress Configuration Backup Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -928,7 +928,7 @@
     },
     {
       "id": "FR-021",
-      "title": "WordPress Plugin Detected",
+      "title": "Software Identified: WordPress Plugin Detected",
       "aliases": [
         "WordPress Plugins Detected in Page Source",
         "WordPress Plugin Detected"
@@ -1017,7 +1017,7 @@
     },
     {
       "id": "FR-022",
-      "title": "WordPress Theme Detected",
+      "title": "Software Identified: WordPress Theme Detected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1063,7 +1063,7 @@
     },
     {
       "id": "FR-023",
-      "title": "WordPress Debug Log Accessible",
+      "title": "Sensitive File Exposed: WordPress Debug Log Accessible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1201,7 +1201,7 @@
     },
     {
       "id": "FR-026",
-      "title": "Sitemap.xml Discovered",
+      "title": "Sensitive File Exposed: Sitemap.xml Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1432,7 +1432,7 @@
     },
     {
       "id": "FR-031",
-      "title": "WSDL/WADL Service Description Exposed",
+      "title": "Sensitive File Exposed: WSDL/WADL Service Description Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1525,7 +1525,7 @@
     },
     {
       "id": "FR-033",
-      "title": "Swagger/OpenAPI Documentation Exposed",
+      "title": "Sensitive File Exposed: Swagger/OpenAPI Documentation Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1572,7 +1572,7 @@
     },
     {
       "id": "FR-034",
-      "title": "Admin Interface Exposed",
+      "title": "Sensitive File Exposed: Admin Interface Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1618,7 +1618,7 @@
     },
     {
       "id": "FR-035",
-      "title": "Backup File Discovered",
+      "title": "Sensitive File Exposed: Backup File Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1664,7 +1664,7 @@
     },
     {
       "id": "FR-036",
-      "title": "Configuration File Exposed",
+      "title": "Sensitive File Exposed: Configuration File Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1710,7 +1710,7 @@
     },
     {
       "id": "FR-037",
-      "title": "Git Repository Exposed",
+      "title": "Sensitive File Exposed: Git Repository Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1756,7 +1756,7 @@
     },
     {
       "id": "FR-038",
-      "title": "SVN/CVS Repository Exposed",
+      "title": "Sensitive File Exposed: SVN/CVS Repository Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1802,7 +1802,7 @@
     },
     {
       "id": "FR-039",
-      "title": "Log File Accessible",
+      "title": "Sensitive File Exposed: Log File Accessible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1848,7 +1848,7 @@
     },
     {
       "id": "FR-040",
-      "title": "Database File Exposed",
+      "title": "Database: Database File Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1894,7 +1894,7 @@
     },
     {
       "id": "FR-041",
-      "title": "TLS Certificate Expired",
+      "title": "SSL/TLS Certificate: TLS Certificate Expired",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1940,7 +1940,7 @@
     },
     {
       "id": "FR-042",
-      "title": "TLS Certificate Not Yet Valid",
+      "title": "SSL/TLS Certificate: TLS Certificate Not Yet Valid",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -1986,7 +1986,7 @@
     },
     {
       "id": "FR-043",
-      "title": "TLS Certificate Hostname Mismatch",
+      "title": "SSL/TLS Certificate: TLS Certificate Hostname Mismatch",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2032,7 +2032,7 @@
     },
     {
       "id": "FR-044",
-      "title": "TLS Certificate Self-Signed",
+      "title": "SSL/TLS Certificate: TLS Certificate Self-Signed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2078,7 +2078,7 @@
     },
     {
       "id": "FR-045",
-      "title": "Weak TLS Protocol Supported (SSLv2/SSLv3/TLS 1.0/TLS 1.1)",
+      "title": "Insecure Protocol Detected: Weak TLS Protocol Supported (SSLv2/SSLv3/TLS 1.0/TLS 1.1)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2130,7 +2130,7 @@
     },
     {
       "id": "FR-046",
-      "title": "Weak Cipher Suite Supported",
+      "title": "SSL/TLS Ciphers: Weak Cipher Suite Supported",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2176,7 +2176,7 @@
     },
     {
       "id": "FR-047",
-      "title": "TLS BEAST Vulnerability",
+      "title": "SSL/TLS Vulnerability: TLS BEAST Vulnerability",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2226,7 +2226,7 @@
     },
     {
       "id": "FR-048",
-      "title": "TLS POODLE Vulnerability",
+      "title": "SSL/TLS Vulnerability: TLS POODLE Vulnerability",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2276,7 +2276,7 @@
     },
     {
       "id": "FR-049",
-      "title": "TLS DROWN Vulnerability",
+      "title": "SSL/TLS Vulnerability: TLS DROWN Vulnerability",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2326,7 +2326,7 @@
     },
     {
       "id": "FR-050",
-      "title": "TLS HEARTBLEED Vulnerability",
+      "title": "SSL/TLS Vulnerability: TLS HEARTBLEED Vulnerability",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2376,7 +2376,7 @@
     },
     {
       "id": "FR-051",
-      "title": "TLS LOGJAM Vulnerability",
+      "title": "SSL/TLS Vulnerability: TLS LOGJAM Vulnerability",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2426,7 +2426,7 @@
     },
     {
       "id": "FR-052",
-      "title": "TLS FREAK Vulnerability",
+      "title": "SSL/TLS Vulnerability: TLS FREAK Vulnerability",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2476,7 +2476,7 @@
     },
     {
       "id": "FR-053",
-      "title": "TLS ROBOT Vulnerability",
+      "title": "SSL/TLS Vulnerability: TLS ROBOT Vulnerability",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2526,7 +2526,7 @@
     },
     {
       "id": "FR-054",
-      "title": "TLS CCS Injection Vulnerability",
+      "title": "SSL/TLS Vulnerability: TLS CCS Injection Vulnerability",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2576,7 +2576,7 @@
     },
     {
       "id": "FR-055",
-      "title": "TLS Ticketbleed Vulnerability",
+      "title": "SSL/TLS Vulnerability: TLS Ticketbleed Vulnerability",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2626,7 +2626,7 @@
     },
     {
       "id": "FR-056",
-      "title": "TLS SWEET32 Vulnerability",
+      "title": "SSL/TLS Vulnerability: TLS SWEET32 Vulnerability",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2676,7 +2676,7 @@
     },
     {
       "id": "FR-057",
-      "title": "HTTP Strict Transport Security (HSTS) Not Enforced",
+      "title": "Missing Security Header: HTTP Strict Transport Security (HSTS) Not Enforced",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2725,7 +2725,7 @@
     },
     {
       "id": "FR-058",
-      "title": "TLS Certificate Uses Weak Signature Algorithm (MD5/SHA-1)",
+      "title": "SSL/TLS Certificate: TLS Certificate Uses Weak Signature Algorithm (MD5/SHA-1)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2771,7 +2771,7 @@
     },
     {
       "id": "FR-059",
-      "title": "TLS Certificate Short Key Length",
+      "title": "SSL/TLS Certificate: TLS Certificate Short Key Length",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2817,7 +2817,7 @@
     },
     {
       "id": "FR-060",
-      "title": "Subdomain Takeover Vulnerability",
+      "title": "DNS Vulnerability: Subdomain Takeover Vulnerability",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2863,7 +2863,7 @@
     },
     {
       "id": "FR-061",
-      "title": "Missing Content-Security-Policy Header",
+      "title": "Missing Security Header: Missing Content-Security-Policy Header",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2909,7 +2909,7 @@
     },
     {
       "id": "FR-062",
-      "title": "Missing X-Frame-Options Header",
+      "title": "Missing Security Header: Missing X-Frame-Options Header",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -2955,7 +2955,7 @@
     },
     {
       "id": "FR-063",
-      "title": "Missing X-Content-Type-Options Header",
+      "title": "Missing Security Header: Missing X-Content-Type-Options Header",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3001,7 +3001,7 @@
     },
     {
       "id": "FR-064",
-      "title": "Missing Referrer-Policy Header",
+      "title": "Missing Security Header: Missing Referrer-Policy Header",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3047,7 +3047,7 @@
     },
     {
       "id": "FR-065",
-      "title": "Missing Permissions-Policy Header",
+      "title": "Missing Security Header: Missing Permissions-Policy Header",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3093,7 +3093,7 @@
     },
     {
       "id": "FR-066",
-      "title": "Missing Strict-Transport-Security Header",
+      "title": "Missing Security Header: Missing Strict-Transport-Security Header",
       "aliases": [
         "HTTP Strict Transport Security Absent",
         "Missing Strict-Transport-Security Header",
@@ -3196,7 +3196,7 @@
     },
     {
       "id": "FR-067",
-      "title": "Insecure Content-Security-Policy (Unsafe-Inline Allowed)",
+      "title": "Permissive Security Header: Insecure Content-Security-Policy (Unsafe-Inline Allowed)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3242,7 +3242,7 @@
     },
     {
       "id": "FR-068",
-      "title": "Insecure Content-Security-Policy (Wildcard Source)",
+      "title": "Permissive Security Header: Insecure Content-Security-Policy (Wildcard Source)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3429,7 +3429,7 @@
     },
     {
       "id": "FR-072",
-      "title": "JWT Token in Local Storage",
+      "title": "JWT: JWT Token in Local Storage",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3475,7 +3475,7 @@
     },
     {
       "id": "FR-073",
-      "title": "JWT Algorithm Confusion (None Algorithm)",
+      "title": "Authentication Bypass: JWT Algorithm Confusion (None Algorithm)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3521,7 +3521,7 @@
     },
     {
       "id": "FR-074",
-      "title": "JWT Algorithm Confusion (RS256 to HS256)",
+      "title": "JWT: JWT Algorithm Confusion (RS256 to HS256)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3567,7 +3567,7 @@
     },
     {
       "id": "FR-075",
-      "title": "JWT Weak HMAC Secret",
+      "title": "JWT: JWT Weak HMAC Secret",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3613,7 +3613,7 @@
     },
     {
       "id": "FR-076",
-      "title": "JWT Signature Not Verified",
+      "title": "JWT: JWT Signature Not Verified",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -3705,7 +3705,7 @@
     },
     {
       "id": "FR-078",
-      "title": "JWT Token Accepted After Expiry",
+      "title": "JWT: JWT Token Accepted After Expiry",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5307,7 +5307,7 @@
     },
     {
       "id": "FR-098",
-      "title": "HTML Comment Discloses Sensitive Information",
+      "title": "Sensitive File Exposed: HTML Comment Discloses Sensitive Information",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5746,7 +5746,7 @@
     },
     {
       "id": "FR-104",
-      "title": "Broken Authentication — Default Credentials",
+      "title": "Authentication: Default Credentials Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5792,7 +5792,7 @@
     },
     {
       "id": "FR-105",
-      "title": "Authentication Bypass via SQL Injection",
+      "title": "Authentication Bypass: Authentication Bypass via SQL Injection",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5838,7 +5838,7 @@
     },
     {
       "id": "FR-106",
-      "title": "Authentication Bypass via Response Manipulation",
+      "title": "Authentication Bypass: Authentication Bypass via Response Manipulation",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5884,7 +5884,7 @@
     },
     {
       "id": "FR-107",
-      "title": "Authentication Bypass via Direct URL Access",
+      "title": "Authentication Bypass: Authentication Bypass via Direct URL Access",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5930,7 +5930,7 @@
     },
     {
       "id": "FR-108",
-      "title": "Password Reset Token Weak or Predictable",
+      "title": "Authentication: Password Reset Token Weak or Predictable",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -5977,7 +5977,7 @@
     },
     {
       "id": "FR-109",
-      "title": "Sensitive File Exposed — /etc/passwd",
+      "title": "Sensitive File Exposed: Sensitive File Exposed — /etc/passwd",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6069,7 +6069,7 @@
     },
     {
       "id": "FR-111",
-      "title": "Sensitive File Exposed — Private Key",
+      "title": "Sensitive File Exposed: Sensitive File Exposed — Private Key",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6115,7 +6115,7 @@
     },
     {
       "id": "FR-112",
-      "title": "Sensitive File Exposed — phpinfo()",
+      "title": "Sensitive File Exposed: Sensitive File Exposed — phpinfo()",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6161,7 +6161,7 @@
     },
     {
       "id": "FR-113",
-      "title": "Sensitive File Exposed — Composer/NPM Metadata",
+      "title": "Sensitive File Exposed: Sensitive File Exposed — Composer/NPM Metadata",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6207,7 +6207,7 @@
     },
     {
       "id": "FR-114",
-      "title": "Vulnerability Scanner Finding — Known CVE",
+      "title": "Software Version Detected: Vulnerability Scanner Finding — Known CVE",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6253,7 +6253,7 @@
     },
     {
       "id": "FR-115",
-      "title": "Vulnerability Scanner Finding — Exposed Panel",
+      "title": "Unauthenticated Access: Vulnerability Scanner Finding — Exposed Panel",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6345,7 +6345,7 @@
     },
     {
       "id": "FR-117",
-      "title": "GraphQL Introspection Enabled",
+      "title": "GraphQL: GraphQL Introspection Enabled",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6391,7 +6391,7 @@
     },
     {
       "id": "FR-118",
-      "title": "GraphQL Batch Query Attack",
+      "title": "GraphQL: GraphQL Batch Query Attack",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6437,7 +6437,7 @@
     },
     {
       "id": "FR-119",
-      "title": "GraphQL Deeply Nested Query (DoS)",
+      "title": "GraphQL: GraphQL Deeply Nested Query (DoS)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6483,7 +6483,7 @@
     },
     {
       "id": "FR-120",
-      "title": "GraphQL Field Suggestion Enabled",
+      "title": "GraphQL: GraphQL Field Suggestion Enabled",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6529,7 +6529,7 @@
     },
     {
       "id": "FR-121",
-      "title": "Insufficient Logging and Monitoring",
+      "title": "Authentication: Insufficient Logging and Monitoring",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6621,7 +6621,7 @@
     },
     {
       "id": "FR-123",
-      "title": "No Account Lockout Mechanism",
+      "title": "Authentication: No Account Lockout Mechanism",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6667,7 +6667,7 @@
     },
     {
       "id": "FR-124",
-      "title": "Username Enumeration via Login Response",
+      "title": "Enumeration: Username Enumeration via Login Response",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6714,7 +6714,7 @@
     },
     {
       "id": "FR-125",
-      "title": "Username Enumeration via Password Reset",
+      "title": "Enumeration: Username Enumeration via Password Reset",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6760,7 +6760,7 @@
     },
     {
       "id": "FR-126",
-      "title": "Username Enumeration via Registration",
+      "title": "Enumeration: Username Enumeration via Registration",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6806,7 +6806,7 @@
     },
     {
       "id": "FR-127",
-      "title": "Weak Password Policy",
+      "title": "Authentication: Weak Password Policy",
       "aliases": [
         "Password Length Too Short",
         "Missing Password Strength Enforcement",
@@ -6910,7 +6910,7 @@
     },
     {
       "id": "FR-128",
-      "title": "Multi-Factor Authentication Not Enforced",
+      "title": "Authentication: Multi-Factor Authentication Not Enforced",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -6956,7 +6956,7 @@
     },
     {
       "id": "FR-129",
-      "title": "Insecure Direct Object Reference (IDOR)",
+      "title": "Broken Access Control: Insecure Direct Object Reference (IDOR)",
       "aliases": [
         "Unauthorized Object Access",
         "Sequential ID Enumeration",
@@ -7082,7 +7082,7 @@
     },
     {
       "id": "FR-130",
-      "title": "Horizontal Privilege Escalation",
+      "title": "Broken Access Control: Horizontal Privilege Escalation",
       "aliases": [
         "Cross-Account Data Access",
         "Horizontal Privilege Escalation",
@@ -7184,7 +7184,7 @@
     },
     {
       "id": "FR-131",
-      "title": "Vertical Privilege Escalation",
+      "title": "Broken Access Control: Vertical Privilege Escalation",
       "aliases": [
         "Vertical Privilege Escalation",
         "Unauthorized Admin Access",
@@ -7300,7 +7300,7 @@
     },
     {
       "id": "FR-132",
-      "title": "Missing Function-Level Access Control",
+      "title": "Broken Access Control: Missing Function-Level Access Control",
       "aliases": [
         "API Function Authorization Bypass",
         "Admin Endpoint Exposed to Low-Privilege Users",
@@ -7417,7 +7417,7 @@
     },
     {
       "id": "FR-133",
-      "title": "Session Fixation",
+      "title": "Session: Session Fixation",
       "aliases": [
         "Cookie Session Fixation",
         "Session Token Not Rotated After Login",
@@ -7528,7 +7528,7 @@
     },
     {
       "id": "FR-134",
-      "title": "Session Token in URL",
+      "title": "Session: Session Token in URL",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7574,7 +7574,7 @@
     },
     {
       "id": "FR-135",
-      "title": "Long-Lived Session Without Expiration",
+      "title": "Session: Long-Lived Session Without Expiration",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7620,7 +7620,7 @@
     },
     {
       "id": "FR-136",
-      "title": "Session Not Invalidated on Logout",
+      "title": "Session: Session Not Invalidated on Logout",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7666,7 +7666,7 @@
     },
     {
       "id": "FR-137",
-      "title": "Cross-Site Request Forgery (CSRF)",
+      "title": "Authentication: Cross-Site Request Forgery (CSRF)",
       "aliases": [
         "XSRF",
         "Cross-Site Request Forgery on State-Changing Endpoint",
@@ -7767,7 +7767,7 @@
     },
     {
       "id": "FR-138",
-      "title": "CSRF Token Not Validated Server-Side",
+      "title": "Authentication: CSRF Token Not Validated Server-Side",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -7813,7 +7813,7 @@
     },
     {
       "id": "FR-139",
-      "title": "Cross-User Data Leakage",
+      "title": "Broken Access Control: Cross-User Data Leakage",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8304,7 +8304,7 @@
     },
     {
       "id": "FR-147",
-      "title": "Mass Assignment Vulnerability",
+      "title": "Broken Access Control: Mass Assignment Vulnerability",
       "aliases": [
         "Over-Posted Parameters",
         "Mass Assignment — Accepted",
@@ -8419,7 +8419,7 @@
     },
     {
       "id": "FR-148",
-      "title": "Mass Assignment — Privilege Escalation via Role Field",
+      "title": "Broken Access Control: Mass Assignment — Privilege Escalation via Role Field",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8465,7 +8465,7 @@
     },
     {
       "id": "FR-149",
-      "title": "Broken Object-Level Authorization (BOLA) in API",
+      "title": "Broken Access Control: Broken Object-Level Authorization (BOLA) in API",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8512,7 +8512,7 @@
     },
     {
       "id": "FR-150",
-      "title": "Broken Function-Level Authorization (BFLA) in API",
+      "title": "Broken Access Control: Broken Function-Level Authorization (BFLA) in API",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8655,7 +8655,7 @@
     },
     {
       "id": "FR-152",
-      "title": "CORS Misconfiguration — Arbitrary Origin Reflected",
+      "title": "Permissive Security Header: CORS Misconfiguration — Arbitrary Origin Reflected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8702,7 +8702,7 @@
     },
     {
       "id": "FR-153",
-      "title": "CORS Misconfiguration — Null Origin Allowed",
+      "title": "Permissive Security Header: CORS Misconfiguration — Null Origin Allowed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8748,7 +8748,7 @@
     },
     {
       "id": "FR-154",
-      "title": "Business Logic Flaw — Negative Value Accepted",
+      "title": "Business Logic: Business Logic Flaw — Negative Value Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8794,7 +8794,7 @@
     },
     {
       "id": "FR-155",
-      "title": "Business Logic Flaw — Price Manipulation",
+      "title": "Business Logic: Business Logic Flaw — Price Manipulation",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8840,7 +8840,7 @@
     },
     {
       "id": "FR-156",
-      "title": "Business Logic Flaw — Coupon/Discount Abuse",
+      "title": "Business Logic: Business Logic Flaw — Coupon/Discount Abuse",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8886,7 +8886,7 @@
     },
     {
       "id": "FR-157",
-      "title": "Business Logic Flaw — Workflow Step Bypass",
+      "title": "Authentication Bypass: Business Logic Flaw — Workflow Step Bypass",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8932,7 +8932,7 @@
     },
     {
       "id": "FR-158",
-      "title": "Business Logic Flaw — Race Condition",
+      "title": "Business Logic: Business Logic Flaw — Race Condition",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -8978,7 +8978,7 @@
     },
     {
       "id": "FR-159",
-      "title": "Rate Limiting Not Enforced on Sensitive Endpoint",
+      "title": "Authentication: Rate Limiting Not Enforced on Sensitive Endpoint",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9025,7 +9025,7 @@
     },
     {
       "id": "FR-160",
-      "title": "Insecure Direct Object Reference in File Download",
+      "title": "Broken Access Control: Insecure Direct Object Reference in File Download",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9164,7 +9164,7 @@
     },
     {
       "id": "FR-163",
-      "title": "FFUF — Administrative Path Discovered",
+      "title": "Unauthenticated Access: FFUF — Administrative Path Discovered",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9210,7 +9210,7 @@
     },
     {
       "id": "FR-164",
-      "title": "shcheck — Missing Security Header",
+      "title": "Missing Security Header: shcheck — Missing Security Header",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9348,7 +9348,7 @@
     },
     {
       "id": "FR-167",
-      "title": "TLS Certificate Transparency Log Entry",
+      "title": "SSL/TLS Certificate: TLS Certificate Transparency Log Entry",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9395,7 +9395,7 @@
     },
     {
       "id": "FR-168",
-      "title": "Authentication — Concurrent Session Not Restricted",
+      "title": "Session: Authentication — Concurrent Session Not Restricted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9667,7 +9667,7 @@
     },
     {
       "id": "FR-173",
-      "title": "Subdomain Takeover — S3 Bucket Not Found",
+      "title": "DNS Vulnerability: Subdomain Takeover — S3 Bucket Not Found",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9713,7 +9713,7 @@
     },
     {
       "id": "FR-174",
-      "title": "Subdomain Takeover — GitHub Pages",
+      "title": "DNS Vulnerability: Subdomain Takeover — GitHub Pages",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9759,7 +9759,7 @@
     },
     {
       "id": "FR-175",
-      "title": "Subdomain Takeover — Heroku",
+      "title": "DNS Vulnerability: Subdomain Takeover — Heroku",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -9943,7 +9943,7 @@
     },
     {
       "id": "FR-179",
-      "title": "GraphQL Authorization Bypass",
+      "title": "Authentication Bypass: GraphQL Authorization Bypass",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10036,7 +10036,7 @@
     },
     {
       "id": "FR-181",
-      "title": "Access Matrix — Unauthenticated Access to Authenticated Endpoint",
+      "title": "Broken Access Control: Access Matrix — Unauthenticated Access to Authenticated Endpoint",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10082,7 +10082,7 @@
     },
     {
       "id": "FR-182",
-      "title": "Access Matrix — Lower-Role Access to Higher-Role Endpoint",
+      "title": "Broken Access Control: Access Matrix — Lower-Role Access to Higher-Role Endpoint",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10128,7 +10128,7 @@
     },
     {
       "id": "FR-183",
-      "title": "Access Matrix — User A Can Read User B Data",
+      "title": "Broken Access Control: Access Matrix — User A Can Read User B Data",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10174,7 +10174,7 @@
     },
     {
       "id": "FR-184",
-      "title": "Access Matrix — User A Can Modify User B Data",
+      "title": "Broken Access Control: Access Matrix — User A Can Modify User B Data",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10220,7 +10220,7 @@
     },
     {
       "id": "FR-185",
-      "title": "Access Matrix — Admin Functionality Accessible by Regular User",
+      "title": "Broken Access Control: Access Matrix — Admin Functionality Accessible by Regular User",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10266,7 +10266,7 @@
     },
     {
       "id": "FR-186",
-      "title": "HTTP Security Header — X-Frame-Options Incorrectly Configured",
+      "title": "Misconfigured Security Header: HTTP Security Header — X-Frame-Options Incorrectly Configured",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10312,7 +10312,7 @@
     },
     {
       "id": "FR-187",
-      "title": "Content-Security-Policy — Unsafe-Eval Allowed",
+      "title": "Permissive Security Header: Content-Security-Policy — Unsafe-Eval Allowed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10404,7 +10404,7 @@
     },
     {
       "id": "FR-189",
-      "title": "TLS OCSP Stapling Not Configured",
+      "title": "SSL/TLS Certificate: TLS OCSP Stapling Not Configured",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10543,7 +10543,7 @@
     },
     {
       "id": "FR-192",
-      "title": "Missing Rate Limiting on Password Reset",
+      "title": "Authentication: Missing Rate Limiting on Password Reset",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10589,7 +10589,7 @@
     },
     {
       "id": "FR-193",
-      "title": "Insecure Redirect After Authentication",
+      "title": "Authentication: Insecure Redirect After Authentication",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10636,7 +10636,7 @@
     },
     {
       "id": "FR-194",
-      "title": "Lack of Security.txt File",
+      "title": "Misconfigured Security Header: Lack of Security.txt File",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10733,7 +10733,7 @@
     },
     {
       "id": "FR-196",
-      "title": "CDN Active",
+      "title": "Discovery: CDN Active",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10779,7 +10779,7 @@
     },
     {
       "id": "FR-197",
-      "title": "WAF / Edge Security Platform Active",
+      "title": "Discovery: WAF / Edge Security Platform Active",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10825,7 +10825,7 @@
     },
     {
       "id": "FR-198",
-      "title": "WAF/CDN IP Block Detected",
+      "title": "Discovery: WAF/CDN IP Block Detected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10871,7 +10871,7 @@
     },
     {
       "id": "FR-199",
-      "title": "WAF/CDN Session Termination Detected",
+      "title": "Discovery: WAF/CDN Session Termination Detected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10917,7 +10917,7 @@
     },
     {
       "id": "FR-200",
-      "title": "WAF/CDN Challenge Page Active",
+      "title": "Discovery: WAF/CDN Challenge Page Active",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -10963,7 +10963,7 @@
     },
     {
       "id": "FR-201",
-      "title": "Potential CDN Origin Bypass",
+      "title": "Authentication Bypass: Potential CDN Origin Bypass",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -11326,7 +11326,7 @@
     },
     {
       "id": "FR-206",
-      "title": "Single Page Application Detected",
+      "title": "Discovery: Single Page Application Detected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -12254,7 +12254,7 @@
     },
     {
       "id": "FR-216",
-      "title": "Subdomain Takeover — Dangling CNAME",
+      "title": "DNS Vulnerability: Subdomain Takeover — Dangling CNAME",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -12300,7 +12300,7 @@
     },
     {
       "id": "FR-217",
-      "title": "Subdomain Takeover Indicator",
+      "title": "DNS Vulnerability: Subdomain Takeover Indicator",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -12346,7 +12346,7 @@
     },
     {
       "id": "FR-218",
-      "title": "DNS Zone Transfer Permitted (AXFR)",
+      "title": "DNS Information: DNS Zone Transfer Permitted (AXFR)",
       "aliases": [
         "DNS Zone Transfer Permitted (AXFR)"
       ],
@@ -12708,7 +12708,7 @@
     },
     {
       "id": "FR-221",
-      "title": "Sensitive File Exposed",
+      "title": "Sensitive File Exposed: Sensitive File Exposed",
       "aliases": [
         "Archive File Exposed",
         "Sensitive File Exposed",
@@ -12929,7 +12929,7 @@
     },
     {
       "id": "FR-223",
-      "title": "Admin Panel Exposed",
+      "title": "Debug Endpoint Exposed: Admin Panel Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -12976,7 +12976,7 @@
     },
     {
       "id": "FR-224",
-      "title": "Exposed Admin/Debug Endpoint",
+      "title": "Debug Endpoint Exposed: Exposed Admin/Debug Endpoint",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -13559,7 +13559,7 @@
     },
     {
       "id": "FR-231",
-      "title": "Authentication Method Identified",
+      "title": "Discovery: Authentication Method Identified",
       "aliases": [
         "Default Page Detected",
         "Default Webpage Detected",
@@ -14097,7 +14097,7 @@
     },
     {
       "id": "FR-237",
-      "title": "WordPress Users Exposed via REST API",
+      "title": "Enumeration: WordPress Users Exposed via REST API",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -14143,7 +14143,7 @@
     },
     {
       "id": "FR-238",
-      "title": "WordPress User Enumeration via Author Archives",
+      "title": "Enumeration: WordPress User Enumeration via Author Archives",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -14189,7 +14189,7 @@
     },
     {
       "id": "FR-239",
-      "title": "WordPress Debug Log Exposed",
+      "title": "Sensitive File Exposed: WordPress Debug Log Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -14235,7 +14235,7 @@
     },
     {
       "id": "FR-240",
-      "title": "WordPress wp-config.php Source Code Exposed",
+      "title": "Sensitive File Exposed: WordPress wp-config.php Source Code Exposed",
       "aliases": [
         "WordPress wp-config.php Source Code Exposed"
       ],
@@ -14682,7 +14682,7 @@
     },
     {
       "id": "FR-244",
-      "title": "WordPress Parent Theme Detected",
+      "title": "Software Identified: WordPress Parent Theme Detected",
       "aliases": [
         "WordPress Plugins Detected in Page Source",
         "WordPress Parent Theme Detected",
@@ -14788,7 +14788,7 @@
     },
     {
       "id": "FR-245",
-      "title": "WordPress Backup/Export File Exposed",
+      "title": "Sensitive File Exposed: WordPress Backup/Export File Exposed",
       "aliases": [
         "WordPress Backup/Export File Exposed"
       ],
@@ -14908,7 +14908,7 @@
     },
     {
       "id": "FR-246",
-      "title": "WordPress Configuration Backup Exposed",
+      "title": "Sensitive File Exposed: WordPress Configuration Backup Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -15061,7 +15061,7 @@
     },
     {
       "id": "FR-248",
-      "title": "PHP Error Log Exposed",
+      "title": "Sensitive File Exposed: PHP Error Log Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -15108,7 +15108,7 @@
     },
     {
       "id": "FR-249",
-      "title": "TimThumb Script Detected",
+      "title": "Web Vulnerability: TimThumb Script Detected",
       "aliases": [
         "TimThumb Script Detected"
       ],
@@ -15215,7 +15215,7 @@
     },
     {
       "id": "FR-250",
-      "title": "Sensitive WordPress Path Accessible",
+      "title": "Sensitive File Exposed: Sensitive WordPress Path Accessible",
       "aliases": [
         "Sensitive WordPress Path Accessible",
         "WordPress Vulnerability / Misconfiguration",
@@ -16022,7 +16022,7 @@
     },
     {
       "id": "FR-259",
-      "title": "TLS Version Identified",
+      "title": "Software Version Detected: TLS Version Identified",
       "aliases": [
         "Weak SSL/TLS",
         "POODLE Vulnerability",
@@ -16294,7 +16294,7 @@
     },
     {
       "id": "FR-261",
-      "title": "Heartbleed (CVE-2014-0160) Vulnerability Detected",
+      "title": "SSL/TLS Vulnerability: Heartbleed (CVE-2014-0160) Vulnerability Detected",
       "aliases": [
         "Heartbleed",
         "SSL/TLS Vulnerability: Heartbleed",
@@ -16426,7 +16426,7 @@
     },
     {
       "id": "FR-262",
-      "title": "SSL/TLS Grade",
+      "title": "SSL/TLS Grade: SSL/TLS Grade",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -16472,7 +16472,7 @@
     },
     {
       "id": "FR-263",
-      "title": "Missing Security Header",
+      "title": "Missing Security Header: Missing Security Header",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -16797,7 +16797,7 @@
     },
     {
       "id": "FR-270",
-      "title": "Missing Cache-Control on Sensitive Page",
+      "title": "Missing Security Header: Missing Cache-Control on Sensitive Page",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -16844,7 +16844,7 @@
     },
     {
       "id": "FR-271",
-      "title": "Misconfigured Expect-CT Header (max-age=0 with enforce)",
+      "title": "Misconfigured Security Header: Misconfigured Expect-CT Header (max-age=0 with enforce)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -16890,7 +16890,7 @@
     },
     {
       "id": "FR-272",
-      "title": "Endpoint-Specific Security Header Found",
+      "title": "Misconfigured Security Header: Endpoint-Specific Security Header Found",
       "aliases": [
         "Interesting Endpoint Discovered",
         "Wildcard (*) Detected",
@@ -19200,7 +19200,7 @@
     },
     {
       "id": "FR-294",
-      "title": "Credentials/Secret in JavaScript",
+      "title": "Information Disclosure: Credentials/Secret in JavaScript",
       "aliases": [
         "API Key in Client-Side JS",
         "Secret in Minified JavaScript",
@@ -19411,7 +19411,7 @@
     },
     {
       "id": "FR-296",
-      "title": "Weak or Default Credentials Accepted",
+      "title": "Authentication: Default Credentials Accepted",
       "aliases": [
         "Default Admin Credentials",
         "Default Username and Password",
@@ -19552,7 +19552,7 @@
     },
     {
       "id": "FR-297",
-      "title": "Missing Rate Limiting / Brute-Force Protection",
+      "title": "Authentication: Missing Rate Limiting / Brute-Force Protection",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19599,7 +19599,7 @@
     },
     {
       "id": "FR-298",
-      "title": "Insufficient Auth Failure Logging / No Brute-Force Detection",
+      "title": "Authentication: Insufficient Auth Failure Logging / No Brute-Force Detection",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19645,7 +19645,7 @@
     },
     {
       "id": "FR-299",
-      "title": "Timing Attack — Non-Constant-Time Authentication",
+      "title": "Authentication: Timing Attack — Non-Constant-Time Authentication",
       "aliases": [
         "Timing Attack — Non-Constant-Time Authentication"
       ],
@@ -19738,7 +19738,7 @@
     },
     {
       "id": "FR-300",
-      "title": "JWT None Algorithm Authentication Bypass",
+      "title": "Authentication Bypass: JWT None Algorithm Authentication Bypass",
       "aliases": [
         "JWT alg:none Vulnerability",
         "JWT RS256 to HS256 Confusion",
@@ -19854,7 +19854,7 @@
     },
     {
       "id": "FR-301",
-      "title": "JWT Vulnerability: 'none' Algorithm Accepted",
+      "title": "JWT: JWT Vulnerability: 'none' Algorithm Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19900,7 +19900,7 @@
     },
     {
       "id": "FR-302",
-      "title": "JWT Vulnerability Confirmed by jwt_tool",
+      "title": "JWT: JWT Vulnerability Confirmed by jwt_tool",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -19946,7 +19946,7 @@
     },
     {
       "id": "FR-303",
-      "title": "JWT — Missing Expiry Claim (No exp)",
+      "title": "JWT: JWT — Missing Expiry Claim (No exp)",
       "aliases": [
         "JWT — Missing Expiry Claim (No exp)"
       ],
@@ -20100,7 +20100,7 @@
     },
     {
       "id": "FR-305",
-      "title": "Potentially Predictable Session Token",
+      "title": "Session: Potentially Predictable Session Token",
       "aliases": [
         "Potentially Predictable Session Token",
         "Low-Entropy Session Token"
@@ -20209,7 +20209,7 @@
     },
     {
       "id": "FR-306",
-      "title": "Low-Entropy Session Token",
+      "title": "Session: Low-Entropy Session Token",
       "aliases": [
         "Potentially Predictable Session Token",
         "Low-Entropy Session Token"
@@ -20318,7 +20318,7 @@
     },
     {
       "id": "FR-307",
-      "title": "Session Fixation Vulnerability",
+      "title": "Session: Session Fixation Vulnerability",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -20364,7 +20364,7 @@
     },
     {
       "id": "FR-308",
-      "title": "Session Not Invalidated After Logout",
+      "title": "Session: Session Not Invalidated After Logout",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -20410,7 +20410,7 @@
     },
     {
       "id": "FR-309",
-      "title": "Session Not Invalidated Server-Side After Logout",
+      "title": "Session: Session Not Invalidated Server-Side After Logout",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -20456,7 +20456,7 @@
     },
     {
       "id": "FR-310",
-      "title": "Session Timeout Absent or Excessive",
+      "title": "Session: Session Timeout Absent or Excessive",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -20502,7 +20502,7 @@
     },
     {
       "id": "FR-311",
-      "title": "Excessive Session Timeout Configured",
+      "title": "Session: Excessive Session Timeout Configured",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -21063,7 +21063,7 @@
     },
     {
       "id": "FR-317",
-      "title": "No Logout (Logoff) Function Detected",
+      "title": "Session: No Logout (Logoff) Function Detected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -21109,7 +21109,7 @@
     },
     {
       "id": "FR-318",
-      "title": "No Concurrent Session Limit Detected",
+      "title": "Session: No Concurrent Session Limit Detected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -21155,7 +21155,7 @@
     },
     {
       "id": "FR-319",
-      "title": "Concurrent Session Limit Enforced",
+      "title": "Session: Concurrent Session Limit Enforced",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -21201,7 +21201,7 @@
     },
     {
       "id": "FR-320",
-      "title": "CORS Misconfiguration Allowing Credential Leakage",
+      "title": "Permissive Security Header: CORS Misconfiguration Allowing Credential Leakage",
       "aliases": [
         "Permissive CORS Policy",
         "CORS Misconfiguration Allowing Credential Leakage",
@@ -21424,7 +21424,7 @@
     },
     {
       "id": "FR-322",
-      "title": "Cross-Site Request Forgery (CSRF) — Missing Token",
+      "title": "Authentication: Cross-Site Request Forgery (CSRF) — Missing Token",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -21471,7 +21471,7 @@
     },
     {
       "id": "FR-323",
-      "title": "Unauthenticated Access to Protected Path",
+      "title": "Unauthenticated Access: Unauthenticated Access to Protected Path",
       "aliases": [
         "Unauthenticated Access to Protected Path"
       ],
@@ -21588,7 +21588,7 @@
     },
     {
       "id": "FR-324",
-      "title": "Debug Mode Enabled / Developer Console Exposed",
+      "title": "Debug Endpoint Exposed: Debug Mode Enabled / Developer Console Exposed",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -21635,7 +21635,7 @@
     },
     {
       "id": "FR-325",
-      "title": "Cross-User Data Leakage (IDOR)",
+      "title": "Broken Access Control: Cross-User Data Leakage (IDOR)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -21682,7 +21682,7 @@
     },
     {
       "id": "FR-326",
-      "title": "Broken Object Level Authorization (IDOR / BOLA)",
+      "title": "Broken Access Control: Broken Object Level Authorization (IDOR / BOLA)",
       "aliases": [
         "API Object Access Control Failure",
         "API IDOR",
@@ -21796,7 +21796,7 @@
     },
     {
       "id": "FR-327",
-      "title": "Broken Function Level Authorization (BFLA)",
+      "title": "Broken Access Control: Broken Function Level Authorization (BFLA)",
       "aliases": [
         "API Function Authorization Bypass",
         "Admin Endpoint Exposed to Low-Privilege Users",
@@ -21913,7 +21913,7 @@
     },
     {
       "id": "FR-328",
-      "title": "BFLA: Role Can Access Admin Path",
+      "title": "Broken Access Control: BFLA: Role Can Access Admin Path",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -21959,7 +21959,7 @@
     },
     {
       "id": "FR-329",
-      "title": "Mass Assignment / Privilege Escalation via Parameter Binding",
+      "title": "Broken Access Control: Mass Assignment / Privilege Escalation via Parameter Binding",
       "aliases": [
         "Over-Posted Parameters",
         "Mass Assignment — Accepted",
@@ -22075,7 +22075,7 @@
     },
     {
       "id": "FR-330",
-      "title": "API Endpoint Returns Same Data for All Users",
+      "title": "Broken Access Control: API Endpoint Returns Same Data for All Users",
       "aliases": [
         "API Endpoint Returns Same Data for All Users"
       ],
@@ -22310,7 +22310,7 @@
     },
     {
       "id": "FR-332",
-      "title": "Business Logic — Hidden Price/Value Field Tampering",
+      "title": "Business Logic: Business Logic — Hidden Price/Value Field Tampering",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22357,7 +22357,7 @@
     },
     {
       "id": "FR-333",
-      "title": "Business Logic — Numeric Field Accepts Negative/Zero Value",
+      "title": "Business Logic: Business Logic — Numeric Field Accepts Negative/Zero Value",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22404,7 +22404,7 @@
     },
     {
       "id": "FR-334",
-      "title": "Business Logic — Potential Race Condition (Duplicate Submission)",
+      "title": "Business Logic: Business Logic — Potential Race Condition (Duplicate Submission)",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22450,7 +22450,7 @@
     },
     {
       "id": "FR-335",
-      "title": "Business Logic — Workflow Step Directly Accessible",
+      "title": "Business Logic: Business Logic — Workflow Step Directly Accessible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22497,7 +22497,7 @@
     },
     {
       "id": "FR-336",
-      "title": "GraphQL Field Suggestions Enabled",
+      "title": "GraphQL: GraphQL Field Suggestions Enabled",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22543,7 +22543,7 @@
     },
     {
       "id": "FR-337",
-      "title": "GraphQL Batch Query Attack Possible",
+      "title": "GraphQL: GraphQL Batch Query Attack Possible",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22589,7 +22589,7 @@
     },
     {
       "id": "FR-338",
-      "title": "Public Exploit Available",
+      "title": "Software Version Detected: Public Exploit Available",
       "aliases": [
         "Sploitus: Public Exploit Available for Detected Version",
         "Metasploit Module Available",
@@ -22749,7 +22749,7 @@
     },
     {
       "id": "FR-340",
-      "title": "WAF/CDN Possible Session Termination",
+      "title": "Discovery: WAF/CDN Possible Session Termination",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22790,7 +22790,7 @@
     },
     {
       "id": "FR-341",
-      "title": "Admin Panel Exposed: {apath}",
+      "title": "Debug Endpoint Exposed: Admin Panel Exposed: {apath}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22829,7 +22829,7 @@
     },
     {
       "id": "FR-342",
-      "title": "CDN Active: {_recon_cdn}",
+      "title": "Discovery: CDN Active: {_recon_cdn}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22907,7 +22907,7 @@
     },
     {
       "id": "FR-344",
-      "title": "Credentials/Secret in JavaScript: {secret_type}",
+      "title": "Information Disclosure: Credentials/Secret in JavaScript: {secret_type}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22946,7 +22946,7 @@
     },
     {
       "id": "FR-345",
-      "title": "Deprecated Protocol Enabled: {_tsf_proto}",
+      "title": "Insecure Protocol Detected: Deprecated Protocol Enabled: {_tsf_proto}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -22985,7 +22985,7 @@
     },
     {
       "id": "FR-346",
-      "title": "Endpoint-Specific Security Header Found: {_hn}",
+      "title": "Misconfigured Security Header: Endpoint-Specific Security Header Found: {_hn}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23024,7 +23024,7 @@
     },
     {
       "id": "FR-347",
-      "title": "Exposed Admin/Debug Endpoint: {path}",
+      "title": "Debug Endpoint Exposed: Exposed Admin/Debug Endpoint: {path}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23414,7 +23414,7 @@
     },
     {
       "id": "FR-357",
-      "title": "Nuclei: {ntitle}",
+      "title": "Uncategorized: {ntitle}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23453,7 +23453,7 @@
     },
     {
       "id": "FR-358",
-      "title": "PHP Error Log Exposed: {_el}",
+      "title": "Sensitive File Exposed: PHP Error Log Exposed: {_el}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23492,7 +23492,7 @@
     },
     {
       "id": "FR-359",
-      "title": "Potential CDN Origin Bypass: {_recon_cdn}",
+      "title": "Authentication Bypass: Potential CDN Origin Bypass: {_recon_cdn}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23531,7 +23531,7 @@
     },
     {
       "id": "FR-360",
-      "title": "Public Exploit Available: {term}",
+      "title": "Software Version Detected: Public Exploit Available: {term}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23687,7 +23687,7 @@
     },
     {
       "id": "FR-364",
-      "title": "Sensitive WordPress Path Accessible: {_ep}",
+      "title": "Sensitive File Exposed: Sensitive WordPress Path Accessible: {_ep}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23921,7 +23921,7 @@
     },
     {
       "id": "FR-370",
-      "title": "Subdomain Takeover Indicator ({service})",
+      "title": "DNS Vulnerability: Subdomain Takeover Indicator ({service})",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23960,7 +23960,7 @@
     },
     {
       "id": "FR-371",
-      "title": "Subdomain Takeover — Dangling CNAME ({service})",
+      "title": "DNS Vulnerability: Subdomain Takeover — Dangling CNAME ({service})",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -23999,7 +23999,7 @@
     },
     {
       "id": "FR-372",
-      "title": "TimThumb Script Detected: {_t_name}{_tv2_str}",
+      "title": "Web Vulnerability: TimThumb Script Detected: {_t_name}{_tv2_str}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24038,7 +24038,7 @@
     },
     {
       "id": "FR-373",
-      "title": "Unauthenticated {_bi_name} Access: {_bi_desc}",
+      "title": "Unauthenticated Access: Unauthenticated {_bi_name} Access: {_bi_desc}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24194,7 +24194,7 @@
     },
     {
       "id": "FR-377",
-      "title": "WAF / Edge Security Platform Active: {_waf_names}",
+      "title": "Discovery: WAF / Edge Security Platform Active: {_waf_names}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24233,7 +24233,7 @@
     },
     {
       "id": "FR-378",
-      "title": "WAF/CDN Challenge Page Active: {waf_cdn}",
+      "title": "Discovery: WAF/CDN Challenge Page Active: {waf_cdn}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24272,7 +24272,7 @@
     },
     {
       "id": "FR-379",
-      "title": "WAF/CDN IP Block Detected: {waf_cdn}",
+      "title": "Discovery: WAF/CDN IP Block Detected: {waf_cdn}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24311,7 +24311,7 @@
     },
     {
       "id": "FR-380",
-      "title": "WAF/CDN Possible Session Termination: {waf_cdn}",
+      "title": "Discovery: WAF/CDN Possible Session Termination: {waf_cdn}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24350,7 +24350,7 @@
     },
     {
       "id": "FR-381",
-      "title": "WAF/CDN Session Termination Detected: {waf_cdn}",
+      "title": "Discovery: WAF/CDN Session Termination Detected: {waf_cdn}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24467,7 +24467,7 @@
     },
     {
       "id": "FR-384",
-      "title": "WordPress Backup/Export File Exposed: {_bkp}",
+      "title": "Sensitive File Exposed: WordPress Backup/Export File Exposed: {_bkp}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24506,7 +24506,7 @@
     },
     {
       "id": "FR-385",
-      "title": "WordPress Configuration Backup Exposed: {_cb}",
+      "title": "Sensitive File Exposed: WordPress Configuration Backup Exposed: {_cb}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24584,7 +24584,7 @@
     },
     {
       "id": "FR-387",
-      "title": "WordPress Parent Theme Detected: {_pt_name}{_pt_ver_str}",
+      "title": "Software Identified: WordPress Parent Theme Detected: {_pt_name}{_pt_ver_str}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24662,7 +24662,7 @@
     },
     {
       "id": "FR-389",
-      "title": "WordPress User Enumeration via Author Archives ({len(_author_users)} user(s))",
+      "title": "Enumeration: WordPress User Enumeration via Author Archives ({len(_author_users)} user(s))",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24701,7 +24701,7 @@
     },
     {
       "id": "FR-390",
-      "title": "WordPress Users Exposed via REST API ({len(_ru_extracted)} user(s))",
+      "title": "Enumeration: WordPress Users Exposed via REST API ({len(_ru_extracted)} user(s))",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24779,7 +24779,7 @@
     },
     {
       "id": "FR-392",
-      "title": "Authentication Failure Detected",
+      "title": "Discovery: Authentication Failure Detected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24857,7 +24857,7 @@
     },
     {
       "id": "FR-394",
-      "title": "Missing Security Headers",
+      "title": "Missing Security Header: Missing Security Headers",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -24896,7 +24896,7 @@
     },
     {
       "id": "FR-395",
-      "title": "Multi-Factor Authentication Detected",
+      "title": "Discovery: Multi-Factor Authentication Detected",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -25900,7 +25900,7 @@
     },
     {
       "id": "FR-405",
-      "title": "BFLA: Role '{low_role}' Can Access Admin Path",
+      "title": "Broken Access Control: BFLA: Role '{low_role}' Can Access Admin Path",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -25950,7 +25950,7 @@
     },
     {
       "id": "FR-406",
-      "title": "CBC Mode Cipher Suites Accepted",
+      "title": "SSL/TLS Ciphers: CBC Mode Cipher Suites Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26268,7 +26268,7 @@
     },
     {
       "id": "FR-413",
-      "title": "JWT Signing Secret Brute-Force Recovered ({alg})",
+      "title": "JWT: JWT Signing Secret Brute-Force Recovered ({alg})",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26358,7 +26358,7 @@
     },
     {
       "id": "FR-415",
-      "title": "Missing Subresource Integrity — {entry['tag']} from {entry['host']}",
+      "title": "Misconfigured Security Header: Missing Subresource Integrity — {entry['tag']} from {entry['host']}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26399,7 +26399,7 @@
     },
     {
       "id": "FR-416",
-      "title": "Nikto: {_nik_title}",
+      "title": "Uncategorized: {_nik_title}",
       "aliases": [],
       "source_tools": [
         "fracture",
@@ -26441,7 +26441,7 @@
     },
     {
       "id": "FR-417",
-      "title": "Non-Standard Cipher Suites Accepted",
+      "title": "SSL/TLS Ciphers: Non-Standard Cipher Suites Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26541,7 +26541,7 @@
     },
     {
       "id": "FR-419",
-      "title": "SHA-1 HMAC Cipher Suites Accepted",
+      "title": "SSL/TLS Ciphers: SHA-1 HMAC Cipher Suites Accepted",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26682,7 +26682,7 @@
     },
     {
       "id": "FR-422",
-      "title": "TLSv1.3 Not Supported",
+      "title": "SSL/TLS Certificate: TLSv1.3 Not Supported",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26729,7 +26729,7 @@
     },
     {
       "id": "FR-423",
-      "title": "Vulnerable Component: {pname} {version}",
+      "title": "Out of Date Software: Vulnerable Component: {pname} {version}",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26782,7 +26782,7 @@
     },
     {
       "id": "FR-424",
-      "title": "{proto} Enabled",
+      "title": "Insecure Protocol Detected: {proto} Enabled",
       "aliases": [],
       "source_tools": [
         "fracture"
@@ -26829,7 +26829,7 @@
     },
     {
       "id": "FR-425",
-      "title": "Cookie Prefix Violation: __Host-",
+      "title": "Cookies: Cookie Prefix Violation: __Host-",
       "aliases": [
         "__Host- cookie violation",
         "Cookie prefix __Host- misconfigured"
@@ -26880,7 +26880,7 @@
     },
     {
       "id": "FR-426",
-      "title": "Cookie Prefix Violation: __Secure-",
+      "title": "Cookies: Cookie Prefix Violation: __Secure-",
       "aliases": [
         "__Secure- cookie violation"
       ],
@@ -26930,7 +26930,7 @@
     },
     {
       "id": "FR-427",
-      "title": "HSTS Not Preload-Ready",
+      "title": "Missing Security Header: HSTS Not Preload-Ready",
       "aliases": [
         "HSTS preload missing",
         "Strict-Transport-Security not preload ready"
@@ -26981,7 +26981,7 @@
     },
     {
       "id": "FR-428",
-      "title": "Missing Cross-Origin Isolation Header: {header}",
+      "title": "Missing Security Header: Missing Cross-Origin Isolation Header: {header}",
       "aliases": [
         "Missing COOP",
         "Missing COEP",
@@ -27031,7 +27031,7 @@
     },
     {
       "id": "FR-429",
-      "title": "JavaScript Source Map Exposed",
+      "title": "Sensitive File Exposed: JavaScript Source Map Exposed",
       "aliases": [
         "Source map file accessible",
         "js.map exposed"
@@ -27088,7 +27088,7 @@
     },
     {
       "id": "FR-430",
-      "title": "Inline Source Map in JavaScript Bundle",
+      "title": "Sensitive File Exposed: Inline Source Map in JavaScript Bundle",
       "aliases": [
         "sourceMappingURL data URI",
         "Inline sourcemap"
@@ -27135,7 +27135,7 @@
     },
     {
       "id": "FR-431",
-      "title": "Content-Type Confusion",
+      "title": "Misconfigured Security Header: Content-Type Confusion",
       "aliases": [
         "MIME type mismatch",
         "Content-Type sniffing"
@@ -27466,7 +27466,7 @@
     },
     {
       "id": "FR-437",
-      "title": "Unicode Normalization Bypass in Authentication",
+      "title": "Authentication Bypass: Unicode Normalization Bypass in Authentication",
       "aliases": [
         "Unicode confusable bypass",
         "Homoglyph authentication bypass"
@@ -27517,7 +27517,7 @@
     },
     {
       "id": "FR-438",
-      "title": "WebSocket Endpoint Missing Authentication",
+      "title": "Authentication: WebSocket Endpoint Missing Authentication",
       "aliases": [
         "Unauthenticated WebSocket",
         "WS no auth"
@@ -27568,7 +27568,7 @@
     },
     {
       "id": "FR-439",
-      "title": "WebSocket Missing Origin Validation",
+      "title": "WebSocket: WebSocket Missing Origin Validation",
       "aliases": [
         "Cross-Site WebSocket Hijacking",
         "CSWSH"
@@ -27616,7 +27616,7 @@
     },
     {
       "id": "FR-440",
-      "title": "WebSocket Message Injection (XSS)",
+      "title": "WebSocket: WebSocket Message Injection (XSS)",
       "aliases": [
         "WS XSS reflection",
         "WebSocket script injection"
@@ -27772,7 +27772,7 @@
     },
     {
       "id": "FR-443",
-      "title": "OAuth Missing State Parameter (CSRF)",
+      "title": "Authentication: OAuth Missing State Parameter (CSRF)",
       "aliases": [
         "OAuth CSRF",
         "Missing state parameter"
@@ -27865,7 +27865,7 @@
     },
     {
       "id": "FR-445",
-      "title": "OAuth Scope Escalation",
+      "title": "Authentication: OAuth Scope Escalation",
       "aliases": [
         "OAuth privilege escalation",
         "Scope expansion"
@@ -27911,7 +27911,7 @@
     },
     {
       "id": "FR-446",
-      "title": "MFA Bypass — Direct Navigation",
+      "title": "Authentication Bypass: MFA Bypass — Direct Navigation",
       "aliases": [
         "2FA bypass",
         "MFA skip"
@@ -27970,7 +27970,7 @@
     },
     {
       "id": "FR-447",
-      "title": "MFA Missing Rate Limiting on OTP",
+      "title": "Authentication: MFA Missing Rate Limiting on OTP",
       "aliases": [
         "OTP brute force",
         "2FA rate limit missing"
@@ -28026,7 +28026,7 @@
     },
     {
       "id": "FR-448",
-      "title": "API Endpoint Missing Rate Limiting",
+      "title": "Authentication: API Endpoint Missing Rate Limiting",
       "aliases": [
         "No rate limiting",
         "Missing throttling"
@@ -28073,7 +28073,7 @@
     },
     {
       "id": "FR-449",
-      "title": "GraphQL Alias-Based Batching",
+      "title": "GraphQL: GraphQL Alias-Based Batching",
       "aliases": [
         "GraphQL alias abuse",
         "Aliased query batching"
@@ -28120,7 +28120,7 @@
     },
     {
       "id": "FR-450",
-      "title": "GraphQL Circular Fragment Accepted",
+      "title": "GraphQL: GraphQL Circular Fragment Accepted",
       "aliases": [
         "GraphQL circular reference",
         "Fragment cycle"
@@ -28167,7 +28167,7 @@
     },
     {
       "id": "FR-451",
-      "title": "GraphQL Field Duplication Not Limited",
+      "title": "GraphQL: GraphQL Field Duplication Not Limited",
       "aliases": [
         "GraphQL field amplification"
       ],
@@ -28212,7 +28212,7 @@
     },
     {
       "id": "FR-452",
-      "title": "GraphQL Debug Extensions Exposed",
+      "title": "GraphQL: GraphQL Debug Extensions Exposed",
       "aliases": [
         "GraphQL tracing exposed",
         "Debug extensions in production"
@@ -28487,7 +28487,7 @@
     },
     {
       "id": "FR-457",
-      "title": "Authorization Gaps — Unauthenticated Access to Restricted Paths",
+      "title": "Unauthenticated Access: Authorization Gaps — Unauthenticated Access to Restricted Paths",
       "aliases": [
         "Forced browsing",
         "Missing access control on admin paths",
@@ -28935,7 +28935,7 @@
     },
     {
       "id": "FR-466",
-      "title": "Log File Publicly Accessible",
+      "title": "Sensitive File Exposed: Log File Publicly Accessible",
       "aliases": [
         "Error Log Exposed",
         "Debug Log Exposed",
@@ -28998,7 +28998,7 @@
     },
     {
       "id": "FR-467",
-      "title": "Password Field With Autocomplete Enabled",
+      "title": "Authentication: Password Field With Autocomplete Enabled",
       "aliases": [
         "Autocomplete on Password Field"
       ],
@@ -29113,7 +29113,7 @@
     },
     {
       "id": "FR-469",
-      "title": "Terraform State File Exposed",
+      "title": "Sensitive File Exposed: Terraform State File Exposed",
       "aliases": [
         "Terraform tfstate Exposed"
       ],
@@ -29177,7 +29177,7 @@
     },
     {
       "id": "FR-470",
-      "title": "Sensitive Data Exposed in HTML Comments",
+      "title": "Sensitive File Exposed: Sensitive Data Exposed in HTML Comments",
       "aliases": [
         "Secrets in HTML Comments",
         "Credentials in HTML Source"
@@ -29234,7 +29234,7 @@
     },
     {
       "id": "FR-471",
-      "title": "Exposed Admin/Debug Endpoint: /_ray/api/health",
+      "title": "Debug Endpoint Exposed: Exposed Admin/Debug Endpoint: /_ray/api/health",
       "aliases": [
         "Spatie Ray Debug Tool Exposed"
       ],
@@ -29295,7 +29295,7 @@
     },
     {
       "id": "FR-472",
-      "title": "Exposed Admin/Debug Endpoint: Express.js Default Error",
+      "title": "Debug Endpoint Exposed: Exposed Admin/Debug Endpoint: Express.js Default Error",
       "aliases": [
         "Express Default Error Handler"
       ],
@@ -29688,7 +29688,7 @@
     },
     {
       "id": "FR-479",
-      "title": "Exposed Admin/Debug Endpoint: /_ignition/execute-solution",
+      "title": "Debug Endpoint Exposed: Exposed Admin/Debug Endpoint: /_ignition/execute-solution",
       "aliases": [
         "Laravel Ignition RCE",
         "Ignition Error Page Exposed"
@@ -29807,7 +29807,7 @@
     },
     {
       "id": "FR-481",
-      "title": "Overly Permissive Permissions-Policy Header",
+      "title": "Permissive Security Header: Overly Permissive Permissions-Policy Header",
       "aliases": [
         "Permissive Feature-Policy",
         "Wildcard Permissions-Policy"
@@ -29868,7 +29868,7 @@
     },
     {
       "id": "FR-482",
-      "title": "Expired TLS Certificate Detected",
+      "title": "SSL/TLS Certificate: Expired TLS Certificate Detected",
       "aliases": [
         "Expired SSL Certificate",
         "Certificate Expired"
@@ -29945,7 +29945,7 @@
     },
     {
       "id": "FR-483",
-      "title": "Self-Signed TLS Certificate",
+      "title": "SSL/TLS Certificate: Self-Signed TLS Certificate",
       "aliases": [
         "Self-Signed SSL Certificate",
         "Untrusted Certificate Authority"
@@ -30013,7 +30013,7 @@
     },
     {
       "id": "FR-484",
-      "title": "TLS Certificate Hostname Mismatch",
+      "title": "SSL/TLS Certificate: TLS Certificate Hostname Mismatch",
       "aliases": [
         "SSL Certificate Name Mismatch",
         "Certificate CN Mismatch"
@@ -30082,7 +30082,7 @@
     },
     {
       "id": "FR-485",
-      "title": "Revoked TLS Certificate Detected",
+      "title": "SSL/TLS Certificate: Revoked TLS Certificate Detected",
       "aliases": [
         "Revoked SSL Certificate",
         "Certificate Revocation"
@@ -30159,7 +30159,7 @@
     },
     {
       "id": "FR-486",
-      "title": "TLS Certificate SAN Enumeration",
+      "title": "Enumeration: TLS Certificate SAN Enumeration",
       "aliases": [
         "Subject Alternative Name Enumeration",
         "SAN Discovery"
@@ -30213,7 +30213,7 @@
     },
     {
       "id": "FR-487",
-      "title": "Ivanti Cloud Services Appliance (CSA) Detected",
+      "title": "Discovery: Ivanti Cloud Services Appliance (CSA) Detected",
       "aliases": [
         "Ivanti CSA Detected",
         "Ivanti CSA Appliance"
@@ -30298,7 +30298,7 @@
     },
     {
       "id": "FR-488",
-      "title": "Pulse Secure / Ivanti Connect Secure VPN Detected",
+      "title": "Discovery: Pulse Secure / Ivanti Connect Secure VPN Detected",
       "aliases": [
         "Ivanti Connect Secure Detected",
         "Pulse Secure VPN Detected",
@@ -30384,7 +30384,7 @@
     },
     {
       "id": "FR-489",
-      "title": "F5 BIG-IP Detected",
+      "title": "Discovery: F5 BIG-IP Detected",
       "aliases": [
         "F5 BIG-IP Appliance Detected",
         "F5 Load Balancer Detected"
@@ -30462,7 +30462,7 @@
     },
     {
       "id": "FR-490",
-      "title": "Citrix NetScaler / ADC Detected",
+      "title": "Discovery: Citrix NetScaler / ADC Detected",
       "aliases": [
         "Citrix ADC Detected",
         "Citrix Gateway Detected",
@@ -30541,7 +30541,7 @@
     },
     {
       "id": "FR-491",
-      "title": "Fortinet FortiGate Detected",
+      "title": "Discovery: Fortinet FortiGate Detected",
       "aliases": [
         "FortiOS Detected",
         "FortiWeb Detected",
@@ -30619,7 +30619,7 @@
     },
     {
       "id": "FR-492",
-      "title": "Palo Alto Networks Detected",
+      "title": "Discovery: Palo Alto Networks Detected",
       "aliases": [
         "PAN-OS Detected",
         "GlobalProtect Detected",
@@ -30696,7 +30696,7 @@
     },
     {
       "id": "FR-493",
-      "title": "SonicWall Detected",
+      "title": "Discovery: SonicWall Detected",
       "aliases": [
         "SonicWall Appliance Detected",
         "SonicWall Firewall Detected"
@@ -30768,7 +30768,7 @@
     },
     {
       "id": "FR-494",
-      "title": "Cisco ASA Detected",
+      "title": "Discovery: Cisco ASA Detected",
       "aliases": [
         "Cisco Adaptive Security Appliance Detected",
         "Cisco ASA Firewall Detected"
@@ -30842,7 +30842,7 @@
     },
     {
       "id": "FR-495",
-      "title": "VMware vSphere / ESXi Detected",
+      "title": "Discovery: VMware vSphere / ESXi Detected",
       "aliases": [
         "VMware ESXi Detected",
         "VMware vCenter Detected",
@@ -30918,7 +30918,7 @@
     },
     {
       "id": "FR-496",
-      "title": "Sophos Firewall Detected",
+      "title": "Discovery: Sophos Firewall Detected",
       "aliases": [
         "Sophos XG Detected",
         "Sophos XG Firewall Detected",
@@ -31731,7 +31731,7 @@
     },
     {
       "id": "FR-507",
-      "title": "Session Token Exposed in URL",
+      "title": "Session: Session Token Exposed in URL",
       "aliases": [
         "Session ID in URL",
         "JSESSIONID in URL",
@@ -31799,7 +31799,7 @@
     },
     {
       "id": "FR-508",
-      "title": "Session Token in Page Links",
+      "title": "Session: Session Token in Page Links",
       "aliases": [
         "Session ID in Hyperlinks",
         "Token Leakage via href"
@@ -31854,7 +31854,7 @@
     },
     {
       "id": "FR-509",
-      "title": "Overly Broad Cookie Domain Scope",
+      "title": "Cookies: Overly Broad Cookie Domain Scope",
       "aliases": [
         "Cookie Scoped to Parent Domain",
         "Session Cookie Domain Too Broad"
@@ -31909,7 +31909,7 @@
     },
     {
       "id": "FR-510",
-      "title": "Cookie Path Scoped to Root",
+      "title": "Cookies: Cookie Path Scoped to Root",
       "aliases": [
         "Session Cookie Path Too Broad"
       ],
@@ -31954,7 +31954,7 @@
     },
     {
       "id": "FR-511",
-      "title": "JWT Algorithm None Accepted",
+      "title": "JWT: JWT Algorithm None Accepted",
       "aliases": [
         "JWT alg:none Vulnerability",
         "JWT No Signature Verification"
@@ -32032,7 +32032,7 @@
     },
     {
       "id": "FR-512",
-      "title": "JWT Missing Expiration Claim",
+      "title": "JWT: JWT Missing Expiration Claim",
       "aliases": [
         "JWT No exp Claim",
         "JWT Token Never Expires"
@@ -32098,7 +32098,7 @@
     },
     {
       "id": "FR-513",
-      "title": "JWT Excessive Lifetime",
+      "title": "JWT: JWT Excessive Lifetime",
       "aliases": [
         "JWT Long-Lived Token",
         "JWT Token Too Long"
@@ -32208,7 +32208,7 @@
     },
     {
       "id": "FR-515",
-      "title": "JWT Missing Audience Claim",
+      "title": "JWT: JWT Missing Audience Claim",
       "aliases": [
         "JWT No aud Claim",
         "JWT Audience Not Restricted"
@@ -32254,7 +32254,7 @@
     },
     {
       "id": "FR-516",
-      "title": "Session Persists After Password Change",
+      "title": "Session: Session Persists After Password Change",
       "aliases": [
         "Session Not Invalidated on Password Change",
         "Password Change Does Not Revoke Sessions"
@@ -32318,7 +32318,7 @@
     },
     {
       "id": "FR-517",
-      "title": "Excessive Session Cookie Lifetime",
+      "title": "Session: Excessive Session Cookie Lifetime",
       "aliases": [
         "Session Cookie Too Long",
         "No Absolute Session Timeout"
@@ -32375,7 +32375,7 @@
     },
     {
       "id": "FR-518",
-      "title": "Missing Referrer-Policy With External Links",
+      "title": "Missing Security Header: Missing Referrer-Policy With External Links",
       "aliases": [
         "No Referrer-Policy Header",
         "Session Token Referer Leakage"
@@ -32426,7 +32426,7 @@
     },
     {
       "id": "FR-519",
-      "title": "Mixed Content on Authenticated Page",
+      "title": "Misconfigured Security Header: Mixed Content on Authenticated Page",
       "aliases": [
         "HTTP Resources on HTTPS Page",
         "Mixed Content Warning"

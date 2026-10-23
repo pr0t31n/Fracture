@@ -1522,7 +1522,7 @@ def _waf_session_health(
             "WARNING",
         )
         out.add_finding(
-            title=f"WAF/CDN IP Block Detected: {waf_cdn}",
+            title=f"Discovery: WAF/CDN IP Block Detected: {waf_cdn}",
             url=target_url, port=target.get("port", 443), risk="INFO",
             description=_msg,
             output=f"HTTP {_status}\n{_body[:512]}",
@@ -1554,7 +1554,7 @@ def _waf_session_health(
             "WARNING",
         )
         out.add_finding(
-            title=f"WAF/CDN Challenge Page Active: {waf_cdn}",
+            title=f"Discovery: WAF/CDN Challenge Page Active: {waf_cdn}",
             url=target_url, port=target.get("port", 443), risk="INFO",
             description=_msg,
             output=f"HTTP {_status}\n{_body[:512]}",
@@ -1580,7 +1580,7 @@ def _waf_session_health(
             "WARNING",
         )
         out.add_finding(
-            title=f"WAF/CDN Session Termination Detected: {waf_cdn}",
+            title=f"Discovery: WAF/CDN Session Termination Detected: {waf_cdn}",
             url=target_url, port=target.get("port", 443), risk="INFO",
             description=_msg,
             output=f"HTTP {_status}\n{_body[:512]}",
@@ -1611,7 +1611,7 @@ def _waf_session_health(
             "WARNING",
         )
         out.add_finding(
-            title=f"WAF/CDN Session Termination Detected: {waf_cdn}",
+            title=f"Discovery: WAF/CDN Session Termination Detected: {waf_cdn}",
             url=target_url, port=target.get("port", 443), risk="INFO",
             description=_msg,
             output=f"HTTP {_status} Location: {_loc}",
@@ -1642,7 +1642,7 @@ def _waf_session_health(
             "WARNING",
         )
         out.add_finding(
-            title=f"WAF/CDN Possible Session Termination: {waf_cdn}",
+            title=f"Discovery: WAF/CDN Possible Session Termination: {waf_cdn}",
             url=target_url, port=target.get("port", 443), risk="INFO",
             description=_msg,
             output=f"HTTP {_status}\n{_body[:512]}",
@@ -12786,7 +12786,7 @@ def _phase_wordpress_scan(
             except Exception:
                 pass
             out.add_finding(
-                title="WordPress X-Pingback Header Present",
+                title="Misconfigured Security Header: WordPress X-Pingback Header Present",
                 url=base, port=target["port"], risk="LOW",
                 description=(
                     f"The X-Pingback response header ({xpb}) discloses the "
@@ -12843,7 +12843,7 @@ def _phase_wordpress_scan(
                 )
                 if _multicall:
                     out.add_finding(
-                        title="WordPress XML-RPC Multicall Brute-Force Vector",
+                        title="RPC: WordPress XML-RPC Multicall Brute-Force Vector",
                         url=base + "/xmlrpc.php", port=target["port"], risk="HIGH",
                         description=(
                             "system.multicall bundles multiple credential-check calls "
@@ -12863,7 +12863,7 @@ def _phase_wordpress_scan(
                     )
                 if _pingback:
                     out.add_finding(
-                        title="WordPress XML-RPC Pingback SSRF Vector",
+                        title="RPC: WordPress XML-RPC Pingback SSRF Vector",
                         url=base + "/xmlrpc.php", port=target["port"], risk="HIGH",
                         description=(
                             "pingback.ping is exposed, allowing an unauthenticated "
@@ -13126,7 +13126,7 @@ def _phase_wordpress_scan(
             _cbrq, _cbrp = _save_http_evidence(
                 out, phase, f"wp_cfgbak_{_cb[:25]}_{hostname}", r)
             out.add_finding(
-                title=f"WordPress Configuration Backup Exposed: {_cb}",
+                title=f"Sensitive File Exposed: WordPress Configuration Backup Exposed: {_cb}",
                 url=base + f"/{_cb}", port=target["port"],
                 risk="CRITICAL" if _cfg_content else "HIGH",
                 description=(
@@ -13158,7 +13158,7 @@ def _phase_wordpress_scan(
             r'DB_NAME|DB_PASSWORD|AUTH_KEY', r.text, re.I):
         _wcrq, _wcrp = _save_http_evidence(out, phase, f"wp_config_src_{hostname}", r)
         out.add_finding(
-            title="WordPress wp-config.php Source Code Exposed",
+            title="Sensitive File Exposed: WordPress wp-config.php Source Code Exposed",
             url=base + "/wp-config.php", port=target["port"], risk="CRITICAL",
             description=(
                 "wp-config.php is being served as plain text rather than executed. "
@@ -13184,7 +13184,7 @@ def _phase_wordpress_scan(
         _dl_ev = out.output_path(phase, f"wp_debug_log_content_{hostname}")
         _dl_ev.write_text(r.text[:50000], encoding="utf-8")
         out.add_finding(
-            title="WordPress Debug Log Exposed",
+            title="Sensitive File Exposed: WordPress Debug Log Exposed",
             url=base + "/wp-content/debug.log",
             port=target["port"], risk="HIGH",
             description=(
@@ -13212,7 +13212,7 @@ def _phase_wordpress_scan(
                 out, phase,
                 f"wp_errlog_{_el.strip('/').replace('/', '_')[:30]}_{hostname}", r)
             out.add_finding(
-                title=f"PHP Error Log Exposed: {_el}",
+                title=f"Sensitive File Exposed: PHP Error Log Exposed: {_el}",
                 url=base + _el, port=target["port"], risk="MEDIUM",
                 description=(
                     f"A PHP error log ({_el}) is publicly accessible, disclosing "
@@ -13355,7 +13355,7 @@ def _phase_wordpress_scan(
                 f"wp_path_{_ep.strip('/').replace('/', '_')[:30]}_{hostname}")
             _ep_ev.write_text(r.text[:5000], encoding="utf-8")
             out.add_finding(
-                title=f"Sensitive WordPress Path Accessible: {_ep}",
+                title=f"Sensitive File Exposed: Sensitive WordPress Path Accessible: {_ep}",
                 url=base + _ep, port=target["port"], risk=_ep_risk,
                 description=_ep_desc,
                 output=f"GET {_ep} → HTTP {r.status_code}",
@@ -13438,7 +13438,7 @@ def _phase_wordpress_scan(
         _p_ev.write_text(r.text[:5000], encoding="utf-8")
         _ver_str = f" v{_p_ver}" if _p_ver else ""
         out.add_finding(
-            title="WordPress Plugin Detected",
+            title="Software Identified: WordPress Plugin Detected",
             url=base, port=target["port"], risk="INFO",
             description=(
                 "WordPress plugin(s) confirmed via readme.txt enumeration. "
@@ -13505,7 +13505,7 @@ def _phase_wordpress_scan(
         ]
         _theme_ev = ",".join(_ev for _, _, _, _ev, _ in _detected_themes)
         out.add_finding(
-            title="WordPress Theme Detected",
+            title="Software Identified: WordPress Theme Detected",
             url=base, port=target["port"], risk="INFO",
             description=(
                 f"{len(_detected_themes)} theme(s) detected via style.css. "
@@ -13548,7 +13548,7 @@ def _phase_wordpress_scan(
                 except Exception:
                     pass
                 out.add_finding(
-                    title=f"WordPress Parent Theme Detected: {_pt_name}{_pt_ver_str}",
+                    title=f"Software Identified: WordPress Parent Theme Detected: {_pt_name}{_pt_ver_str}",
                     url=base + _psc, port=target["port"], risk="INFO",
                     description=(
                         f"Parent theme '{_pt_name}' (slug: {_t_parent})"
@@ -13585,7 +13585,7 @@ def _phase_wordpress_scan(
                 except Exception:
                     pass
                 out.add_finding(
-                    title=f"TimThumb Script Detected: {_t_name}{_tv2_str}",
+                    title=f"Web Vulnerability: TimThumb Script Detected: {_t_name}{_tv2_str}",
                     url=base + _tim_sub, port=target["port"], risk="HIGH",
                     description=(
                         f"A TimThumb image-processing script{_tv2_str} was found "
@@ -13622,7 +13622,7 @@ def _phase_wordpress_scan(
                 f"wp_backup_{_bkp.strip('/').replace('/', '_')[:40]}_{hostname}")
             _bkev.write_text(r.text[:10000], encoding="utf-8")
             out.add_finding(
-                title=f"WordPress Backup/Export File Exposed: {_bkp}",
+                title=f"Sensitive File Exposed: WordPress Backup/Export File Exposed: {_bkp}",
                 url=base + _bkp, port=target["port"], risk=_bk_risk,
                 description=(
                     f"The file {_bkp} is publicly accessible"
@@ -15212,7 +15212,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 for path, ct, snip in _log_hits[:10]
             )
             out.add_finding(
-                title="Log File Publicly Accessible",
+                title="Sensitive File Exposed: Log File Publicly Accessible",
                 url=url, port=target["port"], risk="HIGH",
                 description=(
                     f"The web server at {url} exposes log file(s) to "
@@ -15288,7 +15288,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 for path, snip in _tf_hits[:5]
             )
             out.add_finding(
-                title="Terraform State File Exposed",
+                title="Sensitive File Exposed: Terraform State File Exposed",
                 url=url, port=target["port"], risk="CRITICAL",
                 description=(
                     f"The web server at {url} exposes Terraform state file(s) "
@@ -15325,7 +15325,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             _pp_list = ", ".join(_pp_permissive)
             _pp_val = headers.get("Permissions-Policy", "") or headers.get("Feature-Policy", "")
             out.add_finding(
-                title="Overly Permissive Permissions-Policy Header",
+                title="Permissive Security Header: Overly Permissive Permissions-Policy Header",
                 url=url, port=target["port"], risk="LOW",
                 description=(
                     f"The Permissions-Policy (or Feature-Policy) header on {url} "
@@ -15627,7 +15627,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             if _cdn_key in server_hdr.lower() and _cdn_key not in _bp_srv and _bp_srv:
                 _bp_rq, _bp_rp = _save_http_evidence(out, phase, "cdn_bypass_probe", _bp_r)
                 out.add_finding(
-                    title=f"Potential CDN Origin Bypass: {_recon_cdn}",
+                    title=f"Authentication Bypass: Potential CDN Origin Bypass: {_recon_cdn}",
                     url=url, port=target["port"], risk="MEDIUM",
                     description=(
                         f"A request with X-Forwarded-For / X-Real-IP spoofing headers "
@@ -15980,7 +15980,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                         f"bi_{_bi_name.lower().replace(' ', '_').replace('/', '_')}_probe",
                         _bi_r)
                     out.add_finding(
-                        title=f"Unauthenticated {_bi_name} Access: {_bi_desc}",
+                        title=f"Unauthenticated Access: Unauthenticated {_bi_name} Access: {_bi_desc}",
                         url=url.rstrip("/") + _bi_path,
                         port=target["port"], risk="HIGH",
                         description=(
@@ -16443,7 +16443,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                                     _ww_hl_vuln = [f"{pname} {version}"]
                                     _ww_hl_vuln.extend(_vuln_summary.get("cves") or [])
                                     out.add_finding(
-                                        title=f"Vulnerable Component: {pname} {version}",
+                                        title=f"Out of Date Software: Vulnerable Component: {pname} {version}",
                                         url=url, port=target["port"],
                                         risk=_vuln_summary["risk"],
                                         description=_vuln_summary["description"],
@@ -16565,7 +16565,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 if exploits:
                     titles_list = [e.get("Title", "") for e in exploits[:5]]
                     out.add_finding(
-                        title=f"Public Exploit Available: {term}",
+                        title=f"Software Version Detected: Public Exploit Available: {term}",
                         url=url, port=target["port"], risk="HIGH",
                         description=(
                             f"{len(exploits)} public exploit(s) found in ExploitDB for "
@@ -19855,7 +19855,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 if (re.search(r'\bvulnerable\b', _hb_body, re.I)
                         and not re.search(r'not vulnerable', _hb_body, re.I)):
                     out.add_finding(
-                        title="Heartbleed (CVE-2014-0160) Vulnerability Detected",
+                        title="SSL/TLS Vulnerability: Heartbleed (CVE-2014-0160) Vulnerability Detected",
                         url=target["url"], port=port, risk="CRITICAL",
                         description=(
                             "sslscan: The server is vulnerable to Heartbleed (CVE-2014-0160). "
@@ -20055,7 +20055,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             # 3. CBC mode cipher suites (standalone finding, beyond LUCKY13)
             if _cbc_suites:
                 out.add_finding(
-                    title="CBC Mode Cipher Suites Accepted",
+                    title="SSL/TLS Ciphers: CBC Mode Cipher Suites Accepted",
                     url=target["url"], port=port, risk="LOW",
                     description=(
                         f"The server accepts {len(_cbc_suites)} CBC-mode "
@@ -20112,7 +20112,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
             ]
             if _nonstd_ciphers:
                 out.add_finding(
-                    title="Non-Standard Cipher Suites Accepted",
+                    title="SSL/TLS Ciphers: Non-Standard Cipher Suites Accepted",
                     url=target["url"], port=port, risk="INFO",
                     description=(
                         f"The server accepts {len(_nonstd_ciphers)} "
@@ -20406,7 +20406,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                                     or "connect timeout" in _tsf_finding_lo):
                                 continue
                             _tsf_proto = _TESTSSL_PROTO_IDS[_tsf_id]
-                            _tsf_title = f"Deprecated Protocol Enabled: {_tsf_proto}"
+                            _tsf_title = f"Insecure Protocol Detected: Deprecated Protocol Enabled: {_tsf_proto}"
                             if "SSLv2" in _tsf_proto:
                                 _tsf_risk = "CRITICAL" if _tls_ext else "HIGH"
                             elif "SSLv3" in _tsf_proto:
@@ -20696,7 +20696,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="TLS Version Identified",
+                    title="Software Version Detected: TLS Version Identified",
                     url=target["url"], port=port, risk="INFO",
                     description=f"Server negotiated {proto}.",
                     output=f"Negotiated protocol: {proto}",
@@ -20707,7 +20707,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 )
             if proto in ("TLSv1", "TLSv1.1", "SSLv2", "SSLv3"):
                 out.add_finding(
-                    title=f"{proto} Enabled",
+                    title=f"Insecure Protocol Detected: {proto} Enabled",
                     url=target["url"], port=port,
                     risk="MEDIUM" if "1.1" in (proto or "") else "HIGH",
                     description=f"Server negotiated {proto} which is considered weak.",
@@ -20916,7 +20916,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 # Expired certificate
                 if _tl.get("expired", False):
                     out.add_finding(
-                        title="Expired TLS Certificate Detected",
+                        title="SSL/TLS Certificate: Expired TLS Certificate Detected",
                         url=target["url"], port=_tl_port_n,
                         risk="HIGH",
                         description=(
@@ -20936,7 +20936,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 # Self-signed certificate
                 if _tl.get("self_signed", False):
                     out.add_finding(
-                        title="Self-Signed TLS Certificate",
+                        title="SSL/TLS Certificate: Self-Signed TLS Certificate",
                         url=target["url"], port=_tl_port_n,
                         risk="MEDIUM",
                         description=(
@@ -20988,7 +20988,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                 # Revoked certificate
                 if _tl.get("revoked", False):
                     out.add_finding(
-                        title="Revoked TLS Certificate Detected",
+                        title="SSL/TLS Certificate: Revoked TLS Certificate Detected",
                         url=target["url"], port=_tl_port_n,
                         risk="HIGH",
                         description=(
@@ -21249,7 +21249,7 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
             for service, pattern in _TAKEOVER_FINGERPRINTS:
                 if pattern.search(r.text):
                     out.add_finding(
-                        title=f"Subdomain Takeover — Dangling CNAME ({service})",
+                        title=f"DNS Vulnerability: Subdomain Takeover — Dangling CNAME ({service})",
                         url=url, port=target["port"], risk="HIGH",
                         description=(
                             f"The hostname '{host}' has a CNAME record pointing to "
@@ -21292,7 +21292,7 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
             for service, pattern in _TAKEOVER_FINGERPRINTS:
                 if pattern.search(r.text):
                     out.add_finding(
-                        title=f"Subdomain Takeover Indicator ({service})",
+                        title=f"DNS Vulnerability: Subdomain Takeover Indicator ({service})",
                         url=url, port=target["port"], risk="MEDIUM",
                         description=(
                             f"The response from '{host}' matches a known takeover "
@@ -21338,7 +21338,7 @@ def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="DNS Zone Transfer Permitted (AXFR)",
+                        title="DNS Information: DNS Zone Transfer Permitted (AXFR)",
                         url=url, port=target["port"], risk="HIGH",
                         description="The DNS server responds to unauthenticated AXFR zone transfer requests, exposing the complete DNS zone including internal hostnames, IP addresses, and mail infrastructure.",
                         output=(
@@ -21565,22 +21565,22 @@ _SECURITY_HEADERS = [
     ("Strict-Transport-Security", "MEDIUM",  "Missing HSTS Header",
      "Without HSTS, browsers may connect over plain HTTP enabling SSL-stripping downgrade attacks (RFC 6797). CWE-523, CWE-319.",
      "SC-8", "Add: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload"),
-    ("Content-Security-Policy",   "LOW", "Missing Content-Security-Policy Header",
+    ("Content-Security-Policy",   "LOW", "Missing Security Header: Missing Content-Security-Policy Header",
      "Without CSP, the application is susceptible to XSS attacks.",
      "SI-10", "Implement a Content-Security-Policy to restrict resource loading."),
     ("X-Frame-Options",           "LOW",    "Missing X-Frame-Options Header (Clickjacking)",
      "Without X-Frame-Options, the page may be embedded in an iframe for clickjacking.",
      "SI-10", "Add: X-Frame-Options: DENY or SAMEORIGIN"),
-    ("X-Content-Type-Options",    "LOW",    "Missing X-Content-Type-Options Header",
+    ("X-Content-Type-Options",    "LOW",    "Missing Security Header: Missing X-Content-Type-Options Header",
      "Without this header, browsers may MIME-sniff responses enabling XSS.",
      "SI-10", "Add: X-Content-Type-Options: nosniff"),
-    ("Referrer-Policy",           "LOW",    "Missing Referrer-Policy Header",
+    ("Referrer-Policy",           "LOW",    "Missing Security Header: Missing Referrer-Policy Header",
      "Without Referrer-Policy, URL parameters may leak to third parties.",
      "SI-12", "Add: Referrer-Policy: strict-origin-when-cross-origin"),
     ("Cache-Control",             "LOW",    "Missing Cache-Control Header",
      "Without Cache-Control, sensitive responses may be stored by browser or proxy caches.",
      "SI-12", "Add: Cache-Control: no-store, no-cache to sensitive endpoint responses."),
-    ("Permissions-Policy",        "LOW",    "Missing Permissions-Policy Header",
+    ("Permissions-Policy",        "LOW",    "Missing Security Header: Missing Permissions-Policy Header",
      "Without Permissions-Policy (or Feature-Policy), the browser grants the page access to sensitive device features (camera, microphone, geolocation, payment). CWE-16.",
      "SI-10", "Add: Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()"),
 ]
@@ -22496,7 +22496,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     expect_ct = headers.get("Expect-CT", "")
     if expect_ct and "enforce" in expect_ct.lower() and "max-age=0" in expect_ct:
         out.add_finding(
-            title="Misconfigured Expect-CT Header (max-age=0 with enforce)",
+            title="Misconfigured Security Header: Misconfigured Expect-CT Header (max-age=0 with enforce)",
             url=url, port=target["port"], risk="LOW",
             description=(
                 "The Expect-CT header is present with 'enforce' and 'max-age=0'. "
@@ -22579,7 +22579,7 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="Debug Mode Enabled / Developer Console Exposed",
+                    title="Debug Endpoint Exposed: Debug Mode Enabled / Developer Console Exposed",
                     url=url.rstrip("/") + _dbpath, port=target["port"], risk="HIGH",
                     description=(
                         f"A debug or developer console endpoint is accessible at "
@@ -25046,7 +25046,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             f"  • {snip}  (page: {u})" for u, snip in _hs_entries[:15]
         )
         out.add_finding(
-            title="Sensitive Data Exposed in HTML Comments",
+            title="Sensitive File Exposed: Sensitive Data Exposed in HTML Comments",
             url=url, port=target["port"], risk="MEDIUM",
             description=(
                 f"HTML comments on {len(_hs_entries)} crawled page(s) contain "
@@ -25878,7 +25878,7 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="JWT Vulnerability: 'none' Algorithm Accepted",
+                        title="JWT: JWT Vulnerability: 'none' Algorithm Accepted",
                         url=url, port=port, risk="CRITICAL",
                         description=(
                             "The server accepted a JWT with 'alg': 'none' and an empty "
@@ -25929,7 +25929,7 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
             out.log_command("jwt_tool", cmd, jt_out)
             if re.search(r'RESULT.*VULNERABLE|successfully forged|VULNERABLE', stdout_jt, re.I):
                 out.add_finding(
-                    title="JWT Vulnerability Confirmed by jwt_tool",
+                    title="JWT: JWT Vulnerability Confirmed by jwt_tool",
                     url=url, port=port, risk="CRITICAL",
                     description=(
                         "jwt_tool confirmed a JWT algorithm confusion vulnerability. "
@@ -26009,7 +26009,7 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title=f"JWT Signing Secret Brute-Force Recovered ({alg})",
+                        title=f"JWT: JWT Signing Secret Brute-Force Recovered ({alg})",
                         url=url, port=port, risk="CRITICAL",
                         description=(
                             f"Fracture brute-forced the {alg} signing secret for a JWT "
@@ -28516,7 +28516,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Business Logic — Numeric Field Accepts Negative/Zero Value",
+                        title="Business Logic: Business Logic — Numeric Field Accepts Negative/Zero Value",
                         url=action, port=target["port"], risk="HIGH",
                         description=(
                             f"Form at {action} accepted a {label} value ({test_val}) for "
@@ -28575,7 +28575,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="Business Logic — Workflow Step Directly Accessible",
+                    title="Business Logic: Business Logic — Workflow Step Directly Accessible",
                     url=lnk, port=target["port"], risk="HIGH",
                     description=(
                         f"Late-stage workflow page '{lnk}' returned HTTP {r.status_code} "
@@ -28640,7 +28640,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
             out.add_finding(
-                title="Business Logic — Potential Race Condition (Duplicate Submission)",
+                title="Business Logic: Business Logic — Potential Race Condition (Duplicate Submission)",
                 url=action, port=target["port"], risk="HIGH",
                 description=(
                     f"Sending {len(results)} concurrent requests to {action} yielded "
@@ -28703,7 +28703,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Business Logic — Hidden Price/Value Field Tampering",
+                        title="Business Logic: Business Logic — Hidden Price/Value Field Tampering",
                         url=action, port=target["port"], risk="HIGH",
                         description=(
                             f"Hidden field '{hf['name']}' in form at {action} was "
@@ -29181,7 +29181,7 @@ def _probe_login_default_creds(login_url: str, target: dict,
             )
         if auth_method:
             out.add_finding(
-                title="Authentication Method Identified",
+                title="Discovery: Authentication Method Identified",
                 url=login_url, port=target["port"], risk="INFO",
                 description=(
                     f"AuthProbe identified the authentication method as "
@@ -29321,7 +29321,7 @@ def _probe_login_default_creds(login_url: str, target: dict,
             except Exception:
                 pass
             out.add_finding(
-                title="Weak or Default Credentials Accepted",
+                title="Authentication: Default Credentials Accepted",
                 url=login_url, port=target["port"], risk="CRITICAL",
                 description="The target accepted well-known default or factory-set credentials, granting unauthorised access.",
                 output=(
@@ -29442,7 +29442,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                         f"Response: {r.status_code}\n{r.text[:2000]}\n\n"
                     )
                 out.add_finding(
-                    title="Authentication Bypass via SQL Injection",
+                    title="Authentication Bypass: Authentication Bypass via SQL Injection",
                     url=action, port=target["port"], risk="CRITICAL",
                     description=f"Login form at {action} is vulnerable to SQL injection authentication bypass.",
                     output=f"Payload: {usr_pay}\nResponse: {r.status_code}",
@@ -29561,7 +29561,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                                 f"Response: {r.status_code}\n{r.text[:2000]}\n\n"
                             )
                         out.add_finding(
-                            title="JWT None Algorithm Authentication Bypass",
+                            title="Authentication Bypass: JWT None Algorithm Authentication Bypass",
                             url=url, port=target["port"], risk="CRITICAL",
                             description="The application accepts JSON Web Tokens specifying the alg:none algorithm, allowing an attacker to forge arbitrary tokens without possessing a signing key and bypass authentication entirely.",
                             output=f"Cookie: {cookie.name}\nToken: {none_token[:80]}",
@@ -29604,7 +29604,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                 jwt_payload = json.loads(_b64j.urlsafe_b64decode(payload_padded).decode("utf-8", errors="replace"))
                 if "exp" not in jwt_payload:
                     out.add_finding(
-                        title="JWT — Missing Expiry Claim (No exp)",
+                        title="JWT: JWT — Missing Expiry Claim (No exp)",
                         url=url, port=target["port"], risk="MEDIUM",
                         description=(f"The JWT in cookie '{cookie.name}' has no 'exp' claim. "
                                      f"Without an expiry, the token is valid indefinitely and cannot "
@@ -29729,7 +29729,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Timing Attack — Non-Constant-Time Authentication",
+                        title="Authentication: Timing Attack — Non-Constant-Time Authentication",
                         url=login_u, port=target["port"], risk="MEDIUM",
                         description=(f"Login endpoint {lpath} shows a {(avg_valid - avg_invalid)*1000:.0f}ms "
                                      f"average response time difference between a non-existent username and "
@@ -30472,7 +30472,7 @@ _NIKTO_NORM: "list[tuple]" = [
      "A05:2025 Security Misconfiguration", "CM-7",
      "Remove backup files from production web roots."),
     (r"(?:admin|administrator|manager|console|dashboard).*(?:found|accessible|interface|panel)",
-     "Admin Panel Exposed", "HIGH",
+     "Debug Endpoint Exposed: Admin Panel Exposed", "HIGH",
      "A05:2025 Security Misconfiguration", "AC-3",
      "Restrict admin interfaces by IP allowlist or VPN."),
     (r"/icons/(?:README|small|apache_pb\b)",
@@ -30775,7 +30775,7 @@ def _normalize_nikto(vuln: dict) -> dict:
         if _rx.search(msg):
             if _risk == "DROP":
                 return None
-            if _title == "Admin Panel Exposed" and _nik_url:
+            if _title == "Debug Endpoint Exposed: Admin Panel Exposed" and _nik_url:
                 _url_parts = _nik_url.lower().replace("/", " ").replace("-", " ").replace("_", " ").split()
                 if not (_ADMIN_PATH_KEYWORDS & set(_url_parts)):
                     return {"title": "Discovery: Login Page",
@@ -30907,7 +30907,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "A05:2025 Security Misconfiguration", "CM-7",
      "Review exposed technology stack for known vulnerabilities."),
     (r"^waf-detect$|^waf-",
-     "WAF / Edge Security Platform Active", "INFO",
+     "Discovery: WAF / Edge Security Platform Active", "INFO",
      "A05:2025 Security Misconfiguration", "CM-7",
      "WAF/CDN detected — informational."),
     (r"server-header|apache-version|nginx-version|iis-version",
@@ -30924,7 +30924,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Remove the X-AspNet-Version header via web.config."),
     # ── Exposed panels / admin ──
     (r"^exposed-panels?/|admin-panel|phpmyadmin|adminer|grafana-default|jenkins",
-     "Admin Panel Exposed", "HIGH",
+     "Debug Endpoint Exposed: Admin Panel Exposed", "HIGH",
      "A05:2025 Security Misconfiguration", "AC-3",
      "Restrict admin interfaces by IP allowlist or VPN."),
     # ── Sensitive files ──
@@ -31144,12 +31144,12 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Change default credentials immediately."),
     # ── Subdomain takeover ──
     (r"subdomain-takeover|cname-takeover",
-     "Subdomain Takeover — Dangling CNAME", "CRITICAL",
+     "DNS Vulnerability: Subdomain Takeover — Dangling CNAME", "CRITICAL",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Remove dangling DNS records or reclaim the underlying service."),
     # ── GraphQL ──
     (r"graphql-introspection",
-     "GraphQL Introspection Enabled", "MEDIUM",
+     "GraphQL: GraphQL Introspection Enabled", "MEDIUM",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Disable GraphQL introspection in production."),
     (r"graphql-field-suggestion",
@@ -32949,7 +32949,7 @@ def _phase_graphql(target: dict, cfg: dict, pm: ProgressManager,
                 f"for comprehensive API security testing including introspection "
                 f"analysis, query depth/complexity attacks, and batching abuse."
             ),
-            source_finding="GraphQL Introspection Enabled",
+            source_finding="GraphQL: GraphQL Introspection Enabled",
             priority="high",
             scope=target.get("scope", ""),
             metadata={"source_phase": "graphql", "endpoint": found_gql},
@@ -32976,7 +32976,7 @@ def _phase_graphql(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
             out.add_finding(
-                title="GraphQL Batch Query Attack Possible",
+                title="GraphQL: GraphQL Batch Query Attack Possible",
                 url=found_gql, port=target["port"], risk="MEDIUM",
                 description="GraphQL accepts batched queries, which can be used to bypass rate limiting.",
                 output=r.text[:300], sources="fracture-graphql",
@@ -33004,7 +33004,7 @@ def _phase_graphql(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
             out.add_finding(
-                title="GraphQL Field Suggestions Enabled",
+                title="GraphQL: GraphQL Field Suggestions Enabled",
                 url=found_gql, port=target["port"], risk="LOW",
                 description="GraphQL returns field name suggestions on typos, which can aid schema enumeration.",
                 output=r.text[:300], sources="fracture-graphql",
@@ -34420,7 +34420,7 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
                         "req": str(_an_rq), "resp": str(_an_rp),
                     })
                 out.add_finding(
-                    title="Broken Object Level Authorization (IDOR / BOLA)",
+                    title="Broken Access Control: Broken Object Level Authorization (IDOR / BOLA)",
                     url=test_url, port=target["port"], risk="CRITICAL",
                     description=(
                         "The application exposes a user-controlled object "
@@ -34652,7 +34652,7 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
         for f in _fb_found:
             _fb_all_ev.extend(f["evidence"])
         out.add_finding(
-            title="Authorization Gaps — Unauthenticated Access to Restricted Paths",
+            title="Unauthenticated Access: Authorization Gaps — Unauthenticated Access to Restricted Paths",
             url=_fb_found[0]["url"], port=target["port"], risk="HIGH",
             description=(
                 f"{len(_fb_found)} administrative or restricted path(s) are "
@@ -34736,7 +34736,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
             out.add_finding(
-                title="Low-Entropy Session Token",
+                title="Session: Low-Entropy Session Token",
                 url=url, port=target["port"], risk="HIGH",
                 description=f"Session cookie '{cookie.name}' has low entropy (value length={len(val)}, unique chars={unique_chars}).",
                 output=f"Cookie: {cookie.name}={val[:20]}...",
@@ -34762,7 +34762,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
             out.add_finding(
-                title="Potentially Predictable Session Token",
+                title="Session: Potentially Predictable Session Token",
                 url=url, port=target["port"], risk="HIGH",
                 description=f"Session cookie '{cookie.name}' consists entirely of digits, which may indicate a sequential or predictable value.",
                 output=f"Cookie: {cookie.name}={val[:20]}",
@@ -34899,7 +34899,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                             except Exception:
                                 pass
                             out.add_finding(
-                                title="Session Fixation Vulnerability",
+                                title="Session: Session Fixation Vulnerability",
                                 url=url, port=target["port"], risk="HIGH",
                                 description=(
                                     f"The session cookie '{session_cookie_name}' is not "
@@ -35565,7 +35565,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                          "resp": str(_follow_rp)},
                     ])
                     out.add_finding(
-                        title="Session Not Invalidated After Logout",
+                        title="Session: Session Not Invalidated After Logout",
                         url=url + lpath, port=target["port"], risk="HIGH",
                         description=(
                             "Session cookies remain valid after the logout "
@@ -35632,7 +35632,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
             out.add_finding(
-                title="Session Token Exposed in URL",
+                title="Session: Session Token Exposed in URL",
                 url=_final_url, port=target["port"], risk="MEDIUM",
                 description=(
                     f"Session-related parameter(s) ({', '.join(_leaked_params)}) appear in "
@@ -35676,7 +35676,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="Session Token in Page Links",
+                    title="Session: Session Token in Page Links",
                     url=url, port=target["port"], risk="MEDIUM",
                     description=(
                         f"Page links embed session tokens in URL query parameters. "
@@ -35736,7 +35736,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
             out.add_finding(
-                title="Overly Broad Cookie Domain Scope",
+                title="Cookies: Overly Broad Cookie Domain Scope",
                 url=url, port=target["port"], risk="LOW",
                 description=(
                     f"Session cookie(s) are scoped to a parent domain rather than "
@@ -35762,7 +35762,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             vc.log(f"[session] Broad domain scope: {', '.join(n for n, _ in _broad_domain_cookies)}", "SUCCESS")
         if _broad_path_cookies and _target_path != "/":
             out.add_finding(
-                title="Cookie Path Scoped to Root",
+                title="Cookies: Cookie Path Scoped to Root",
                 url=url, port=target["port"], risk="INFO",
                 description=(
                     f"Session cookie(s) use Path=/ while the application appears to "
@@ -35834,7 +35834,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             # Check 1: alg=none
             if _jwt_alg in ("none", ""):
                 out.add_finding(
-                    title="JWT Algorithm None Accepted",
+                    title="JWT: JWT Algorithm None Accepted",
                     url=url, port=target["port"], risk="CRITICAL",
                     description=(
                         f"JWT in {_jwt_src} '{_jwt_name}' uses algorithm '{_header.get('alg', 'none')}'. "
@@ -35857,7 +35857,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             # Check 2: Missing exp claim
             if "exp" not in _payload:
                 out.add_finding(
-                    title="JWT Missing Expiration Claim",
+                    title="JWT: JWT Missing Expiration Claim",
                     url=url, port=target["port"], risk="MEDIUM",
                     description=(
                         f"JWT in {_jwt_src} '{_jwt_name}' has no 'exp' (expiration) claim. "
@@ -35888,7 +35888,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                     if _lifetime_hrs > 24:
                         _risk = "MEDIUM" if _lifetime_hrs > 720 else "LOW"
                         out.add_finding(
-                            title="JWT Excessive Lifetime",
+                            title="JWT: JWT Excessive Lifetime",
                             url=url, port=target["port"], risk=_risk,
                             description=(
                                 f"JWT in {_jwt_src} '{_jwt_name}' has a lifetime of "
@@ -35945,7 +35945,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             # Check 5: Missing aud claim
             if "aud" not in _payload:
                 out.add_finding(
-                    title="JWT Missing Audience Claim",
+                    title="JWT: JWT Missing Audience Claim",
                     url=url, port=target["port"], risk="LOW",
                     description=(
                         f"JWT in {_jwt_src} '{_jwt_name}' has no 'aud' (audience) claim. "
@@ -36024,7 +36024,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                         except Exception:
                             pass
                         out.add_finding(
-                            title="Session Persists After Password Change",
+                            title="Session: Session Persists After Password Change",
                             url=url, port=target["port"], risk="MEDIUM",
                             description=(
                                 "Existing sessions remain valid after a password change. "
@@ -36096,7 +36096,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
             out.add_finding(
-                title="Excessive Session Cookie Lifetime",
+                title="Session: Excessive Session Cookie Lifetime",
                 url=url, port=target["port"], risk=_ck_risk,
                 description=(
                     f"Session cookie '{_ck_name}' has an excessively long lifetime: "
@@ -36158,7 +36158,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
             out.add_finding(
-                title="Missing Referrer-Policy With External Links",
+                title="Missing Security Header: Missing Referrer-Policy With External Links",
                 url=url, port=target["port"], risk="MEDIUM",
                 description=(
                     f"The page contains {len(_ext_links)} external link(s) but no "
@@ -36207,7 +36207,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="Mixed Content on Authenticated Page",
+                    title="Misconfigured Security Header: Mixed Content on Authenticated Page",
                     url=url, port=target["port"], risk="LOW",
                     description=(
                         f"The authenticated HTTPS page loads {len(_http_resources)} "
@@ -36454,7 +36454,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
         out.add_finding(
-            title="No Logout (Logoff) Function Detected",
+            title="Session: No Logout (Logoff) Function Detected",
             url=url, port=target["port"], risk="MEDIUM",
             description=(
                 "No logout or session-termination endpoint was found in the "
@@ -36575,7 +36575,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                         )
 
                     out.add_finding(
-                        title="Excessive Session Timeout Configured",
+                        title="Session: Excessive Session Timeout Configured",
                         url=url, port=target["port"], risk="MEDIUM",
                         description=(
                             f"The session cookie '{_ck.name}' has a configured "
@@ -36732,7 +36732,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
             )
 
         out.add_finding(
-            title="Session Timeout Absent or Excessive",
+            title="Session: Session Timeout Absent or Excessive",
             url=url, port=target["port"], risk="HIGH",
             description=(
                 f"The authenticated session remained valid after {_timeout_max} seconds "
@@ -36862,7 +36862,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Session Not Invalidated Server-Side After Logout",
+                        title="Session: Session Not Invalidated Server-Side After Logout",
                         url=_logout_url, port=target["port"], risk="HIGH",
                         description=(
                             f"After sending a logout request to {_logout_url}, the "
@@ -37001,7 +37001,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                         pass
                     if not _a_still_valid:
                         out.add_finding(
-                            title="Concurrent Session Limit Enforced",
+                            title="Session: Concurrent Session Limit Enforced",
                             url=url, port=target["port"], risk="INFO",
                             description=(
                                 "A new login with the same credentials invalidated the "
@@ -37032,7 +37032,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
                         )
                     else:
                         out.add_finding(
-                            title="No Concurrent Session Limit Detected",
+                            title="Session: No Concurrent Session Limit Detected",
                             url=url, port=target["port"], risk="LOW",
                             description=(
                                 "Two simultaneous authenticated sessions using the same "
@@ -37149,7 +37149,7 @@ def _phase_csrf(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Cross-Site Request Forgery (CSRF) — Missing Token",
+                        title="Authentication: Cross-Site Request Forgery (CSRF) — Missing Token",
                         url=action, port=target["port"], risk="HIGH",
                         description=f"State-changing form at {action} lacks a CSRF token. A cross-origin POST was accepted.",
                         output=f"Form action: {action}\nInputs: {[i['name'] for i in inputs]}",
@@ -37299,7 +37299,7 @@ def _phase_cross_user(target: dict, cfg: dict, pm: ProgressManager,
                 })
 
             out.add_finding(
-                title="Cross-User Data Leakage (IDOR)",
+                title="Broken Access Control: Cross-User Data Leakage (IDOR)",
                 url=res_url, port=target["port"], risk="CRITICAL",
                 description=(
                     f"User2's authenticated session can access User1's "
@@ -37353,7 +37353,7 @@ def _phase_cross_user(target: dict, cfg: dict, pm: ProgressManager,
                         except Exception:
                             pass
                         out.add_finding(
-                            title="API Endpoint Returns Same Data for All Users",
+                            title="Broken Access Control: API Endpoint Returns Same Data for All Users",
                             url=link, port=target["port"], risk="MEDIUM",
                             description=f"API endpoint {link} returns identical data for different authenticated users — may indicate missing user-scope filtering.",
                             output=f"User1 == User2 response ({len(r1.text)} bytes)",
@@ -37504,7 +37504,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title=f"Exposed Admin/Debug Endpoint: {path}",
+                    title=f"Debug Endpoint Exposed: Exposed Admin/Debug Endpoint: {path}",
                     url=probe_url, port=target["port"], risk="HIGH",
                     description=(
                         f"The endpoint '{path}' returned HTTP 200 without authentication. "
@@ -38013,7 +38013,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Missing Cache-Control on Sensitive Page",
+                        title="Missing Security Header: Missing Cache-Control on Sensitive Page",
                         url=surl, port=target["port"], risk="LOW",
                         description=(f"The sensitive page {spath} is missing Cache-Control: no-store / no-cache. "
                                      f"Browsers and intermediate proxies may cache the response, "
@@ -38555,7 +38555,7 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
         _affected = "\n".join(dict.fromkeys(r["action"] for r in _lockout_results))
         _first = _lockout_results[0]
         out.add_finding(
-            title="Missing Rate Limiting / Brute-Force Protection",
+            title="Authentication: Missing Rate Limiting / Brute-Force Protection",
             url=_first["action"], port=target["port"], risk="HIGH",
             description=(
                 "Authentication endpoints do not enforce request rate limits, "
@@ -39512,7 +39512,7 @@ def _phase_sri_check(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
             out.add_finding(
-                title=f"Missing Subresource Integrity — {entry['tag']} from {entry['host']}",
+                title=f"Misconfigured Security Header: Missing Subresource Integrity — {entry['tag']} from {entry['host']}",
                 url=entry["page"], port=target["port"], risk="MEDIUM",
                 description=(
                     f"The page {entry['page']} loads a <{entry['tag']}> from "
@@ -39876,7 +39876,7 @@ def _phase_mass_assignment(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="Mass Assignment / Privilege Escalation via Parameter Binding",
+                    title="Broken Access Control: Mass Assignment / Privilege Escalation via Parameter Binding",
                     url=action, port=target["port"], risk="HIGH",
                     description="The application or API auto-binds request input properties to internal model objects without restricting which fields may be set, allowing an attacker to inject privileged fields (e.g., role, isAdmin) and escalate privileges.",
                     output=(f"Form: {action}\nInjected fields: {', '.join(reflected)}\n"
@@ -39920,7 +39920,7 @@ def _phase_mass_assignment(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Mass Assignment / Privilege Escalation via Parameter Binding",
+                        title="Broken Access Control: Mass Assignment / Privilege Escalation via Parameter Binding",
                         url=jurl, port=target["port"], risk="HIGH",
                         description="The application or API auto-binds request input properties to internal model objects without restricting which fields may be set, allowing an attacker to inject privileged fields (e.g., role, isAdmin) and escalate privileges.",
                         output=(f"PUT {jpath}\nInjected: {list(priv_payload.keys())}\n"
@@ -41673,7 +41673,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                     _bfla_roles = sorted(set([low_role, most_privileged] +
                         [r for r in cred_roles if _ok(ep_access.get(r), r, ep)]))
                     out.add_finding(
-                        title=f"BFLA: Role '{low_role}' Can Access Admin Path",
+                        title=f"Broken Access Control: BFLA: Role '{low_role}' Can Access Admin Path",
                         url=ep["url"], port=port, risk=_bfla_risk,
                         description=(
                             f"Role '{low_role}' can access {ep['path']} which "
@@ -41825,7 +41825,7 @@ def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
         except Exception:
             pass
         out.add_finding(
-            title="Broken Function Level Authorization (BFLA)",
+            title="Broken Access Control: Broken Function Level Authorization (BFLA)",
             url=target["url"],
             port=target["port"],
             risk=risk,
@@ -42067,7 +42067,7 @@ def _test_hsts_preload(target: dict, cfg: dict, out: "OutputManager",
         except Exception:
             pass
         out.add_finding(
-            title="HSTS Not Preload-Ready",
+            title="Missing Security Header: HSTS Not Preload-Ready",
             url=url, port=target["port"], risk="LOW",
             description=(
                 f"The Strict-Transport-Security header is present but does not "
@@ -42239,7 +42239,7 @@ def _test_source_maps(target: dict, cfg: dict, out: "OutputManager",
                     except Exception:
                         pass
                     out.add_finding(
-                        title="JavaScript Source Map Exposed",
+                        title="Sensitive File Exposed: JavaScript Source Map Exposed",
                         url=map_url, port=target["port"], risk="MEDIUM",
                         description=(
                             f"A JavaScript source map file is publicly accessible at "
@@ -42293,7 +42293,7 @@ def _test_source_maps(target: dict, cfg: dict, out: "OutputManager",
                             except Exception:
                                 pass
                             out.add_finding(
-                                title="Inline Source Map in JavaScript Bundle",
+                                title="Sensitive File Exposed: Inline Source Map in JavaScript Bundle",
                                 url=js_url, port=target["port"], risk="MEDIUM",
                                 description=(
                                     f"The JavaScript file at {js_url} contains an inline "
@@ -42350,7 +42350,7 @@ def _test_content_type_confusion(target: dict, cfg: dict, out: "OutputManager",
                     {k.lower() for k in r.headers}):
                 _rq, _rp = _save_http_evidence(out, phase, f"ct_confusion_{accept_val.replace('/', '_')}", r)
                 out.add_finding(
-                    title="Content-Type Confusion",
+                    title="Misconfigured Security Header: Content-Type Confusion",
                     url=url, port=target["port"], risk="LOW",
                     description=(
                         f"The server returned HTML content with Content-Type "
@@ -43355,7 +43355,7 @@ def _test_unicode_normalization(target: dict, cfg: dict,
                     out, phase, f"unicode_norm_{label}", r,
                     endpoint_url=action, method="POST")
                 out.add_finding(
-                    title="Unicode Normalization Bypass in Authentication",
+                    title="Authentication Bypass: Unicode Normalization Bypass in Authentication",
                     url=action, port=target["port"], risk="HIGH",
                     description=(
                         f"The login form at {action} responds differently to "
@@ -43674,7 +43674,7 @@ def _phase_websocket(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="WebSocket Endpoint Missing Authentication",
+                    title="Authentication: WebSocket Endpoint Missing Authentication",
                     url=f"{scheme}://{hostname}:{port}{ep['path']}",
                     port=target["port"], risk="HIGH",
                     description=(
@@ -43733,7 +43733,7 @@ def _phase_websocket(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="WebSocket Missing Origin Validation",
+                    title="WebSocket: WebSocket Missing Origin Validation",
                     url=f"{scheme}://{hostname}:{port}{ep['path']}",
                     port=target["port"], risk="MEDIUM",
                     description=(
@@ -43811,7 +43811,7 @@ def _phase_websocket(target: dict, cfg: dict, pm: ProgressManager,
                         except Exception:
                             pass
                         out.add_finding(
-                            title="WebSocket Message Injection (XSS)",
+                            title="WebSocket: WebSocket Message Injection (XSS)",
                             url=f"{scheme}://{hostname}:{port}{ep['path']}",
                             port=target["port"], risk="HIGH",
                             description=(
@@ -44222,7 +44222,7 @@ def _test_oauth_flows(target: dict, cfg: dict, out: OutputManager,
                 if _proceeds:
                     _rq, _rp = _save_http_evidence(out, phase, "oauth_no_state", r)
                     out.add_finding(
-                        title="OAuth Missing State Parameter (CSRF)",
+                        title="Authentication: OAuth Missing State Parameter (CSRF)",
                         url=_authorize_url, port=target["port"], risk="MEDIUM",
                         description=(
                             f"The OAuth authorization endpoint processed a request without "
@@ -44579,7 +44579,7 @@ def _test_mfa_bypass(target: dict, cfg: dict, out: "OutputManager",
                     _rq, _rp = _save_http_evidence(
                         out, phase, "mfa_bypass_direct", r, endpoint_url=ppage)
                     out.add_finding(
-                        title="MFA Bypass — Direct Navigation",
+                        title="Authentication Bypass: MFA Bypass — Direct Navigation",
                         url=ppage, port=target["port"], risk="CRITICAL",
                         description=(
                             f"After reaching the MFA verification page at {mfa_url}, "
@@ -44670,7 +44670,7 @@ def _test_mfa_bypass(target: dict, cfg: dict, out: "OutputManager",
             _rq, _rp = _save_http_evidence(
                 out, phase, "mfa_no_rate_limit", r, endpoint_url=action)
             out.add_finding(
-                title="MFA Missing Rate Limiting on OTP",
+                title="Authentication: MFA Missing Rate Limiting on OTP",
                 url=action, port=target["port"], risk="MEDIUM",
                 description=(
                     f"The MFA verification endpoint at {action} accepted 5 rapid "
@@ -44821,7 +44821,7 @@ def _test_password_policy(target: dict, cfg: dict, out: "OutputManager",
         except Exception:
             pass
         out.add_finding(
-            title="Weak Password Policy",
+            title="Authentication: Weak Password Policy",
             url=pw_forms[0].get("action", url), port=target["port"],
             risk="MEDIUM",
             description=(
@@ -45184,7 +45184,7 @@ def _test_api_rate_limiting(target: dict, cfg: dict, out: "OutputManager",
                 out, phase, f"rate_limit_{ep.split('/')[-1][:20]}",
                 _last_r, endpoint_url=ep)
             out.add_finding(
-                title="API Endpoint Missing Rate Limiting",
+                title="Authentication: API Endpoint Missing Rate Limiting",
                 url=ep, port=target["port"], risk="INFO",
                 description=(
                     f"The API endpoint at {ep} accepted 10 rapid consecutive requests "
@@ -45261,7 +45261,7 @@ def _test_graphql_advanced(target: dict, cfg: dict, out: "OutputManager",
                     _rq, _rp = _save_http_evidence(
                         out, phase, "gql_alias_batch", r, endpoint_url=found_gql)
                     out.add_finding(
-                        title="GraphQL Alias-Based Batching",
+                        title="GraphQL: GraphQL Alias-Based Batching",
                         url=found_gql, port=target["port"], risk="MEDIUM",
                         description=(
                             f"The GraphQL endpoint at {found_gql} processed a query with "
@@ -45311,7 +45311,7 @@ def _test_graphql_advanced(target: dict, cfg: dict, out: "OutputManager",
                     _rq, _rp = _save_http_evidence(
                         out, phase, "gql_circular_frag", r, endpoint_url=found_gql)
                     out.add_finding(
-                        title="GraphQL Circular Fragment Accepted",
+                        title="GraphQL: GraphQL Circular Fragment Accepted",
                         url=found_gql, port=target["port"], risk="MEDIUM",
                         description=(
                             f"The GraphQL endpoint at {found_gql} accepted a query with "
@@ -45354,7 +45354,7 @@ def _test_graphql_advanced(target: dict, cfg: dict, out: "OutputManager",
                     _fd_rq, _fd_rp = _save_http_evidence(
                         out, phase, "gql_field_dup", r, endpoint_url=found_gql)
                     out.add_finding(
-                        title="GraphQL Field Duplication Not Limited",
+                        title="GraphQL: GraphQL Field Duplication Not Limited",
                         url=found_gql, port=target["port"], risk="INFO",
                         description=(
                             f"The GraphQL endpoint at {found_gql} processed a query with "
@@ -45396,7 +45396,7 @@ def _test_graphql_advanced(target: dict, cfg: dict, out: "OutputManager",
                         _rq, _rp = _save_http_evidence(
                             out, phase, "gql_debug_ext", r, endpoint_url=found_gql)
                         out.add_finding(
-                            title="GraphQL Debug Extensions Exposed",
+                            title="GraphQL: GraphQL Debug Extensions Exposed",
                             url=found_gql, port=target["port"], risk="MEDIUM",
                             description=(
                                 f"The GraphQL endpoint at {found_gql} returns an 'extensions' "
@@ -47208,7 +47208,7 @@ def main() -> None:
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Multi-Factor Authentication Detected",
+                        title="Discovery: Multi-Factor Authentication Detected",
                         url=_mfa_url,
                         port=target["port"],
                         risk="INFO",
@@ -48145,7 +48145,7 @@ def main() -> None:
                                         except Exception:
                                             pass
                                         out.add_finding(
-                                            title=f"Unauthenticated {_bi_name} Access: {_bi_desc}",
+                                            title=f"Unauthenticated Access: Unauthenticated {_bi_name} Access: {_bi_desc}",
                                             url=target["url"].rstrip("/") + _bi_path,
                                             port=target["port"], risk="HIGH",
                                             description=(
@@ -49352,7 +49352,7 @@ def main() -> None:
                             if _retest_ans in ("yes", "y", "1"):
                                 _af_ev = str(_auth_status_path) if _auth_status_path.exists() else None
                                 out.add_finding(
-                                    title="Authentication Failure Detected",
+                                    title="Discovery: Authentication Failure Detected",
                                     url=target["url"],
                                     port=target["port"],
                                     risk="HIGH",
