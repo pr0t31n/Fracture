@@ -15286,7 +15286,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     _rp_title = _rp_title_m.group(1).strip() if _rp_title_m else ""
     _rp_cls = _classify_screenshot(
         _rp_title, server_hdr, status_code,
-        port=target["port"], body_snippet=body[:4096])
+        body_snippet=body[:4096])
     if _rp_cls and _rp_cls in _ADMIN_CONSOLE_LABELS:
         out.add_finding(
             title="Discovery: Admin Console",
