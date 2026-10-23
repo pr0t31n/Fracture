@@ -1292,7 +1292,8 @@ def _filter_buster_wildcards(
                 "INFO",
             )
             _suppressed = 0
-            for entry in sc_entries:
+            _mismatch_streak = 0
+            for _ei, entry in enumerate(sc_entries):
                 _handled_ids.add(id(entry))
                 eu = entry[0]
                 try:
@@ -1303,10 +1304,28 @@ def _filter_buster_wildcards(
                     )
                     if _is_wildcard_match(_rv, wc):
                         _suppressed += 1
+                        _mismatch_streak = 0
                         continue
+                    if _rv.status_code != sc:
+                        _mismatch_streak += 1
+                    else:
+                        _mismatch_streak = 0
                 except Exception:
                     pass
                 kept.append(entry)
+                if _mismatch_streak >= 5 and _ei < len(sc_entries) - 1:
+                    _remaining = len(sc_entries) - _ei - 1
+                    vc.log(
+                        f"[buster-filter] Session returns different status "
+                        f"than scanner for {_mismatch_streak} consecutive "
+                        f"entries — tool is selectively blocked; suppressing "
+                        f"remaining {_remaining} HTTP {sc} result(s)",
+                        "WARNING",
+                    )
+                    for _re in sc_entries[_ei + 1:]:
+                        _handled_ids.add(id(_re))
+                    _suppressed += _remaining
+                    break
             if _suppressed:
                 vc.log(
                     f"[buster-filter] Suppressed {_suppressed}/{len(sc_entries)} "
@@ -1425,6 +1444,98 @@ _DEAD_BODY_PHRASES: tuple = (
     "the page could not be found",
     "there is nothing here",
 )
+
+
+def _probe_buster_tool_block(
+    feroxbuster_bin: str,
+    base_url: str,
+    sess: "requests.Session",
+    timeout: int = 10,
+) -> bool:
+    """Quick feroxbuster-vs-session comparison to detect tool-level blocking.
+
+    Writes a 5-word temp wordlist of random UUID paths, runs feroxbuster
+    with --quiet --depth 1 --time-limit 15s, then fetches the same 5 paths
+    with the Python session.  If feroxbuster gets a uniform code (e.g. 403)
+    but the session gets a DIFFERENT uniform code (e.g. 200), the tool is
+    selectively blocked.  Returns True if blocked.
+    """
+    import uuid as _uuid_mod, tempfile
+    _probe_words = [_uuid_mod.uuid4().hex for _ in range(5)]
+    try:
+        _wl = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", prefix="fr_probe_", delete=False)
+        _wl.write("\n".join(_probe_words) + "\n")
+        _wl.close()
+        _out = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", prefix="fr_probe_out_", delete=False)
+        _out.close()
+        cmd = [
+            feroxbuster_bin, "--url", base_url, "--wordlist", _wl.name,
+            "--depth", "1", "--threads", "3", "--quiet",
+            "--output", _out.name, "--insecure", "--time-limit", "15s",
+            "--no-recursion",
+        ]
+        cmd += _buster_auth_flags(sess, base_url)
+        try:
+            proc = _popen(cmd, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, text=True)
+            _register_proc(proc)
+            proc.communicate(timeout=20)
+            _deregister_proc(proc)
+        except subprocess.TimeoutExpired:
+            _kill_proc_tree(proc)
+            try: proc.communicate()
+            except Exception: pass
+            _deregister_proc(proc)
+        except Exception:
+            pass
+        fer_codes: "list[int]" = []
+        try:
+            for line in Path(_out.name).read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                m = re.match(r"(\d{3})\s", line)
+                if m:
+                    fer_codes.append(int(m.group(1)))
+        except Exception:
+            pass
+        sess_codes: "list[int]" = []
+        for _w in _probe_words:
+            try:
+                r = sess.get(
+                    f"{base_url.rstrip('/')}/{_w}",
+                    timeout=max(timeout // 2, 3),
+                    allow_redirects=False,
+                    headers={"Accept": "text/html"},
+                )
+                sess_codes.append(r.status_code)
+            except Exception:
+                pass
+        try:
+            os.unlink(_wl.name)
+        except OSError:
+            pass
+        try:
+            os.unlink(_out.name)
+        except OSError:
+            pass
+        if len(fer_codes) >= 3 and len(sess_codes) >= 3:
+            from collections import Counter
+            _fc, _fc_n = Counter(fer_codes).most_common(1)[0]
+            _sc, _sc_n = Counter(sess_codes).most_common(1)[0]
+            if _fc_n >= len(fer_codes) * 0.8 and _sc != _fc:
+                vc.log(
+                    f"[buster-probe] feroxbuster got {_fc_n}/{len(fer_codes)} "
+                    f"HTTP {_fc} but session got {_sc_n}/{len(sess_codes)} "
+                    f"HTTP {_sc} for the same paths — tool is selectively blocked",
+                    "WARNING",
+                )
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _probe_waf_rate_limit(
@@ -17664,6 +17775,43 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 vc.log("[recon] Rate-limit probe: no throttling detected", "INFO")
         except Exception as _rl_exc:
             vc.log(f"[recon] Rate-limit probe failed: {_rl_exc}", "WARNING")
+    if feroxbuster and not cfg.get("_buster_tool_blocked"):
+        vc.log("[recon] Pre-flight tool-block probe for feroxbuster ...", "INFO")
+        try:
+            if _probe_buster_tool_block(feroxbuster, _recon_origin, sess, timeout):
+                cfg["_buster_tool_blocked"] = True
+                vc.log(
+                    "[recon] feroxbuster is selectively blocked by server/WAF "
+                    "(TLS fingerprint, HTTP/2 negotiation, or header mismatch). "
+                    "Skipping all feroxbuster and gobuster invocations for this target.",
+                    "WARNING",
+                )
+                out.add_finding(
+                    title="Discovery: Scanner Tool Selectively Blocked",
+                    url=_recon_origin, port=target["port"], risk="INFO",
+                    description=(
+                        "The target server or upstream WAF selectively blocks "
+                        "feroxbuster/gobuster while allowing identical requests "
+                        "from the Python session (different TLS fingerprint). "
+                        "Directory brute-force tools have been skipped to avoid "
+                        "thousands of false-positive 403 results."
+                    ),
+                    output="feroxbuster: blocked (uniform 403)\nPython session: not blocked (200)",
+                    sources="fracture-recon", service=target.get("scheme", "https"),
+                    affected=_recon_origin,
+                    owasp="A05:2025 Security Misconfiguration",
+                    command="feroxbuster (5-path probe) vs requests.Session",
+                    remediation=(
+                        "This is informational. The WAF/reverse proxy distinguishes "
+                        "HTTP clients by TLS fingerprint (JA3/JA4) or HTTP/2 behavior. "
+                        "To enable directory discovery, allowlist the scanner IP or "
+                        "use a tool with a browser-like TLS stack."
+                    ),
+                )
+                feroxbuster = None
+                gobuster = None
+        except Exception:
+            pass
     if feroxbuster and Path(wordlist).exists():
         _fer_subdir = out.root / phase / "feroxbuster" / target["hostname"]
         _fer_subdir.mkdir(parents=True, exist_ok=True)
@@ -19341,13 +19489,13 @@ def _phase_endpoint_tools(
     # thousands of requests — the same CF bot-fight trigger the recon
     # phase already guards against. Without this guard, stealth scans
     # were still hammering CF via the endpoint-tools loop.
-    if cfg.get("_waf_stealth_applied"):
+    if cfg.get("_waf_stealth_applied") or cfg.get("_buster_tool_blocked"):
         if gobuster or feroxbuster:
+            _skip_reason = ("stealth mode active" if cfg.get("_waf_stealth_applied")
+                            else "tool selectively blocked by server/WAF")
             vc.log(
-                "[endpoint_tools] Skipping per-endpoint gobuster + "
-                "feroxbuster — stealth mode active. Directory brute-"
-                "force across N discovered endpoints would multiply the "
-                "CDN bot-fight trigger by N.",
+                f"[endpoint_tools] Skipping per-endpoint gobuster + "
+                f"feroxbuster — {_skip_reason}.",
                 "INFO",
             )
         gobuster    = None
@@ -40994,12 +41142,14 @@ def _run_buster_only(target: dict, cfg: dict, out: "OutputManager",
     # per-role buster runner invoked from authenticated/cross-role
     # contexts; same CF bot-fight concern as _phase_recon and
     # _phase_endpoint_tools.
-    if cfg.get("_waf_stealth_applied"):
+    if cfg.get("_waf_stealth_applied") or cfg.get("_buster_tool_blocked"):
         if gobuster or feroxbuster:
+            _skip_reason = ("stealth mode active" if cfg.get("_waf_stealth_applied")
+                            else "tool selectively blocked by server/WAF")
             vc.log(
                 f"[buster] Skipping per-role gobuster + feroxbuster"
                 f"{(' for role ' + role_label) if role_label else ''} — "
-                "stealth mode active.",
+                f"{_skip_reason}.",
                 "INFO",
             )
         gobuster    = None
@@ -48311,7 +48461,7 @@ def main() -> None:
                         _lnd_gob_out = out.output_path(
                             "recon",
                             f"gobuster_landing_{_hostname}")
-                        _lnd_gobuster = _find_tool("gobuster")
+                        _lnd_gobuster = _find_tool("gobuster") if not cfg.get("_buster_tool_blocked") else None
                         if _lnd_gobuster:
                             _lnd_wl = cfg.get("wordlist", "")
                             if _lnd_wl and Path(_lnd_wl).exists():
