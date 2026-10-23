@@ -1166,6 +1166,19 @@ def _filter_buster_wildcards(
     if not results:
         return results
 
+    # ── Diagnostic: status code distribution ──────────────────────────────────
+    from collections import Counter as _BFCounter
+    import time as _bf_time
+    _bf_t0 = _bf_time.monotonic()
+    _bf_code_dist = _BFCounter(s for _, s, _ in results if s is not None)
+    _bf_dist_str = ", ".join(
+        f"HTTP {code}: {cnt}" for code, cnt in _bf_code_dist.most_common(10)
+    )
+    vc.log(
+        f"[buster-filter] Input: {len(results)} result(s) — {_bf_dist_str}",
+        "INFO",
+    )
+
     # ── Global uniform-response check ─────────────────────────────────────────
     # If every result shares exactly one non-404/410 status code AND every redirect
     # destination is the same (when present), the server is likely returning the
@@ -1284,60 +1297,162 @@ def _filter_buster_wildcards(
                 except Exception:
                     _parent_wc_cache[parent_url] = None
             wc = _parent_wc_cache[parent_url]
-            if wc is None or wc["status"] != sc:
-                continue
-            vc.log(
-                f"[buster-filter] Per-path wildcard at {parent_url} "
-                f"(HTTP {sc} catch-all) — validating {len(sc_entries)} result(s)",
-                "INFO",
-            )
-            _suppressed = 0
-            _mismatch_streak = 0
-            for _ei, entry in enumerate(sc_entries):
-                _handled_ids.add(id(entry))
-                eu = entry[0]
-                try:
-                    _rv = sess.get(
-                        eu, timeout=max(timeout // 2, 3),
-                        allow_redirects=False,
-                        headers={"Accept": "text/html,application/json"},
-                    )
-                    if _is_wildcard_match(_rv, wc):
-                        _suppressed += 1
-                        _mismatch_streak = 0
-                        continue
-                    if _rv.status_code != sc:
-                        _mismatch_streak += 1
-                    else:
-                        _mismatch_streak = 0
-                except Exception:
-                    pass
-                kept.append(entry)
-                if _mismatch_streak >= 5 and _ei < len(sc_entries) - 1:
-                    _remaining = len(sc_entries) - _ei - 1
-                    vc.log(
-                        f"[buster-filter] Session returns different status "
-                        f"than scanner for {_mismatch_streak} consecutive "
-                        f"entries — tool is selectively blocked; suppressing "
-                        f"remaining {_remaining} HTTP {sc} result(s)",
-                        "WARNING",
-                    )
-                    for _re in sc_entries[_ei + 1:]:
-                        _handled_ids.add(id(_re))
-                    _suppressed += _remaining
-                    break
-            if _suppressed:
+            if wc is None:
                 vc.log(
-                    f"[buster-filter] Suppressed {_suppressed}/{len(sc_entries)} "
-                    f"wildcard-matching HTTP {sc} result(s) at {parent_url}",
+                    f"[buster-filter] {parent_url}: wildcard probe returned None "
+                    f"(server returns 404/410 or responses differ) — "
+                    f"keeping {len(sc_entries)} HTTP {sc} result(s)",
                     "INFO",
                 )
+                continue
+            if wc["status"] != sc:
+                vc.log(
+                    f"[buster-filter] {parent_url}: wildcard status HTTP {wc['status']} "
+                    f"≠ bucket status HTTP {sc} — keeping {len(sc_entries)} result(s)",
+                    "INFO",
+                )
+                continue
+            _n_entries = len(sc_entries)
+            _SAMPLE_THRESHOLD = 50
+            _SAMPLE_SIZE = 20
+
+            if _n_entries > _SAMPLE_THRESHOLD:
+                # ── Sampling mode: check a random subset instead of all ───
+                vc.log(
+                    f"[buster-filter] Per-path wildcard at {parent_url} "
+                    f"(HTTP {sc} catch-all) — {_n_entries} result(s); "
+                    f"sampling {_SAMPLE_SIZE} to verify",
+                    "INFO",
+                )
+                import random as _bf_rand
+                _sample_indices = sorted(_bf_rand.sample(
+                    range(_n_entries), min(_SAMPLE_SIZE, _n_entries)))
+                _sample_match = 0
+                _sample_miss = 0
+                _sample_codes: "list[int]" = []
+                for _si in _sample_indices:
+                    eu = sc_entries[_si][0]
+                    try:
+                        _rv = sess.get(
+                            eu, timeout=max(timeout // 2, 3),
+                            allow_redirects=False,
+                            headers={"Accept": "text/html,application/json"},
+                        )
+                        _sample_codes.append(_rv.status_code)
+                        if _is_wildcard_match(_rv, wc):
+                            _sample_match += 1
+                        else:
+                            _sample_miss += 1
+                    except Exception:
+                        _sample_match += 1
+                _sample_total = _sample_match + _sample_miss
+                _sess_code_dist = _BFCounter(_sample_codes)
+                _sess_dist_str = ", ".join(
+                    f"{c}: {n}" for c, n in _sess_code_dist.most_common(5))
+                vc.log(
+                    f"[buster-filter] Sample results: {_sample_match}/{_sample_total} "
+                    f"match wildcard, {_sample_miss} unique — "
+                    f"session codes: [{_sess_dist_str}] vs scanner HTTP {sc}",
+                    "INFO",
+                )
+                if _sample_miss == 0 or (_sample_total > 0 and
+                        _sample_match / _sample_total >= 0.90):
+                    for entry in sc_entries:
+                        _handled_ids.add(id(entry))
+                    vc.log(
+                        f"[buster-filter] Suppressed {_n_entries}/{_n_entries} "
+                        f"HTTP {sc} result(s) at {parent_url} "
+                        f"(sample: {_sample_match}/{_sample_total} wildcard match)",
+                        "INFO",
+                    )
+                else:
+                    vc.log(
+                        f"[buster-filter] Sample shows {_sample_miss} unique "
+                        f"result(s) — falling back to full validation",
+                        "INFO",
+                    )
+                    _suppressed = 0
+                    for entry in sc_entries:
+                        _handled_ids.add(id(entry))
+                        eu = entry[0]
+                        try:
+                            _rv = sess.get(
+                                eu, timeout=max(timeout // 2, 3),
+                                allow_redirects=False,
+                                headers={"Accept": "text/html,application/json"},
+                            )
+                            if _is_wildcard_match(_rv, wc):
+                                _suppressed += 1
+                                continue
+                        except Exception:
+                            pass
+                        kept.append(entry)
+                    if _suppressed:
+                        vc.log(
+                            f"[buster-filter] Suppressed {_suppressed}/{_n_entries} "
+                            f"wildcard-matching HTTP {sc} result(s) at {parent_url}",
+                            "INFO",
+                        )
+            else:
+                # ── Small bucket: check every entry ──────────────────────
+                vc.log(
+                    f"[buster-filter] Per-path wildcard at {parent_url} "
+                    f"(HTTP {sc} catch-all) — validating {_n_entries} result(s)",
+                    "INFO",
+                )
+                _suppressed = 0
+                _mismatch_streak = 0
+                for _ei, entry in enumerate(sc_entries):
+                    _handled_ids.add(id(entry))
+                    eu = entry[0]
+                    try:
+                        _rv = sess.get(
+                            eu, timeout=max(timeout // 2, 3),
+                            allow_redirects=False,
+                            headers={"Accept": "text/html,application/json"},
+                        )
+                        if _is_wildcard_match(_rv, wc):
+                            _suppressed += 1
+                            _mismatch_streak = 0
+                            continue
+                        if _rv.status_code != sc:
+                            _mismatch_streak += 1
+                        else:
+                            _mismatch_streak = 0
+                    except Exception:
+                        pass
+                    kept.append(entry)
+                    if _mismatch_streak >= 5 and _ei < len(sc_entries) - 1:
+                        _remaining = len(sc_entries) - _ei - 1
+                        vc.log(
+                            f"[buster-filter] Session returns different status "
+                            f"than scanner for {_mismatch_streak} consecutive "
+                            f"entries — tool is selectively blocked; suppressing "
+                            f"remaining {_remaining} HTTP {sc} result(s)",
+                            "WARNING",
+                        )
+                        for _re in sc_entries[_ei + 1:]:
+                            _handled_ids.add(id(_re))
+                        _suppressed += _remaining
+                        break
+                if _suppressed:
+                    vc.log(
+                        f"[buster-filter] Suppressed {_suppressed}/{_n_entries} "
+                        f"wildcard-matching HTTP {sc} result(s) at {parent_url}",
+                        "INFO",
+                    )
 
         # Keep every entry that was not identified as a wildcard false positive
         for entry in group_entries:
             if id(entry) not in _handled_ids:
                 kept.append(entry)
 
+    _bf_elapsed = _bf_time.monotonic() - _bf_t0
+    vc.log(
+        f"[buster-filter] Wildcard filter done in {_bf_elapsed:.1f}s — "
+        f"{len(results)} in → {len(kept)} kept",
+        "INFO",
+    )
     return _filter_dominant_code(kept, sess, timeout)
 
 
@@ -1491,16 +1606,18 @@ def _probe_buster_tool_block(
         except Exception:
             pass
         fer_codes: "list[int]" = []
+        _raw_output = ""
         try:
-            for line in Path(_out.name).read_text().splitlines():
+            _raw_output = Path(_out.name).read_text()
+            for line in _raw_output.splitlines():
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
                 m = re.match(r"(\d{3})\s", line)
                 if m:
                     fer_codes.append(int(m.group(1)))
-        except Exception:
-            pass
+        except Exception as _fe:
+            vc.log(f"[buster-probe] Error reading feroxbuster output: {_fe}", "WARNING")
         sess_codes: "list[int]" = []
         for _w in _probe_words:
             try:
@@ -1513,6 +1630,20 @@ def _probe_buster_tool_block(
                 sess_codes.append(r.status_code)
             except Exception:
                 pass
+        vc.log(
+            f"[buster-probe] feroxbuster: {len(fer_codes)} result(s) {fer_codes} | "
+            f"session: {len(sess_codes)} result(s) {sess_codes}"
+            + (f" | raw output lines: {len(_raw_output.splitlines())}"
+               if not fer_codes else ""),
+            "INFO",
+        )
+        if not fer_codes and _raw_output:
+            _preview = _raw_output[:300].replace("\n", "\\n")
+            vc.log(
+                f"[buster-probe] No codes parsed from feroxbuster output — "
+                f"preview: {_preview}",
+                "WARNING",
+            )
         try:
             os.unlink(_wl.name)
         except OSError:
@@ -1533,8 +1664,22 @@ def _probe_buster_tool_block(
                     "WARNING",
                 )
                 return True
+            vc.log(
+                f"[buster-probe] No block detected — feroxbuster dominant: "
+                f"HTTP {_fc} ({_fc_n}/{len(fer_codes)}), session dominant: "
+                f"HTTP {_sc} ({_sc_n}/{len(sess_codes)})",
+                "INFO",
+            )
+        elif len(fer_codes) < 3:
+            vc.log(
+                f"[buster-probe] Insufficient feroxbuster results ({len(fer_codes)}/3 needed) "
+                f"— cannot determine tool-block status; treating as blocked (precautionary)",
+                "WARNING",
+            )
+            return True
         return False
-    except Exception:
+    except Exception as _probe_exc:
+        vc.log(f"[buster-probe] Probe failed with exception: {_probe_exc}", "WARNING")
         return False
 
 
@@ -17812,6 +17957,14 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 gobuster = None
         except Exception:
             pass
+    if feroxbuster and wc_baseline is not None:
+        vc.log(
+            f"[recon] Skipping feroxbuster — wildcard/catch-all already confirmed "
+            f"(HTTP {wc_baseline['status']} for all paths). Feroxbuster results "
+            f"would be entirely false positives requiring per-entry validation.",
+            "INFO",
+        )
+        feroxbuster = None
     if feroxbuster and Path(wordlist).exists():
         _fer_subdir = out.root / phase / "feroxbuster" / target["hostname"]
         _fer_subdir.mkdir(parents=True, exist_ok=True)
