@@ -10694,33 +10694,78 @@ return null;
                         f"[auth] OKTA authn API probe failed: {_cle}",
                         "INFO")
             if _cl_okta_done:
-                # OKTA authn set OKTA domain cookies but the app's own cookies
-                # (authToken, idToken, etc.) are still missing — the stored
-                # authorize URL has stale state/nonce so sessionCookieRedirect
-                # can't complete the authorization-callback.  Navigate to the
-                # app's base URL: the app redirects to OKTA authorize (fresh
-                # state/nonce), OKTA sees the session cookies and auto-grants,
-                # the callback sets the app cookies.
+                # OKTA authn set OKTA domain cookies but the app's own
+                # cookies (authToken, idToken, etc.) are still missing.
+                # The stored authorize URL has stale state/nonce so
+                # sessionCookieRedirect can't complete the callback.
+                # Strategy: visit the app base URL, then find and follow
+                # the login-initiation link (e.g. /login_okta) which
+                # server-redirects to OKTA authorize with FRESH
+                # state/nonce.  OKTA auto-grants via session cookies →
+                # callback sets app cookies.
                 if _base_target_url:
                     _pre_n = len(list(sess.cookies))
+                    _fu_r = None
                     try:
-                        sess.get(_base_target_url, timeout=timeout,
-                                 allow_redirects=True)
+                        _fu_r = sess.get(
+                            _base_target_url, timeout=timeout,
+                            allow_redirects=True)
                     except Exception as _oae:
                         vc.log(
-                            f"[auth] OKTA app-cookie follow-up failed: {_oae}",
-                            "WARNING")
+                            f"[auth] OKTA app-cookie follow-up: "
+                            f"base-URL GET failed: {_oae}", "WARNING")
                     _post_n = len(list(sess.cookies))
-                    if _post_n > _pre_n:
+                    # If base URL only gained ≤2 cookies, the app uses
+                    # a JS-driven login redirect (SPA) — parse the
+                    # response for login-initiation links and follow
+                    # the first one that triggers the OAuth2 flow.
+                    if (_post_n - _pre_n <= 2
+                            and _fu_r is not None
+                            and _fu_r.status_code == 200):
+                        _fu_html = _fu_r.text
+                        _fu_links = _re_cl.findall(
+                            r'href=["\']([^"\']*'
+                            r'(?:login_okta|/sso|/auth/redirect'
+                            r'|/signin|/oauth)'
+                            r'[^"\']*)["\']',
+                            _fu_html, _re_cl.IGNORECASE)
+                        if not _fu_links:
+                            _fu_links = _re_cl.findall(
+                                r'href=["\']'
+                                r'(/[^"\']*login[^"\']*)'
+                                r'["\']',
+                                _fu_html, _re_cl.IGNORECASE)
+                        for _flink in _fu_links:
+                            if _flink.startswith('/'):
+                                _flink = urllib.parse.urljoin(
+                                    _base_target_url, _flink)
+                            if _flink.rstrip('/') == _base_target_url.rstrip('/'):
+                                continue
+                            try:
+                                sess.get(
+                                    _flink, timeout=timeout,
+                                    allow_redirects=True)
+                            except Exception:
+                                continue
+                            if len(list(sess.cookies)) - _pre_n > 2:
+                                break
+                    _final_n = len(list(sess.cookies))
+                    if _final_n - _pre_n > 2:
                         vc.log(
                             f"[auth] OKTA app-cookie follow-up: "
-                            f"{_pre_n} → {_post_n} cookies",
+                            f"{_pre_n} → {_final_n} cookies",
                             "SUCCESS")
+                    elif _final_n > _pre_n:
+                        vc.log(
+                            f"[auth] OKTA app-cookie follow-up: "
+                            f"{_pre_n} → {_final_n} cookies "
+                            f"(incomplete — app may reject)",
+                            "WARNING")
                     else:
                         vc.log(
-                            f"[auth] OKTA app-cookie follow-up: no new "
-                            f"cookies ({_post_n} total) — app may reject",
-                            "WARNING")
+                            f"[auth] OKTA app-cookie follow-up: "
+                            f"no new cookies ({_final_n} total) "
+                            f"— app may reject", "WARNING")
                 return sess
             else:
                 vc.log(
@@ -10864,23 +10909,71 @@ return null;
                                             pass
                                     # Ensure app cookies are set — OKTA authn
                                     # only sets OKTA domain cookies; navigate
-                                    # to app base URL to trigger fresh OAuth2.
+                                    # to app base URL then follow login-
+                                    # initiation links for fresh OAuth2 flow.
                                     if _base_target_url:
                                         _ba_pre = len(list(_ba_ok.cookies))
+                                        _ba_fu_r = None
                                         try:
-                                            _ba_ok.get(
+                                            _ba_fu_r = _ba_ok.get(
                                                 _base_target_url,
                                                 timeout=timeout,
                                                 allow_redirects=True)
                                         except Exception:
                                             pass
                                         _ba_post = len(list(_ba_ok.cookies))
-                                        if _ba_post > _ba_pre:
+                                        if (_ba_post - _ba_pre <= 2
+                                                and _ba_fu_r is not None
+                                                and _ba_fu_r.status_code == 200):
+                                            _ba_fu_links = _re_ba.findall(
+                                                r'href=["\']([^"\']*'
+                                                r'(?:login_okta|/sso'
+                                                r'|/auth/redirect'
+                                                r'|/signin|/oauth)'
+                                                r'[^"\']*)["\']',
+                                                _ba_fu_r.text,
+                                                _re_ba.IGNORECASE)
+                                            if not _ba_fu_links:
+                                                _ba_fu_links = _re_ba.findall(
+                                                    r'href=["\']'
+                                                    r'(/[^"\']*login'
+                                                    r'[^"\']*)["\']',
+                                                    _ba_fu_r.text,
+                                                    _re_ba.IGNORECASE)
+                                            for _bfl in _ba_fu_links:
+                                                if _bfl.startswith('/'):
+                                                    _bfl = (
+                                                        urllib.parse.urljoin(
+                                                            _base_target_url,
+                                                            _bfl))
+                                                if (_bfl.rstrip('/')
+                                                        == _base_target_url
+                                                        .rstrip('/')):
+                                                    continue
+                                                try:
+                                                    _ba_ok.get(
+                                                        _bfl,
+                                                        timeout=timeout,
+                                                        allow_redirects=True)
+                                                except Exception:
+                                                    continue
+                                                if (len(list(_ba_ok.cookies))
+                                                        - _ba_pre > 2):
+                                                    break
+                                        _ba_final = len(list(_ba_ok.cookies))
+                                        if _ba_final - _ba_pre > 2:
                                             vc.log(
                                                 f"[auth] OKTA app-cookie "
                                                 f"follow-up: {_ba_pre}"
-                                                f" → {_ba_post} cookies",
+                                                f" → {_ba_final} cookies",
                                                 "SUCCESS")
+                                        elif _ba_final > _ba_pre:
+                                            vc.log(
+                                                f"[auth] OKTA app-cookie "
+                                                f"follow-up: {_ba_pre}"
+                                                f" → {_ba_final} cookies"
+                                                f" (incomplete)",
+                                                "WARNING")
                                     return _ba_ok
                                 vc.log(
                                     "[auth] OKTA authn API failed — "
