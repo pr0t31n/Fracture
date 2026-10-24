@@ -823,7 +823,7 @@ GO_TOOLS = [
     ("github.com/OJ/gobuster/v3@latest",                        "gobuster"),
     ("github.com/ffuf/ffuf/v2@latest",                          "ffuf"),
     ("github.com/projectdiscovery/tlsx/cmd/tlsx@latest",       "tlsx"),
-    ("github.com/rverton/webanalyze/cmd/webanalyze@latest",    "webanalyze"),
+    ("github.com/rverton/webanalyze/v2/cmd/webanalyze@latest",  "webanalyze"),
     ("github.com/bitquark/shortscan/cmd/shortscan@latest",     "shortscan"),
 ]
 
@@ -838,6 +838,17 @@ def find_go():
     return None
 
 
+def _go_binary_ok(path):
+    """Return True if a Go binary at *path* can actually execute."""
+    try:
+        subprocess.run([path, "--help"], capture_output=True, timeout=5)
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return True
+
+
 def install_go():
     banner("Phase: go tools")
     go_bin = find_go()
@@ -848,9 +859,16 @@ def install_go():
     env = os.environ.copy()
     env["GOBIN"] = "/usr/local/bin"
     for pkg, name in GO_TOOLS:
-        if shutil.which(name):
-            info(f"{name} already installed — skipping")
-            continue
+        existing = shutil.which(name)
+        if existing:
+            if _go_binary_ok(existing):
+                info(f"{name} already installed — skipping")
+                continue
+            warn(f"{name} at {existing} cannot execute (wrong architecture?) — reinstalling")
+            try:
+                os.remove(existing)
+            except OSError:
+                pass
         info(f"Installing {name} via go install ...")
         run([go_bin, "install", pkg], check=False, env=env)
 
@@ -979,13 +997,33 @@ def git_clone_or_update(url, dest):
 
 def install_git():
     banner("Phase: git tools")
-    # testssl.sh
-    git_clone_or_update("https://github.com/drwetter/testssl.sh.git", "/opt/testssl.sh")
-    testssl_bin = "/opt/testssl.sh/testssl.sh"
-    if os.path.isfile(testssl_bin):
-        os.chmod(testssl_bin, 0o755)
-        symlink_force(testssl_bin, "/usr/local/bin/testssl.sh")
-        info("testssl.sh symlinked to /usr/local/bin/testssl.sh")
+    # testssl.sh — prefer git clone (latest), fall back to apt package
+    _testssl_ok = False
+    if shutil.which("testssl.sh") or shutil.which("testssl"):
+        info("testssl.sh already installed — skipping")
+        _testssl_ok = True
+    if not _testssl_ok:
+        try:
+            git_clone_or_update("https://github.com/drwetter/testssl.sh.git", "/opt/testssl.sh")
+        except Exception as _ts_e:
+            warn(f"testssl.sh git clone failed: {_ts_e}")
+        testssl_bin = "/opt/testssl.sh/testssl.sh"
+        if os.path.isfile(testssl_bin):
+            os.chmod(testssl_bin, 0o755)
+            symlink_force(testssl_bin, "/usr/local/bin/testssl.sh")
+            info("testssl.sh symlinked to /usr/local/bin/testssl.sh")
+            _testssl_ok = True
+    if not _testssl_ok and OS == "apt":
+        info("Falling back to apt for testssl.sh ...")
+        try:
+            run(["apt-get", "install", "-y", "testssl.sh"], check=False)
+            if shutil.which("testssl.sh") or shutil.which("testssl"):
+                info("  ✓ testssl.sh installed via apt")
+                _testssl_ok = True
+        except Exception:
+            pass
+    if not _testssl_ok:
+        warn("testssl.sh could not be installed — install manually: apt install testssl.sh")
 
     # OWASP ZAP — automated web vulnerability scanner
     _zap_bin = shutil.which("zaproxy") or shutil.which("zap.sh")

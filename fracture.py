@@ -20039,6 +20039,53 @@ def _chrome_okta_authn_login(driver, cfg: dict, login_url: str,
                     _bm.group(1)).rstrip("/")
         except Exception:
             pass
+    # Detect custom OKTA domains (e.g. login.staging.aws.example.com) by
+    # looking for OKTA widget signatures in the page source and probing
+    # /api/v1/authn on the login host.
+    if not _okta_base:
+        try:
+            _page_src = _page_src if "_page_src" in dir() else (driver.page_source or "")
+            _is_okta_widget = any(s in _page_src for s in (
+                "okta-sign-in", "OktaSignIn", "okta-auth-js",
+                "/api/v1/authn", "oktaData", "signIn.renderEl",
+            ))
+            if _is_okta_widget:
+                _login_parsed = urllib.parse.urlparse(_cur or login_url)
+                _candidate = f"{_login_parsed.scheme}://{_login_parsed.netloc}"
+                vc.log(
+                    f"[crawl/spa] OKTA widget detected on custom domain "
+                    f"{_login_parsed.netloc} — probing /api/v1/authn",
+                    "INFO",
+                )
+                _okta_base = _candidate
+        except Exception:
+            pass
+    if not _okta_base:
+        # Last resort: probe /api/v1/authn on the current login host.
+        # OKTA responds with a specific JSON error shape; non-OKTA hosts
+        # return 404 or HTML.
+        try:
+            _login_parsed = urllib.parse.urlparse(_cur or login_url)
+            _probe_base = f"{_login_parsed.scheme}://{_login_parsed.netloc}"
+            import requests as _rq_probe
+            _probe = _rq_probe.post(
+                f"{_probe_base}/api/v1/authn",
+                json={"username": "probe@invalid", "password": "probe"},
+                timeout=10, verify=False,
+            )
+            _pj = _probe.json()
+            if _pj.get("errorCode") or _pj.get("status") in (
+                "UNAUTHENTICATED", "LOCKED_OUT", "PASSWORD_EXPIRED",
+                "MFA_REQUIRED", "MFA_ENROLL", "SUCCESS",
+            ):
+                vc.log(
+                    f"[crawl/spa] OKTA authn API confirmed on custom domain "
+                    f"{_login_parsed.netloc}",
+                    "INFO",
+                )
+                _okta_base = _probe_base
+        except Exception:
+            pass
     if not _okta_base:
         return False
 
@@ -25640,38 +25687,67 @@ _SPA_INTERCEPT_JS = """
 
 
 def _spa_transfer_cookies(sess: "requests.Session", driver: object,
-                          base_url: str) -> int:
+                          base_url: str,
+                          log_prefix: str = "[screenshot]") -> int:
     """Copy all cookies from a requests.Session into a Selenium WebDriver.
 
-    The driver must already be on the target origin before this is called —
-    Selenium's same-origin cookie policy rejects additions to a foreign domain.
+    Uses CDP Network.setCookie when available (Chrome) — this supports
+    cross-domain cookies (e.g. OKTA cookies on login.staging.*.com when
+    the browser is on the app domain).  Falls back to Selenium add_cookie
+    for Firefox or when CDP is unavailable.
     Returns the number of cookies successfully transferred.
     """
     _ok = 0
+    _total = len(sess.cookies)
+    if not _total:
+        return 0
+    _use_cdp = False
+    try:
+        driver.execute_cdp_cmd("Browser.getVersion", {})
+        _use_cdp = True
+    except Exception:
+        pass
+
     try:
         domain_hint = urllib.parse.urlparse(base_url).netloc.split(":")[0]
+        _is_https = base_url.startswith("https")
         for ck in sess.cookies:
             try:
-                driver.add_cookie({   # type: ignore[attr-defined]
-                    "name":   ck.name,
-                    "value":  ck.value,
-                    "domain": ck.domain or domain_hint,
-                    "path":   ck.path   or "/",
-                    "secure": bool(ck.secure),
-                })
+                if _use_cdp:
+                    _cdp_ck = {
+                        "name":   ck.name,
+                        "value":  ck.value,
+                        "domain": ck.domain or domain_hint,
+                        "path":   ck.path or "/",
+                        "secure": bool(ck.secure) if ck.secure else _is_https,
+                        "httpOnly": bool(getattr(ck, "_rest", {}).get("HttpOnly", False)),
+                        "url": f"https://{(ck.domain or domain_hint).lstrip('.')}{ck.path or '/'}",
+                    }
+                    if ck.expires:
+                        _cdp_ck["expires"] = ck.expires
+                    driver.execute_cdp_cmd("Network.setCookie", _cdp_ck)
+                else:
+                    driver.add_cookie({
+                        "name":   ck.name,
+                        "value":  ck.value,
+                        "domain": ck.domain or domain_hint,
+                        "path":   ck.path   or "/",
+                        "secure": bool(ck.secure),
+                    })
                 _ok += 1
             except Exception as _ck_err:
                 vc.log(
-                    f"[screenshot] Cookie transfer failed: {ck.name} "
+                    f"{log_prefix} Cookie transfer failed: {ck.name} "
                     f"(domain={ck.domain!r}) — {_ck_err}",
                     "WARNING",
                 )
         if _ok:
-            vc.log(f"[screenshot] Transferred {_ok}/{len(sess.cookies)} session cookies to browser", "INFO")
-        elif len(sess.cookies):
-            vc.log(f"[screenshot] WARNING: 0/{len(sess.cookies)} cookies transferred — screenshots will be unauthenticated", "WARNING")
+            _method = "CDP" if _use_cdp else "Selenium"
+            vc.log(f"{log_prefix} Transferred {_ok}/{_total} session cookies via {_method}", "INFO")
+        elif _total:
+            vc.log(f"{log_prefix} WARNING: 0/{_total} cookies transferred — browsing will be unauthenticated", "WARNING")
     except Exception as _tc_err:
-        vc.log(f"[screenshot] Cookie transfer error: {_tc_err}", "WARNING")
+        vc.log(f"{log_prefix} Cookie transfer error: {_tc_err}", "WARNING")
     return _ok
 
 
@@ -25810,7 +25886,7 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
         except Exception:
             pass
         driver.delete_all_cookies()
-        _spa_transfer_cookies(sess, driver, url)
+        _spa_transfer_cookies(sess, driver, url, log_prefix="[crawl/spa]")
 
         # Detect if initial navigation landed on a login page.
         # Cookie injection alone is insufficient for OKTA / JS-state auth apps
@@ -33463,6 +33539,7 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
 
     # ── 2. Launch nikto (one per app-base parent path) ──────────────────────
     nikto = _find_tool("nikto")
+    _nikto_skipped = False
     if skip_nikto:
         vc.log(
             "[vulnscan] nikto skipped — target has wildcard/catch-all or SPA "
@@ -33470,6 +33547,7 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
             "INFO",
         )
         nikto = None
+        _nikto_skipped = True
     if nikto:
         for _nik_idx, _nik_base in enumerate(_vs_parents):
             _nik_label = urllib.parse.urlparse(_nik_base).path or "/"
@@ -33505,7 +33583,7 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
             except Exception as e:
                 vc.error(f"[vulnscan] nikto launch failed for {_nik_base}: {e}")
                 out.log_error("nikto", cmd, str(e))
-    else:
+    elif not _nikto_skipped:
         vc.log("[vulnscan] nikto not found", "WARNING")
 
     _bg_count = (1 if handle["nuclei_proc"] else 0) + len(handle["nikto_procs"])
