@@ -10693,7 +10693,36 @@ return null;
                     vc.log(
                         f"[auth] OKTA authn API probe failed: {_cle}",
                         "INFO")
-            if not _cl_okta_done:
+            if _cl_okta_done:
+                # OKTA authn set OKTA domain cookies but the app's own cookies
+                # (authToken, idToken, etc.) are still missing — the stored
+                # authorize URL has stale state/nonce so sessionCookieRedirect
+                # can't complete the authorization-callback.  Navigate to the
+                # app's base URL: the app redirects to OKTA authorize (fresh
+                # state/nonce), OKTA sees the session cookies and auto-grants,
+                # the callback sets the app cookies.
+                if _base_target_url:
+                    _pre_n = len(list(sess.cookies))
+                    try:
+                        sess.get(_base_target_url, timeout=timeout,
+                                 allow_redirects=True)
+                    except Exception as _oae:
+                        vc.log(
+                            f"[auth] OKTA app-cookie follow-up failed: {_oae}",
+                            "WARNING")
+                    _post_n = len(list(sess.cookies))
+                    if _post_n > _pre_n:
+                        vc.log(
+                            f"[auth] OKTA app-cookie follow-up: "
+                            f"{_pre_n} → {_post_n} cookies",
+                            "SUCCESS")
+                    else:
+                        vc.log(
+                            f"[auth] OKTA app-cookie follow-up: no new "
+                            f"cookies ({_post_n} total) — app may reject",
+                            "WARNING")
+                return sess
+            else:
                 vc.log(
                     f"[auth] Operator-configured login URL — skipping form-page walk "
                     f"(direct POST like testConnection: {_login_url})",
@@ -10833,6 +10862,25 @@ return null;
                                                 scope_hostnames.add(_okta_h)
                                         except Exception:
                                             pass
+                                    # Ensure app cookies are set — OKTA authn
+                                    # only sets OKTA domain cookies; navigate
+                                    # to app base URL to trigger fresh OAuth2.
+                                    if _base_target_url:
+                                        _ba_pre = len(list(_ba_ok.cookies))
+                                        try:
+                                            _ba_ok.get(
+                                                _base_target_url,
+                                                timeout=timeout,
+                                                allow_redirects=True)
+                                        except Exception:
+                                            pass
+                                        _ba_post = len(list(_ba_ok.cookies))
+                                        if _ba_post > _ba_pre:
+                                            vc.log(
+                                                f"[auth] OKTA app-cookie "
+                                                f"follow-up: {_ba_pre}"
+                                                f" → {_ba_post} cookies",
+                                                "SUCCESS")
                                     return _ba_ok
                                 vc.log(
                                     "[auth] OKTA authn API failed — "
@@ -48388,6 +48436,7 @@ def main() -> None:
         # ── Checkpoint save closure ──────────────────────────────────────────
         def _save_checkpoint() -> None:
             """Persist full runtime state to checkpoint.json."""
+            global _heartbeat_learned_wait
             try:
                 pm.save_scan_state({
                     # Auth chain
