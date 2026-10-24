@@ -2217,7 +2217,7 @@ def _heartbeat_between_phases(
     )
     _hb_evi_dir = out.root / "evidence" / "heartbeat"
     _hb_evi_dir.mkdir(parents=True, exist_ok=True)
-    _hb_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    _hb_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     _hb_evi = _hb_evi_dir / f"waf_block_{last_phase}_{_hb_ts}.json"
     _hb_evi_rel = ""
     try:
@@ -19545,7 +19545,7 @@ def _register_screenshot(root: Path, png_path, url: str = "",
             "status_code": status_code,
             "server": server, "page_title": page_title,
             "oos": oos,
-            "timestamp": datetime.datetime.now().isoformat(),
+            "timestamp": datetime.now().isoformat(),
         }
         dest.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
     except Exception:
