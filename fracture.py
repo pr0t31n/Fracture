@@ -2000,9 +2000,17 @@ def _waf_session_health(
 # before they corrupt test results.  When a block is detected the scan pauses,
 # polls until the block clears, re-authenticates, and resumes.
 
-_HEARTBEAT_POLL_INTERVAL = 30          # seconds between block-clear polls
-_HEARTBEAT_MAX_WAIT      = 1800        # 30 min max wait before giving up
-_HEARTBEAT_GRACE_DELAY   = 5           # seconds to wait after unblock before re-auth
+_HEARTBEAT_POLL_START    = 60           # first wait: 1 minute
+_HEARTBEAT_POLL_STEP     = 60           # add 1 minute each subsequent poll
+_HEARTBEAT_POLL_CAP      = 600          # max single interval: 10 minutes
+_HEARTBEAT_MAX_POLLS     = 10           # give up after 10 failed polls
+_HEARTBEAT_GRACE_DELAY   = 5            # seconds after unblock before re-auth
+_heartbeat_learned_wait: "int | None" = None  # learned clearance time (seconds)
+
+
+class _HeartbeatBlockedExit(Exception):
+    """Raised when WAF block persists past maximum escalation — checkpoint + exit."""
+    pass
 
 
 def _heartbeat_capture_baseline(
@@ -2093,33 +2101,56 @@ def _heartbeat_wait_for_unblock(
     out: "OutputManager",
     timeout: int = 10,
 ) -> bool:
-    """Poll until the WAF block clears or we hit the max wait time.
+    """Poll with escalating intervals until the WAF block clears.
 
-    Returns True if the block cleared, False if we timed out.
+    Intervals: 1 min, 2 min, 3 min, … up to 10 min (1-minute step-ups).
+    If a previous block cleared, the learned clearance time is used as the
+    first interval so we don't waste short probes re-triggering the WAF.
+    Returns True if the block cleared, False after 10 failed polls.
     """
+    global _heartbeat_learned_wait
     import time as _time
+    import math as _math
     _start = _time.monotonic()
     _poll_count = 0
 
-    while (_time.monotonic() - _start) < _HEARTBEAT_MAX_WAIT:
+    if _heartbeat_learned_wait is not None:
+        _interval = min(_heartbeat_learned_wait, _HEARTBEAT_POLL_CAP)
+        vc.log(
+            f"[heartbeat] Using learned wait: {_interval}s "
+            f"({_interval // 60}m{_interval % 60:02d}s) from previous block",
+            "INFO",
+        )
+    else:
+        _interval = _HEARTBEAT_POLL_START
+
+    while _poll_count < _HEARTBEAT_MAX_POLLS:
         _poll_count += 1
         _elapsed = int(_time.monotonic() - _start)
 
         vc.log(
-            f"[heartbeat] Block check #{_poll_count} — "
-            f"waiting {_elapsed}s/{_HEARTBEAT_MAX_WAIT}s",
+            f"[heartbeat] Block check #{_poll_count}/{_HEARTBEAT_MAX_POLLS} — "
+            f"waiting {_interval}s ({_interval // 60}m) before probe "
+            f"(elapsed {_elapsed}s)",
             "INFO",
         )
-        vc.status("heartbeat", "WAF Block", f"blocked — poll #{_poll_count} ({_elapsed}s)")
+        vc.status(
+            "heartbeat", "WAF Block",
+            f"blocked — wait {_interval // 60}m "
+            f"(poll #{_poll_count}/{_HEARTBEAT_MAX_POLLS})",
+        )
 
-        _time.sleep(_HEARTBEAT_POLL_INTERVAL)
+        _time.sleep(_interval)
 
         blocked, reason, info = _heartbeat_check(target_url, baseline, timeout)
         if not blocked:
             _elapsed = int(_time.monotonic() - _start)
+            _learned = int(_math.ceil(_elapsed / 60)) * 60
+            _heartbeat_learned_wait = _learned
             vc.log(
                 f"[heartbeat] Block CLEARED after {_elapsed}s "
-                f"({_poll_count} polls) — HTTP {info.get('status', '?')}",
+                f"({_poll_count} polls) — HTTP {info.get('status', '?')} "
+                f"— learned wait: {_learned}s ({_learned // 60}m)",
                 "SUCCESS",
             )
             _time.sleep(_HEARTBEAT_GRACE_DELAY)
@@ -2132,10 +2163,12 @@ def _heartbeat_wait_for_unblock(
             "WARNING",
         )
 
+        _interval = min(_interval + _HEARTBEAT_POLL_STEP, _HEARTBEAT_POLL_CAP)
+
     _elapsed = int(_time.monotonic() - _start)
     vc.log(
-        f"[heartbeat] Block did NOT clear after {_elapsed}s "
-        f"({_poll_count} polls) — aborting wait",
+        f"[heartbeat] Block did NOT clear after {_poll_count} polls "
+        f"({_elapsed}s) — saving checkpoint and pausing scan",
         "ERROR",
     )
     return False
@@ -2210,12 +2243,15 @@ def _heartbeat_between_phases(
 
     if not cleared:
         vc.log(
-            f"[heartbeat] Block did not clear — continuing scan with "
-            f"potentially unreliable results{_lbl}",
+            f"[heartbeat] Persistent WAF block — saving checkpoint and "
+            f"pausing scan{_lbl}. Resume when IP is unblocked.",
             "ERROR",
         )
-        vc.status("heartbeat", "WAF Block", "timed out — resuming anyway")
-        return effective_auth
+        vc.status("heartbeat", "Paused", "WAF block — resume when unblocked")
+        raise _HeartbeatBlockedExit(
+            f"WAF block after '{last_phase}' did not clear after "
+            f"{_HEARTBEAT_MAX_POLLS} escalating polls"
+        )
 
     # ── Re-authenticate ──────────────────────────────────────────────────
     if effective_auth is not None and (ctx_cfg or cfg).get("auth", {}).get("enabled"):
@@ -28327,7 +28363,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 if r and cmd_pat.search(r.text):
                     _rq, _rp = _save_http_evidence(out, phase, f"cmdi_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
-                        title="OS Command Injection",
+                        title="Injection: OS Command Injection",
                         url=purl, port=target["port"], risk="CRITICAL",
                         description="User-controlled input is passed unsanitised to a system shell or OS command execution function, allowing an attacker to execute arbitrary commands on the host.",
                         output=f"Parameter: {param}\nPayload: {cmd_pay}",
@@ -28366,15 +28402,27 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     _deregister_proc(proc)
                     _cmx_out.write_text(_cmx_stdout, encoding="utf-8")
                     out.log_command("commix", _cmx_cmd, _cmx_out)
-                    _cmx_vuln = bool(re.search(
-                        r'is\s+vulnerable|injection\s+point|injectable',
-                        _cmx_stdout, re.I))
-                    _cmx_blind = bool(re.search(
-                        r'time-based|blind.*injection|blind.*technique',
-                        _cmx_stdout, re.I))
+                    _cmx_confirmed = re.search(
+                        r'is\s+injectable|is\s+vulnerable|'
+                        r'injection\s+point\s+found',
+                        _cmx_stdout, re.I)
+                    _cmx_failed = re.search(
+                        r'answered\s+none\s+of\s+the\s+\d+\s+requests|'
+                        r'might\s+not\s+be\s+injectable|'
+                        r'does\s+not\s+seem\s+to\s+be\s+injectable|'
+                        r'all\s+tested\s+parameters\s+.*not.*injectable',
+                        _cmx_stdout, re.I)
+                    _cmx_vuln = bool(_cmx_confirmed) and not bool(_cmx_failed)
+                    _cmx_blind = (
+                        _cmx_vuln
+                        and bool(re.search(
+                            r'time-based.*injectable|'
+                            r'blind.*is\s+injectable',
+                            _cmx_stdout, re.I))
+                    )
                     if _cmx_vuln and not _cmx_blind:
                         out.add_finding(
-                            title="OS Command Injection — commix Confirmed",
+                            title="Injection: OS Command Injection — commix Confirmed",
                             url=purl, port=target["port"], risk="CRITICAL",
                             description=(
                                 f"commix confirmed OS command injection in parameter "
@@ -28393,9 +28441,9 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                             ),
                         )
                         vc.log(f"[injection] commix confirmed CMDi: {purl} param={param}", "SUCCESS")
-                    elif _cmx_blind:
+                    elif _cmx_vuln and _cmx_blind:
                         out.add_finding(
-                            title="Blind Command Injection (Time-Based) — commix",
+                            title="Injection: Blind Command Injection (Time-Based) — commix",
                             url=purl, port=target["port"], risk="HIGH",
                             description=(
                                 f"commix detected time-based blind command injection in "
