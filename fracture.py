@@ -2215,6 +2215,19 @@ def _heartbeat_between_phases(
         f"{reason} (HTTP {info.get('status', '?')})",
         "WARNING",
     )
+    _hb_evi_dir = out.root / "evidence" / "heartbeat"
+    _hb_evi_dir.mkdir(parents=True, exist_ok=True)
+    _hb_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    _hb_evi = _hb_evi_dir / f"waf_block_{last_phase}_{_hb_ts}.json"
+    _hb_evi_rel = ""
+    try:
+        _hb_evi.write_text(json.dumps({
+            "phase": last_phase, "role": role_label,
+            "probe": info, "baseline": baseline, "reason": reason,
+        }, indent=2))
+        _hb_evi_rel = str(_hb_evi.relative_to(out.root))
+    except Exception:
+        pass
     out.add_finding(
         title=f"Discovery: WAF Block Triggered After Phase: {last_phase}",
         url=target_url, port=target.get("port", 443), risk="INFO",
@@ -2230,6 +2243,7 @@ def _heartbeat_between_phases(
         ),
         output=json.dumps(info, indent=2),
         affected=target_url, sources="fracture-heartbeat",
+        output_file=_hb_evi_rel,
         service=target.get("scheme", "https"),
         command=f"GET {target_url} (unauthenticated heartbeat probe)",
         owasp="A05:2021 – Security Misconfiguration", nist="SI-4",
@@ -12357,6 +12371,10 @@ def _normalize_url(base: str, href: str) -> "str | None":
         p      = urllib.parse.urlparse(joined)
         if p.scheme not in ("http", "https"):
             return None
+        if p.hostname and p.path:
+            _segs = p.path.split("/")
+            if p.hostname in _segs:
+                return None
         return joined.rstrip("/") if not p.path or p.path == "/" else joined
     except Exception:
         return None
@@ -18548,6 +18566,22 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     "Skipping all feroxbuster and gobuster invocations for this target.",
                     "WARNING",
                 )
+                _tb_evi_dir = out.root / "evidence" / "recon"
+                _tb_evi_dir.mkdir(parents=True, exist_ok=True)
+                _tb_evi = _tb_evi_dir / "tool_block_probe.txt"
+                _tb_evi_rel = ""
+                try:
+                    _tb_evi.write_text(
+                        "feroxbuster tool-block probe result\n"
+                        "====================================\n"
+                        f"Target: {_recon_origin}\n"
+                        f"feroxbuster: blocked (uniform 403)\n"
+                        f"Python session: not blocked (200)\n"
+                        f"Conclusion: WAF/TLS fingerprint-based selective blocking\n"
+                    )
+                    _tb_evi_rel = str(_tb_evi.relative_to(out.root))
+                except Exception:
+                    pass
                 out.add_finding(
                     title="Discovery: Scanner Tool Selectively Blocked",
                     url=_recon_origin, port=target["port"], risk="INFO",
@@ -18561,6 +18595,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     output="feroxbuster: blocked (uniform 403)\nPython session: not blocked (200)",
                     sources="fracture-recon", service=target.get("scheme", "https"),
                     affected=_recon_origin,
+                    output_file=_tb_evi_rel,
                     owasp="A05:2025 Security Misconfiguration",
                     command="feroxbuster (5-path probe) vs requests.Session",
                     remediation=(
@@ -26383,6 +26418,18 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         _ch_details = "\n".join(
             f"  {h}  (first seen: {_crawl_leaked_hosts[h]})" for h in _ch_list
         )
+        _ch_evi_dir = out.root / "evidence" / "crawl"
+        _ch_evi_dir.mkdir(parents=True, exist_ok=True)
+        _ch_evi = _ch_evi_dir / "internal_hostnames.txt"
+        _ch_evi_rel = ""
+        try:
+            _ch_evi.write_text(
+                f"Internal hostnames found during crawl ({len(_ch_list)}):\n"
+                f"{_ch_details}\n"
+            )
+            _ch_evi_rel = str(_ch_evi.relative_to(out.root))
+        except Exception:
+            pass
         out.add_finding(
             title="Information Disclosure: Internal Hostname in HTTP Response",
             url=url, port=target["port"], risk="LOW",
@@ -26394,6 +26441,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             output=f"Internal hostnames found during crawl ({len(_ch_list)}):\n{_ch_details}",
             affected=_url_rel_path(url, target["url"]),
             sources="fracture-crawl", service=target["scheme"],
+            output_file=_ch_evi_rel,
             owasp="A05:2025 Security Misconfiguration",
             remediation=(
                 "Remove internal hostnames from HTTP responses and headers. "
@@ -28046,6 +28094,11 @@ def _write_structure_map(out: "OutputManager", target: dict,
                 if any(c in _decoded for c in ('"', '<', '>')):
                     return
             except Exception:
+                return
+            # Reject paths containing the target hostname as a segment —
+            # caused by schemeless absolute URLs ("host/path") that urljoin
+            # misinterprets as relative, producing "/host/path".
+            if base_host and base_host in path.split("/"):
                 return
             entry = paths.setdefault(path, {})
             # HTTP status is write-once: the first writer (Role 1 / most
@@ -50767,6 +50820,16 @@ def main() -> None:
                     )
                     _pa_sm_updates = {}
                     for _pa_base in _pa_bases:
+                        _pa_wc = _detect_wildcard(
+                            _pa_base, _ctx_auth, cfg.get("timeout", 10))
+                        if _pa_wc:
+                            vc.log(
+                                f"[recon-postauth] SPA/wildcard detected under "
+                                f"{urllib.parse.urlparse(_pa_base).path} "
+                                f"— skipping admin/common probes",
+                                "INFO",
+                            )
+                            continue
                         _pa_bp = urllib.parse.urlparse(_pa_base).path.rstrip("/")
                         for _pa_ap in _ADMIN_PATHS + _COMMON_PATHS:
                             _pa_fp = (_pa_bp + _pa_ap) if _pa_bp else _pa_ap
