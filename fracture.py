@@ -2184,13 +2184,16 @@ def _heartbeat_between_phases(
     scope_hostnames: "set | None" = None,
     role_label: str = "",
     ctx_cfg: "dict | None" = None,
+    checkpoint_cb: "callable | None" = None,
 ) -> "requests.Session | None":
     """Check for WAF block between phases; pause/wait/re-auth if blocked.
 
     Called between every phase in the dispatch loop.  Returns the (possibly
-    refreshed) authenticated session.  If the block never clears, returns
-    the original session and logs an error — the scan continues but results
-    are flagged as potentially unreliable.
+    refreshed) authenticated session.
+
+    If the block persists past 10 escalating polls (1 min → 10 min), saves
+    a checkpoint via *checkpoint_cb* and exits cleanly so the user can
+    resume when the IP is unblocked.
 
     *last_phase* is the name of the phase that just completed — logged when a
     block is detected so we can identify which tool/phase triggered it.
@@ -2243,15 +2246,20 @@ def _heartbeat_between_phases(
 
     if not cleared:
         vc.log(
-            f"[heartbeat] Persistent WAF block — saving checkpoint and "
-            f"pausing scan{_lbl}. Resume when IP is unblocked.",
+            f"[heartbeat] Persistent WAF block after '{last_phase}' — "
+            f"saving checkpoint and pausing scan{_lbl}. "
+            f"Resume when IP is unblocked.",
             "ERROR",
         )
         vc.status("heartbeat", "Paused", "WAF block — resume when unblocked")
-        raise _HeartbeatBlockedExit(
-            f"WAF block after '{last_phase}' did not clear after "
-            f"{_HEARTBEAT_MAX_POLLS} escalating polls"
-        )
+        if checkpoint_cb is not None:
+            try:
+                checkpoint_cb()
+                vc.log("[heartbeat] Checkpoint saved", "INFO")
+            except Exception as _cpe:
+                vc.log(f"[heartbeat] Checkpoint save error: {_cpe}", "WARNING")
+        import sys as _sys_hb
+        _sys_hb.exit(0)
 
     # ── Re-authenticate ──────────────────────────────────────────────────
     if effective_auth is not None and (ctx_cfg or cfg).get("auth", {}).get("enabled"):
@@ -10526,11 +10534,171 @@ return null;
                 "INFO",
             )
         elif _login_url and _configured_login_url:
-            vc.log(
-                f"[auth] Operator-configured login URL — skipping form-page walk "
-                f"(direct POST like testConnection: {_login_url})",
-                "INFO",
-            )
+            # Check if the configured URL points to an OKTA-protected target.
+            # On resume after a WAF block, _configured_login_url is the stored
+            # OKTA authorize URL — form POST will fail (MFA wall).  Try the
+            # OKTA authn API first; fall through to form POST if not OKTA.
+            import re as _re_cl
+            _cl_okta_done = False
+            _OKTA_URL_IND = ('.okta.com', '/oauth2/', '/authorize')
+            if any(_ind in (_login_url or '') for _ind in _OKTA_URL_IND):
+                vc.log(
+                    f"[auth] Operator-configured login URL has OKTA indicators "
+                    f"— trying OKTA authn API before form POST",
+                    "INFO",
+                )
+                try:
+                    _cl_r = sess.get(_login_url, timeout=timeout,
+                                     allow_redirects=True)
+                    _cl_html = _cl_r.text
+                    _CL_OKTA_IND = (
+                        'okta-sign-in.min.js', 'okta-signin-widget',
+                        'id="okta-login-container"',
+                        "id='okta-login-container'",
+                    )
+                    _cl_okta_page = any(_ib in _cl_html for _ib in _CL_OKTA_IND)
+                    if not _cl_okta_page:
+                        # Try extracting OKTA base from URL chain
+                        for _cu in [_cl_r.url, _login_url]:
+                            if '.okta.com' in _cu:
+                                _cl_okta_page = True
+                                break
+                    if _cl_okta_page:
+                        def _js_unesc_cl(s):
+                            return _re_cl.sub(
+                                r'\\x([0-9a-fA-F]{2})',
+                                lambda m: chr(int(m.group(1), 16)), s)
+                        # Extract OKTA base URL from page or from the URL itself
+                        _cl_base_m = _re_cl.search(
+                            r'"baseUrl"\s*:\s*"([^"]+)"', _cl_html)
+                        _cl_okta_base = None
+                        if _cl_base_m:
+                            _cl_okta_base = _js_unesc_cl(
+                                _cl_base_m.group(1)).rstrip("/")
+                        else:
+                            # Derive from redirect chain
+                            for _cu in [_cl_r.url, _login_url]:
+                                _cu_p = urllib.parse.urlparse(_cu)
+                                if '.okta.com' in _cu_p.hostname:
+                                    _cl_okta_base = f"{_cu_p.scheme}://{_cu_p.hostname}"
+                                    break
+                        if _cl_okta_base:
+                            _cl_u = auth.get("username", "")
+                            _cl_p = auth.get("password", "")
+                            if _cl_u and _cl_p:
+                                from urllib.parse import quote as _q_cl
+                                _cl_st_m = _re_cl.search(
+                                    r'"stateToken"\s*:\s*"([^"]+)"', _cl_html)
+                                _cl_state_token = (
+                                    _js_unesc_cl(_cl_st_m.group(1))
+                                    if _cl_st_m else None)
+                                _cl_ru_m = _re_cl.search(
+                                    r'"redirectUri"\s*:\s*"([^"]+)"', _cl_html)
+                                _cl_redir = (
+                                    _js_unesc_cl(_cl_ru_m.group(1))
+                                    if _cl_ru_m else None)
+                                vc.log(
+                                    f"[auth] OKTA authn API at {_cl_okta_base}",
+                                    "INFO")
+                                _cl_payload = {
+                                    "username": _cl_u, "password": _cl_p}
+                                try:
+                                    _cl_ar = sess.post(
+                                        f"{_cl_okta_base}/api/v1/authn",
+                                        json=_cl_payload, timeout=timeout)
+                                    _cl_aj = _cl_ar.json()
+                                except Exception as _cle:
+                                    vc.log(
+                                        f"[auth] OKTA authn request failed: "
+                                        f"{_cle}", "INFO")
+                                    _cl_aj = {}
+                                if _cl_aj.get("status") == "SUCCESS":
+                                    _cl_stok = _cl_aj.get("sessionToken", "")
+                                    if _cl_stok:
+                                        _cl_rt = (
+                                            _cl_redir
+                                            if (_cl_redir and (
+                                                '/authorize' in _cl_redir
+                                                or '/oauth2/' in _cl_redir))
+                                            else auth.get("login_url", "").strip()
+                                            or target["url"])
+                                        sess.get(
+                                            f"{_cl_okta_base}/login"
+                                            f"/sessionCookieRedirect"
+                                            f"?checkAccountSetupComplete=true"
+                                            f"&token={_cl_stok}"
+                                            f"&redirectUrl="
+                                            f"{_q_cl(_cl_rt, safe='')}",
+                                            timeout=timeout,
+                                            allow_redirects=True)
+                                        if sess.cookies:
+                                            vc.log(
+                                                f"[auth] OKTA authn API SUCCESS "
+                                                f"({len(list(sess.cookies))} cookies)",
+                                                "SUCCESS")
+                                            if scope_hostnames is not None:
+                                                try:
+                                                    _okta_h = urllib.parse.urlparse(
+                                                        _cl_okta_base).hostname
+                                                    if _okta_h:
+                                                        scope_hostnames.add(_okta_h)
+                                                except Exception:
+                                                    pass
+                                            _cl_okta_done = True
+                                elif _cl_aj.get("status") == "MFA_REQUIRED":
+                                    vc.log(
+                                        "[auth] OKTA authn: MFA required — "
+                                        "falling back to form POST", "INFO")
+                                elif _cl_aj.get("status"):
+                                    vc.log(
+                                        f"[auth] OKTA authn: "
+                                        f"{_cl_aj.get('errorSummary', _cl_aj['status'])}",
+                                        "INFO")
+                                # Try with stateToken if primary failed
+                                if not _cl_okta_done and _cl_state_token:
+                                    _cl_payload["stateToken"] = _cl_state_token
+                                    try:
+                                        _cl_ar2 = sess.post(
+                                            f"{_cl_okta_base}/api/v1/authn",
+                                            json=_cl_payload, timeout=timeout)
+                                        _cl_aj2 = _cl_ar2.json()
+                                    except Exception:
+                                        _cl_aj2 = {}
+                                    if _cl_aj2.get("status") == "SUCCESS":
+                                        _cl_stok2 = _cl_aj2.get("sessionToken", "")
+                                        if _cl_stok2:
+                                            _cl_rt2 = (
+                                                _cl_redir
+                                                if (_cl_redir and (
+                                                    '/authorize' in _cl_redir
+                                                    or '/oauth2/' in _cl_redir))
+                                                else auth.get("login_url", "").strip()
+                                                or target["url"])
+                                            sess.get(
+                                                f"{_cl_okta_base}/login"
+                                                f"/sessionCookieRedirect"
+                                                f"?checkAccountSetupComplete=true"
+                                                f"&token={_cl_stok2}"
+                                                f"&redirectUrl="
+                                                f"{_q_cl(_cl_rt2, safe='')}",
+                                                timeout=timeout,
+                                                allow_redirects=True)
+                                            if sess.cookies:
+                                                vc.log(
+                                                    f"[auth] OKTA authn+stateToken "
+                                                    f"SUCCESS ({len(list(sess.cookies))} cookies)",
+                                                    "SUCCESS")
+                                                _cl_okta_done = True
+                except Exception as _cle:
+                    vc.log(
+                        f"[auth] OKTA authn API probe failed: {_cle}",
+                        "INFO")
+            if not _cl_okta_done:
+                vc.log(
+                    f"[auth] Operator-configured login URL — skipping form-page walk "
+                    f"(direct POST like testConnection: {_login_url})",
+                    "INFO",
+                )
         elif _login_url:
             _stepped = _step_to_login_form(_login_url)
 
@@ -10754,6 +10922,7 @@ return null;
                         )
                         _guard_html_g = _guard_r.text
                         if any(_ig in _guard_html_g for _ig in _OKTA_IND_G):
+                            import re as _re7
                             def _js_unesc_g(s):
                                 return _re7.sub(
                                     r'\\x([0-9a-fA-F]{2})',
@@ -27995,8 +28164,8 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception: r2 = None
                 _confirmed = r2 is not None and not _SQL_ERROR_RE.search(r2.text)
                 _risk      = "CRITICAL" if _confirmed else "HIGH"
-                _title     = ("SQL Injection (Error-Based) — Confirmed" if _confirmed
-                              else "SQL Injection (Error-Based) — Suspected, unconfirmed")
+                _title     = ("Injection: SQL Injection (Error-Based) — Confirmed" if _confirmed
+                              else "Injection: SQL Injection (Error-Based) — Suspected, unconfirmed")
                 _rq, _rp = _save_http_evidence(out, phase, f"sqli_error_{param}", r, endpoint_url=purl, method="GET")
                 out.add_finding(
                     title=_title,
@@ -28047,8 +28216,8 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception: r2 = None
                     _confirmed = r2 is not None and not _SQL_ERROR_RE.search(r2.text)
                     _risk      = "CRITICAL" if _confirmed else "HIGH"
-                    _title     = ("SQL Injection (Error-Based) — Confirmed" if _confirmed
-                                  else "SQL Injection (Error-Based) — Suspected, unconfirmed")
+                    _title     = ("Injection: SQL Injection (Error-Based) — Confirmed" if _confirmed
+                                  else "Injection: SQL Injection (Error-Based) — Suspected, unconfirmed")
                     _rq, _rp = _save_http_evidence(out, phase, f"sqli_form_{pname}", r, endpoint_url=action, method=method)
                     out.add_finding(
                         title=_title,
@@ -28098,7 +28267,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="SQL Injection Confirmed by sqlmap",
+                        title="Injection: SQL Injection Confirmed by sqlmap",
                         url=sample_url, port=target["port"], risk="CRITICAL",
                         description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
                         output=stdout[:2000], sources="sqlmap",
@@ -28147,7 +28316,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         purl, out, phase, f"reflected_xss_{param}",
                         target, cfg, auth_session=sess)
                     out.add_finding(
-                        title="Reflected Cross-Site Scripting (XSS)",
+                        title="Injection: Reflected Cross-Site Scripting (XSS)",
                         url=purl, port=target["port"], risk="HIGH",
                         description=_desc,
                         output=f"Parameter: {param}\nPayload: {payload}",
@@ -28259,7 +28428,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 if expected in _ssti_body:
                     _rq, _rp = _save_http_evidence(out, phase, f"ssti_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
-                        title="Server-Side Template Injection (SSTI)",
+                        title="Injection: Server-Side Template Injection (SSTI)",
                         url=purl, port=target["port"], risk="CRITICAL",
                         description="User-controlled input is evaluated as template syntax by a server-side template engine (e.g., Jinja2, Twig, Freemarker), enabling arbitrary server-side code execution.",
                         output=f"Parameter: {param}\nPayload: {payload} → {expected}",
@@ -28308,7 +28477,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     if _ssti_confirmed:
                         _sstimap_found_params.add(_sstikey)
                         out.add_finding(
-                            title="Server-Side Template Injection (SSTI) — SSTImap Confirmed",
+                            title="Injection: Server-Side Template Injection (SSTI) — SSTImap Confirmed",
                             url=purl, port=target["port"], risk="CRITICAL",
                             description=(
                                 f"SSTImap confirmed SSTI in parameter '{param}' at {purl}. "
@@ -28475,7 +28644,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             if r and "X-Injected-Fracture" in str(r.headers):
                 _rq, _rp = _save_http_evidence(out, phase, f"crlf_{param}", r, endpoint_url=purl, method="GET")
                 out.add_finding(
-                    title="CRLF Injection",
+                    title="Injection: CRLF Injection",
                     url=purl, port=target["port"], risk="MEDIUM",
                     description="User-supplied carriage-return and line-feed characters are reflected into HTTP response headers, allowing an attacker to inject arbitrary headers, split responses, or set malicious cookies.",
                     output=f"Parameter: {param}\nPayload: {_CRLF_PAYLOAD}",
@@ -28499,7 +28668,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             if re.search(r'root:.*:/bin/', r.text):
                 _rq, _rp = _save_http_evidence(out, phase, "xxe", r, endpoint_url=action, method="POST")
                 out.add_finding(
-                    title="XML External Entity (XXE) Injection",
+                    title="Injection: XML External Entity (XXE) Injection",
                     url=action, port=target["port"], risk="CRITICAL",
                     description=f"XXE injection confirmed at {action}. /etc/passwd content was returned.",
                     output=r.text[:500],
@@ -28530,7 +28699,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 if r2 and _SQL_ERROR_RE.search(r2.text):
                     _rq, _rp = _save_http_evidence(out, phase, f"sqli_so_{pname}", r2, endpoint_url=action, method="POST")
                     out.add_finding(
-                        title="Second-Order SQL Injection",
+                        title="Injection: Second-Order SQL Injection",
                         url=action, port=target["port"], risk="CRITICAL",
                         description=(f"Second-order SQL injection detected via field '{pname}' at {action}. "
                                      f"A quote character stored in the field triggered a SQL error on the "
@@ -28608,7 +28777,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 if r and nosql_err.search(_nosql_body):
                     _rq, _rp = _save_http_evidence(out, phase, f"nosql_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
-                        title="NoSQL Injection",
+                        title="Injection: NoSQL Injection",
                         url=purl, port=target["port"], risk="CRITICAL",
                         description="User-supplied input is incorporated into NoSQL query documents without type or operator validation, allowing an attacker to manipulate query logic and bypass authentication or exfiltrate data.",
                         output=f"Parameter: {param}\nPayload: {nosql_pay}\nResponse ({r.status_code}): {r.text[:300]}",
@@ -28853,7 +29022,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                             check_url, out, phase, f"stored_xss_{pname}",
                             target, cfg, auth_session=sess)
                         out.add_finding(
-                            title="Stored Cross-Site Scripting (XSS)",
+                            title="Injection: Stored Cross-Site Scripting (XSS)",
                             url=action, port=target["port"], risk="CRITICAL",
                             description="User-controlled input is reflected or stored and rendered in a browser context without proper encoding, enabling arbitrary script execution.",
                             output=f"Field: {pname}\nPayload: {_stored_xss_marker}\nReflected at: {check_url}",
@@ -28894,7 +29063,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 out.add_finding(
-                    title="DOM-Based Cross-Site Scripting (XSS)",
+                    title="Injection: DOM-Based Cross-Site Scripting (XSS)",
                     url=js_url, port=target["port"], risk="HIGH",
                     description="User-controlled input is reflected or stored and rendered in a browser context without proper encoding, enabling arbitrary script execution.",
                     output=f"Pattern found near: ...{m.group(0)[:200]}...",
@@ -28978,7 +29147,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Blind SQL Injection (Boolean-Based)",
+                        title="Injection: Blind SQL Injection (Boolean-Based)",
                         url=purl, port=target["port"], risk="CRITICAL",
                         description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
                         output=(f"Parameter: {param}\n"
@@ -29043,7 +29212,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         except Exception:
                             pass
                         out.add_finding(
-                            title="Blind SQL Injection (Time-Based)",
+                            title="Injection: Blind SQL Injection (Time-Based)",
                             url=purl, port=target["port"], risk="CRITICAL",
                             description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
                             output=(f"Parameter: {param}\nPayload: {tsql}\n"
@@ -29094,7 +29263,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                             action, out, phase, f"post_xss_ss_{pname}",
                             target, cfg, auth_session=sess)
                         out.add_finding(
-                            title="Reflected Cross-Site Scripting (XSS) — POST Parameter",
+                            title="Injection: Reflected Cross-Site Scripting (XSS) — POST Parameter",
                             url=action, port=target["port"], risk="HIGH",
                             description=(
                                 f"The form field '{pname}' at {action} reflects user-supplied "
@@ -32240,27 +32409,27 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Review the Telerik UI version for known vulnerabilities and apply patches."),
     # ── XSS / injection ──
     (r"reflected-xss|xss-reflected|cross-site-scripting",
-     "Reflected Cross-Site Scripting (XSS)", "HIGH",
+     "Injection: Reflected Cross-Site Scripting (XSS)", "HIGH",
      "A03:2025 Injection", "SI-10",
      "Implement input validation and output encoding."),
     (r"stored-xss",
-     "Stored Cross-Site Scripting (XSS)", "HIGH",
+     "Injection: Stored Cross-Site Scripting (XSS)", "HIGH",
      "A03:2025 Injection", "SI-10",
      "Implement input validation and output encoding."),
     (r"dom-xss|dom-based",
-     "DOM-Based Cross-Site Scripting (XSS)", "MEDIUM",
+     "Injection: DOM-Based Cross-Site Scripting (XSS)", "MEDIUM",
      "A03:2025 Injection", "SI-10",
      "Implement input validation and output encoding."),
     (r"sqli|sql-injection",
-     "SQL Injection (Error-Based)", "HIGH",
+     "Injection: SQL Injection (Error-Based)", "HIGH",
      "A03:2025 Injection", "SI-10",
      "Use parameterised queries; never concatenate user input into SQL."),
     (r"ssti|template-injection",
-     "Server-Side Template Injection (SSTI)", "CRITICAL",
+     "Injection: Server-Side Template Injection (SSTI)", "CRITICAL",
      "A03:2025 Injection", "SI-10",
      "Do not pass user input to template engines without sanitisation."),
     (r"command-injection|os-command|\brce\b",
-     "OS Command Injection", "CRITICAL",
+     "Injection: OS Command Injection", "CRITICAL",
      "A03:2025 Injection", "SI-10",
      "Do not pass user input to OS commands; use safe APIs."),
     (r"lfi|local-file-inclusion|path-traversal|file-inclusion",
@@ -32276,11 +32445,11 @@ _NUCLEI_NORM: "list[tuple]" = [
      "A01:2025 Broken Access Control", "CM-7",
      "Validate redirect destinations against an allowlist."),
     (r"crlf-injection|crlf",
-     "CRLF Injection", "MEDIUM",
+     "Injection: CRLF Injection", "MEDIUM",
      "A03:2025 Injection", "SI-10",
      "Sanitise user input in HTTP headers; reject CRLF characters."),
     (r"xxe|xml-external|xml-entity",
-     "XML External Entity (XXE) Injection", "HIGH",
+     "Injection: XML External Entity (XXE) Injection", "HIGH",
      "A03:2025 Injection", "SI-10",
      "Disable external entity processing in XML parsers."),
     # ── CSRF ──
@@ -48103,6 +48272,15 @@ def main() -> None:
             _scan_waf_cdn               = _ss.get("scan_waf_cdn", _scan_waf_cdn)
             _heartbeat_baseline         = _ss.get("heartbeat_baseline", _heartbeat_baseline)
             wc_baseline                 = _ss.get("wc_baseline", wc_baseline)
+            # Restore heartbeat learned wait so the first post-resume block
+            # doesn't waste probes at the 1-minute default.
+            if _ss.get("heartbeat_learned_wait") is not None:
+                _heartbeat_learned_wait = _ss["heartbeat_learned_wait"]
+                vc.log(
+                    f"[resume] Restored heartbeat learned wait: "
+                    f"{_heartbeat_learned_wait}s ({_heartbeat_learned_wait // 60}m)",
+                    "INFO",
+                )
             _discovered_creds_seen      = set(_ss.get("discovered_creds_seen", []))
             # Discovery leader
             _discovery_leader           = _ss.get("discovery_leader", _discovery_leader)
@@ -48110,26 +48288,54 @@ def main() -> None:
                                                    _discovery_leader_score)
             # Role landing URLs
             _role_landing_urls.update(_ss.get("role_landing_urls", {}))
-            # Auth sessions — rebuild from stored cookies/headers.
-            # The full re-auth path via _build_auth_session runs for each
-            # context inside the context loop, but pre-seeding cookies from the
-            # checkpoint ensures that cookie-only auth methods (where
-            # _build_auth_session just sets cookies) resume without an extra
-            # login round-trip.  For form-login/SSO methods the cookies may be
-            # stale, so _build_auth_session re-authenticates normally.
-            for _rlabel, _rauth in _ss.get("role_sessions_auth", {}).items():
+            # Auth sessions — force full re-authentication on resume.
+            # Stored cookies are likely stale (especially after a WAF block
+            # that lasted long enough to trigger checkpoint+exit).  For each
+            # role with pending phases, call _build_auth_session to get a
+            # fresh session.  Cookie-only methods re-establish instantly;
+            # SSO/OKTA methods re-run the authn API flow.
+            _paused_role = _ss.get("heartbeat_paused_role", "")
+            if _paused_role:
+                vc.log(
+                    f"[resume] Scan was paused during role '{_paused_role}' "
+                    f"— will re-authenticate before continuing",
+                    "INFO",
+                )
+            for _rctx in _cred_contexts:
+                _rlabel = _rctx["label"]
+                if _rlabel == "unauthenticated":
+                    continue
+                _rctx_cfg = _rctx.get("cfg") or cfg
+                if not (_rctx_cfg.get("auth", {}).get("enabled")):
+                    continue
+                vc.log(f"[resume] Re-authenticating role '{_rlabel}' …", "INFO")
                 try:
-                    _rsess = _make_session(cfg, _scope_hostnames)
-                    _restore_session_auth(_rsess, _rauth)
-                    _completed_role_sessions[_rlabel] = _rsess
-                    # Inject restored session into the matching context entry
-                    # so phases that use _ctx_auth have a pre-seeded session.
-                    for _rctx in _cred_contexts:
-                        if _rctx["label"] == _rlabel and _rctx["auth_sess"] is None:
-                            _rctx["auth_sess"] = _rsess
-                            break
-                except Exception:
-                    pass
+                    _rsess = _build_auth_session(
+                        _rctx_cfg, "auth",
+                        scope_hostnames=_scope_hostnames,
+                        role_label=_rlabel,
+                        no_interactive=False,
+                    )
+                    if _rsess is not None:
+                        _rctx["auth_sess"] = _rsess
+                        _completed_role_sessions[_rlabel] = _rsess
+                        vc.log(
+                            f"[resume] Re-authentication SUCCESSFUL for "
+                            f"role '{_rlabel}'",
+                            "SUCCESS",
+                        )
+                    else:
+                        vc.log(
+                            f"[resume] Re-authentication FAILED for "
+                            f"role '{_rlabel}' — phases may fail",
+                            "ERROR",
+                        )
+                except Exception as _rae:
+                    vc.log(
+                        f"[resume] Re-authentication error for "
+                        f"role '{_rlabel}': {_rae}",
+                        "ERROR",
+                    )
             # Move files from phases that were running to _interrupted/
             _interrupted_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             _interrupted_dir = out.root / "_interrupted" / _interrupted_ts
@@ -48217,6 +48423,9 @@ def main() -> None:
                     "wc_baseline":           wc_baseline,
                     # Metadata
                     "fracture_version":      VERSION,
+                    # Heartbeat state — persisted for resume re-auth
+                    "heartbeat_learned_wait": _heartbeat_learned_wait,
+                    "heartbeat_paused_role":  _scan_ctx.get("role", ""),
                 })
             except Exception as _cpe:
                 vc.log(f"[checkpoint] Save error: {_cpe}", "WARNING")
@@ -48994,7 +49203,8 @@ def main() -> None:
                 effective_auth = _heartbeat_between_phases(
                     target, cfg, _heartbeat_baseline, out, effective_auth,
                     "screenshot", scope_hostnames=_scope_hostnames,
-                    role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                    role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
                 # Phase 0c: webfiles
                 if not _skip("webfiles"):
@@ -49011,7 +49221,8 @@ def main() -> None:
                 effective_auth = _heartbeat_between_phases(
                     target, cfg, _heartbeat_baseline, out, effective_auth,
                     "webfiles", scope_hostnames=_scope_hostnames,
-                    role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                    role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
                 # Phase 1: tls
                 if not _skip("tls"):
@@ -49028,7 +49239,8 @@ def main() -> None:
                 effective_auth = _heartbeat_between_phases(
                     target, cfg, _heartbeat_baseline, out, effective_auth,
                     "tls", scope_hostnames=_scope_hostnames,
-                    role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                    role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
                 # Phase 1b: subdomain_takeover
                 if not _skip("subdomain_takeover"):
@@ -49045,7 +49257,8 @@ def main() -> None:
                 effective_auth = _heartbeat_between_phases(
                     target, cfg, _heartbeat_baseline, out, effective_auth,
                     "subdomain_takeover", scope_hostnames=_scope_hostnames,
-                    role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                    role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
                 # Phase 2c: ffuf
                 if not _skip("ffuf"):
@@ -49426,7 +49639,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "recon_discovery", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
             # ── Phase 2: headers ──
             if not _skip("headers"):
@@ -49473,7 +49687,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "headers", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
             # ── Phase 3: crawl ──
             if not _skip("crawl"):
@@ -49793,7 +50008,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "vulnscan_crawl", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
             if _scan_waf_cdn and effective_auth is not None:
                 _waf_session_health(
                     target["url"], effective_auth, cfg.get("timeout", 10),
@@ -49815,7 +50031,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "injection", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
             # ── Phase 5: traversal ──
             if not _skip("traversal"):
@@ -49832,7 +50049,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "traversal", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
             # ── Phase 5b: business_logic ──
             if not _skip("business_logic"):
@@ -49850,7 +50068,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "business_logic", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
             # ── Phase 6: ssrf ──
             if not _skip("ssrf"):
@@ -49867,7 +50086,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "ssrf", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
             # ── Phase 7: auth_bypass ──
             if not _skip("auth_bypass"):
@@ -49901,7 +50121,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "auth_bypass", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
             # ── Phase 7b: account_lockout ──
             if not _skip("account_lockout"):
@@ -49919,7 +50140,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "account_lockout", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
             # ── Phase 8: files ──
             if not _skip("files"):
@@ -49936,7 +50158,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "files", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
             # ── Phase 10: graphql ──
             if not _skip("graphql"):
@@ -50084,7 +50307,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "logging_monitoring", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
             # ── Gap Coverage Tests (v2.42.0) ─────────────────────────────
             # These run once on the primary context (not reduced) unless the
@@ -50194,7 +50418,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "gap_coverage", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
             # ── WebSocket testing (new phase) ──
             if not _skip("websocket") and not _is_reduced_ctx:
@@ -50227,7 +50452,8 @@ def main() -> None:
             effective_auth = _heartbeat_between_phases(
                 target, cfg, _heartbeat_baseline, out, effective_auth,
                 "websocket_oauth", scope_hostnames=_scope_hostnames,
-                role_label=_ctx_label, ctx_cfg=_ctx_cfg)
+                role_label=_ctx_label, ctx_cfg=_ctx_cfg,
+                    checkpoint_cb=_save_checkpoint)
 
             # ── Phase 21: bfla ──
             if not _skip("bfla"):
