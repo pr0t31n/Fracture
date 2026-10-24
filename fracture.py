@@ -27342,6 +27342,7 @@ def _phase_manual_crawl(out: "OutputManager", target: dict, cfg: dict,
 
 _JWT_RE = re.compile(
     r'eyJ[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_]*'
+    r'(?:\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)?'
 )
 
 
@@ -27419,7 +27420,7 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
 
     for token in list(found_tokens)[:5]:
         parts = token.split(".")
-        if len(parts) != 3:
+        if len(parts) not in (3, 5):
             continue
         try:
             # Decode header (base64url, pad to 4-byte boundary)
@@ -27439,7 +27440,7 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
             out.add_finding(
-                title=f"JWT Token Identified: Algorithm {alg}",
+                title=f"Discovery: JWT Token Identified: Algorithm {alg}",
                 url=url, port=port, risk="INFO",
                 description=(
                     f"A JWT token using algorithm '{alg}' was identified in the "
@@ -27455,6 +27456,151 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
                     "Validate algorithm server-side against a strict allowlist."
                 ),
             )
+
+            # ── JWE-specific analysis (PBES2, compression) ─────────────────
+            _jwe_enc = hdr_json.get("enc")
+            _jwe_alg = hdr_json.get("alg", "")
+            _jwe_p2c = hdr_json.get("p2c")
+            _jwe_zip = hdr_json.get("zip")
+
+            if _jwe_p2c is not None and "PBES2" in _jwe_alg:
+                _p2c_int = int(_jwe_p2c) if str(_jwe_p2c).isdigit() else 0
+                if _p2c_int < 100000:
+                    _p2c_risk = "HIGH" if _p2c_int < 10000 else "MEDIUM"
+                    _p2c_ev = ""
+                    try:
+                        _p2c_ev_path = out.output_path(
+                            phase, f"jwt_pbes2_low_iterations_{alg}")
+                        _p2c_ev_path.write_text(
+                            f"JWE PBES2 Low Iteration Count Analysis\n"
+                            f"Algorithm: {_jwe_alg}\n"
+                            f"Iteration count (p2c): {_p2c_int}\n"
+                            f"OWASP minimum (PBKDF2-SHA512): 210,000\n"
+                            f"NIST SP 800-132 minimum: 10,000\n"
+                            f"Content encryption: {_jwe_enc or 'unknown'}\n"
+                            f"Salt (p2s): {hdr_json.get('p2s', 'N/A')}\n"
+                            f"Header: {json.dumps(hdr_json, indent=2)}\n"
+                            f"Token (truncated): {token[:80]}...\n",
+                            encoding="utf-8")
+                        _p2c_ev = str(_p2c_ev_path)
+                    except Exception:
+                        pass
+                    out.add_finding(
+                        title=f"Weak Cryptography: JWE PBES2 Low Iteration Count ({_p2c_int})",
+                        url=url, port=port, risk=_p2c_risk,
+                        description=(
+                            f"The JWE token uses {_jwe_alg} with a PBKDF2 iteration "
+                            f"count (p2c) of {_p2c_int}. OWASP recommends a minimum of "
+                            f"210,000 iterations for PBKDF2-SHA512 (2023 guidance). "
+                            f"NIST SP 800-132 sets a floor of 10,000. At {_p2c_int} "
+                            f"iterations, an attacker who captures a JWE token can "
+                            f"brute-force the password offline at high speed using "
+                            f"commodity hardware."
+                        ),
+                        output=(
+                            f"alg: {_jwe_alg}\np2c: {_p2c_int}\n"
+                            f"enc: {_jwe_enc}\n"
+                            f"OWASP minimum: 210,000\n"
+                            f"NIST minimum: 10,000"
+                        ),
+                        sources="fracture-jwt", service=target["scheme"],
+                        output_file=_p2c_ev,
+                        cves="",
+                        owasp="A02:2025 Cryptographic Failures", nist="SC-13",
+                        remediation=(
+                            f"Increase the PBES2 iteration count (p2c) to at least "
+                            f"210,000 per OWASP 2023 guidance for PBKDF2-SHA512. "
+                            f"Consider migrating from password-based encryption "
+                            f"(PBES2) to direct key wrapping (A256KW) or asymmetric "
+                            f"key wrapping (RSA-OAEP) to eliminate brute-force risk."
+                        ),
+                    )
+
+            if _jwe_zip and _jwe_enc:
+                _zip_ev = ""
+                try:
+                    _zip_ev_path = out.output_path(
+                        phase, f"jwt_jwe_compression_{alg}")
+                    _zip_ev_path.write_text(
+                        f"JWE Compression Before Encryption Analysis\n"
+                        f"Algorithm: {_jwe_alg}\n"
+                        f"Compression: {_jwe_zip}\n"
+                        f"Content encryption: {_jwe_enc}\n"
+                        f"Header: {json.dumps(hdr_json, indent=2)}\n"
+                        f"Token (truncated): {token[:80]}...\n",
+                        encoding="utf-8")
+                    _zip_ev = str(_zip_ev_path)
+                except Exception:
+                    pass
+                out.add_finding(
+                    title=f"Weak Cryptography: JWE Compression Before Encryption ({_jwe_zip})",
+                    url=url, port=port, risk="LOW",
+                    description=(
+                        f"The JWE token uses compression ({_jwe_zip}) before "
+                        f"encryption ({_jwe_enc}). Compression before encryption "
+                        f"can enable CRIME/BREACH-style oracle attacks when an "
+                        f"attacker can influence part of the plaintext and observe "
+                        f"ciphertext length changes. Impact depends on whether "
+                        f"attacker-controlled data enters the token payload."
+                    ),
+                    output=(
+                        f"zip: {_jwe_zip}\nenc: {_jwe_enc}\nalg: {_jwe_alg}"
+                    ),
+                    sources="fracture-jwt", service=target["scheme"],
+                    output_file=_zip_ev,
+                    owasp="A02:2025 Cryptographic Failures", nist="SC-13",
+                    remediation=(
+                        "Remove compression from JWE tokens (remove the 'zip' header "
+                        "parameter). If compression is required for payload size, "
+                        "ensure no attacker-controlled data enters the encrypted "
+                        "payload to prevent oracle attacks."
+                    ),
+                )
+
+            if "PBES2" in _jwe_alg:
+                _pbes_ev = ""
+                try:
+                    _pbes_ev_path = out.output_path(
+                        phase, f"jwt_pbes2_password_encryption_{alg}")
+                    _pbes_ev_path.write_text(
+                        f"JWE Password-Based Encryption Analysis\n"
+                        f"Algorithm: {_jwe_alg}\n"
+                        f"Content encryption: {_jwe_enc or 'unknown'}\n"
+                        f"Iteration count (p2c): {hdr_json.get('p2c', 'N/A')}\n"
+                        f"Salt (p2s): {hdr_json.get('p2s', 'N/A')}\n"
+                        f"Header: {json.dumps(hdr_json, indent=2)}\n"
+                        f"Token (truncated): {token[:80]}...\n",
+                        encoding="utf-8")
+                    _pbes_ev = str(_pbes_ev_path)
+                except Exception:
+                    pass
+                out.add_finding(
+                    title="Weak Cryptography: JWE Uses Password-Based Encryption (PBES2)",
+                    url=url, port=port, risk="MEDIUM",
+                    description=(
+                        f"The application uses password-based encryption ({_jwe_alg}) "
+                        f"for JWE tokens. PBES2 derives the encryption key from a "
+                        f"shared password via PBKDF2, making the token's confidentiality "
+                        f"dependent on password strength and iteration count. Direct "
+                        f"key wrapping (A256KW) or asymmetric key wrapping (RSA-OAEP, "
+                        f"ECDH-ES) are preferred for server-to-server token exchange."
+                    ),
+                    output=(
+                        f"alg: {_jwe_alg}\nenc: {_jwe_enc}\n"
+                        f"p2c: {hdr_json.get('p2c', 'N/A')}\n"
+                        f"p2s: {hdr_json.get('p2s', 'N/A')}"
+                    ),
+                    sources="fracture-jwt", service=target["scheme"],
+                    output_file=_pbes_ev,
+                    owasp="A02:2025 Cryptographic Failures", nist="SC-12",
+                    remediation=(
+                        "Migrate from password-based encryption (PBES2) to direct "
+                        "key wrapping (A256KW) or asymmetric key wrapping (RSA-OAEP, "
+                        "ECDH-ES+A256KW). If PBES2 must be retained, ensure the "
+                        "password has at least 128 bits of entropy and the iteration "
+                        "count meets current OWASP guidance (210,000+ for SHA-512)."
+                    ),
+                )
 
             # ── Test 1: 'none' algorithm bypass ──────────────────────────────
             none_hdr_b64 = (
