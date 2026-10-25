@@ -27354,11 +27354,16 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
             ),
             source_finding="API Endpoint Identified",
             priority="medium",
-            scope=target.get("scope", ""),
+            scope=target.get("scope", "") or os.environ.get("CRUCIBLE_SCOPE", ""),
             metadata={
                 "api_count": len(_crawl_api_sorted),
+                "api_endpoints": _crawl_api_sorted[:50],
                 "source_phase": "crawl",
                 "auth_state": "unauthenticated",
+                "auth_status_file": str(out.root / "authentication_status.json"),
+                "fracture_tool_dir": str(out.root),
+                "auth_method": (cfg.get("scan", cfg).get("auth", {})
+                                .get("method", "")),
             },
         )
 
@@ -28288,6 +28293,26 @@ def _inj_is_login_page(r) -> bool:
     if _INJ_AUTH_PATH_RE.search(_url):
         return True
     return any(m in _body for m in _INJ_LOGIN_MARKERS)
+
+_SPA_MOUNT_RE = re.compile(
+    r'<(?:div\s+id=["\'](?:root|app|__next|__nuxt|__app)["\']'
+    r'|app-root)[^>]*>\s*</(?:div|app-root)>',
+    re.I,
+)
+
+def _is_spa_shell(r) -> bool:
+    """Return True if the response is an SPA shell (empty JS-rendered mount point)."""
+    if r is None:
+        return False
+    try:
+        body = (r.text or "")[:16000]
+    except Exception:
+        return False
+    if not _SPA_MOUNT_RE.search(body):
+        return False
+    return ('<noscript>' in body
+            or 'type="module"' in body
+            or "type='module'" in body)
 
 _NOSQL_PAYLOADS = [
     ('{"$gt": ""}',       re.compile(r'\$gt|\$ne|\$where|unexpected.*operator|cast.*failed|E11000', re.I)),
@@ -30636,7 +30661,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                      else sess.get(action, params=data, timeout=timeout, allow_redirects=True))
                 if r and r.status_code in (200, 201, 302) and not re.search(
                         r'error|invalid|not.allowed|rejected|negative|zero', r.text, re.I):
-                    if _inj_is_login_page(r):
+                    if _inj_is_login_page(r) or _is_spa_shell(r):
                         continue
                     field_names = ", ".join(nf["name"] for nf in num_fields)
                     _ev_files: list = []
@@ -30685,7 +30710,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
             if r and r.status_code in (200, 201):
                 # Skip if the response is actually a login page (JS redirect,
                 # inline form, or meta-refresh — common in ASP.NET WebForms)
-                if _inj_is_login_page(r):
+                if _inj_is_login_page(r) or _is_spa_shell(r):
                     continue
                 # Skip API endpoints that return JSON — a 200 with an empty
                 # dataset or error object is not a workflow bypass.  SPAs
@@ -30824,7 +30849,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                      if method == "POST"
                      else sess.get(action, params=tamper, timeout=timeout, allow_redirects=True))
                 if r and r.status_code in (200, 201, 302):
-                    if _inj_is_login_page(r):
+                    if _inj_is_login_page(r) or _is_spa_shell(r):
                         continue
                     _ev_files: list = []
                     try:
@@ -31613,13 +31638,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
     for rpath in reset_paths:
         try:
             r = sess.get(url + rpath, timeout=timeout)
-            _rp_body = (r.text or "").lower()
-            _rp_is_spa_shell = ('<div id="root">' in _rp_body
-                                and 'noscript' in _rp_body
-                                and ('forgot' not in _rp_body
-                                     and 'reset' not in _rp_body
-                                     and 'recover' not in _rp_body))
-            if r.status_code == 200 and not _rp_is_spa_shell:
+            if r.status_code == 200 and not _is_spa_shell(r):
                 vc.log(f"[auth_bypass] Password reset endpoint found: {rpath}", "INFO")
                 with auth_out.open("a", encoding="utf-8") as _af:
                     _af.write(
@@ -35096,8 +35115,16 @@ def _phase_graphql(target: dict, cfg: dict, pm: ProgressManager,
             ),
             source_finding="GraphQL: GraphQL Introspection Enabled",
             priority="high",
-            scope=target.get("scope", ""),
-            metadata={"source_phase": "graphql", "endpoint": found_gql},
+            scope=target.get("scope", "") or os.environ.get("CRUCIBLE_SCOPE", ""),
+            metadata={
+                "source_phase": "graphql",
+                "endpoint": found_gql,
+                "auth_state": "unauthenticated",
+                "auth_status_file": str(out.root / "authentication_status.json"),
+                "fracture_tool_dir": str(out.root),
+                "auth_method": (cfg.get("scan", cfg).get("auth", {})
+                                .get("method", "")),
+            },
         )
 
     if not found_gql:
@@ -36308,11 +36335,16 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
             ),
             source_finding="API Endpoint Identified",
             priority="high",
-            scope=target.get("scope", ""),
+            scope=target.get("scope", "") or os.environ.get("CRUCIBLE_SCOPE", ""),
             metadata={
                 "api_count": len(_api_paths_sorted),
+                "api_endpoints": _api_paths_sorted[:50],
                 "source_phase": "auth_recon",
                 "auth_state": "authenticated",
+                "auth_status_file": str(out.root / "authentication_status.json"),
+                "fracture_tool_dir": str(out.root),
+                "auth_method": (cfg.get("scan", cfg).get("auth", {})
+                                .get("method", "")),
             },
         )
 
@@ -36955,7 +36987,10 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                        f"post-auth persistence", "INFO")
 
                 import copy as _sf_copy
+                _sf_om = cfg.pop("_output_manager", None)
                 _sf_cfg = _sf_copy.deepcopy(cfg)
+                if _sf_om is not None:
+                    cfg["_output_manager"] = _sf_om
                 # Pass fix_sess so _build_auth_session uses it (no new
                 # session creation) — the fixed cookie rides through login.
                 _sf_sess = _build_auth_session(
@@ -37694,6 +37729,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                     pass
                 if (r2.status_code == 200
                         and not _logout_spa_shell
+                        and not _is_spa_shell(r2)
                         and not re.search(r'login|sign.?in|auth', r2.url, re.I)
                         and not _matches_error_fingerprint(r2.text)
                         and not _response_is_error_page(r2.text)):
@@ -43066,7 +43102,10 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         _rc_auth["enabled"]  = True
         _rc_auth["username"] = _rc.get("username", _rc_auth.get("username", ""))
         _rc_auth["password"] = _rc.get("password", _rc_auth.get("password", ""))
+        _rc_om = cfg.pop("_output_manager", None)
         _rc_cfg = _copy.deepcopy(cfg)
+        if _rc_om is not None:
+            cfg["_output_manager"] = _rc_om
         _rc_cfg["auth"] = _rc_auth
         _role_cfgs[_rc_role] = _rc_cfg
     project_dir = out.root
@@ -43128,7 +43167,10 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             r_auth["enabled"]  = True
             r_auth["username"] = role_cfg.get("username", r_auth.get("username", ""))
             r_auth["password"] = role_cfg.get("password", r_auth.get("password", ""))
+            _brs_om = cfg.pop("_output_manager", None)
             r_cfg = _copy.deepcopy(cfg)
+            if _brs_om is not None:
+                cfg["_output_manager"] = _brs_om
             r_cfg["auth"] = r_auth
             return _reauth_session(r_cfg, target, role_cfg.get("role", ""))
 
