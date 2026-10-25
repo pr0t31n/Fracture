@@ -31613,8 +31613,13 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
     for rpath in reset_paths:
         try:
             r = sess.get(url + rpath, timeout=timeout)
-            if r.status_code == 200:
-                # Check if responses differ for valid vs invalid users
+            _rp_body = (r.text or "").lower()
+            _rp_is_spa_shell = ('<div id="root">' in _rp_body
+                                and 'noscript' in _rp_body
+                                and ('forgot' not in _rp_body
+                                     and 'reset' not in _rp_body
+                                     and 'recover' not in _rp_body))
+            if r.status_code == 200 and not _rp_is_spa_shell:
                 vc.log(f"[auth_bypass] Password reset endpoint found: {rpath}", "INFO")
                 with auth_out.open("a", encoding="utf-8") as _af:
                     _af.write(
@@ -31685,7 +31690,13 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                     test_sess = _make_session(cfg)
                     test_sess.cookies.set(cookie.name, none_token)
                     r = test_sess.get(url, timeout=timeout)
-                    if r.status_code == 200:
+                    _none_body = (r.text or "").lower()
+                    _none_is_login = any(k in _none_body for k in (
+                        "sign in", "log in", "login", "signin",
+                        "forgot password", "forgot-password",
+                        'type="password"', "type='password'",
+                    ))
+                    if r.status_code == 200 and not _none_is_login:
                         with auth_out.open("a", encoding="utf-8") as _af:
                             _af.write(
                                 f"## JWT None Algorithm Bypass\n"
