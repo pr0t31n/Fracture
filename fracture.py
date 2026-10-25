@@ -16053,7 +16053,7 @@ _SPA_API_PATTERNS = [
 
 # Paths to exclude (static assets, not routes)
 _SPA_ROUTE_EXCLUDE = re.compile(
-    r'\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map|json|xml|webmanifest)$'
+    r'\.(js|mjs|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|otf|eot|map|json|xml|webmanifest)$'
     r'|^/static/'
     r'|^/assets/'
     r'|^/node_modules/'
@@ -43377,20 +43377,26 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         "/nonexistent-path-" + str(int(time.time())),
         "/fracture_nonexistent_path_404_test",
     ]
-    for _bl_probe in _bl_probes:
-        for _bl_redir in (True, False):
-            try:
-                _bl_r = unauth_sess.get(
-                    base_url + _bl_probe, timeout=timeout,
-                    allow_redirects=_bl_redir,
-                    headers={"Accept": "text/html,application/json"})
-                if _bl_r.status_code == 200:
-                    _bl_body = (_bl_r.text or "").strip()
-                    _bl_h = _p20_body_hash(_bl_body)
-                    if _bl_h:
-                        _p20_baseline_hashes.add(_bl_h)
-            except Exception:
-                pass
+    _bl_sessions = [("unauth", unauth_sess)]
+    if cred_roles:
+        _bl_sessions.append((cred_roles[0], role_sessions.get(cred_roles[0])))
+    for _bl_label, _bl_sess in _bl_sessions:
+        if _bl_sess is None:
+            continue
+        for _bl_probe in _bl_probes:
+            for _bl_redir in (True, False):
+                try:
+                    _bl_r = _bl_sess.get(
+                        base_url + _bl_probe, timeout=timeout,
+                        allow_redirects=_bl_redir,
+                        headers={"Accept": "text/html,application/json"})
+                    if _bl_r.status_code == 200:
+                        _bl_body = (_bl_r.text or "").strip()
+                        _bl_h = _p20_body_hash(_bl_body)
+                        if _bl_h:
+                            _p20_baseline_hashes.add(_bl_h)
+                except Exception:
+                    pass
 
     # URL path patterns that indicate an error/catch-all page.  SPAs render
     # error content client-side so the server HTML shell has no error markers —
@@ -43437,6 +43443,8 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         if _matches_error_fingerprint(body):
             return ("error_page", body_hash)
         if body_hash in _p20_baseline_hashes:
+            return ("spa_shell", body_hash)
+        if _is_spa_shell(resp):
             return ("spa_shell", body_hash)
         return ("unique", body_hash)
 
@@ -43661,6 +43669,39 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             f"{_p20_dir_wc_total} path(s) across "
             f"{len(_p20_dir_catchall_hashes)} catch-all director(y/ies)",
             "INFO")
+
+    # ── Cross-role unanimity detection ────────────────────────────────────
+    # When ALL authenticated roles return 200 with the SAME body hash for a
+    # path, the server is serving the same page regardless of role — that is
+    # the SPA shell, not role-differentiated content.  Reclassify as
+    # spa_shell even if the hash does not match the unauthenticated baseline
+    # (common when unauth gets 302 and never contributes a 200 baseline).
+    _p20_unanimity_count = 0
+    if len(cred_roles) >= 2:
+        for _ue in path_access:
+            _ue_bc = _ue.get("body_class", {})
+            _ue_bh = _ue.get("body_hash", {})
+            _ue_ac = _ue.get("access", {})
+            _unique_roles = [
+                r for r in cred_roles
+                if _ue_ac.get(r) == 200
+                and _ue_bc.get(r) == "unique"
+                and _ue_bh.get(r)
+            ]
+            if len(_unique_roles) < 2:
+                continue
+            _ue_hashes = set(_ue_bh.get(r) for r in _unique_roles)
+            if len(_ue_hashes) == 1:
+                _shared_hash = next(iter(_ue_hashes))
+                for r in _unique_roles:
+                    _ue_bc[r] = "spa_shell"
+                _p20_baseline_hashes.add(_shared_hash)
+                _p20_unanimity_count += 1
+    if _p20_unanimity_count:
+        vc.log(
+            f"[access-matrix/p20] Cross-role unanimity: {_p20_unanimity_count} "
+            f"path(s) where all auth roles got identical 200 body — "
+            f"reclassified as spa_shell", "INFO")
 
     # Body classes that do NOT represent genuine access — status 200 is
     # misleading; the page is a SPA shell, catchall, error, or login form.
