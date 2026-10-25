@@ -47937,10 +47937,13 @@ def _test_h2c_smuggling(target: dict, cfg: dict, out: "OutputManager",
     vc.status(phase, "h2c Smuggling", "complete", "Done", 2, 2)
     vc.log("[h2c_smuggling] h2c smuggling tests complete", "INFO")
 
-# Phases run for every credential context (full scan for role 1).
-# Reduced contexts (roles 2..n and unauthenticated) only run this subset.
-_REDUCED_SCAN_PHASES: frozenset = frozenset({
-    "headers", "shcheck", "auth_bypass", "account_lockout", "session", "csrf", "bfla",
+# Infrastructure/discovery phases — run only for the discovery leader (role 1).
+# These are not auth-dependent; re-running per role wastes time without finding
+# new surface.  The crawl phase is NOT in this set because each role's
+# authenticated view can reveal different links.
+_INFRA_ONLY_PHASES: frozenset = frozenset({
+    "recon", "screenshot", "webfiles", "tls", "subdomain_takeover", "ffuf",
+    "vulnscan", "zap", "request_smuggling",
 })
 
 
@@ -49116,9 +49119,15 @@ def main() -> None:
         _combined_auth_recon: dict = {"forms": [], "links": [], "resource_ids": []}
         _all_crawl_links:     list = []
         _discovered_creds_seen: set = set()  # avoid duplicate contexts from discovered creds
-        # Crawl data from role 1 (most permissive); passed to reduced contexts so they
-        # test accessibility to the same paths without re-crawling.
+        # Crawl data from role 1 (most permissive); shared as seed for delta computation.
         _role1_crawl_data: dict = {"forms": [], "params": [], "links": []}
+        # Per-role delta tracking — union of all endpoints discovered by prior roles.
+        # Used to compute the delta for subsequent roles so testing phases only hit
+        # genuinely new surface, not endpoints already tested by a prior role.
+        _all_known_links_norm: set = set()
+        _all_known_form_actions: set = set()
+        _all_known_param_urls: set = set()
+        _prev_role_sessions: list = []  # [(label, session)] for backfill probing
         # Discovery phase outputs — populated during Role 1's context, reused by all others.
         wc_baseline: object = None
         _wp_discovered_paths: list = []
@@ -49318,9 +49327,16 @@ def main() -> None:
             _ctx_auth  = _ctx["auth_sess"]
             _ctx_cfg   = _ctx["cfg"]
             # True for roles 2..n and unauthenticated in multi-role mode.
-            # Reduced contexts skip discovery/crawl/injection and most attack phases;
-            # they only test access to paths already found by role 1.
             _is_reduced_ctx = _ctx.get("reduced", False)
+            # _is_first_ctx: True for role 1 and all auth_matrix-mode contexts.
+            # Infrastructure phases (recon, vulnscan, tls, etc.) only run here.
+            _is_first_ctx = not _is_reduced_ctx
+            # _is_delta_ctx: True for roles 2..n + unauthenticated in multi-role.
+            # These contexts run a per-role crawl, then testing phases only hit
+            # NEW endpoints not discovered by any prior role.
+            _is_delta_ctx = _is_reduced_ctx
+            _has_delta = True  # updated after crawl; default True so pre-crawl phases run
+            _delta_crawl: dict = {}  # populated after crawl delta computation
 
             # Route tool output files into per-role subdirectories when multi-role
             # scanning is active so that results from different roles do not overwrite
@@ -49728,7 +49744,7 @@ def main() -> None:
                 # Phase 0b captures the target URL unauthenticated; we
                 # still take a per-role login screenshot so the report
                 # explicitly shows "Login Page" evidence.
-                if _ctx_auth is not None and not _is_reduced_ctx:
+                if _ctx_auth is not None and _is_first_ctx:
                     _ss_login_url = (
                         _ctx_cfg.get("auth", {}).get("login_url", "").strip()
                         or ""
@@ -49874,15 +49890,15 @@ def main() -> None:
                 vc.log(f"Auth [{_ctx_label}]: enabled", "INFO")
             else:
                 vc.log(f"Auth [{_ctx_label}]: none", "INFO")
-            if _is_reduced_ctx:
+            if _is_delta_ctx:
                 vc.log(
-                    f"[{_ctx_label}] Reduced context — running authorization/session/bypass "
-                    f"phases only against role 1 discovered paths", "INFO"
+                    f"[{_ctx_label}] Delta context — per-role crawl will discover "
+                    f"role-specific surface; testing phases run on NEW endpoints only",
+                    "INFO",
                 )
 
-            # Closures capture _ctx_label and _is_reduced_ctx via default arg
             def _skip(phase_name: str, _lbl: str = _ctx_label,
-                      _reduced: bool = _is_reduced_ctx) -> bool:
+                      _delta: bool = _is_delta_ctx) -> bool:
                 _check_pause()
                 if not phases_enabled.get(phase_name, False):
                     vc.log(f"[{phase_name}] Phase disabled — skipping", "INFO")
@@ -49892,22 +49908,18 @@ def main() -> None:
                 if pm.is_phase_complete(f"{phase_name}#{_lbl}"):
                     vc.log(f"[{phase_name}] Already complete — skipping (checkpoint)", "INFO")
                     return True
-                if _reduced and phase_name not in _REDUCED_SCAN_PHASES:
+                if _delta and phase_name in _INFRA_ONLY_PHASES:
                     vc.log(
-                        f"[{phase_name}] Skipping for reduced context [{_lbl}] — "
-                        f"full scan was performed for the most permissive user", "INFO"
+                        f"[{phase_name}] Infrastructure phase — skipping for [{_lbl}] "
+                        f"(ran during discovery context)", "INFO"
                     )
                     vc.status(phase_name, phase_name, "skipped")
                     pm.set_phase_status(f"{phase_name}#{_lbl}", "skipped", phase_name)
                     return True
                 return False
 
-            # For reduced contexts seed crawl_data from role 1's results so that
-            # auth_bypass / session / csrf phases test the same paths.
-            if _is_reduced_ctx:
-                crawl_data = copy.deepcopy(_role1_crawl_data)
-            else:
-                crawl_data = {"forms": [], "params": [], "links": []}
+            # All roles start with empty crawl_data; the crawl phase populates it.
+            crawl_data = {"forms": [], "params": [], "links": []}
             auth_recon_data = {"forms": [], "links": [], "resource_ids": []}
 
             # effective_auth: the session used for all requests in this context.
@@ -50005,9 +50017,9 @@ def main() -> None:
             # ── Discovery phases — Role 1 only ──────────────────────────────
             # All enumeration and server-analysis runs authenticated as the most
             # privileged role to obtain the most comprehensive application surface.
-            # Reduced contexts (roles 2..n, unauthenticated) skip this block and
-            # reuse the endpoint list collected here.
-            if not _is_reduced_ctx:
+            # Delta contexts (roles 2..n, unauthenticated) skip this block; they
+            # do their own crawl later to discover role-specific endpoints.
+            if _is_first_ctx:
 
                 # Phase 0: recon (gobuster, whatweb, nikto baseline, etc.)
                 if not _skip("recon"):
@@ -50369,7 +50381,7 @@ def main() -> None:
             # mitmproxy and adds discovered paths to _ep_base before testing runs.
             # Skip in managed mode — no human operator to browse, and the 180s
             # timeout causes extreme delays in unattended scans.
-            if not _is_reduced_ctx and not vc._managed:
+            if _is_first_ctx and not vc._managed:
                 try:
                     _sm_path = out.root / "structure_map.json"
                     if _sm_path.exists():
@@ -50405,7 +50417,7 @@ def main() -> None:
             # CMSs/BI tools on sub-paths are invisible unless discovered URLs are
             # also checked.  No additional HTTP probes are needed — all paths are
             # already known from gobuster/feroxbuster/WordPress discovery.
-            if not _is_reduced_ctx:
+            if _is_first_ctx:
                 try:
                     _ep_path_str = " ".join(_ep_base)
                     _cms_path_sigs = {
@@ -50498,7 +50510,7 @@ def main() -> None:
                     pass
 
             # Write auth method and login page to target profile (Role 1 context only)
-            if not _is_reduced_ctx:
+            if _is_first_ctx:
                 try:
                     _auth_cfg   = _ctx_cfg.get("auth", {})
                     _auth_meth  = (_auth_cfg.get("auth_method")
@@ -50549,7 +50561,7 @@ def main() -> None:
                     pm.set_phase_status(f"shcheck#{_ctx_label}", "error", detail=str(e))
 
             # ── Session timeout detection (opt-in, Role 1 only) ──
-            if not _is_reduced_ctx and _ctx_cfg.get("detect_session_timeout"):
+            if _is_first_ctx and _ctx_cfg.get("detect_session_timeout"):
                 try:
                     _detected_st = _detect_session_timeout(
                         effective_auth, target, _ctx_cfg, out,
@@ -50569,22 +50581,16 @@ def main() -> None:
                     checkpoint_cb=_save_checkpoint)
 
             # ── Phase 3: crawl ──
+            # Every role crawls with its own session to discover role-specific
+            # surface.  Role 1 discovers the broadest surface; subsequent roles
+            # may find links/forms only visible to their privilege level.
             if not _skip("crawl"):
                 pm.set_phase_status(f"crawl#{_ctx_label}", "running", "Crawl")
                 try:
-                    # Seed the crawl with the landing URL (if reachable) plus all
-                    # endpoints discovered during recon (gobuster/feroxbuster/admin
-                    # panel/common-paths probing).  SPAs like React have no HTML
-                    # links in their shell page; without these seeds the BFS crawler
-                    # has nothing to follow.  The WebForms pages behind these seeds
-                    # (Audit/*.aspx, Dashboard/*.aspx, DocLib/*.aspx) contain
-                    # traditional <a href> links that the crawler CAN follow.
                     _crawl_seeds: list = []
                     if (_as_landing_url
                             and _as_landing_code in range(200, 300)):
                         _crawl_seeds.append(_as_landing_url)
-                    # Add all previously-discovered endpoints as crawl roots.
-                    # Dedup against target URL and landing URL to avoid double-visit.
                     _crawl_seen = {
                         target["url"].rstrip("/"),
                         (_as_landing_url or "").rstrip("/"),
@@ -50605,8 +50611,7 @@ def main() -> None:
                         target, _ctx_cfg, pm, out, effective_auth,
                         extra_seeds=_crawl_seeds or None)
                     pm.set_phase_status(f"crawl#{_ctx_label}", "complete", "Crawl")
-                    # Persist role 1 crawl data for reduced contexts
-                    if not _is_reduced_ctx:
+                    if _is_first_ctx:
                         _role1_crawl_data = crawl_data
                     _save_checkpoint()
                 except Exception as e:
@@ -50615,9 +50620,6 @@ def main() -> None:
                     pm.set_phase_status(f"crawl#{_ctx_label}", "error", detail=str(e))
 
             # ── Scope-filter crawl data before any test phase uses it ──────────
-            # Discard any links, params, or forms pointing outside scope hostnames.
-            # This is the primary guard against testing out-of-scope targets discovered
-            # via crawling (e.g. social-media links found on the target page).
             _scoped_links = [
                 l for l in crawl_data.get("links", [])
                 if _is_in_scope_url(l, _scope_hostnames)
@@ -50643,6 +50645,54 @@ def main() -> None:
                 "params": _scoped_params,
                 "forms":  _scoped_forms,
             }
+
+            # ── Delta computation ──────────────────────────────────────────────
+            # For delta contexts (roles 2..n), compute which endpoints are NEW —
+            # not discovered by any prior role.  Testing phases only hit the delta;
+            # authorization/security phases still use the full crawl_data.
+            if _is_delta_ctx:
+                _delta_links = [
+                    l for l in crawl_data.get("links", [])
+                    if l.rstrip("/") not in _all_known_links_norm
+                ]
+                _delta_forms = [
+                    f for f in crawl_data.get("forms", [])
+                    if (f.get("action", "")).rstrip("/") not in _all_known_form_actions
+                ]
+                _delta_params = [
+                    p for p in crawl_data.get("params", [])
+                    if p.get("url", "").rstrip("/") not in _all_known_param_urls
+                ]
+                _delta_crawl = {
+                    "links": _delta_links, "forms": _delta_forms,
+                    "params": _delta_params,
+                    "is_spa": crawl_data.get("is_spa", False),
+                }
+                _has_delta = bool(_delta_links or _delta_forms or _delta_params)
+                vc.log(
+                    f"[crawl-delta] Role '{_ctx_label}': "
+                    f"{len(_delta_links)} new link(s), "
+                    f"{len(_delta_forms)} new form(s), "
+                    f"{len(_delta_params)} new param(s)"
+                    + (" — testing phases will run on delta"
+                       if _has_delta else " — no new surface, testing phases skipped"),
+                    "INFO",
+                )
+            else:
+                _delta_crawl = crawl_data
+                _has_delta = True
+
+            # Update the union of all known endpoints for subsequent roles.
+            for _kl in crawl_data.get("links", []):
+                _all_known_links_norm.add(_kl.rstrip("/"))
+            for _kf in crawl_data.get("forms", []):
+                _all_known_form_actions.add((_kf.get("action", "")).rstrip("/"))
+            for _kp in crawl_data.get("params", []):
+                _all_known_param_urls.add(_kp.get("url", "").rstrip("/"))
+
+            # Record this role's session for backfill probing by later roles.
+            if effective_auth is not None and _ctx_label != "unauthenticated":
+                _prev_role_sessions.append((_ctx_label, effective_auth))
 
             # Accumulate crawl links for access_matrix
             _all_crawl_links.extend(crawl_data.get("links", []))
@@ -50674,7 +50724,7 @@ def main() -> None:
             # ── Phase 9: vulnscan (after crawl for full structure_map) ──────────
             # Runs after crawl so nuclei/nikto get the full target list including
             # crawl-discovered endpoints, not just the handful from recon.
-            if not _is_reduced_ctx:
+            if _is_first_ctx:
                 if not _skip("vulnscan"):
                     pm.set_phase_status(f"vulnscan#{_ctx_label}", "running", "Vuln Scan")
                     try:
@@ -50693,7 +50743,7 @@ def main() -> None:
                         _vulnscan_handle = None
 
             # ── Phase 9b: ZAP (background, alongside vulnscan) ──────────────
-            if not _is_reduced_ctx:
+            if _is_first_ctx:
                 if not _skip("zap"):
                     pm.set_phase_status(f"zap#{_ctx_label}", "running", "ZAP Scan")
                     try:
@@ -50845,7 +50895,7 @@ def main() -> None:
                 except Exception:
                     pass
 
-            if _ep_discovered and not _is_reduced_ctx:
+            if _ep_discovered and _is_first_ctx:
                 _et_key = f"endpoint_tools#{_ctx_label}"
                 if pm.is_phase_complete(_et_key):
                     vc.log(f"[endpoint_tools] Already complete — skipping (checkpoint)", "INFO")
@@ -50871,14 +50921,18 @@ def main() -> None:
 
             # ── Phase 3b: jwt ──
             if not _skip("jwt"):
-                pm.set_phase_status(f"jwt#{_ctx_label}", "running", "JWT Testing")
-                try:
-                    _phase_jwt(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
-                    pm.set_phase_status(f"jwt#{_ctx_label}", "complete", "JWT Testing")
-                    _save_checkpoint()
-                except Exception as e:
-                    vc.error(f"Phase jwt [{_ctx_label}] error: {e}")
-                    pm.set_phase_status(f"jwt#{_ctx_label}", "error", detail=str(e))
+                if _is_delta_ctx and not _has_delta:
+                    vc.log(f"[jwt] No new endpoints for [{_ctx_label}] — skipping", "INFO")
+                    pm.set_phase_status(f"jwt#{_ctx_label}", "skipped", "JWT Testing")
+                else:
+                    pm.set_phase_status(f"jwt#{_ctx_label}", "running", "JWT Testing")
+                    try:
+                        _phase_jwt(target, _ctx_cfg, pm, out, effective_auth, _delta_crawl)
+                        pm.set_phase_status(f"jwt#{_ctx_label}", "complete", "JWT Testing")
+                        _save_checkpoint()
+                    except Exception as e:
+                        vc.error(f"Phase jwt [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"jwt#{_ctx_label}", "error", detail=str(e))
 
             # ── Phase 4: injection ──
             # Pre-injection heartbeat + WAF health check: detect IP block or
@@ -50894,16 +50948,21 @@ def main() -> None:
                     out, target, _scan_waf_cdn, role_label=_ctx_label,
                 )
             if not _skip("injection"):
-                pm.set_phase_status(f"injection#{_ctx_label}", "running", "Injection Testing")
-                try:
-                    _phase_injection(target, _ctx_cfg, pm, out, effective_auth, crawl_data,
-                                     fast=args.fast, waf_cdn=_scan_waf_cdn)
-                    pm.set_phase_status(f"injection#{_ctx_label}", "complete", "Injection Testing")
-                    _save_checkpoint()
-                except Exception as e:
-                    vc.error(f"Phase injection [{_ctx_label}] error: {e}")
-                    out.log_error("injection", "phase-level exception", str(e))
-                    pm.set_phase_status(f"injection#{_ctx_label}", "error", detail=str(e))
+                if _is_delta_ctx and not _has_delta:
+                    vc.log(f"[injection] No new endpoints for [{_ctx_label}] — skipping", "INFO")
+                    pm.set_phase_status(f"injection#{_ctx_label}", "skipped", "Injection Testing")
+                else:
+                    pm.set_phase_status(f"injection#{_ctx_label}", "running", "Injection Testing")
+                    try:
+                        _phase_injection(target, _ctx_cfg, pm, out, effective_auth,
+                                         _delta_crawl,
+                                         fast=args.fast, waf_cdn=_scan_waf_cdn)
+                        pm.set_phase_status(f"injection#{_ctx_label}", "complete", "Injection Testing")
+                        _save_checkpoint()
+                    except Exception as e:
+                        vc.error(f"Phase injection [{_ctx_label}] error: {e}")
+                        out.log_error("injection", "phase-level exception", str(e))
+                        pm.set_phase_status(f"injection#{_ctx_label}", "error", detail=str(e))
 
             # ── Heartbeat: after injection ──
             effective_auth = _heartbeat_between_phases(
@@ -50914,14 +50973,18 @@ def main() -> None:
 
             # ── Phase 5: traversal ──
             if not _skip("traversal"):
-                pm.set_phase_status(f"traversal#{_ctx_label}", "running", "Path Traversal")
-                try:
-                    _phase_traversal(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
-                    pm.set_phase_status(f"traversal#{_ctx_label}", "complete", "Path Traversal")
-                    _save_checkpoint()
-                except Exception as e:
-                    vc.error(f"Phase traversal [{_ctx_label}] error: {e}")
-                    pm.set_phase_status(f"traversal#{_ctx_label}", "error", detail=str(e))
+                if _is_delta_ctx and not _has_delta:
+                    vc.log(f"[traversal] No new endpoints for [{_ctx_label}] — skipping", "INFO")
+                    pm.set_phase_status(f"traversal#{_ctx_label}", "skipped", "Path Traversal")
+                else:
+                    pm.set_phase_status(f"traversal#{_ctx_label}", "running", "Path Traversal")
+                    try:
+                        _phase_traversal(target, _ctx_cfg, pm, out, effective_auth, _delta_crawl)
+                        pm.set_phase_status(f"traversal#{_ctx_label}", "complete", "Path Traversal")
+                        _save_checkpoint()
+                    except Exception as e:
+                        vc.error(f"Phase traversal [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"traversal#{_ctx_label}", "error", detail=str(e))
 
             # ── Heartbeat: after traversal ──
             effective_auth = _heartbeat_between_phases(
@@ -50932,15 +50995,19 @@ def main() -> None:
 
             # ── Phase 5b: business_logic ──
             if not _skip("business_logic"):
-                pm.set_phase_status(f"business_logic#{_ctx_label}", "running", "Business Logic")
-                try:
-                    _phase_business_logic(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
-                    pm.set_phase_status(f"business_logic#{_ctx_label}", "complete",
-                                        "Business Logic")
-                    _save_checkpoint()
-                except Exception as e:
-                    vc.error(f"Phase business_logic [{_ctx_label}] error: {e}")
-                    pm.set_phase_status(f"business_logic#{_ctx_label}", "error", detail=str(e))
+                if _is_delta_ctx and not _has_delta:
+                    vc.log(f"[business_logic] No new endpoints for [{_ctx_label}] — skipping", "INFO")
+                    pm.set_phase_status(f"business_logic#{_ctx_label}", "skipped", "Business Logic")
+                else:
+                    pm.set_phase_status(f"business_logic#{_ctx_label}", "running", "Business Logic")
+                    try:
+                        _phase_business_logic(target, _ctx_cfg, pm, out, effective_auth, _delta_crawl)
+                        pm.set_phase_status(f"business_logic#{_ctx_label}", "complete",
+                                            "Business Logic")
+                        _save_checkpoint()
+                    except Exception as e:
+                        vc.error(f"Phase business_logic [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"business_logic#{_ctx_label}", "error", detail=str(e))
 
             # ── Heartbeat: after business_logic ──
             effective_auth = _heartbeat_between_phases(
@@ -50951,14 +51018,18 @@ def main() -> None:
 
             # ── Phase 6: ssrf ──
             if not _skip("ssrf"):
-                pm.set_phase_status(f"ssrf#{_ctx_label}", "running", "SSRF Testing")
-                try:
-                    _phase_ssrf(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
-                    pm.set_phase_status(f"ssrf#{_ctx_label}", "complete", "SSRF Testing")
-                    _save_checkpoint()
-                except Exception as e:
-                    vc.error(f"Phase ssrf [{_ctx_label}] error: {e}")
-                    pm.set_phase_status(f"ssrf#{_ctx_label}", "error", detail=str(e))
+                if _is_delta_ctx and not _has_delta:
+                    vc.log(f"[ssrf] No new endpoints for [{_ctx_label}] — skipping", "INFO")
+                    pm.set_phase_status(f"ssrf#{_ctx_label}", "skipped", "SSRF Testing")
+                else:
+                    pm.set_phase_status(f"ssrf#{_ctx_label}", "running", "SSRF Testing")
+                    try:
+                        _phase_ssrf(target, _ctx_cfg, pm, out, effective_auth, _delta_crawl)
+                        pm.set_phase_status(f"ssrf#{_ctx_label}", "complete", "SSRF Testing")
+                        _save_checkpoint()
+                    except Exception as e:
+                        vc.error(f"Phase ssrf [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"ssrf#{_ctx_label}", "error", detail=str(e))
 
             # ── Heartbeat: after ssrf ──
             effective_auth = _heartbeat_between_phases(
@@ -51055,7 +51126,7 @@ def main() -> None:
                 pm.set_phase_status(f"logging_monitoring#{_ctx_label}", "running",
                                     "Logging & Monitoring")
                 try:
-                    _phase_logging_monitoring(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
+                    _phase_logging_monitoring(target, _ctx_cfg, pm, out, effective_auth, _delta_crawl)
                     pm.set_phase_status(f"logging_monitoring#{_ctx_label}", "complete",
                                         "Logging & Monitoring")
                     _save_checkpoint()
@@ -51119,31 +51190,39 @@ def main() -> None:
 
             # ── Phase 16: open_redirect ──
             if not _skip("open_redirect"):
-                pm.set_phase_status(f"open_redirect#{_ctx_label}", "running", "Open Redirect")
-                try:
-                    _phase_open_redirect(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
-                    pm.set_phase_status(f"open_redirect#{_ctx_label}", "complete", "Open Redirect")
-                    _save_checkpoint()
-                except Exception as e:
-                    vc.error(f"Phase open_redirect [{_ctx_label}] error: {e}")
-                    pm.set_phase_status(f"open_redirect#{_ctx_label}", "error", detail=str(e))
+                if _is_delta_ctx and not _has_delta:
+                    vc.log(f"[open_redirect] No new endpoints for [{_ctx_label}] — skipping", "INFO")
+                    pm.set_phase_status(f"open_redirect#{_ctx_label}", "skipped", "Open Redirect")
+                else:
+                    pm.set_phase_status(f"open_redirect#{_ctx_label}", "running", "Open Redirect")
+                    try:
+                        _phase_open_redirect(target, _ctx_cfg, pm, out, effective_auth, _delta_crawl)
+                        pm.set_phase_status(f"open_redirect#{_ctx_label}", "complete", "Open Redirect")
+                        _save_checkpoint()
+                    except Exception as e:
+                        vc.error(f"Phase open_redirect [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"open_redirect#{_ctx_label}", "error", detail=str(e))
 
             # ── Phase 17: deserialization ──
             if not _skip("deserialization"):
-                pm.set_phase_status(f"deserialization#{_ctx_label}", "running", "Deserialization")
-                try:
-                    _phase_deserialization(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
-                    pm.set_phase_status(f"deserialization#{_ctx_label}", "complete",
-                                        "Deserialization")
-                    _save_checkpoint()
-                except Exception as e:
-                    vc.error(f"Phase deserialization [{_ctx_label}] error: {e}")
-                    pm.set_phase_status(f"deserialization#{_ctx_label}", "error", detail=str(e))
+                if _is_delta_ctx and not _has_delta:
+                    vc.log(f"[deserialization] No new endpoints for [{_ctx_label}] — skipping", "INFO")
+                    pm.set_phase_status(f"deserialization#{_ctx_label}", "skipped", "Deserialization")
+                else:
+                    pm.set_phase_status(f"deserialization#{_ctx_label}", "running", "Deserialization")
+                    try:
+                        _phase_deserialization(target, _ctx_cfg, pm, out, effective_auth, _delta_crawl)
+                        pm.set_phase_status(f"deserialization#{_ctx_label}", "complete",
+                                            "Deserialization")
+                        _save_checkpoint()
+                    except Exception as e:
+                        vc.error(f"Phase deserialization [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"deserialization#{_ctx_label}", "error", detail=str(e))
 
             # ── Phase 17b: request_smuggling ──
-            # Transport-layer test — only meaningful on the first (non-reduced)
-            # context since the vulnerability is independent of the auth role.
-            if not _skip("request_smuggling") and not _is_reduced_ctx:
+            # Transport-layer test — only meaningful on the first context
+            # since the vulnerability is independent of the auth role.
+            if not _skip("request_smuggling") and _is_first_ctx:
                 pm.set_phase_status(f"request_smuggling#{_ctx_label}", "running",
                                     "Request Smuggling")
                 try:
@@ -51159,27 +51238,35 @@ def main() -> None:
 
             # ── Phase 18: file_upload_info ──
             if not _skip("file_upload_info"):
-                pm.set_phase_status(f"file_upload_info#{_ctx_label}", "running", "File Upload Info")
-                try:
-                    _phase_file_upload_info(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
-                    pm.set_phase_status(f"file_upload_info#{_ctx_label}", "complete",
-                                        "File Upload Info")
-                    _save_checkpoint()
-                except Exception as e:
-                    vc.error(f"Phase file_upload_info [{_ctx_label}] error: {e}")
-                    pm.set_phase_status(f"file_upload_info#{_ctx_label}", "error", detail=str(e))
+                if _is_delta_ctx and not _has_delta:
+                    vc.log(f"[file_upload_info] No new endpoints for [{_ctx_label}] — skipping", "INFO")
+                    pm.set_phase_status(f"file_upload_info#{_ctx_label}", "skipped", "File Upload Info")
+                else:
+                    pm.set_phase_status(f"file_upload_info#{_ctx_label}", "running", "File Upload Info")
+                    try:
+                        _phase_file_upload_info(target, _ctx_cfg, pm, out, effective_auth, _delta_crawl)
+                        pm.set_phase_status(f"file_upload_info#{_ctx_label}", "complete",
+                                            "File Upload Info")
+                        _save_checkpoint()
+                    except Exception as e:
+                        vc.error(f"Phase file_upload_info [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"file_upload_info#{_ctx_label}", "error", detail=str(e))
 
             # ── Phase 19: mass_assignment ──
             if not _skip("mass_assignment"):
-                pm.set_phase_status(f"mass_assignment#{_ctx_label}", "running", "Mass Assignment")
-                try:
-                    _phase_mass_assignment(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
-                    pm.set_phase_status(f"mass_assignment#{_ctx_label}", "complete",
-                                        "Mass Assignment")
-                    _save_checkpoint()
-                except Exception as e:
-                    vc.error(f"Phase mass_assignment [{_ctx_label}] error: {e}")
-                    pm.set_phase_status(f"mass_assignment#{_ctx_label}", "error", detail=str(e))
+                if _is_delta_ctx and not _has_delta:
+                    vc.log(f"[mass_assignment] No new endpoints for [{_ctx_label}] — skipping", "INFO")
+                    pm.set_phase_status(f"mass_assignment#{_ctx_label}", "skipped", "Mass Assignment")
+                else:
+                    pm.set_phase_status(f"mass_assignment#{_ctx_label}", "running", "Mass Assignment")
+                    try:
+                        _phase_mass_assignment(target, _ctx_cfg, pm, out, effective_auth, _delta_crawl)
+                        pm.set_phase_status(f"mass_assignment#{_ctx_label}", "complete",
+                                            "Mass Assignment")
+                        _save_checkpoint()
+                    except Exception as e:
+                        vc.error(f"Phase mass_assignment [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"mass_assignment#{_ctx_label}", "error", detail=str(e))
 
             # ── Heartbeat: after logging_monitoring ──
             effective_auth = _heartbeat_between_phases(
@@ -51189,11 +51276,9 @@ def main() -> None:
                     checkpoint_cb=_save_checkpoint)
 
             # ── Gap Coverage Tests (v2.42.0) ─────────────────────────────
-            # These run once on the primary context (not reduced) unless the
-            # test is specifically relevant to per-role comparison.
 
-            # ── Header extensions (cookie prefixes, HSTS preload, COOP/COEP/CORP) ──
-            if not _skip("headers") and not _is_reduced_ctx:
+            # ── Header extensions — infrastructure-only (config/transport level) ──
+            if not _skip("headers") and _is_first_ctx:
                 try:
                     _test_cookie_prefixes(target, _ctx_cfg, out, effective_auth)
                 except Exception as _e:
@@ -51215,38 +51300,38 @@ def main() -> None:
                 except Exception as _e:
                     vc.error(f"[trace_xst] {_e}")
 
-            # ── Source map disclosure ──
-            if not _skip("recon") and not _is_reduced_ctx:
+            # ── Source map disclosure — infrastructure-only ──
+            if not _skip("recon") and _is_first_ctx:
                 try:
                     _test_source_maps(target, _ctx_cfg, out, effective_auth, crawl_data)
                 except Exception as _e:
                     vc.error(f"[source_maps] {_e}")
 
-            # ── Injection extensions ──
-            if not _skip("injection") and not _is_reduced_ctx:
+            # ── Injection extensions — per role, delta endpoints ──
+            if not _skip("injection") and _has_delta:
                 try:
-                    _test_prototype_pollution_server(target, _ctx_cfg, out, effective_auth, crawl_data)
+                    _test_prototype_pollution_server(target, _ctx_cfg, out, effective_auth, _delta_crawl)
                 except Exception as _e:
                     vc.error(f"[prototype_pollution_server] {_e}")
                 try:
-                    _test_prototype_pollution_client(target, _ctx_cfg, out, effective_auth, crawl_data)
+                    _test_prototype_pollution_client(target, _ctx_cfg, out, effective_auth, _delta_crawl)
                 except Exception as _e:
                     vc.error(f"[prototype_pollution_client] {_e}")
                 try:
-                    _test_ssi_injection(target, _ctx_cfg, out, effective_auth, crawl_data)
+                    _test_ssi_injection(target, _ctx_cfg, out, effective_auth, _delta_crawl)
                 except Exception as _e:
                     vc.error(f"[ssi_injection] {_e}")
                 try:
-                    _test_esi_injection(target, _ctx_cfg, out, effective_auth, crawl_data)
+                    _test_esi_injection(target, _ctx_cfg, out, effective_auth, _delta_crawl)
                 except Exception as _e:
                     vc.error(f"[esi_injection] {_e}")
                 try:
-                    _test_email_header_injection(target, _ctx_cfg, out, effective_auth, crawl_data)
+                    _test_email_header_injection(target, _ctx_cfg, out, effective_auth, _delta_crawl)
                 except Exception as _e:
                     vc.error(f"[email_header_injection] {_e}")
 
-            # ── Auth extensions ──
-            if not _skip("auth_bypass") and not _is_reduced_ctx:
+            # ── Auth extensions — per role (auth-dependent) ──
+            if not _skip("auth_bypass"):
                 try:
                     _test_unicode_normalization(target, _ctx_cfg, out, effective_auth, crawl_data)
                 except Exception as _e:
@@ -51264,29 +51349,29 @@ def main() -> None:
                 except Exception as _e:
                     vc.error(f"[verb_tunneling] {_e}")
 
-            # ── CSRF advanced ──
-            if not _skip("csrf") and not _is_reduced_ctx:
+            # ── CSRF advanced — per role ──
+            if not _skip("csrf"):
                 try:
                     _test_csrf_advanced(target, _ctx_cfg, out, effective_auth, crawl_data)
                 except Exception as _e:
                     vc.error(f"[csrf_advanced] {_e}")
 
-            # ── GraphQL advanced ──
-            if not _skip("graphql") and not _is_reduced_ctx:
+            # ── GraphQL advanced — per role ──
+            if not _skip("graphql"):
                 try:
-                    _test_graphql_advanced(target, _ctx_cfg, out, effective_auth, crawl_data)
+                    _test_graphql_advanced(target, _ctx_cfg, out, effective_auth, _delta_crawl)
                 except Exception as _e:
                     vc.error(f"[graphql_advanced] {_e}")
 
-            # ── API rate limiting ──
-            if not _skip("account_lockout") and not _is_reduced_ctx:
+            # ── API rate limiting — per role ──
+            if not _skip("account_lockout"):
                 try:
                     _test_api_rate_limiting(target, _ctx_cfg, out, effective_auth, crawl_data)
                 except Exception as _e:
                     vc.error(f"[api_rate_limiting] {_e}")
 
-            # ── Request smuggling extensions (h2c) ──
-            if not _skip("request_smuggling") and not _is_reduced_ctx:
+            # ── Request smuggling extensions (h2c) — infrastructure-only ──
+            if not _skip("request_smuggling") and _is_first_ctx:
                 try:
                     _test_h2c_smuggling(target, _ctx_cfg, out, effective_auth)
                 except Exception as _e:
@@ -51299,26 +51384,30 @@ def main() -> None:
                 role_label=_ctx_label, ctx_cfg=_ctx_cfg,
                     checkpoint_cb=_save_checkpoint)
 
-            # ── WebSocket testing (new phase) ──
-            if not _skip("websocket") and not _is_reduced_ctx:
-                pm.set_phase_status(f"websocket#{_ctx_label}", "running", "WebSocket Testing")
-                try:
-                    _phase_websocket(target, _ctx_cfg, pm, out, effective_auth, crawl_data)
-                    pm.set_phase_status(f"websocket#{_ctx_label}", "complete", "WebSocket Testing")
-                    _save_checkpoint()
-                except Exception as e:
-                    vc.error(f"Phase websocket [{_ctx_label}] error: {e}")
-                    pm.set_phase_status(f"websocket#{_ctx_label}", "error", detail=str(e))
+            # ── WebSocket testing — per role, delta ──
+            if not _skip("websocket"):
+                if _is_delta_ctx and not _has_delta:
+                    vc.log(f"[websocket] No new endpoints for [{_ctx_label}] — skipping", "INFO")
+                    pm.set_phase_status(f"websocket#{_ctx_label}", "skipped", "WebSocket Testing")
+                else:
+                    pm.set_phase_status(f"websocket#{_ctx_label}", "running", "WebSocket Testing")
+                    try:
+                        _phase_websocket(target, _ctx_cfg, pm, out, effective_auth, _delta_crawl)
+                        pm.set_phase_status(f"websocket#{_ctx_label}", "complete", "WebSocket Testing")
+                        _save_checkpoint()
+                    except Exception as e:
+                        vc.error(f"Phase websocket [{_ctx_label}] error: {e}")
+                        pm.set_phase_status(f"websocket#{_ctx_label}", "error", detail=str(e))
 
-            # ── Web cache deception ──
-            if not _skip("recon") and not _is_reduced_ctx:
+            # ── Web cache deception — infrastructure-only ──
+            if not _skip("recon") and _is_first_ctx:
                 try:
                     _test_web_cache_deception(target, _ctx_cfg, out, effective_auth)
                 except Exception as _e:
                     vc.error(f"[web_cache_deception] {_e}")
 
-            # ── OAuth/OIDC flow testing ──
-            if not _skip("auth_bypass") and not _is_reduced_ctx:
+            # ── OAuth/OIDC flow testing — per role (auth-dependent) ──
+            if not _skip("auth_bypass"):
                 try:
                     _test_oauth_flows(target, _ctx_cfg, out, effective_auth, crawl_data)
                 except Exception as _e:
@@ -51340,7 +51429,7 @@ def main() -> None:
                            "INFO")
                     vc.status("bfla", "BFLA Testing", "skipped")
                     pm.set_phase_status(f"bfla#{_ctx_label}", "skipped", "bfla")
-                elif not _is_reduced_ctx:
+                elif _is_first_ctx:
                     # Role 1 itself — nothing to compare against yet; skip silently.
                     vc.status("bfla", "BFLA Testing", "skipped")
                     pm.set_phase_status(f"bfla#{_ctx_label}", "skipped", "bfla")
@@ -51370,6 +51459,120 @@ def main() -> None:
                     _keepalive.stop()
                 except Exception:
                     pass
+
+            # ── Backfill: probe delta endpoints with previous roles ────────
+            # When a delta role discovers endpoints not seen by prior roles,
+            # probe those endpoints with every prior role's session.  Results
+            # go into the access matrix.  When a prior role CANNOT access a
+            # delta endpoint (401/403 while the delta role got 200), emit a
+            # tentative finding — it could be legitimate role-specific
+            # functionality, not necessarily BFLA.
+            if _is_delta_ctx and _has_delta and _prev_role_sessions:
+                _bf_links = _delta_crawl.get("links", [])
+                if _bf_links:
+                    vc.log(f"[backfill] Probing {len(_bf_links)} delta endpoint(s) "
+                           f"with {len(_prev_role_sessions)} prior role(s)", "INFO")
+                    _pu_bf = urllib.parse.urlparse(target["url"])
+                    _bf_base = f"{_pu_bf.scheme}://{_pu_bf.netloc}"
+                    _bf_timeout = _ctx_cfg.get("timeout", 10)
+                    _bf_verify = _ctx_cfg.get("verify_ssl", False)
+                    _bf_am_path = out.root / "access_matrix.json"
+                    try:
+                        _bf_am = json.loads(_bf_am_path.read_text()) if _bf_am_path.exists() else {}
+                    except Exception:
+                        _bf_am = {}
+                    _bf_am_by_path = {e["path"]: e for e in _bf_am.get("paths", [])}
+                    _bf_changed = False
+
+                    for _bf_link in _bf_links:
+                        _check_pause()
+                        try:
+                            _bf_parsed = urllib.parse.urlparse(_bf_link)
+                            _bf_path_raw = _bf_parsed.path or "/"
+                            _bf_url = (
+                                _bf_link
+                                if _bf_link.startswith(("http://", "https://"))
+                                else f"{_bf_base}{_bf_path_raw}"
+                            )
+                        except Exception:
+                            continue
+
+                        for _bf_plabel, _bf_psess in _prev_role_sessions:
+                            try:
+                                _bf_r = _bf_psess.get(
+                                    _bf_url, timeout=_bf_timeout,
+                                    allow_redirects=False, verify=_bf_verify,
+                                    headers={"Accept": "text/html,application/json"})
+                                _bf_st = _bf_r.status_code
+                            except Exception:
+                                _bf_st = 0
+
+                            # Record in access matrix
+                            _bf_entry = _bf_am_by_path.get(_bf_path_raw)
+                            if _bf_entry is not None:
+                                _bf_entry.setdefault("access", {})[_bf_plabel] = _bf_st
+                                _bf_changed = True
+                            else:
+                                _bf_new_entry = {
+                                    "path": _bf_path_raw,
+                                    "url": _bf_url,
+                                    "access": {
+                                        _ctx_label: 200,
+                                        _bf_plabel: _bf_st,
+                                    },
+                                }
+                                _bf_am.setdefault("paths", []).append(_bf_new_entry)
+                                _bf_am_by_path[_bf_path_raw] = _bf_new_entry
+                                _bf_changed = True
+
+                            # Detect reverse access: delta role has 200, prior role denied
+                            if _bf_st in (401, 403):
+                                _bf_desc = (
+                                    f"Role '{_ctx_label}' discovered endpoint {_bf_path_raw} "
+                                    f"during crawl, but role '{_bf_plabel}' receives HTTP "
+                                    f"{_bf_st}. This may indicate role-specific functionality "
+                                    f"that is by design (different roles have different feature "
+                                    f"sets) or may represent a broken access control gap. "
+                                    f"Manual verification required."
+                                )
+                                out.add_finding(
+                                    title="Broken Access Control: Cross-Role Discovery — Role-Exclusive Endpoint (Tentative)",
+                                    url=_bf_url,
+                                    port=_pu_bf.port or (443 if _pu_bf.scheme == "https" else 80),
+                                    risk="MEDIUM",
+                                    description=_bf_desc,
+                                    output=(
+                                        f"Discovering role: {_ctx_label} (HTTP 200)\n"
+                                        f"Denied role: {_bf_plabel} (HTTP {_bf_st})\n"
+                                        f"Endpoint: {_bf_url}"
+                                    ),
+                                    command=f"GET {_bf_url} (role: {_bf_plabel})",
+                                    affected=_bf_url,
+                                    owasp="A01:2021 Broken Access Control",
+                                    nist="AC-6",
+                                    remediation=(
+                                        "Verify whether this role-exclusive access pattern is "
+                                        "by design. If the endpoint should be accessible to all "
+                                        "authenticated roles, implement consistent authorization. "
+                                        "If role-specific, document the intended access policy."
+                                    ),
+                                    confidence="Tentative",
+                                    catalogue_id="FR-529",
+                                    roles=f"{_ctx_label}, {_bf_plabel}",
+                                )
+                                vc.log(
+                                    f"[backfill] Tentative: '{_ctx_label}' has access to "
+                                    f"{_bf_path_raw}, '{_bf_plabel}' denied ({_bf_st})",
+                                    "INFO")
+
+                    if _bf_changed:
+                        try:
+                            _bf_am_path.write_text(
+                                json.dumps(_bf_am, indent=2, default=str),
+                                encoding="utf-8")
+                        except Exception:
+                            pass
+                    vc.log(f"[backfill] Complete for role '{_ctx_label}'", "INFO")
 
             # Consolidate all finding URLs into structure_map before access matrix sync.
             # Findings from every phase (headers, shcheck, files, etc.) may reference
@@ -51408,9 +51611,10 @@ def main() -> None:
             # redundant probes and prevents session-expiry from corrupting
             # already-confirmed data.
             #
-            # NOT done for reduced (non-leader) contexts because the
-            # structure_map codes are from Role 1's session, not theirs.
-            if not _is_reduced_ctx:
+            # Only for the first (discovery leader) context: the structure_map
+            # codes are from Role 1's session.  Delta roles probe fresh with
+            # their own sessions via _probe_role_paths.
+            if _is_first_ctx:
                 try:
                     _seed_sm = out.root / "structure_map.json"
                     _seed_am = out.root / "access_matrix.json"
@@ -51553,7 +51757,6 @@ def main() -> None:
             # the live score, causing a spurious self-outscore comparison).
             if (
                 _ctx_label != "unauthenticated"
-                and not _is_reduced_ctx
                 and _ctx_label != _discovery_leader
                 and _n_roles >= 1
             ):

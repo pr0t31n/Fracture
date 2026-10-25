@@ -2,7 +2,7 @@
   "version": "1.7.0",
   "tool": "fracture",
   "generated": "(complete: upgraded existing + scaffolded missing)",
-  "total": 527,
+  "total": 528,
   "from_existing": 340,
   "newly_scaffolded": 64,
   "findings": [
@@ -33006,6 +33006,79 @@
         "jwt_tool",
         "jose-cli",
         "python-jose"
+      ]
+    },
+    {
+      "id": "FR-529",
+      "title": "Broken Access Control: Cross-Role Discovery \u2014 Role-Exclusive Endpoint (Tentative)",
+      "aliases": [
+        "Role-Specific Endpoint Access Pattern",
+        "Cross-Role Endpoint Discovery Discrepancy"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "description": "During multi-role testing, a role's authenticated crawl discovered an endpoint that is not accessible to other tested roles. The discovering role receives HTTP 200 while one or more other roles receive HTTP 401 or 403. This access pattern may indicate broken function-level authorization (BFLA) where access controls are inconsistent across roles, or it may represent legitimate role-specific functionality where different roles have intentionally different feature sets within the scope of their responsibilities.",
+      "impact": "If this represents a genuine access control gap, an attacker who compromises the discovering role's credentials gains access to functionality that other roles cannot reach, potentially bypassing intended authorization boundaries. If the pattern is by design (role-specific functionality), there is no security impact. Manual review is required to distinguish between the two scenarios.",
+      "cwe": [
+        "CWE-285",
+        "CWE-863"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 5.4,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A01:2021 Broken Access Control",
+      "owasp_api": "API5:2023 Broken Function Level Authorization",
+      "nist_csf2": [
+        "PR.AA-05"
+      ],
+      "nist_800_53": [
+        "AC-3",
+        "AC-6"
+      ],
+      "nist_800_171": [
+        "3.1.1",
+        "3.1.2"
+      ],
+      "pci_dss_4": [
+        "7.2.1",
+        "7.2.2"
+      ],
+      "iso_27001": [
+        "A.8.3"
+      ],
+      "iso_27002": [
+        "8.3"
+      ],
+      "soc2": [
+        "CC6.1",
+        "CC6.3"
+      ],
+      "hitrust": [],
+      "gdpr": [
+        "Art. 25"
+      ],
+      "mitre_attack": [
+        {
+          "technique": "T1078",
+          "tactic": "Initial Access",
+          "name": "Valid Accounts"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Verify whether this role-exclusive access pattern is by design. If the endpoint should be accessible to all authenticated roles, implement consistent role-based authorization. If role-specific, document the intended access policy and ensure it aligns with the principle of least privilege. Review function-level access controls to confirm they enforce the intended authorization model.",
+      "remediation_component": "Application",
+      "remediation_category": "Access Control",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "fracture",
+        "burp-suite",
+        "curl"
       ]
     }
   ]
