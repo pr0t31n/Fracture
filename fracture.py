@@ -13919,6 +13919,11 @@ _KNOWN_NON_SEC_HEADERS = frozenset({
     # Standard web platform headers — not security-relevant
     "reporting-endpoints",
     "timing-allow-origin",
+    # Cross-origin isolation headers — standard, presence is good practice
+    "cross-origin-embedder-policy",
+    "cross-origin-opener-policy",
+    "cross-origin-resource-policy",
+    "origin-agent-cluster",
     # Deprecated headers — browsers ignore these
     "expect-ct",
     "feature-policy",
