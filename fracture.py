@@ -19888,15 +19888,18 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
 
     driver = None
     _used_browser = browser
+    vc.log(f"[screenshot] BEGIN url={ep_url} browser={browser}", "INFO")
     try:
         if browser == "firefox":
             driver = _do_firefox()
         else:
             try:
                 driver = _do_chrome()
-            except Exception:
+            except Exception as _br_err:
+                vc.log(f"[screenshot] Chrome launch failed ({_br_err}), trying Firefox", "WARNING")
                 driver = _do_firefox()
                 _used_browser = "firefox"
+        vc.log(f"[screenshot] Browser launched: {_used_browser}", "INFO")
         try:
             driver.set_page_load_timeout(30)
             if _used_browser == "firefox":
@@ -19906,9 +19909,10 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                 _origin_url = f"{_parsed_ep.scheme}://{_parsed_ep.netloc}/"
                 _is_https = _parsed_ep.scheme == "https"
                 _used_cdp = False
-                # Prefer full browser cookies (preserves secure, httpOnly,
-                # sameSite, path, expiry) over requests CookieJar (loses all).
+                _ck_names = [c.name for c in auth_session.cookies]
                 _raw_cks = getattr(auth_session, "_fracture_browser_cookies", None)
+                vc.log(f"[screenshot] Auth session has {len(auth_session.cookies)} cookies: {_ck_names[:10]}", "INFO")
+                vc.log(f"[screenshot] _fracture_browser_cookies present: {_raw_cks is not None} ({len(_raw_cks) if _raw_cks else 0} entries)", "INFO")
                 if _used_browser != "firefox":
                     try:
                         _ep_domain = _parsed_ep.netloc.split(":")[0]
@@ -19931,20 +19935,24 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                             _used_cdp = True
                             vc.log(f"[screenshot] Injected {len(_raw_cks)} cookies via CDP (full attributes)", "INFO")
                         else:
+                            _cdp_injected = []
                             for ck in auth_session.cookies:
+                                _ck_domain = ck.domain or _ep_domain
                                 driver.execute_cdp_cmd("Network.setCookie", {
                                     "name":   ck.name,
                                     "value":  ck.value,
-                                    "domain": ck.domain or _ep_domain,
+                                    "domain": _ck_domain,
                                     "path":   ck.path or "/",
                                     "secure": _is_https,
                                     "url":    _origin_url,
                                 })
+                                _cdp_injected.append(f"{ck.name}@{_ck_domain}")
                             _used_cdp = True
-                            vc.log(f"[screenshot] Injected {len(auth_session.cookies)} cookies via CDP", "INFO")
+                            vc.log(f"[screenshot] Injected {len(auth_session.cookies)} cookies via CDP: {_cdp_injected[:10]}", "INFO")
                     except Exception as _cdp_err:
                         vc.log(f"[screenshot] CDP cookie injection failed ({_cdp_err}), falling back to Selenium", "WARNING")
                 if not _used_cdp:
+                    vc.log(f"[screenshot] Using Selenium cookie transfer (CDP unavailable or Firefox)", "INFO")
                     try:
                         driver.get(_origin_url)
                         import time as _time_stop
@@ -19994,6 +20002,9 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                                 vc.log(f"[screenshot] Injected {_st_ok}/{len(_st_src)} {_st_js} entries", "INFO")
                     except Exception as _ls_err:
                         vc.log(f"[screenshot] Storage injection failed: {_ls_err}", "WARNING")
+            if auth_session is None or not len(auth_session.cookies):
+                _ss_reason = "no auth session" if auth_session is None else "auth session has 0 cookies"
+                vc.log(f"[screenshot] Unauthenticated capture ({_ss_reason})", "INFO")
             # For SPAs with route-based auth gating, "/" may always show
             # the public view.  When the browser landed on a different
             # URL after login, use THAT as the screenshot target — it's
@@ -20007,10 +20018,12 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                         and _cap_parsed.path.rstrip("/") != _ep_parsed.path.rstrip("/")):
                     _nav_url = _captured
                     vc.log(f"[screenshot] SPA: using authenticated landing URL {_nav_url} instead of {ep_url}", "INFO")
+            vc.log(f"[screenshot] Navigating to: {_nav_url}", "INFO")
             try:
                 driver.get(_nav_url)
             except Exception as _load_err:
                 _le = str(_load_err)
+                vc.log(f"[screenshot] Navigation error: {_le[:200]}", "WARNING")
                 if "net::ERR_CONNECTION_REFUSED" in _le or "Reached error page" in _le:
                     return False
             from selenium.webdriver.support.ui import WebDriverWait
@@ -20021,20 +20034,24 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
             except Exception:
                 pass
             import time as _time_cs
-            # SPAs need more time after readyState=complete — the JS
-            # framework still has to bootstrap, check auth, fetch data,
-            # and render.  Wait longer when authenticated.
             _spa_wait = 4.0 if auth_session is not None else 1.5
             _time_cs.sleep(_spa_wait)
+            _ss_final_url = ""
+            _ss_final_title = ""
+            try:
+                _ss_final_url = driver.current_url or ""
+            except Exception:
+                pass
+            try:
+                _ss_final_title = driver.title or ""
+            except Exception:
+                pass
+            if _ss_final_url != _nav_url:
+                vc.log(f"[screenshot] REDIRECT detected: requested={_nav_url} → landed={_ss_final_url}", "WARNING")
+            vc.log(f"[screenshot] Final URL: {_ss_final_url}  Title: {_ss_final_title!r}", "INFO")
             if _meta is not None:
-                try:
-                    _meta["page_title"] = driver.title or ""
-                except Exception:
-                    pass
-                try:
-                    _meta["final_url"] = driver.current_url or ""
-                except Exception:
-                    pass
+                _meta["page_title"] = _ss_final_title
+                _meta["final_url"] = _ss_final_url
                 try:
                     _meta["rendered_body"] = (driver.page_source or "")[:8192]
                 except Exception:
@@ -20048,13 +20065,15 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
             driver.set_window_size(1280, max(800, int(total_h)))
             driver.save_screenshot(str(out_path))
             _add_url_bar(out_path, _url_bar_url or _nav_url)
+            vc.log(f"[screenshot] Saved: {out_path}", "INFO")
             return True
         finally:
             try:
                 driver.quit()
             except Exception:
                 pass
-    except Exception:
+    except Exception as _ss_outer_err:
+        vc.log(f"[screenshot] FAILED url={ep_url} error={_ss_outer_err}", "WARNING")
         return False
 
 
