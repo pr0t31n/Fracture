@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "2.5.1"
+VERSION = "2.6.0"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -60,6 +60,7 @@ AUTH_METHODS: dict[str, str] = {
     "kerberos":             "Kerberos / SPNEGO Negotiate  (domain Kerberos ticket)",
     "kerberos_delegation":  "Kerberos S4U2Proxy  — constrained delegation / impersonation",
     "proxy_header":         "Proxy / Gateway Auth Header  — inject header set by upstream auth proxy",
+    "fingerprint":          "Fingerprint Replay  — replay a recorded auth_fingerprint.json flow",
 }
 
 
@@ -644,6 +645,39 @@ def build_auth_session(
             return sess, f"WARNING: no proxy_header_value provided for header '{hdr_name}'"
         sess.headers[hdr_name] = hdr_value
         return sess, f"Proxy auth header set: {hdr_name}: {hdr_value}"
+
+    # ── Fingerprint Replay ───────────────────────────────────────────────────
+    elif method == "fingerprint":
+        from pathlib import Path as _FpPath
+        fp_file = auth.get("fingerprint_file", "")
+        if not fp_file:
+            return sess, "ERROR: fingerprint_file path is required for fingerprint method"
+        fp_path = _FpPath(fp_file)
+        if not fp_path.is_file():
+            return sess, f"ERROR: fingerprint file not found: {fp_file}"
+        try:
+            fp_data = json.loads(fp_path.read_text())
+        except Exception as e:
+            return sess, f"ERROR: failed to parse fingerprint file: {e}"
+        fc = fp_data.get("fracture_auth_config", {})
+        if not fc:
+            return sess, "ERROR: fingerprint file has no fracture_auth_config section"
+        replay_auth = dict(fc)
+        replay_auth["username"] = auth.get("username", "")
+        replay_auth["password"] = auth.get("password", "")
+        if auth.get("login_username_field"):
+            replay_auth["login_username_field"] = auth["login_username_field"]
+        if auth.get("login_password_field"):
+            replay_auth["login_password_field"] = auth["login_password_field"]
+        replay_method = replay_auth.get("method", "form_login")
+        replay_auth["method"] = replay_method
+        replay_auth["_target_url"] = auth.get("_target_url", "")
+        rp_sess, rp_info = build_auth_session(replay_auth, timeout, proxy, verify_ssl)
+        fp_note = f"[fingerprint → {replay_method}] "
+        if fp_data.get("sso_provider"):
+            sso = fp_data["sso_provider"]
+            fp_note += f"(SSO: {sso.get('type', '?')} @ {sso.get('base_url', '?')}) "
+        return rp_sess, fp_note + rp_info
 
     # ── Auto-Detect ──────────────────────────────────────────────────────────
     elif method == "auto":
@@ -1498,14 +1532,26 @@ def test_connection(
         return result
 
     # ── Login-based methods: POST result is the definitive answer ─────────────
-    if auth_method in ("form_login", "token_login", "totp_mfa", "saml_assertion"):
+    if auth_method in ("form_login", "token_login", "totp_mfa", "saml_assertion", "fingerprint"):
         failed = auth_info.startswith("ERROR:")
-        return {
+        result = {
             "success":     not failed,
             "message":     auth_info,
             "status_code": None,
             "auth_info":   auth_info,
         }
+        if auth_method == "fingerprint" and not failed:
+            fp_file = auth.get("fingerprint_file", "")
+            if fp_file:
+                try:
+                    from pathlib import Path as _FpP
+                    _fp_d = json.loads(_FpP(fp_file).read_text())
+                    fc = _fp_d.get("fracture_auth_config", {})
+                    if fc:
+                        result["fingerprint_config"] = fc
+                except Exception:
+                    pass
+        return result
 
     # ── Any setup-time ERROR is a hard failure ────────────────────────────────
     if auth_info.startswith("ERROR:"):

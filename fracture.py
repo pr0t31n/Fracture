@@ -12296,6 +12296,39 @@ return null;
         except ImportError:
             vc.err("[auth] Kerberos delegation requires: pip install requests-kerberos")
 
+    elif method == "fingerprint":
+        from pathlib import Path as _FpPath2
+        fp_file = auth.get("fingerprint_file", "")
+        if not fp_file:
+            vc.err("[auth] fingerprint method requires fingerprint_file path")
+            return None
+        fp_p = _FpPath2(fp_file)
+        if not fp_p.is_file():
+            vc.err(f"[auth] fingerprint file not found: {fp_file}")
+            return None
+        try:
+            import json as _json_fp
+            fp_data = _json_fp.loads(fp_p.read_text())
+        except Exception as _fe:
+            vc.err(f"[auth] failed to parse fingerprint: {_fe}")
+            return None
+        fc = fp_data.get("fracture_auth_config", {})
+        if not fc:
+            vc.err("[auth] fingerprint file has no fracture_auth_config")
+            return None
+        if fc.get("_auth_recipe"):
+            cfg["_auth_recipe"] = fc["_auth_recipe"]
+            vc.log(f"[auth] fingerprint: loaded auth recipe ({fc['_auth_recipe'].get('method', '?')})", "INFO")
+        replay_auth = dict(auth)
+        for k, v in fc.items():
+            if k != "_auth_recipe" and k != "method":
+                replay_auth[k] = v
+        replay_auth["method"] = fc.get("method", "form_login")
+        cfg[auth_key] = replay_auth
+        vc.log(f"[auth] fingerprint → delegating to {replay_auth['method']}", "INFO")
+        return _build_auth_session(cfg, auth_key, scope_hostnames, role_label,
+                                   no_interactive, session, quiet)
+
     elif method == "auto":
         # ── Auto / Unknown — try username+password methods in priority order ─────
         # Attempts each method that accepts a username and password, stops at the
