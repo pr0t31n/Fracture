@@ -839,12 +839,25 @@ def find_go():
 
 
 def _go_binary_ok(path):
-    """Return True if a Go binary at *path* can actually execute."""
+    """Return True if a Go binary at *path* can actually execute.
+
+    Catches exec-format errors (wrong architecture) whether they surface
+    as OSError from execve, exit code 126 from a shell wrapper, or
+    stderr messages from binfmt_misc / the kernel.
+    """
     try:
-        subprocess.run([path, "--help"], capture_output=True, timeout=5)
+        r = subprocess.run([path, "--help"], capture_output=True,
+                           timeout=10, text=True)
+        if r.returncode in (126, 127):
+            return False
+        _err = (r.stderr or "") + (r.stdout or "")
+        if "cannot execute" in _err or "Exec format error" in _err:
+            return False
         return True
-    except OSError:
+    except (OSError, PermissionError):
         return False
+    except subprocess.TimeoutExpired:
+        return True
     except Exception:
         return True
 

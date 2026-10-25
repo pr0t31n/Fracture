@@ -5449,6 +5449,208 @@ def _subprocess_ua(sess: "requests.Session") -> str:
     return sess.headers.get("User-Agent", "")
 
 
+def _okta_full_auth(cfg: dict, auth_dict: dict, vc_ref, timeout: int,
+                    scope_hostnames: "set | None" = None,
+                    baseline: "dict | None" = None,
+                    out: "OutputManager | None" = None,
+                    ) -> "tuple[requests.Session | None, bool]":
+    """Unified OKTA auth — single method, called every time.
+
+    First call discovers the recipe (okta_base + login_initiation_url) and
+    saves it to cfg["_auth_recipe"].  Subsequent calls replay the saved
+    recipe with whatever credentials are in *auth_dict* at call time.
+
+    The flow:
+      1. GET login_initiation_url (allow_redirects=False) → Location = fresh
+         authorize URL with fresh state/nonce
+      2. POST okta_base/api/v1/authn → sessionToken
+      3. GET sessionCookieRedirect?token=…&redirectUrl=<fresh authorize URL>
+         with allow_redirects=True → full OAuth redirect chain → all cookies
+
+    If the target appears WAF-blocked, waits for the block to clear using
+    the same heartbeat/learned-wait logic before retrying.
+
+    Returns (session, True) on success, (None, False) on failure.
+    """
+    recipe = cfg.get("_auth_recipe", {})
+    if recipe.get("method") != "okta_authn":
+        return None, False
+
+    okta_base = recipe.get("okta_base", "")
+    login_init = recipe.get("login_initiation_url", "")
+    username = auth_dict.get("username", "")
+    password = auth_dict.get("password", "")
+    if not username or not password or not okta_base:
+        return None, False
+
+    # If no login_initiation_url saved, probe common SSO-initiation paths
+    if not login_init:
+        _target_url = cfg.get("target", {}).get("url", "")
+        if _target_url:
+            _SSO_PROBES = [
+                "/login_okta", "/sso", "/auth/redirect", "/signin/okta",
+                "/login/sso", "/oauth2/authorize", "/login",
+            ]
+            _probe_sess = _make_session(cfg, None)
+            for _sp in _SSO_PROBES:
+                _sp_url = urllib.parse.urljoin(_target_url, _sp)
+                try:
+                    _sp_r = _probe_sess.get(
+                        _sp_url, timeout=timeout, allow_redirects=False)
+                    if _sp_r.is_redirect:
+                        _loc = _sp_r.headers.get("Location", "")
+                        if okta_base in _loc or "/authorize" in _loc:
+                            login_init = _sp_url
+                            recipe["login_initiation_url"] = login_init
+                            vc_ref.log(
+                                f"[auth] OKTA recipe: discovered login "
+                                f"initiation at {_sp}", "INFO")
+                            break
+                except Exception:
+                    continue
+            _probe_sess.close()
+    if not login_init:
+        vc_ref.log("[auth] OKTA recipe: no login_initiation_url", "WARNING")
+        return None, False
+
+    sess = _make_session(cfg, scope_hostnames)
+
+    # ── WAF block check before attempting auth ──────────────────────────
+    if baseline is not None:
+        _blocked, _reason, _binfo = _heartbeat_check(
+            login_init, baseline, timeout)
+        if _blocked:
+            vc_ref.log(
+                f"[auth] OKTA recipe: target appears WAF-blocked "
+                f"({_reason}) — waiting for clearance", "WARNING")
+            if out is not None:
+                _cleared = _heartbeat_wait_for_unblock(
+                    cfg.get("target", {}).get("url", login_init),
+                    baseline, out, timeout)
+                if not _cleared:
+                    vc_ref.log(
+                        "[auth] OKTA recipe: WAF block did not clear",
+                        "ERROR")
+                    return None, False
+                vc_ref.log(
+                    "[auth] OKTA recipe: WAF block cleared — proceeding",
+                    "SUCCESS")
+            else:
+                global _heartbeat_learned_wait
+                _wait = _heartbeat_learned_wait or 120
+                vc_ref.log(
+                    f"[auth] OKTA recipe: sleeping {_wait}s "
+                    f"(learned WAF wait)", "INFO")
+                import time as _t_ofr
+                _t_ofr.sleep(_wait)
+
+    # ── Step 1: fresh authorize URL from login-initiation endpoint ──────
+    try:
+        _init_r = sess.get(login_init, timeout=timeout,
+                           allow_redirects=False)
+    except Exception as _e:
+        vc_ref.log(
+            f"[auth] OKTA recipe: login initiation failed: {_e}",
+            "WARNING")
+        return None, False
+
+    fresh_authorize_url = ""
+    if _init_r.is_redirect:
+        fresh_authorize_url = _init_r.headers.get("Location", "")
+        if fresh_authorize_url and not fresh_authorize_url.startswith("http"):
+            fresh_authorize_url = urllib.parse.urljoin(
+                login_init, fresh_authorize_url)
+    if not fresh_authorize_url:
+        # Follow redirects and check final URL
+        try:
+            _init_r2 = sess.get(login_init, timeout=timeout,
+                                allow_redirects=True)
+            if okta_base in _init_r2.url:
+                fresh_authorize_url = _init_r2.url
+            elif _init_r2.history:
+                for _h in _init_r2.history:
+                    _loc = _h.headers.get("Location", "")
+                    if okta_base in _loc or "/authorize" in _loc:
+                        if not _loc.startswith("http"):
+                            _loc = urllib.parse.urljoin(
+                                login_init, _loc)
+                        fresh_authorize_url = _loc
+                        break
+        except Exception:
+            pass
+
+    if not fresh_authorize_url or (
+            "/authorize" not in fresh_authorize_url
+            and "/oauth2/" not in fresh_authorize_url):
+        vc_ref.log(
+            f"[auth] OKTA recipe: login initiation did not yield "
+            f"authorize URL (got {(fresh_authorize_url or 'nothing')[:120]})",
+            "WARNING")
+        return None, False
+
+    vc_ref.log(
+        f"[auth] OKTA recipe: obtained fresh authorize URL "
+        f"(state/nonce refreshed)", "INFO")
+
+    # ── Step 2: OKTA authn API → sessionToken ───────────────────────────
+    try:
+        _ar = sess.post(
+            f"{okta_base}/api/v1/authn",
+            json={"username": username, "password": password},
+            timeout=timeout)
+        _aj = _ar.json()
+    except Exception as _e:
+        vc_ref.log(
+            f"[auth] OKTA recipe: authn API failed: {_e}", "WARNING")
+        return None, False
+
+    if _aj.get("status") != "SUCCESS":
+        _err = _aj.get("errorSummary", _aj.get("status", "unknown"))
+        vc_ref.log(f"[auth] OKTA recipe: authn {_err}", "WARNING")
+        return None, False
+
+    _session_token = _aj.get("sessionToken", "")
+    if not _session_token:
+        vc_ref.log("[auth] OKTA recipe: no sessionToken", "WARNING")
+        return None, False
+
+    # ── Step 3: sessionCookieRedirect → full OAuth chain ────────────────
+    from urllib.parse import quote as _q_ofr
+    try:
+        sess.get(
+            f"{okta_base}/login/sessionCookieRedirect"
+            f"?checkAccountSetupComplete=true"
+            f"&token={_session_token}"
+            f"&redirectUrl={_q_ofr(fresh_authorize_url, safe='')}",
+            timeout=timeout,
+            allow_redirects=True)
+    except Exception as _e:
+        vc_ref.log(
+            f"[auth] OKTA recipe: redirect chain failed: {_e}",
+            "WARNING")
+        return None, False
+
+    _n = len(list(sess.cookies))
+    if scope_hostnames is not None:
+        try:
+            _h = urllib.parse.urlparse(okta_base).hostname
+            if _h:
+                scope_hostnames.add(_h)
+        except Exception:
+            pass
+
+    if _n >= 6:
+        vc_ref.log(
+            f"[auth] OKTA recipe: session established "
+            f"({_n} cookies)", "SUCCESS")
+        return sess, True
+    else:
+        vc_ref.log(
+            f"[auth] OKTA recipe: only {_n} cookies — "
+            f"incomplete auth", "WARNING")
+        return None, False
+
+
 def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         scope_hostnames: "set | None" = None,
                         role_label: str = "",
@@ -7956,11 +8158,13 @@ document.addEventListener('submit', function(e) {
                             vc.log(
                                 f"[auth] Login form found via base-page link"
                                 f" '{_a_label}': {_a_r.url}", "SUCCESS")
+                            cfg["_login_initiation_url"] = _a_cand
                             return _a_r.url
                         if _a_page.get("js_rendered_login"):
                             vc.log(
                                 f"[auth] JS-rendered login via base-page link"
                                 f" '{_a_label}': {_a_r.url}", "INFO")
+                            cfg["_login_initiation_url"] = _a_cand
                             return _a_r.url
                         vc.log(
                             f"[auth] No login form at '{_a_label}' target"
@@ -10548,6 +10752,20 @@ return null;
                 "INFO",
             )
         elif _login_url and _configured_login_url:
+            # ── OKTA recipe replay (unified re-auth) ────────────────────
+            if cfg.get("_auth_recipe", {}).get("method") == "okta_authn":
+                vc.log("[auth] Re-auth via saved OKTA recipe", "INFO")
+                _rp_sess, _rp_ok = _okta_full_auth(
+                    cfg, auth, vc, timeout,
+                    scope_hostnames=scope_hostnames,
+                    baseline=cfg.get("_heartbeat_baseline"),
+                    out=cfg.get("_output_manager"),
+                )
+                if _rp_ok:
+                    return _rp_sess
+                vc.log(
+                    "[auth] OKTA recipe replay failed — "
+                    "falling back to legacy re-auth", "WARNING")
             # Check if the configured URL points to an OKTA-protected target.
             # On resume after a WAF block, _configured_login_url is the stored
             # OKTA authorize URL — form POST will fail (MFA wall).  Try the
@@ -10988,6 +11206,21 @@ return null;
                                                 f" → {_ba_final} cookies"
                                                 f" (incomplete)",
                                                 "WARNING")
+                                    # ── Save auth recipe for replay ─────
+                                    _recipe_init = cfg.get(
+                                        "_login_initiation_url", "")
+                                    if _recipe_init and _ba_okta_base:
+                                        cfg["_auth_recipe"] = {
+                                            "method": "okta_authn",
+                                            "okta_base": _ba_okta_base,
+                                            "login_initiation_url":
+                                                _recipe_init,
+                                        }
+                                        vc.log(
+                                            f"[auth] Saved OKTA auth recipe"
+                                            f" (base={_ba_okta_base},"
+                                            f" init={_recipe_init})",
+                                            "INFO")
                                     return _ba_ok
                                 vc.log(
                                     "[auth] OKTA authn API failed — "
@@ -20015,11 +20248,20 @@ def _chrome_okta_authn_login(driver, cfg: dict, login_url: str,
     _target_url = login_url
 
     _okta_base = None
-    _OKTA_HOST_RE = _re_oa.compile(r'https?://[^/]*\.okta\.com', _re_oa.I)
-    _m = _OKTA_HOST_RE.search(_cur)
-    if _m:
-        _okta_base = _m.group(0).rstrip("/")
+    # Check saved auth recipe first (survives custom-domain OKTA)
+    _recipe = cfg.get("_auth_recipe", {})
+    if _recipe.get("method") == "okta_authn" and _recipe.get("okta_base"):
+        _okta_base = _recipe["okta_base"]
+        vc.log(
+            f"[crawl/spa] Using saved OKTA base from recipe: {_okta_base}",
+            "INFO")
     if not _okta_base:
+        _OKTA_HOST_RE = _re_oa.compile(r'https?://[^/]*\.okta\.com', _re_oa.I)
+        _m = _OKTA_HOST_RE.search(_cur)
+        if _m:
+            _okta_base = _m.group(0).rstrip("/")
+    if not _okta_base:
+        _OKTA_HOST_RE = _re_oa.compile(r'https?://[^/]*\.okta\.com', _re_oa.I)
         _m = _OKTA_HOST_RE.search(login_url)
         if _m:
             _okta_base = _m.group(0).rstrip("/")
@@ -20122,11 +20364,32 @@ def _chrome_okta_authn_login(driver, cfg: dict, login_url: str,
         return False
 
     from urllib.parse import quote as _q_oa
+    # Use login-initiation URL from recipe to get a fresh authorize URL
+    # with fresh state/nonce — _target_url alone loops back to login.
+    _redir_dest = _target_url
+    _recipe_init = (_recipe.get("login_initiation_url", "")
+                    if _recipe.get("method") == "okta_authn" else "")
+    if _recipe_init:
+        try:
+            _init_r = _s.get(_recipe_init, timeout=timeout,
+                             allow_redirects=False)
+            if _init_r.is_redirect:
+                _fresh_loc = _init_r.headers.get("Location", "")
+                if _fresh_loc:
+                    if not _fresh_loc.startswith("http"):
+                        _fresh_loc = urllib.parse.urljoin(
+                            _recipe_init, _fresh_loc)
+                    _redir_dest = _fresh_loc
+                    vc.log(
+                        f"[crawl/spa] OKTA Chrome: obtained fresh "
+                        f"authorize URL via recipe", "INFO")
+        except Exception:
+            pass
     _redirect_url = (
         f"{_okta_base}/login/sessionCookieRedirect"
         f"?checkAccountSetupComplete=true"
         f"&token={_session_token}"
-        f"&redirectUrl={_q_oa(_target_url, safe='')}"
+        f"&redirectUrl={_q_oa(_redir_dest, safe='')}"
     )
 
     try:
@@ -25918,13 +26181,49 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
                 except Exception:
                     _after_retry = ""
                 if _WAF_LOGIN_URL_RE.search(_after_retry):
-                    vc.log(
-                        "[crawl/spa] Cookie injection insufficient — "
-                        "trying OKTA authn API",
-                        "INFO",
-                    )
+                    # Step 1.5: OKTA recipe → requests session → CDP cookie inject
+                    _spa_recipe_ok = False
+                    if cfg.get("_auth_recipe", {}).get("method") == "okta_authn":
+                        vc.log(
+                            "[crawl/spa] Using OKTA recipe for full "
+                            "session auth + CDP injection", "INFO")
+                        _spa_auth = cfg.get("auth", {})
+                        _spa_rsess, _spa_rok = _okta_full_auth(
+                            cfg, _spa_auth, vc, cfg.get("timeout", 10))
+                        if _spa_rok:
+                            driver.delete_all_cookies()
+                            _spa_transfer_cookies(
+                                _spa_rsess, driver, url,
+                                log_prefix="[crawl/spa/recipe]")
+                            try:
+                                driver.get(url)
+                            except Exception:
+                                pass
+                            import time as _spa_t2
+                            _spa_t2.sleep(2.0)
+                            try:
+                                _spa_post = driver.current_url or ""
+                            except Exception:
+                                _spa_post = ""
+                            if not _WAF_LOGIN_URL_RE.search(_spa_post):
+                                vc.log(
+                                    f"[crawl/spa] OKTA recipe auth "
+                                    f"succeeded — Chrome at "
+                                    f"{_spa_post}", "SUCCESS")
+                                _spa_recipe_ok = True
+                            else:
+                                vc.log(
+                                    "[crawl/spa] OKTA recipe auth: "
+                                    "Chrome still on login page",
+                                    "WARNING")
+                    if not _spa_recipe_ok:
+                        vc.log(
+                            "[crawl/spa] Cookie injection insufficient — "
+                            "trying OKTA authn API",
+                            "INFO",
+                        )
                     # Step 2: OKTA authn API (programmatic, bypasses form rendering)
-                    _okta_ok = _chrome_okta_authn_login(driver, cfg, url)
+                    _okta_ok = _spa_recipe_ok or _chrome_okta_authn_login(driver, cfg, url)
                     if not _okta_ok:
                         # Step 3: generic form login fallback
                         vc.log(
@@ -49599,6 +49898,8 @@ def main() -> None:
                     _heartbeat_baseline = _heartbeat_capture_baseline(
                         target["url"], cfg.get("timeout", 10))
                     if _heartbeat_baseline:
+                        cfg["_heartbeat_baseline"] = _heartbeat_baseline
+                        cfg["_output_manager"] = out
                         vc.log(
                             f"[heartbeat] Baseline captured — HTTP {_heartbeat_baseline['status']} "
                             f"(waf_block={_heartbeat_baseline['is_waf_block']}, "
