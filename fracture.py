@@ -19258,6 +19258,7 @@ def _add_url_bar(png_path: Path, url: str) -> bool:
     except ImportError:
         return False
     try:
+        Image.MAX_IMAGE_PIXELS = 300_000_000
         img = Image.open(str(png_path))
         w, h = img.size
         bar_h = 52
@@ -20062,7 +20063,10 @@ def _capture_screenshot_to(ep_url: str, out_path: Path,
                 "  document.documentElement.scrollHeight"
                 ")"
             )
-            driver.set_window_size(1280, max(800, int(total_h)))
+            _capped_h = min(max(800, int(total_h)), 16384)
+            if int(total_h) > 16384:
+                vc.log(f"[screenshot] Page height {total_h}px exceeds cap, clamping to 16384px", "WARNING")
+            driver.set_window_size(1280, _capped_h)
             driver.save_screenshot(str(out_path))
             _add_url_bar(out_path, _url_bar_url or _nav_url)
             vc.log(f"[screenshot] Saved: {out_path}", "INFO")
