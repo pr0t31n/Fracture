@@ -26711,7 +26711,10 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                         if len(_crawl_pw_autocomplete) < 30:
                             _crawl_pw_autocomplete.append((current_url, _pw_name))
                 # 500-series error collection (#5)
-                if _cr.status_code >= 500 and len(_crawl_500_pages) < 20:
+                # Skip un-interpolated template-variable URLs — these always 500
+                if (_cr.status_code >= 500 and len(_crawl_500_pages) < 20
+                        and '${' not in current_url and '{{' not in current_url
+                        and '{param}' not in current_url):
                     _crawl_500_pages.append((
                         current_url, _cr.status_code,
                         (_pg_html[:200] if _pg_html else "")))
