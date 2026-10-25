@@ -3851,7 +3851,8 @@ def _timeout_action_item(out, tool_name, target, timeout_s, priority="MEDIUM",
         ),
         source_finding=f"{_disp} timeout",
         priority=priority,
-        scope="webapp",
+        scope=target.get("scope", "") or os.environ.get("CRUCIBLE_SCOPE", ""),
+        in_scope=True,
     )
 
 
@@ -4407,7 +4408,8 @@ class OutputManager:
                         target: str, ip: str, port: int, hostname: str,
                         title: str, description: str, source_finding: str,
                         priority: str, scope: str,
-                        metadata: "dict | None" = None) -> None:
+                        metadata: "dict | None" = None,
+                        in_scope: "bool | None" = None) -> None:
         key = (recommended_tool.lower(), target.lower(), title.strip().lower())
         with self._action_items_lock:
             if key in self._ai_seen:
@@ -4415,7 +4417,7 @@ class OutputManager:
             self._ai_seen.add(key)
             entry = {
                 "id":              str(_uuid.uuid4()),
-                "type":            type,
+                "category":        type,
                 "recommended_tool": recommended_tool,
                 "target":          target,
                 "ip":              _sanitize_ip(ip),
@@ -4430,6 +4432,8 @@ class OutputManager:
                 "datetime":        datetime.now().isoformat(),
                 "metadata":        metadata or {},
             }
+            if in_scope is not None:
+                entry["in_scope"] = in_scope
             try:
                 items = json.loads(
                     self.action_items_json.read_text(encoding="utf-8") or "[]")
@@ -52396,7 +52400,7 @@ def _generate_cross_tool_action_items(project_dir: Path) -> None:
             continue
         entry = {
             "id": str(_uuid.uuid4()),
-            "type": "file_analysis",
+            "category": "file_analysis",
             "recommended_tool": "Isotope",
             "target": output_file,
             "ip": ip,
@@ -52412,11 +52416,12 @@ def _generate_cross_tool_action_items(project_dir: Path) -> None:
             ),
             "source_finding": title,
             "priority": "HIGH",
-            "scope": "ext",
+            "scope": f.get("scope", "") or os.environ.get("CRUCIBLE_SCOPE", ""),
             "status": "pending",
             "datetime": datetime.now().isoformat(),
             "metadata": {"source_category": "fracture_file_discovery",
                           "source_url": url},
+            "in_scope": True,
         }
         items.append(entry)
         vc.action_item(entry)
