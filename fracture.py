@@ -3863,6 +3863,7 @@ _CP_ERR    = "__CRUCIBLE_ERR__:"
 _CP_PROMPT = "__CRUCIBLE_PROMPT__:"
 _CP_STATUS = "__CRUCIBLE_STATUS__:"
 _CR_ACTION = "__CRUCIBLE_ACTION_ITEM__:"
+_CP_FINDING = "__CRUCIBLE_FINDING__:"
 
 
 class CrucibleConsole:
@@ -5165,6 +5166,26 @@ class OutputManager:
                 with self.findings_csv.open("a", newline="", encoding="utf-8") as f:
                     writer = csv.DictWriter(f, fieldnames=self.FINDINGS_CSV_FIELDS, extrasaction="ignore")
                     writer.writerow(csv_entry)
+
+        if _CRUCIBLE_MANAGED and not merged:
+            try:
+                _finding_payload = json.dumps({
+                    "title": title, "ip": entry.get("ip", ""),
+                    "port": entry.get("port", 0),
+                    "hostname": entry.get("hostname", ""),
+                    "risk": risk or "INFO",
+                    "description": description or "",
+                    "sources": sources or "",
+                    "service": entry.get("service", ""),
+                    "affected": entry.get("affected", ""),
+                    "cves": cves or "",
+                    "output_file": output_file or "",
+                    "remediation": remediation or "",
+                    "owasp": entry.get("owasp", ""),
+                }, ensure_ascii=False)
+                print(f"{_CP_FINDING}{_finding_payload}", flush=True)
+            except Exception:
+                pass
 
     def write_summary(self, meta: dict) -> None:
         """Write scan summary JSON."""
