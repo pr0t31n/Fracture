@@ -34346,6 +34346,8 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                 except Exception:
                     pass
                 _norm   = _normalize_nuclei(item)
+                if _norm is None:
+                    continue
                 # Downgrade hostname-mismatch findings when target is IP
                 if (_norm.get("title") == "SSL/TLS Certificate: Hostname Mismatch"
                         and _norm.get("risk") in ("HIGH", "MEDIUM", "CRITICAL")):
@@ -52274,8 +52276,8 @@ def main() -> None:
         # Paths on already-targeted hosts are already tested by the host's
         # own scan phases — re-scanning them as new targets wastes resources.
         _covered_hosts = {
-            urllib.parse.urlparse(u if "://" in u else "http://" + u).hostname.lower()
-            for u in (*_pending_urls, *_processed_urls) if u
+            _ch.lower() for u in (*_pending_urls, *_processed_urls)
+            if u and (_ch := urllib.parse.urlparse(u if "://" in u else "http://" + u).hostname)
         }
         for _new_url in _in_scope_new:
             _norm_new = _new_url.rstrip("/")
