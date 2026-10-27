@@ -33,6 +33,17 @@ import atexit
 import getpass
 import copy
 import difflib
+
+
+def _safe_cfg_copy(cfg):
+    """Shallow-copy cfg, deep-copy only 'auth' (the only mutated sub-dict).
+
+    copy.deepcopy(cfg) fails on Python 3.14+ when cfg contains unpicklable
+    objects (_output_manager with thread locks, requests Sessions, etc.).
+    """
+    return {**cfg, "auth": copy.deepcopy(cfg.get("auth", {}))}
+
+
 import secrets
 import statistics
 import tempfile
@@ -12431,7 +12442,7 @@ return null;
         _auto_succeeded = False
         for _auto_m in _auto_methods_run:
             vc.log(f"[auth:auto] Trying method: {_auto_m}", "INFO")
-            _auto_cfg = copy.deepcopy(cfg)
+            _auto_cfg = _safe_cfg_copy(cfg)
             _auto_cfg["auth"] = copy.deepcopy(auth)
             _auto_cfg["auth"]["method"] = _auto_m
             _auto_cfg["browser_auth"] = cfg.get("browser_auth", False)
@@ -37015,7 +37026,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
 
                 import copy as _sf_copy
                 _sf_om = cfg.pop("_output_manager", None)
-                _sf_cfg = _sf_copy.deepcopy(cfg)
+                _sf_cfg = _safe_cfg_copy(cfg)
                 if _sf_om is not None:
                     cfg["_output_manager"] = _sf_om
                 # Pass fix_sess so _build_auth_session uses it (no new
@@ -43130,7 +43141,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         _rc_auth["username"] = _rc.get("username", _rc_auth.get("username", ""))
         _rc_auth["password"] = _rc.get("password", _rc_auth.get("password", ""))
         _rc_om = cfg.pop("_output_manager", None)
-        _rc_cfg = _copy.deepcopy(cfg)
+        _rc_cfg = _safe_cfg_copy(cfg)
         if _rc_om is not None:
             cfg["_output_manager"] = _rc_om
         _rc_cfg["auth"] = _rc_auth
@@ -43195,7 +43206,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             r_auth["username"] = role_cfg.get("username", r_auth.get("username", ""))
             r_auth["password"] = role_cfg.get("password", r_auth.get("password", ""))
             _brs_om = cfg.pop("_output_manager", None)
-            r_cfg = _copy.deepcopy(cfg)
+            r_cfg = _safe_cfg_copy(cfg)
             if _brs_om is not None:
                 cfg["_output_manager"] = _brs_om
             r_cfg["auth"] = r_auth
@@ -49060,7 +49071,7 @@ def main() -> None:
         if _n_roles >= 1:
             # Role 1 — full scan (most permissive user)
             _r1 = _collected_roles[0]
-            _r1_cfg = copy.deepcopy(cfg)
+            _r1_cfg = _safe_cfg_copy(cfg)
             vc.log(
                 f"[auth] _r1_cfg login_url after deepcopy: "
                 f"{_r1_cfg.get('auth', {}).get('login_url', '(empty)')!r}",
@@ -49094,7 +49105,7 @@ def main() -> None:
             # using their own credentials without opening a browser window.
             _r1_login_url = _r1_cfg.get("auth", {}).get("login_url", "").strip()
             for _ri, _rc in enumerate(_collected_roles[1:], start=1):
-                _rn_cfg = copy.deepcopy(cfg)
+                _rn_cfg = _safe_cfg_copy(cfg)
                 _rn_cfg["auth"]["enabled"]  = True
                 _rn_cfg["auth"]["username"] = _rc["username"]
                 _rn_cfg["auth"]["password"] = _rc["password"]
@@ -49108,7 +49119,7 @@ def main() -> None:
             # Existing settings-file auth_matrix behaviour
             for _rc in (cfg.get("auth_matrix") or []):
                 _r_label = _rc.get("role") or f"ctx{len(_cred_contexts) + 1}"
-                _r_cfg   = copy.deepcopy(cfg)
+                _r_cfg   = _safe_cfg_copy(cfg)
                 _r_cfg["auth"]["enabled"]  = True
                 _r_cfg["auth"]["username"] = _rc.get("username", "")
                 _r_cfg["auth"]["password"] = _rc.get("password", "")
@@ -49121,7 +49132,7 @@ def main() -> None:
                 })
         # Unauthenticated context always last.
         # Reduced if multi-role mode (role 1 already ran the full scan).
-        _r_unauth_cfg = copy.deepcopy(cfg)
+        _r_unauth_cfg = _safe_cfg_copy(cfg)
         _r_unauth_cfg["auth"]["enabled"] = False
         _cred_contexts.append({
             "label": "unauthenticated", "cfg": _r_unauth_cfg, "auth_sess": None,
@@ -51078,7 +51089,7 @@ def main() -> None:
                         if _dc_key not in _discovered_creds_seen:
                             _discovered_creds_seen.add(_dc_key)
                             _dc_lbl = f"discovered_{_dc['username']}"
-                            _dc_cfg = copy.deepcopy(cfg)
+                            _dc_cfg = _safe_cfg_copy(cfg)
                             _dc_cfg["auth"]["enabled"]  = True
                             _dc_cfg["auth"]["username"] = _dc["username"]
                             _dc_cfg["auth"]["password"] = _dc["password"]
@@ -51889,7 +51900,7 @@ def main() -> None:
                     _collected_roles.append(_nr_creds)
                     if _nr_creds["role"] not in _all_roles_ctx:
                         _all_roles_ctx.insert(-1, _nr_creds["role"])  # before "unauthenticated"
-                    _nr_cfg = copy.deepcopy(cfg)
+                    _nr_cfg = _safe_cfg_copy(cfg)
                     _nr_cfg["auth"]["enabled"]  = True
                     _nr_cfg["auth"]["username"] = _nr_creds["username"]
                     _nr_cfg["auth"]["password"] = _nr_creds["password"]
