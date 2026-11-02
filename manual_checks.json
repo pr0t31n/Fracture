@@ -1,0 +1,231 @@
+{
+  "tool": "fracture",
+  "version": "1.0",
+  "checks": [
+    {
+      "id": "FR-MC-001",
+      "title": "Password Change Mechanism",
+      "description": "Verify whether authenticated users can change their password from within the application without using the forgotten-password flow.",
+      "instructions": [
+        "Authenticate to the application with valid credentials.",
+        "Navigate to the user profile, account settings, or security settings page.",
+        "Look for a 'Change Password', 'Update Password', or similar option.",
+        "If found, verify it requires the current password before accepting a new one.",
+        "If no password change option exists anywhere in the authenticated interface, mark as Missing."
+      ],
+      "priority": "HIGH",
+      "owasp_mapping": "ASVS 2.1.7",
+      "finding_template": {
+        "title": "Missing Password Change Mechanism",
+        "risk": "MEDIUM",
+        "description": "The application does not provide authenticated users with the ability to change their password. The only method available for password modification is the pre-authentication password reset flow, which requires email-based verification. This limits the user's ability to proactively rotate credentials and may delay response to suspected account compromise.",
+        "remediation": "Implement a password change function accessible from the authenticated user's profile or security settings page. The function should require the user's current password before accepting a new one, enforce the application's existing password complexity policy, and invalidate all other active sessions upon successful change.",
+        "cwe": ["CWE-620"],
+        "owasp_web": "A07:2021"
+      }
+    },
+    {
+      "id": "FR-MC-002",
+      "title": "Session Listing and Termination",
+      "description": "Verify whether users can view all active sessions associated with their account and selectively terminate unauthorized ones.",
+      "instructions": [
+        "Authenticate to the application from two different browsers or devices simultaneously.",
+        "Navigate to the user profile, account settings, or security settings page.",
+        "Look for an 'Active Sessions', 'Devices', or 'Login Activity' section.",
+        "If found, verify it lists both sessions with identifying information (device, IP, time).",
+        "Verify that individual sessions can be terminated from the list.",
+        "If no session management interface exists, mark as Missing."
+      ],
+      "priority": "HIGH",
+      "owasp_mapping": "ASVS 3.3.1",
+      "finding_template": {
+        "title": "Users Cannot View or Terminate Active Sessions",
+        "risk": "LOW",
+        "description": "The application does not provide users with a mechanism to view or manage their active sessions. Users have no visibility into how many concurrent sessions are active under their account and cannot terminate sessions they do not recognize. An attacker who gains unauthorized access may maintain persistent access undetected, as the legitimate user has no means to identify or revoke the compromised session.",
+        "remediation": "Implement a session management interface accessible from the user's account settings. The interface should list all active sessions with identifying details such as device type, IP address, approximate location, and last activity timestamp. Provide the ability to terminate individual sessions or all sessions except the current one.",
+        "cwe": ["CWE-613"],
+        "owasp_web": "A07:2021"
+      }
+    },
+    {
+      "id": "FR-MC-003",
+      "title": "Breached Password List Check",
+      "description": "Test whether the application validates passwords against a known breached password list during password creation or change.",
+      "instructions": [
+        "Navigate to the password creation or password change function.",
+        "Attempt to set the password to a commonly breached value that meets the complexity policy (e.g., 'Password1!', 'Summer2025!', 'Welcome123!', 'Qwerty@123').",
+        "Observe whether the application accepts or rejects the password.",
+        "If the password is accepted without any warning about it being compromised, mark as Missing.",
+        "If the application warns or rejects the password citing breach data, mark as Exists."
+      ],
+      "priority": "MEDIUM",
+      "owasp_mapping": "ASVS 2.1.7",
+      "finding_template": {
+        "title": "Password Not Checked Against Breached Password List",
+        "risk": "LOW",
+        "description": "The application does not validate user-supplied passwords against a list of known breached credentials. Passwords that meet the complexity policy but appear in public breach databases are accepted without warning. This increases the risk of credential stuffing attacks, as users may unknowingly choose passwords that are already in attacker wordlists.",
+        "remediation": "Integrate a breached password check into the password creation and change workflows. Use a service such as the Have I Been Pwned Passwords API (k-anonymity model) or maintain an offline copy of the breached password hash set. Reject or warn users when a submitted password matches a known breach entry.",
+        "cwe": ["CWE-521"],
+        "owasp_web": "A07:2021"
+      }
+    },
+    {
+      "id": "FR-MC-004",
+      "title": "Account Unblock/Recovery Mechanism",
+      "description": "Verify that the account lockout recovery mechanism functions correctly after the account is blocked due to excessive failed login attempts.",
+      "instructions": [
+        "Identify the account lockout threshold by attempting successive failed logins.",
+        "Once the account is locked, check for an unblock mechanism (email link, timed unlock, admin reset).",
+        "If an email is sent, click the unblock link and verify it restores access.",
+        "If timed unlock is used, verify the account unlocks after the stated period.",
+        "If the recovery mechanism does not function as documented or expected, mark as Missing."
+      ],
+      "priority": "MEDIUM",
+      "owasp_mapping": "ASVS 2.2.3",
+      "finding_template": {
+        "title": "Account Recovery Mechanism Does Not Function",
+        "risk": "INFO",
+        "description": "The account lockout recovery mechanism does not function as intended. After an account is blocked due to excessive failed login attempts, the recovery path (such as an unblock link sent via email) fails to restore access. This is a functional defect that may prevent legitimate users from regaining access to their accounts without manual administrator intervention.",
+        "remediation": "Review and repair the account unblock mechanism. Verify that recovery emails are sent promptly, that unblock links resolve correctly and have not expired, and that the account status is properly updated in the authentication backend upon successful recovery.",
+        "cwe": ["CWE-645"],
+        "owasp_web": ""
+      }
+    },
+    {
+      "id": "FR-MC-005",
+      "title": "Multi-Factor Authentication Presence",
+      "description": "Verify whether multi-factor authentication (MFA) is available and whether it is enforced for privileged or sensitive operations.",
+      "instructions": [
+        "Authenticate to the application and navigate to security or account settings.",
+        "Look for MFA setup options (TOTP, SMS, hardware key, push notification).",
+        "If MFA is available, verify it can be enabled and is enforced on subsequent logins.",
+        "Check whether MFA is required for sensitive actions (password change, role change, payment).",
+        "Check whether MFA enrollment is mandatory for all users or only optional.",
+        "If MFA is not available or cannot be enabled, mark as Missing."
+      ],
+      "priority": "HIGH",
+      "owasp_mapping": "ASVS 2.8.1",
+      "finding_template": {
+        "title": "Multi-Factor Authentication Not Available",
+        "risk": "MEDIUM",
+        "description": "The application does not offer multi-factor authentication to its users. Authentication relies solely on username and password credentials, providing no additional verification layer against credential compromise, phishing, or brute-force attacks. Without MFA, a single compromised credential pair grants full account access.",
+        "remediation": "Implement multi-factor authentication using a time-based one-time password (TOTP) mechanism at minimum. Consider supporting multiple second factors (authenticator apps, hardware security keys, push notifications). Enforce MFA enrollment for privileged accounts and make it available as an opt-in for all users. Require step-up MFA for sensitive operations such as password changes, role modifications, and financial transactions.",
+        "cwe": ["CWE-308"],
+        "owasp_web": "A07:2021"
+      }
+    },
+    {
+      "id": "FR-MC-006",
+      "title": "MFA Brute-Force Protection Consistency",
+      "description": "Verify that the MFA verification endpoint consistently blocks requests after a defined number of invalid attempts, without intermittent acceptance.",
+      "instructions": [
+        "Authenticate and reach the MFA verification step.",
+        "Submit 10 or more consecutive invalid MFA codes in rapid succession.",
+        "Record whether each attempt is rejected or if any are intermittently accepted.",
+        "After the series of failures, attempt to login with valid credentials and a valid MFA code.",
+        "Verify the account is locked or rate-limited after the brute-force attempts.",
+        "If blocking is inconsistent (some invalid codes succeed, or the account is not locked after many failures), mark as Missing."
+      ],
+      "priority": "HIGH",
+      "owasp_mapping": "ASVS 2.2.1",
+      "finding_template": {
+        "title": "MFA Brute-Force Protection Is Inconsistent",
+        "risk": "LOW",
+        "description": "The multi-factor authentication verification endpoint does not consistently enforce rate limiting or account lockout after repeated invalid attempts. During testing, intermittent acceptance of requests was observed after a series of failures, suggesting that the blocking mechanism is not uniformly applied. An attacker conducting a brute-force attack against the MFA code may periodically bypass the rate limit and continue guessing.",
+        "remediation": "Review the MFA rate-limiting implementation to ensure that blocking is uniformly enforced after a defined threshold of failed attempts. Implement server-side tracking of consecutive failures that is not susceptible to race conditions. After the threshold is exceeded, lock the MFA verification for a cooling-off period or require the user to re-authenticate from the initial login step.",
+        "cwe": ["CWE-307"],
+        "owasp_web": "A07:2021"
+      }
+    },
+    {
+      "id": "FR-MC-007",
+      "title": "Account Lockout Policy and Notification",
+      "description": "Verify that the application enforces an account lockout policy after repeated failed login attempts and notifies the account owner.",
+      "instructions": [
+        "Attempt 10 or more consecutive failed login attempts against a valid user account.",
+        "Observe whether the account becomes locked or if login attempts continue to be processed.",
+        "Check whether the account owner receives an email or in-app notification about the lockout.",
+        "If the account locks, verify the lockout message does not reveal whether the username is valid.",
+        "If no lockout is triggered or no notification is sent, mark as Missing."
+      ],
+      "priority": "MEDIUM",
+      "owasp_mapping": "ASVS 2.2.1",
+      "finding_template": {
+        "title": "Missing Account Lockout Policy or Notification",
+        "risk": "MEDIUM",
+        "description": "The application does not enforce an account lockout policy after repeated failed login attempts, or does not notify the account owner when lockout occurs. Without lockout enforcement, the application is vulnerable to online brute-force and credential stuffing attacks. Without notification, legitimate users are unaware that their account is under attack and cannot take protective action.",
+        "remediation": "Implement an account lockout policy that temporarily disables login after a configurable number of consecutive failed attempts (e.g., 5-10 failures). Send an email notification to the account owner when lockout is triggered, including the timestamp and source IP if available. Ensure lockout error messages do not confirm or deny whether the username exists.",
+        "cwe": ["CWE-307"],
+        "owasp_web": "A07:2021"
+      }
+    },
+    {
+      "id": "FR-MC-008",
+      "title": "CAPTCHA on Login and Registration",
+      "description": "Verify whether the application employs CAPTCHA or equivalent bot-detection mechanisms on login, registration, and password reset forms.",
+      "instructions": [
+        "Navigate to the login page and observe whether a CAPTCHA challenge is presented.",
+        "Navigate to the registration page and observe the same.",
+        "Navigate to the password reset page and observe the same.",
+        "If CAPTCHA is not present on initial load, attempt 5-10 rapid submissions to check for adaptive CAPTCHA.",
+        "If no CAPTCHA or bot-detection mechanism is present on any of these forms, mark as Missing."
+      ],
+      "priority": "LOW",
+      "owasp_mapping": "ASVS 2.2.1",
+      "finding_template": {
+        "title": "No CAPTCHA or Bot-Detection on Authentication Forms",
+        "risk": "LOW",
+        "description": "The application does not implement CAPTCHA or equivalent bot-detection mechanisms on its login, registration, or password reset forms. Automated tools can submit unlimited requests to these endpoints without human-interaction verification, increasing exposure to credential stuffing, account enumeration, and spam registration attacks.",
+        "remediation": "Implement a CAPTCHA mechanism (such as reCAPTCHA v3, hCaptcha, or Turnstile) on login, registration, and password reset forms. Consider an adaptive approach where CAPTCHA is triggered after a small number of failed attempts rather than on every request, to balance security with user experience.",
+        "cwe": ["CWE-799"],
+        "owasp_web": "A07:2021"
+      }
+    },
+    {
+      "id": "FR-MC-009",
+      "title": "Cookie Consent and Privacy Notice",
+      "description": "Verify whether the application displays a cookie consent banner and provides a link to its privacy policy.",
+      "instructions": [
+        "Open the application in a fresh browser session (cleared cookies) or private/incognito window.",
+        "Observe whether a cookie consent banner or dialog is displayed.",
+        "If present, verify it provides options to accept, reject, or customize cookie preferences.",
+        "Look for a link to the privacy policy or cookie policy in the footer or consent banner.",
+        "If no cookie consent mechanism or privacy policy link is present, mark as Missing."
+      ],
+      "priority": "LOW",
+      "owasp_mapping": "",
+      "finding_template": {
+        "title": "Missing Cookie Consent Banner or Privacy Notice",
+        "risk": "INFO",
+        "description": "The application does not display a cookie consent banner or provide a readily accessible link to its privacy policy. Depending on the jurisdictions in which the application operates, this may represent a compliance gap with privacy regulations such as GDPR, CCPA, or ePrivacy Directive requirements for informed consent to tracking technologies.",
+        "remediation": "Implement a cookie consent management mechanism that informs users about the types of cookies and tracking technologies in use. Provide clear options to accept, reject, or customize preferences. Ensure a link to the full privacy policy is accessible from every page, typically in the footer.",
+        "cwe": [],
+        "owasp_web": ""
+      }
+    },
+    {
+      "id": "FR-MC-010",
+      "title": "Remember Me Token Security",
+      "description": "Verify the security of the 'Remember Me' or persistent login functionality, if present.",
+      "instructions": [
+        "Look for a 'Remember Me' or 'Keep me signed in' checkbox on the login page.",
+        "If present, enable it and authenticate.",
+        "Inspect the cookies set by the application for the remember-me token.",
+        "Verify the token has Secure, HttpOnly, and SameSite flags set.",
+        "Check whether the token has a reasonable expiration (not excessively long, e.g., >30 days).",
+        "Change the account password and verify whether the remember-me token is invalidated.",
+        "If the remember-me token lacks secure flags, has excessive lifetime, or persists after password change, mark as Missing."
+      ],
+      "priority": "MEDIUM",
+      "owasp_mapping": "ASVS 3.2.1",
+      "finding_template": {
+        "title": "Insecure Remember Me Token Implementation",
+        "risk": "MEDIUM",
+        "description": "The application's persistent login ('Remember Me') functionality uses tokens that do not conform to security best practices. Issues may include missing Secure or HttpOnly cookie flags, excessively long token lifetimes, or failure to invalidate the token when the user's password is changed. These weaknesses could allow an attacker who captures or steals the remember-me token to maintain unauthorized access even after the legitimate user has changed their credentials.",
+        "remediation": "Ensure remember-me tokens are stored in cookies with Secure, HttpOnly, and SameSite=Lax (or Strict) flags. Limit token lifetime to a reasonable period (e.g., 14-30 days). Invalidate all persistent login tokens when the user changes their password or explicitly logs out. Store token hashes server-side rather than predictable values.",
+        "cwe": ["CWE-613"],
+        "owasp_web": "A07:2021"
+      }
+    }
+  ]
+}
