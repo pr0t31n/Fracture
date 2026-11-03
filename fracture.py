@@ -17088,7 +17088,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     # HTML without wp-content/wp-includes references in the page source.
     # Skipped in stealth — /wp-login.php is a top-3 path matched by CF's
     # "Security Scanner Detection" managed rule. Operator log confirmed
-    # this probe was tripping CF on app.hosting-example.com.
+    # this probe was tripping CF on a PythonAnywhere-hosted site.
     if ("WordPress" not in detected_cms
             and not cfg.get("_waf_stealth_applied")):
         try:
@@ -48817,7 +48817,7 @@ def main() -> None:
         # Inspect server header, cookies, and known hostnames to flag aggressive
         # protection layers BEFORE the scan starts hammering them. The most
         # common operator pain (and what got us blacklisted on
-        # app.hosting-example.com) is Cloudflare + PythonAnywhere — both
+        # a PythonAnywhere-hosted site) is Cloudflare + PythonAnywhere — both
         # block scanners on burst rate, suspicious User-Agent, and path-scan
         # patterns. This warning is the single most important signal an
         # operator needs before continuing.
