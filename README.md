@@ -4,6 +4,8 @@ Web Application Penetration Testing Orchestrator — v2.12.0
 
 Fracture is a Python CLI tool that performs comprehensive web application security assessments across all OWASP Top 10 2025 categories. It orchestrates a suite of open-source tools (gobuster, sqlmap, nuclei, dalfox, wpscan, sslscan, testssl.sh, nikto, ffuf, and more) alongside its own built-in probes, and integrates with the Crucible management platform for real-time monitoring and findings management.
 
+**AI/ML Service Detection (v2.99.0):** During the vulnscan phase, Fracture detects AI/ML services via nuclei template tags (Ollama, vLLM, Gradio, Streamlit, MLflow, LiteLLM, TorchServe, Triton, and 25+ other AI platforms). Detected services generate an INFO finding and an `ai_discovered` action item recommending pAIn testing for LLM-specific vulnerabilities (prompt injection, data exfiltration, model abuse).
+
 ---
 
 ## OWASP Top 10 2025 Coverage
@@ -44,7 +46,7 @@ Fracture is a Python CLI tool that performs comprehensive web application securi
 | 7 | auth_bypass | A07 | Default credentials, SQLi login bypass, JWT none algorithm |
 | 7b | account_lockout | A07 | Brute-force protection and account lockout validation |
 | 8 | files | A02, A05 | Sensitive file exposure (.env, .git, config files, backups, debug logs) |
-| 9 | vulnscan | A06 | Nuclei + Nikto vulnerability scanning |
+| 9 | vulnscan | A06 | Nuclei + Nikto vulnerability scanning, AI/ML service detection via nuclei AI tags |
 | 10 | graphql | A05 | GraphQL endpoint detection, introspection, batch query attacks, field suggestion |
 | 10b | logging_monitoring | A09 | Actuator/debug endpoint exposure, verbose error disclosure, metrics exposure |
 | 11 | auth_recon | A01 | Authenticated endpoint enumeration (requires auth) |

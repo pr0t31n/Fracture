@@ -33408,6 +33408,15 @@ _NUCLEI_SERVER_TAGS = {
     "lighttpd": ["lighttpd"],
 }
 
+_NUCLEI_AI_TAGS = frozenset({
+    "ai", "llm", "ml", "ollama", "gradio", "mlflow", "vllm", "triton",
+    "bentoml", "litellm", "torchserve", "huggingface", "sagemaker",
+    "bedrock", "openai", "langflow", "streamlit", "comfyui", "sdwebui",
+    "stablediffusion", "langchain", "flowise", "nextchat", "jan",
+    "xinference", "sglang", "llamacpp", "openllm", "fastchat",
+    "swarmui", "fooocus", "easydiffusion", "mcp",
+})
+
 
 def _build_nuclei_exclude_tags(target_profile_path):
     """Build a list of nuclei tags to exclude based on undetected technologies.
@@ -34471,6 +34480,57 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                         affected=matched,
                         output_file=str(nuc_out),
                         command=" ".join(handle["nuclei_cmd"]),
+                    )
+                # ── AI/ML service detection + pAIn action item ──────
+                if _nuc_tags_set & _NUCLEI_AI_TAGS:
+                    _ai_tag_match = sorted(_nuc_tags_set & _NUCLEI_AI_TAGS)
+                    _ai_svc = ", ".join(_ai_tag_match)
+                    out.add_finding(
+                        title=f"AI/ML Service Detected: {_norm['title'][:80]}",
+                        url=matched, port=target["port"],
+                        risk="INFO",
+                        description=(
+                            f"Nuclei template '{item.get('template-id', '')}' "
+                            f"(AI tags: {_ai_svc}) identified an AI/ML service "
+                            f"at {matched}. AI services may be vulnerable to "
+                            "prompt injection, model manipulation, data "
+                            "exfiltration, and other attacks specific to "
+                            "machine learning systems (OWASP Top 10 for LLM "
+                            "Applications 2025)."
+                        ),
+                        output=(
+                            f"Template: {item.get('template-id', '')}\n"
+                            f"Name: {item.get('info', {}).get('name', '')}\n"
+                            f"AI Tags: {_ai_svc}\n"
+                            f"Matched: {matched}"
+                        ),
+                        sources="nuclei",
+                        affected=matched,
+                        output_file=str(nuc_out),
+                        command=" ".join(handle["nuclei_cmd"]),
+                    )
+                    out.log_action_item(
+                        type="ai_discovered",
+                        recommended_tool="pain",
+                        target=matched,
+                        ip=target.get("ip", ""),
+                        port=target["port"],
+                        hostname=target.get("hostname", ""),
+                        title="AI/ML Service — pAIn Testing Recommended",
+                        description=(
+                            f"Nuclei identified AI/ML service ({_ai_svc}) at "
+                            f"{matched}. Automated AI security testing with "
+                            "pAIn is recommended to check for prompt injection, "
+                            "data exfiltration, and other LLM/AI-specific "
+                            "vulnerabilities."
+                        ),
+                        source_finding=_norm["title"],
+                        priority="HIGH",
+                        scope="ai",
+                        metadata={
+                            "ai_tags": _ai_tag_match,
+                            "nuclei_template": item.get("template-id", ""),
+                        },
                     )
                 # ── Action item: CVE exploit verification ─────────────
                 _ai_cves = _norm.get("cves", "")

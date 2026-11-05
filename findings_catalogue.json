@@ -2,7 +2,7 @@
   "version": "1.7.0",
   "tool": "fracture",
   "generated": "(complete: upgraded existing + scaffolded missing)",
-  "total": 528,
+  "total": 529,
   "from_existing": 340,
   "newly_scaffolded": 64,
   "findings": [
@@ -33079,6 +33079,73 @@
         "fracture",
         "burp-suite",
         "curl"
+      ]
+    },
+    {
+      "id": "FR-530",
+      "title": "AI/ML Service Detected: {service_name}",
+      "aliases": [
+        "AI Service Discovery",
+        "LLM Platform Detected",
+        "ML Inference Server Detected"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "INFO",
+      "description": "A nuclei template tagged with AI/ML-related keywords identified an AI or machine learning service running on the target. This includes LLM inference servers (Ollama, vLLM, LiteLLM), ML platforms (MLflow, TorchServe, Triton), AI web interfaces (Gradio, Streamlit, ComfyUI), and cloud AI services (Bedrock, SageMaker). AI services are vulnerable to a distinct class of attacks including prompt injection, training data extraction, model theft, and output manipulation.",
+      "impact": "An exposed AI/ML service significantly expands the attack surface. Prompt injection attacks can bypass safety guardrails to exfiltrate data, execute unauthorized actions via tool-use APIs, or manipulate model outputs. Unprotected inference endpoints may allow model abuse, resource exhaustion, or extraction of proprietary model weights and training data. AI services running on default configurations often lack authentication, rate limiting, and input validation.",
+      "cwe": [
+        "CWE-693",
+        "CWE-20"
+      ],
+      "cve_examples": [
+        "CVE-2024-37032",
+        "CVE-2024-37014",
+        "CVE-2023-6977"
+      ],
+      "cvss_v3_base": null,
+      "cvss_vector": "",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A05:2025 Security Misconfiguration",
+      "owasp_api": "",
+      "nist_csf2": [
+        "ID.AM-02"
+      ],
+      "nist_800_53": [
+        "CM-7",
+        "CM-8"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [],
+      "iso_27001": [
+        "A.8.9"
+      ],
+      "iso_27002": [
+        "8.9"
+      ],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [
+        {
+          "technique": "T1595.002",
+          "tactic": "Reconnaissance",
+          "name": "Active Scanning: Vulnerability Scanning"
+        }
+      ],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Review AI/ML service exposure. Restrict access to authorized clients only via network controls and authentication. Conduct specialized AI security testing with tools like pAIn to evaluate prompt injection, data exfiltration, and model abuse vectors.",
+      "remediation_component": "Application",
+      "remediation_category": "Access Control",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "pain",
+        "nuclei",
+        "garak"
       ]
     }
   ]
