@@ -372,6 +372,7 @@ python3 fracture.py --list-phases
 | `--auth-token TOKEN` | Bearer/API token |
 | `--threads N` | Number of concurrent threads |
 | `--timeout N` | Per-request timeout in seconds |
+| `--no-cve-correlation` | Skip OSV CVE version correlation |
 
 ---
 
