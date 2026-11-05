@@ -5734,7 +5734,7 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
     # Cookies and auth headers are transferred to the scoped scan session at the end.
     sess    = session if session is not None else _make_session(cfg, None)
     timeout = cfg.get("timeout", 10)
-    method  = (auth.get("method") or auth.get("auth_type") or "form_login").strip().lower()
+    method  = (auth.get("method") or auth.get("auth_type") or "auto").strip().lower()
     _role_tag = f" [{role_label}]" if role_label else ""
     vc.log(f"[auth] Auth method: {method}{_role_tag}", "INFO")
 
@@ -12890,9 +12890,10 @@ DEFAULT_SETTINGS: dict = {
             "bfla":            True,   # Phase 21: broken function level authorization
             "websocket":       True,   # WebSocket endpoint security testing
         },
+        "per_target_auth": {},  # {url: {method, username, password, ...}} — per-URL auth overrides
         "auth": {
             "enabled":                 False,
-            "method":                  "form_login",   # auto|form_login|basic|digest|ntlm|ntlm_v2|bearer|session_cookie|token_login|oauth2_client_creds|oauth1a|saml_assertion|oidc_token|mtls|totp_mfa|webauthn_probe|apikey_header|apikey_cookie|header_creds|kerberos|kerberos_delegation
+            "method":                  "auto",          # auto|form_login|basic|digest|ntlm|ntlm_v2|bearer|session_cookie|token_login|oauth2_client_creds|oauth1a|saml_assertion|oidc_token|mtls|totp_mfa|webauthn_probe|apikey_header|apikey_cookie|header_creds|kerberos|kerberos_delegation
             "auth_type":               "",             # legacy alias for method
             "username":                "",
             "password":                "",
@@ -12946,7 +12947,7 @@ DEFAULT_SETTINGS: dict = {
         },
         "auth2": {
             "enabled":                 False,
-            "method":                  "form_login",
+            "method":                  "auto",
             "auth_type":               "",
             "username":                "",
             "password":                "",
@@ -48243,6 +48244,14 @@ def main() -> None:
     _redirect_discovered: set  = set()  # tracks redirect-discovered target URLs
     _pending_idx = 0
 
+    # Per-target auth: save the original global auth config so each original target
+    # can start from a clean slate, optionally overlaid with per-URL overrides.
+    import copy as _copy_mod
+    _original_auth = _copy_mod.deepcopy(cfg.get("auth", {}))
+    _per_target_auth: dict = cfg.get("per_target_auth") or {}
+    if _per_target_auth:
+        vc.log(f"[auth] Per-target auth configured for {len(_per_target_auth)} URL(s)", "INFO")
+
     # If the login URL is on a newly-scoped host, add its origin to the queue
     # so it gets full phase coverage like any other target.
     if _login_url_cfg:
@@ -48456,6 +48465,17 @@ def main() -> None:
             _discovery_leader = ""
             _discovery_leader_score = {"score": 0, "n200": 0, "n200_priv": 0}
             _completed_role_sessions = {}
+            _role_sessions.clear()
+            # Restore original auth, then overlay per-target overrides if present
+            cfg["auth"] = _copy_mod.deepcopy(_original_auth)
+            _pta = _per_target_auth.get(raw_url, {})
+            if _pta:
+                for _k, _v in _pta.items():
+                    if _v:
+                        cfg["auth"][_k] = _v
+                cfg["auth"]["enabled"] = True
+                vc.log(f"[auth] Per-target auth override for {raw_url}: "
+                       f"method={_pta.get('method', '(inherit)')}", "INFO")
 
         target = _parse_target(raw_url)
         project_dir = Path(cfg["project"]).resolve()
@@ -49414,6 +49434,7 @@ def main() -> None:
                     "pending_urls":          list(_pending_urls),
                     "pending_idx":           _pending_idx,
                     "redirect_discovered":   list(_redirect_discovered),
+                    "per_target_auth":       _per_target_auth,
                     "scope_hostnames":       list(_scope_hostnames),
                     "current_target_url":    raw_url,
                     # Discovery

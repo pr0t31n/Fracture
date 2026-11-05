@@ -140,7 +140,7 @@ Fracture supports 23 distinct authentication methods to reach authenticated scan
 | `proxy_header` | Trusted proxy header forwarding (X-Forwarded-User) |
 | `kerberos` | Kerberos / SPNEGO |
 | `kerberos_delegation` | Kerberos S4U2Proxy delegation |
-| `auto` | Auto-detect: tries form_login → token_login → basic → digest → ntlm |
+| `auto` | **(Default)** Auto-detect: tries form_login → token_login → basic → digest → ntlm |
 
 ### Browser-Assisted Login
 
@@ -151,6 +151,32 @@ Chrome → Brave → Chromium → Firefox → Iceweasel → LibreWolf → Waterf
 ```
 
 Chrome is tried first because ChromeDriver's CDP interface allows richer network-level request recording. Firefox and compatible browsers are the fallback when Chrome or ChromeDriver is not available.
+
+### Per-Target Authentication
+
+When multiple target URLs are provided, Fracture treats each as an independent application with its own authentication session. Sessions are cleared and rebuilt for each original target URL — redirect-discovered children inherit their parent's session.
+
+**Per-target auth overrides** can be configured via Crucible's wizard or settings page, or directly in the settings file under `scan.per_target_auth`:
+
+```json
+{
+  "scan": {
+    "per_target_auth": {
+      "https://app1.example.com": {
+        "method": "basic",
+        "username": "admin",
+        "password": "secret"
+      },
+      "https://app2.example.com": {
+        "method": "bearer",
+        "token": "eyJ..."
+      }
+    }
+  }
+}
+```
+
+URLs not listed in `per_target_auth` fall back to the global `scan.auth` configuration. If no auth method is configured at all, auto-detect runs for each target.
 
 ---
 
@@ -444,7 +470,7 @@ python3 fracture.py --list-phases
     },
     "auth": {
       "enabled": true,
-      "method": "form_login",
+      "method": "auto",
       "username": "testuser",
       "password": "testpass",
       "domain": "",
@@ -494,7 +520,8 @@ python3 fracture.py --list-phases
       "username": "",
       "password": ""
     },
-    "auth_matrix": []
+    "auth_matrix": [],
+    "per_target_auth": {}
   }
 }
 ```
