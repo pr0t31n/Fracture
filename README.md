@@ -8,6 +8,9 @@ Fracture is a Python CLI tool that performs comprehensive web application securi
 
 ---
 
+
+> **[View full documentation on the Codex Wiki](https://wiki.pr0t31n.com/tools/fracture)** — detailed features, CLI reference, findings catalogue, and integration guides.
+
 ## OWASP Top 10 2025 Coverage
 
 | OWASP Category | Phases |
