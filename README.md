@@ -45,7 +45,7 @@ Security testing is a professional discipline with significant ethical and legal
 
 # Fracture
 
-Web Application Penetration Testing Orchestrator — v2.12.0
+Web Application Penetration Testing Orchestrator — v2.101.0
 
 Fracture is a Python CLI tool that performs comprehensive web application security assessments across all OWASP Top 10 2025 categories. It orchestrates a suite of open-source tools (gobuster, sqlmap, nuclei, dalfox, wpscan, sslscan, testssl.sh, nikto, ffuf, and more) alongside its own built-in probes, and integrates with the Crucible management platform for real-time monitoring and findings management.
 
@@ -355,6 +355,27 @@ python3 fracture.py \
 
 Chrome is attempted first. If Chrome or ChromeDriver is not found, Fracture automatically falls back to Firefox via geckodriver.
 
+### Unauthenticated scan (no-auth, no-browser-assist)
+
+When no authentication is configured, or when `"unauthenticated": true` is set in the settings file, Fracture runs all unauthenticated phases and automatically skips the six phases that require a session: `auth_recon`, `authorization`, `session`, `csrf`, `cross_user`, and `logout`.
+
+The `"no_browser_assist": true` settings flag prevents Fracture from ever opening a browser window for manual login. When automated authentication fails and no-browser-assist is active, Fracture falls back to unauthenticated scanning instead of prompting for browser interaction. This is the default when Crucible launches Fracture in headless/unattended mode.
+
+```bash
+# Inline: no credentials, skip all authenticated phases
+python3 fracture.py --url https://target.example.com --project ./output --no-auth
+
+# Settings file: explicit unauthenticated + no-browser-assist
+# {
+#   "scan": {
+#     "unauthenticated": true,
+#     "no_browser_assist": true,
+#     ...
+#   }
+# }
+python3 fracture.py --settings settings.json
+```
+
 ### Via settings file (Crucible mode)
 
 ```bash
@@ -564,6 +585,7 @@ Controls how the login profile store is used:
 ├── scan.log.json
 ├── errors.log
 ├── findings.json
+├── findings.db                            ← SQLite dual-write (when PR0T31N_FINDINGS_DB is set)
 ├── findings.csv
 ├── checkpoint.json
 ├── summary.json
@@ -573,6 +595,10 @@ Controls how the login profile store is used:
 ### Login Recording Files
 
 When browser-assisted login is used, a `login_recording_<timestamp>.txt` file is written to the project directory. This file documents the complete manual login session (clicks, inputs, form submissions, POST requests, cookies) and is the source used to parse and store a new login profile. Passwords are always redacted as `[REDACTED]`.
+
+### FindingsDB — SQLite Dual-Write
+
+When the `PR0T31N_FINDINGS_DB` environment variable is set to a database path, Fracture dual-writes every new finding to both `findings.json` and a SQLite database via `pr0t31n_findings_db.FindingsDB`. The database mirrors the JSON finding schema and enables SQL queries, cross-project aggregation, and integration with external reporting tools. JSON remains the primary output; the database is supplementary and best-effort (write failures are silently ignored).
 
 ---
 
