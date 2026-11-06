@@ -6606,6 +6606,13 @@ def _build_auth_session(cfg: dict, auth_key: str = "auth",
                         "WARNING",
                     )
 
+                    if cfg.get("_no_browser_assist"):
+                        vc.log(
+                            "[auth] No-browser-assist mode — falling back to unauthenticated",
+                            "INFO",
+                        )
+                        return ""
+
                     # --browser-auth already set → switch immediately
                     if cfg.get("browser_auth") and not no_interactive:
                         vc.log(
@@ -11486,6 +11493,12 @@ return null;
                                 "INFO",
                             )
                             # proceed — _login_url stays set, _login_post will fire
+                        elif cfg.get("_no_browser_assist"):
+                            vc.log(
+                                "[auth] No-browser-assist mode — skipping browser login at guard",
+                                "INFO",
+                            )
+                            _login_url = ""
                         elif cfg.get("browser_auth") and not no_interactive:
                             vc.log(
                                 f"[auth] JS-rendered login detected at guard — "
@@ -11501,6 +11514,12 @@ return null;
                             vc.log(
                                 f"[auth] JS-rendered login at guard — "
                                 "skipping (automated call site)",
+                                "INFO",
+                            )
+                            _login_url = ""
+                        elif cfg.get("_no_browser_assist"):
+                            vc.log(
+                                "[auth] No-browser-assist mode — skipping browser login at guard",
                                 "INFO",
                             )
                             _login_url = ""
@@ -48173,6 +48192,17 @@ def main() -> None:
         cfg["browser_auth"] = True
     if args.chromedriver:
         cfg["chromedriver_path"] = args.chromedriver
+
+    # Crucible-managed unauthenticated/no-browser-assist flags
+    if cfg.get("unauthenticated"):
+        cfg["auth"]["enabled"] = False
+        for _unauth_phase in ("auth_recon", "authorization", "session",
+                               "csrf", "cross_user", "logout"):
+            cfg["phases"][_unauth_phase] = False
+    if cfg.get("no_browser_assist"):
+        cfg["browser_auth"] = False
+        cfg["_no_browser_assist"] = True
+
 
     # CLI auth overrides
     if args.username:
