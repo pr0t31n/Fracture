@@ -1395,7 +1395,9 @@
       "cve_examples": [],
       "cvss_v3_base": null,
       "cvss_vector": "",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        40984
+      ],
       "qualys_qids": [],
       "owasp_web": "A05:2025",
       "owasp_api": "",
@@ -1996,7 +1998,9 @@
       "cve_examples": [],
       "cvss_v3_base": null,
       "cvss_vector": "",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        45411
+      ],
       "qualys_qids": [],
       "owasp_web": "A02:2025",
       "owasp_api": "",
@@ -2338,7 +2342,9 @@
       ],
       "cvss_v3_base": null,
       "cvss_vector": "",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        73412
+      ],
       "qualys_qids": [],
       "owasp_web": "A02:2025",
       "owasp_api": "",
@@ -3298,7 +3304,9 @@
       "cve_examples": [],
       "cvss_v3_base": null,
       "cvss_vector": "",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        84502
+      ],
       "qualys_qids": [],
       "owasp_web": "A02:2025",
       "owasp_api": "",
@@ -3345,7 +3353,9 @@
       "cve_examples": [],
       "cvss_v3_base": null,
       "cvss_vector": "",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        84502
+      ],
       "qualys_qids": [],
       "owasp_web": "A02:2025",
       "owasp_api": "",
@@ -3392,7 +3402,9 @@
       "cve_examples": [],
       "cvss_v3_base": null,
       "cvss_vector": "",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        84502
+      ],
       "qualys_qids": [],
       "owasp_web": "A01:2025",
       "owasp_api": "",
@@ -5756,7 +5768,14 @@
       "cve_examples": [],
       "cvss_v3_base": null,
       "cvss_vector": "",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        10061,
+        10144,
+        10399,
+        34970,
+        57792,
+        87932
+      ],
       "qualys_qids": [],
       "owasp_web": "A07:2025",
       "owasp_api": "",
@@ -9453,7 +9472,10 @@
       "cve_examples": [],
       "cvss_v3_base": null,
       "cvss_vector": "",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        11213,
+        43111
+      ],
       "qualys_qids": [],
       "owasp_web": "A05:2025",
       "owasp_api": "",
@@ -10368,7 +10390,9 @@
       "cve_examples": [],
       "cvss_v3_base": null,
       "cvss_vector": "",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        83738
+      ],
       "qualys_qids": [],
       "owasp_web": "A02:2025",
       "owasp_api": "",
@@ -15490,7 +15514,9 @@
       "cve_examples": [],
       "cvss_v3_base": null,
       "cvss_vector": "",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        45411
+      ],
       "qualys_qids": [],
       "owasp_web": "A02:2025",
       "owasp_api": "",
@@ -15536,7 +15562,9 @@
       "cve_examples": [],
       "cvss_v3_base": null,
       "cvss_vector": "",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        57582
+      ],
       "qualys_qids": [],
       "owasp_web": "A02:2025",
       "owasp_api": "",
@@ -18794,7 +18822,8 @@
       "cvss_v3_base": 5.4,
       "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N",
       "nessus_plugin_ids": [
-        11213
+        11213,
+        43111
       ],
       "qualys_qids": [
         86189
@@ -19488,8 +19517,11 @@
       "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
       "nessus_plugin_ids": [
         10061,
+        10144,
+        10399,
         34970,
-        57792
+        57792,
+        87932
       ],
       "qualys_qids": [
         150100,
@@ -24918,7 +24950,9 @@
       "cve_examples": [],
       "cvss_v3_base": null,
       "cvss_vector": "",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        112530
+      ],
       "qualys_qids": [],
       "owasp_web": "",
       "owasp_api": "",
@@ -28840,7 +28874,9 @@
       "cve_examples": [],
       "cvss_v3_base": 3.7,
       "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N",
-      "nessus_plugin_ids": [],
+      "nessus_plugin_ids": [
+        10759
+      ],
       "qualys_qids": [],
       "owasp_web": "A05:2025 Security Misconfiguration",
       "owasp_api": "",
@@ -29822,7 +29858,8 @@
       "cvss_v3_base": 5.3,
       "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
       "nessus_plugin_ids": [
-        11213
+        11213,
+        43111
       ],
       "qualys_qids": [],
       "owasp_web": "A05:2025 Security Misconfiguration",
