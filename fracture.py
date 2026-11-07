@@ -18180,7 +18180,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 if exploits:
                     titles_list = [e.get("Title", "") for e in exploits[:5]]
                     out.add_finding(
-                        title=f"Uncategorized: Public Exploit Available: {term}",
+                        title=f"Known Vulnerability: Public Exploit Available: {term}",
                         url=url, port=target["port"], risk="HIGH",
                         description=(
                             f"{len(exploits)} public exploit(s) found in ExploitDB for "
@@ -31964,7 +31964,7 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                     except Exception:
                         pass
                     out.add_finding(
-                        title="Uncategorized: Timing Attack — Non-Constant-Time Authentication",
+                        title="Cryptographic Weakness: Timing Attack — Non-Constant-Time Authentication",
                         url=login_u, port=target["port"], risk="MEDIUM",
                         description=(f"Login endpoint {lpath} shows a {(avg_valid - avg_invalid)*1000:.0f}ms "
                                      f"average response time difference between a non-existent username and "
