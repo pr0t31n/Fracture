@@ -33032,6 +33032,17 @@ def _normalize_nikto(vuln: dict) -> dict:
             return {"title": _title, "risk": _risk, "owasp": _owasp,
                     "nist": _nist, "remediation": _remed}
 
+    # Drop infrastructure / network errors — these are not findings.
+    _msg_low = msg.lower() if msg else ""
+    if any(p in _msg_low for p in (
+        "cannot resolve hostname", "name or service not known",
+        "temporary failure in name resolution", "no address associated",
+        "network is unreachable", "connection timed out",
+        "connection refused", "no route to host",
+        "host is unreachable", "name resolution failed",
+    )):
+        return None
+
     # Fallback: use first sentence of msg as title (no "Nikto:" prefix so
     # identical findings from different tools still merge by title).
     _fb_title = msg.split(". ")[0].strip().rstrip(".") if msg else f"Nikto ID {_nik_id}"
