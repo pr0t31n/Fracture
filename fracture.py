@@ -12724,8 +12724,14 @@ def _attach_redirect_hook(
     target: dict,
     out: "OutputManager",
     in_scope_new: list,
+    cfg: "dict | None" = None,
 ) -> None:
     """Attach a response hook that records redirect findings and queues in-scope targets."""
+    _br = (cfg or {}).get("_blanket_redirect")
+    _br_from = _br["from_host"] if _br else None
+    _br_to   = _br["to_host"] if _br else None
+    _br_finding_emitted = [False]
+
     def _hook(r, *args, **kwargs):
         if r.status_code not in (301, 302, 303, 307, 308):
             return
@@ -12743,6 +12749,41 @@ def _attach_redirect_hook(
         # Suppress findings for redirects to Fracture's own NXDOMAIN probe hostnames
         if dest_host.startswith("_fracture_nxdomain_"):
             return
+        # Blanket-redirect suppression: when the target permanently redirects
+        # ALL requests from host A to host B, emit ONE finding and suppress
+        # the per-request flood.  The redirect still happens (requests follows
+        # it), but we don't generate hundreds of identical INFO findings.
+        if _br_from and dest_host == _br_to:
+            try:
+                _src_host = urllib.parse.urlparse(r.url).hostname or ""
+            except Exception:
+                _src_host = ""
+            if _src_host == _br_from:
+                if not _br_finding_emitted[0]:
+                    _br_finding_emitted[0] = True
+                    out.add_finding(
+                        title="Discovery: Blanket Redirect to In-Scope Host",
+                        url=target["url"], port=target["port"], risk="INFO",
+                        description=(
+                            f"The target host {_br_from} permanently redirects "
+                            f"all requests (HTTP {r.status_code}) to {_br_to}. "
+                            f"Subsequent per-path redirect findings from this host "
+                            f"are suppressed. All testing targets the canonical "
+                            f"destination host."
+                        ),
+                        output=f"From: {r.url}\nTo:   {abs_loc}\nStatus: {r.status_code}",
+                        sources="fracture-redirect",
+                        service=target["scheme"],
+                        affected=f"{_br_from} → {_br_to}",
+                        owasp="A05:2025 Security Misconfiguration",
+                        nist="SC-7",
+                        remediation=(
+                            "Consider updating DNS or load balancer configuration "
+                            "to serve content directly from the canonical hostname."
+                        ),
+                        http_code=r.status_code,
+                    )
+                return
         key = (r.url, abs_loc)
         if key in _redirect_seen:
             return
@@ -20883,24 +20924,58 @@ def _phase_endpoint_tools(
     _ep_fer_threads = "5" if _ep_tools_cdn else str(_SCAN_SEM.limit)
     wordlist_file = _find_wordlist("raft-large-files.txt")
 
+    # Blanket-redirect collapse: when the target permanently redirects to
+    # a different host (e.g. IP → hostname), rewrite redirect-source URLs
+    # to their canonical destination before dedup.  This prevents testing
+    # both https://1.2.3.4/page and https://example.com/page when they
+    # serve identical content.
+    _br = cfg.get("_blanket_redirect")
+    _br_from = _br["from_host"] if _br else None
+    _br_to_scheme = _br["to_scheme"] if _br else None
+    _br_to_host = _br["to_host"] if _br else None
+
+    def _canonicalize_ep(u: str) -> str:
+        if not _br_from:
+            return u
+        try:
+            p = urllib.parse.urlparse(u)
+            if p.hostname == _br_from:
+                return urllib.parse.urlunparse(
+                    (_br_to_scheme, _br_to_host, p.path, p.params, p.query, p.fragment))
+        except Exception:
+            pass
+        return u
+
     # Deduplicate, exclude base URL, cap count, skip auth-provider URLs
-    seen = {base_url}
+    seen = {base_url, _canonicalize_ep(base_url).rstrip("/")}
     endpoints: list = []
     _auth_skipped = 0
+    _redir_collapsed = 0
     for u in discovered_urls:
         u = u.rstrip("/")
-        if u and u not in seen:
-            seen.add(u)
-            try:
-                _ep_host = urllib.parse.urlparse(u).hostname or ""
-            except Exception:
-                _ep_host = ""
-            if _is_auth_provider_host(_ep_host):
-                _auth_skipped += 1
-                continue
-            endpoints.append(u)
-            if len(endpoints) >= max_ep:
-                break
+        canon = _canonicalize_ep(u).rstrip("/")
+        if not u:
+            continue
+        if canon in seen or u in seen:
+            if _br_from and u != canon:
+                _redir_collapsed += 1
+            continue
+        seen.add(u)
+        seen.add(canon)
+        try:
+            _ep_host = urllib.parse.urlparse(u).hostname or ""
+        except Exception:
+            _ep_host = ""
+        if _is_auth_provider_host(_ep_host):
+            _auth_skipped += 1
+            continue
+        # Prefer the canonical (redirect destination) URL for testing
+        endpoints.append(canon if _br_from and u != canon else u)
+        if len(endpoints) >= max_ep:
+            break
+    if _redir_collapsed:
+        vc.log(f"[endpoint_tools] Collapsed {_redir_collapsed} redirect-duplicate endpoint(s) "
+               f"({_br_from} → {_br_to_host})", "INFO")
     if _auth_skipped:
         vc.log(f"[endpoint_tools] Skipped {_auth_skipped} auth-provider endpoint(s) "
                f"(SSO/IdP URLs are out of testing scope)", "INFO")
@@ -28924,6 +28999,42 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         )
     forms   = crawl_data.get("forms", [])
     params  = crawl_data.get("params", [])
+
+    # Blanket-redirect canonicalization: when the target permanently redirects
+    # all requests to a different host, rewrite param URLs to the canonical
+    # destination.  This prevents wasting time injecting payloads into URLs
+    # that always return 301 without processing the input.
+    _br = cfg.get("_blanket_redirect")
+    if _br:
+        _br_from = _br["from_host"]
+        _br_to_scheme = _br["to_scheme"]
+        _br_to_host = _br["to_host"]
+        _rewritten = 0
+        _seen_canon: set = set()
+        _filtered_params: list = []
+        for entry in params:
+            purl = entry.get("url", "")
+            try:
+                _pp = urllib.parse.urlparse(purl)
+                if _pp.hostname == _br_from:
+                    purl = urllib.parse.urlunparse(
+                        (_br_to_scheme, _br_to_host, _pp.path,
+                         _pp.params, _pp.query, _pp.fragment))
+                    _rewritten += 1
+            except Exception:
+                pass
+            _canon_key = (purl, tuple(sorted(entry.get("params", []))))
+            if _canon_key not in _seen_canon:
+                _seen_canon.add(_canon_key)
+                _filtered_params.append({"url": purl, "params": entry.get("params", [])})
+        if _rewritten:
+            vc.log(
+                f"[injection] Rewrote {_rewritten} param URL(s) from "
+                f"{_br_from} → {_br_to_host} (blanket redirect)",
+                "INFO",
+            )
+        params = _filtered_params
+
     vc.status(phase, "Injection Testing", "running", "Hidden param discovery (arjun)", 0, 28)
 
     # 0. arjun — hidden HTTP parameter discovery
@@ -48924,6 +49035,31 @@ def main() -> None:
                                     )
                         except Exception:
                             pass
+                    # Blanket-redirect detection: when the target base URL
+                    # returns a permanent redirect (301/308) to a different
+                    # host, record the mapping.  Downstream phases use this
+                    # to (a) collapse IP→hostname endpoint duplicates,
+                    # (b) skip injection testing on the redirect source,
+                    # (c) suppress per-request redirect findings after the
+                    # initial one.
+                    if _alive_r.status_code in (301, 308) and _redir_loc:
+                        try:
+                            _from_host = urllib.parse.urlparse(target["url"]).hostname or ""
+                            _to_host = urllib.parse.urlparse(_redir_loc).hostname or ""
+                            if _to_host and _from_host != _to_host:
+                                cfg["_blanket_redirect"] = {
+                                    "from_host": _from_host,
+                                    "to_host": _to_host,
+                                    "to_scheme": urllib.parse.urlparse(_redir_loc).scheme or "https",
+                                    "status": _alive_r.status_code,
+                                }
+                                vc.log(
+                                    f"[pre-scan] Blanket redirect detected: "
+                                    f"{_from_host} → {_to_host} (HTTP {_alive_r.status_code})",
+                                    "INFO",
+                                )
+                        except Exception:
+                            pass
                 break
             except Exception as _alive_e:
                 if _alive_attempt == len(_alive_delays):
@@ -49167,11 +49303,11 @@ def main() -> None:
 
         # Redirect tracking — accumulates in-scope redirect destinations found during this scan
         _in_scope_new: list = []
-        _attach_redirect_hook(sess, _scope_hostnames, target, out, _in_scope_new)
+        _attach_redirect_hook(sess, _scope_hostnames, target, out, _in_scope_new, cfg=cfg)
         if auth_sess:
-            _attach_redirect_hook(auth_sess, _scope_hostnames, target, out, _in_scope_new)
+            _attach_redirect_hook(auth_sess, _scope_hostnames, target, out, _in_scope_new, cfg=cfg)
         if auth2_sess:
-            _attach_redirect_hook(auth2_sess, _scope_hostnames, target, out, _in_scope_new)
+            _attach_redirect_hook(auth2_sess, _scope_hostnames, target, out, _in_scope_new, cfg=cfg)
 
         # ------------------------------------------------------------------
         # Build per-credential contexts from auth_matrix + unauthenticated.
@@ -49224,7 +49360,7 @@ def main() -> None:
             _r1_as = auth_sess if isinstance(auth_sess, requests.Session) else \
                 _build_auth_session(_r1_cfg, "auth", _scope_hostnames, role_label=_r1["role"])
             if _r1_as:
-                _attach_redirect_hook(_r1_as, _scope_hostnames, target, out, _in_scope_new)
+                _attach_redirect_hook(_r1_as, _scope_hostnames, target, out, _in_scope_new, cfg=cfg)
             _cred_contexts.append({
                 "label": _r1["role"], "cfg": _r1_cfg, "auth_sess": _r1_as,
                 "reduced": False, "multi_role": True, "role_idx": 0,
@@ -49263,7 +49399,7 @@ def main() -> None:
                 _r_cfg["auth"]["password"] = _rc.get("password", "")
                 _r_as    = _build_auth_session(_r_cfg, "auth", _scope_hostnames, role_label=_r_label)
                 if _r_as:
-                    _attach_redirect_hook(_r_as, _scope_hostnames, target, out, _in_scope_new)
+                    _attach_redirect_hook(_r_as, _scope_hostnames, target, out, _in_scope_new, cfg=cfg)
                 _cred_contexts.append({
                     "label": _r_label, "cfg": _r_cfg, "auth_sess": _r_as,
                     "reduced": False, "multi_role": False, "role_idx": -1,
@@ -49543,7 +49679,7 @@ def main() -> None:
                     if _ctx_auth and _role_idx >= 0:
                         _role_sessions[_role_idx] = _ctx_auth
                 if _ctx_auth:
-                    _attach_redirect_hook(_ctx_auth, _scope_hostnames, target, out, _in_scope_new)
+                    _attach_redirect_hook(_ctx_auth, _scope_hostnames, target, out, _in_scope_new, cfg=cfg)
                 _ctx["auth_sess"] = _ctx_auth
 
             # Set auth context so all findings in this pass carry the account.
@@ -50110,13 +50246,13 @@ def main() -> None:
             elif _ctx_label == "unauthenticated":
                 effective_auth = _make_session(_ctx_cfg, _scope_hostnames)
                 _attach_redirect_hook(effective_auth, _scope_hostnames, target,
-                                      out, _in_scope_new)
+                                      out, _in_scope_new, cfg=cfg)
             else:
                 # Auth was attempted but failed — use a clean session so we don't
                 # send stale probe cookies while scanning as this role.
                 effective_auth = _make_session(_ctx_cfg, _scope_hostnames)
                 _attach_redirect_hook(effective_auth, _scope_hostnames, target,
-                                      out, _in_scope_new)
+                                      out, _in_scope_new, cfg=cfg)
 
             # ── Seed _ep_base with the post-login landing URL ────────────────
             # After successful auth the server typically redirects to the
@@ -50858,6 +50994,41 @@ def main() -> None:
             else:
                 _delta_crawl = crawl_data
                 _has_delta = True
+
+            # Blanket-redirect canonicalization of crawl params: rewrite
+            # param URLs from the redirect-source host to the canonical
+            # destination so injection/traversal/SSRF tests hit the host
+            # that actually processes input instead of one that always 301s.
+            _br = cfg.get("_blanket_redirect")
+            if _br and _delta_crawl.get("params"):
+                _br_from = _br["from_host"]
+                _br_to_scheme = _br["to_scheme"]
+                _br_to_host = _br["to_host"]
+                _dc_rewritten = 0
+                _dc_seen: set = set()
+                _dc_params: list = []
+                for _dc_entry in _delta_crawl["params"]:
+                    _dc_url = _dc_entry.get("url", "")
+                    try:
+                        _dc_p = urllib.parse.urlparse(_dc_url)
+                        if _dc_p.hostname == _br_from:
+                            _dc_url = urllib.parse.urlunparse(
+                                (_br_to_scheme, _br_to_host, _dc_p.path,
+                                 _dc_p.params, _dc_p.query, _dc_p.fragment))
+                            _dc_rewritten += 1
+                    except Exception:
+                        pass
+                    _dc_key = (_dc_url, tuple(sorted(_dc_entry.get("params", []))))
+                    if _dc_key not in _dc_seen:
+                        _dc_seen.add(_dc_key)
+                        _dc_params.append({"url": _dc_url, "params": _dc_entry.get("params", [])})
+                _delta_crawl["params"] = _dc_params
+                if _dc_rewritten:
+                    vc.log(
+                        f"[crawl-params] Canonicalized {_dc_rewritten} param URL(s) from "
+                        f"{_br_from} → {_br_to_host} (blanket redirect)",
+                        "INFO",
+                    )
 
             # Update the union of all known endpoints for subsequent roles.
             for _kl in crawl_data.get("links", []):
@@ -52046,7 +52217,7 @@ def main() -> None:
                     _nr_as = _build_auth_session(_nr_cfg, "auth", _scope_hostnames)
                     if _nr_as:
                         _attach_redirect_hook(_nr_as, _scope_hostnames, target,
-                                              out, _in_scope_new)
+                                              out, _in_scope_new, cfg=cfg)
                     # Insert before the unauthenticated context (always last)
                     _cred_contexts.insert(-1, {
                         "label":      _nr_creds["role"],
