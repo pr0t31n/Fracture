@@ -3869,6 +3869,14 @@ def _timeout_action_item(out, tool_name, target, timeout_s, priority="MEDIUM",
 
 _CRUCIBLE_MANAGED = os.environ.get("CRUCIBLE_MANAGED", "") == "1"
 
+try:
+    import sys as _sys_ie
+    if "/opt/pr0t31n/shared" not in _sys_ie.path:
+        _sys_ie.path.insert(0, "/opt/pr0t31n/shared")
+    import pr0t31n_intel_emitter as _ie
+except ImportError:
+    _ie = None
+
 _CP_LOG    = "__CRUCIBLE_LOG__:"
 _CP_ERR    = "__CRUCIBLE_ERR__:"
 _CP_PROMPT = "__CRUCIBLE_PROMPT__:"
@@ -19934,6 +19942,24 @@ def _register_screenshot(root: Path, png_path, url: str = "",
             "timestamp": datetime.now().isoformat(),
         }
         dest.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
+        if _ie and _CRUCIBLE_MANAGED:
+            try:
+                _ie.emit_intel("screenshot", {
+                    "url":            url,
+                    "ip":             ip,
+                    "port":           int(port) if port else 0,
+                    "hostname":       hostname,
+                    "scheme":         _sc,
+                    "title":          title,
+                    "description":    description,
+                    "classification": sidecar.get("classification", ""),
+                    "status_code":    status_code,
+                    "server":         server,
+                    "page_title":     page_title,
+                    "file_path":      str(dest),
+                })
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -28966,6 +28992,24 @@ def _write_structure_map(out: "OutputManager", target: dict,
         }, indent=2), encoding="utf-8")
     except Exception:
         pass
+
+    if _ie and _CRUCIBLE_MANAGED:
+        try:
+            _new_paths = set(paths.keys()) - _old_path_keys
+            if _new_paths:
+                _sm_rows = []
+                for _np in sorted(_new_paths):
+                    _np_info = paths[_np]
+                    _sm_rows.append({
+                        "url":     target["url"].rstrip("/") + _np,
+                        "path":    _np,
+                        "method":  _np_info.get("form_method", "GET"),
+                        "status":  _np_info.get("status"),
+                        "source":  _np_info.get("source", source or ""),
+                    })
+                _ie.emit_intel("structure_url", _sm_rows, bulk=True)
+        except Exception:
+            pass
 
     # Web Structure findings are no longer emitted incrementally from here.
     # A "No Web Structure Identified" finding is emitted at the end of the
@@ -44213,6 +44257,17 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         print(f"  access_matrix.json saved to {project_dir}/")
     except Exception as exc:
         vc.err(f"[access_matrix] Failed to save access_matrix.json: {exc}")
+
+    if _ie and _CRUCIBLE_MANAGED:
+        try:
+            _ie.emit_intel("access_matrix", {
+                "roles":            all_roles,
+                "most_privileged":  most_privileged,
+                "privilege_counts": privilege_counts,
+                "path_count":       len(path_access),
+            })
+        except Exception:
+            pass
 
     vc.status(phase, "Access Matrix", "complete", "Done", len(crawled_paths), len(crawled_paths))
     vc.log("[access_matrix] Phase complete", "SUCCESS")
