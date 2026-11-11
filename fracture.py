@@ -4348,16 +4348,17 @@ class OutputManager:
         self.action_items_json  = self.root / "action_items.json"
         self._ai_seen: set      = set()
         self._fdb = None
-        _db_path = os.environ.get("PR0T31N_FINDINGS_DB")
-        if _db_path:
-            try:
-                import sys as _s
-                if "/opt/pr0t31n/shared" not in _s.path:
-                    _s.path.insert(0, "/opt/pr0t31n/shared")
-                import pr0t31n_findings_db
-                self._fdb = pr0t31n_findings_db.FindingsDB(_db_path)
-            except Exception:
-                self._fdb = None
+        _db_path = os.environ.get("PR0T31N_FINDINGS_DB") or str(self.root / "findings.db")
+        try:
+            import sys as _s
+            if "/opt/pr0t31n/shared" not in _s.path:
+                _s.path.insert(0, "/opt/pr0t31n/shared")
+            import pr0t31n_findings_db
+            self._fdb = pr0t31n_findings_db.FindingsDB(_db_path)
+        except Exception:
+            self._fdb = None
+        if self._fdb and _ie:
+            _ie.init_db(self._fdb)
         self._setup_dirs()
         vc.set_error_log(self.error_log)
 
@@ -5186,16 +5187,23 @@ class OutputManager:
             if not merged:
                 existing_all.append(entry)
 
+            # DB write first (DB-first architecture)
+            if self._fdb:
+                try:
+                    if merged:
+                        for _mex in existing_all:
+                            if _mex.get("title") == title and _mex.get("ip") == entry.get("ip") and _mex.get("port") == entry.get("port"):
+                                self._fdb.insert_finding(_mex)
+                                break
+                    else:
+                        self._fdb.insert_finding(entry)
+                except Exception:
+                    pass
+
             # atomic write JSON
             tmp = self.findings_json.with_suffix(".tmp")
             tmp.write_text(json.dumps(existing_all, indent=2), encoding="utf-8")
             tmp.replace(self.findings_json)
-
-            if self._fdb and not merged:
-                try:
-                    self._fdb.insert_finding(entry)
-                except Exception:
-                    pass
 
             # append CSV only for new entries
             if not merged:
@@ -19941,8 +19949,7 @@ def _register_screenshot(root: Path, png_path, url: str = "",
             "oos": oos,
             "timestamp": datetime.now().isoformat(),
         }
-        dest.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
-        if _ie and _CRUCIBLE_MANAGED:
+        if _ie:
             try:
                 _ie.emit_intel("screenshot", {
                     "url":            url,
@@ -19960,6 +19967,7 @@ def _register_screenshot(root: Path, png_path, url: str = "",
                 })
             except Exception:
                 pass
+        dest.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
     except Exception:
         pass
 
@@ -28984,16 +28992,7 @@ def _write_structure_map(out: "OutputManager", target: dict,
     except Exception:
         pass
 
-    try:
-        sm_path.write_text(json.dumps({
-            "target":       target["url"],
-            "generated_at": datetime.now().isoformat(),
-            "paths":        dict(sorted(paths.items())),
-        }, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-    if _ie and _CRUCIBLE_MANAGED:
+    if _ie:
         try:
             _new_paths = set(paths.keys()) - _old_path_keys
             if _new_paths:
@@ -29010,6 +29009,15 @@ def _write_structure_map(out: "OutputManager", target: dict,
                 _ie.emit_intel("structure_url", _sm_rows, bulk=True)
         except Exception:
             pass
+
+    try:
+        sm_path.write_text(json.dumps({
+            "target":       target["url"],
+            "generated_at": datetime.now().isoformat(),
+            "paths":        dict(sorted(paths.items())),
+        }, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
     # Web Structure findings are no longer emitted incrementally from here.
     # A "No Web Structure Identified" finding is emitted at the end of the
@@ -44250,15 +44258,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
         "auth_status":      _role_auth_status,
         "paths":            path_access,
     }
-    try:
-        (project_dir / "access_matrix.json").write_text(
-            json.dumps(access_matrix_data, indent=2)
-        )
-        print(f"  access_matrix.json saved to {project_dir}/")
-    except Exception as exc:
-        vc.err(f"[access_matrix] Failed to save access_matrix.json: {exc}")
-
-    if _ie and _CRUCIBLE_MANAGED:
+    if _ie:
         try:
             _ie.emit_intel("access_matrix", {
                 "roles":            all_roles,
@@ -44268,6 +44268,14 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
             })
         except Exception:
             pass
+
+    try:
+        (project_dir / "access_matrix.json").write_text(
+            json.dumps(access_matrix_data, indent=2)
+        )
+        print(f"  access_matrix.json saved to {project_dir}/")
+    except Exception as exc:
+        vc.err(f"[access_matrix] Failed to save access_matrix.json: {exc}")
 
     vc.status(phase, "Access Matrix", "complete", "Done", len(crawled_paths), len(crawled_paths))
     vc.log("[access_matrix] Phase complete", "SUCCESS")
