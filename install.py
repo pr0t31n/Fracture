@@ -162,9 +162,22 @@ def _pip_installed(pkg_spec):
 
 
 def _brew_installed_set():
+    brew_path = shutil.which("brew")
+    if not brew_path:
+        for p in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]:
+            if os.path.isfile(p):
+                brew_path = p
+                break
+    if not brew_path:
+        return set()
+    cmd = [brew_path, "list", "--formula", "-1"]
+    if os.geteuid() == 0:
+        user = os.environ.get("SUDO_USER", "").strip()
+        if not user or user == "root":
+            return set()
+        cmd = ["sudo", "-u", user, "-H"] + cmd
     try:
-        r = subprocess.run(["brew", "list", "--formula", "-1"],
-                           capture_output=True, text=True, timeout=15)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         return set(r.stdout.split())
     except Exception:
         return set()
@@ -173,7 +186,7 @@ def _brew_installed_set():
 # ---------------------------------------------------------------------------
 # brew helper — NEVER run as root
 # ---------------------------------------------------------------------------
-def brew_install(pkg):
+def brew_install(pkg, cask=False):
     brew_path = shutil.which("brew")
     if not brew_path:
         for p in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]:
@@ -183,7 +196,10 @@ def brew_install(pkg):
     if not brew_path:
         note(f"brew not found — skipping {pkg}")
         return
-    cmd = [brew_path, "install", pkg]
+    cmd = [brew_path, "install"]
+    if cask:
+        cmd.append("--cask")
+    cmd.append(pkg)
     if is_root():
         sudo_user = get_sudo_user()
         if not sudo_user:
@@ -467,13 +483,7 @@ def install_system():
     elif OS == "zypper":
         zypper_install(["nikto", "python3-pip", "git", "golang", "ruby"])
     elif OS == "macos":
-        try:
-            _brew_path = shutil.which("brew") or "/opt/homebrew/bin/brew"
-            _installed = set(subprocess.run(
-                [_brew_path, "list", "--formula", "-1"],
-                capture_output=True, text=True, check=True).stdout.strip().splitlines())
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            _installed = set()
+        _installed = _brew_installed_set()
         _missing = [p for p in BREW_PACKAGES if p not in _installed]
         for p in BREW_PACKAGES:
             if p in _installed:
@@ -1053,7 +1063,7 @@ def install_git():
                 warn(f"ZAP install failed (non-fatal): {_ze}")
         elif OS == "brew":
             try:
-                run(["brew", "install", "--cask", "zap"])
+                brew_install("zap", cask=True)
                 info("  ✓ ZAP installed via brew")
             except Exception as _ze:
                 warn(f"ZAP install failed (non-fatal): {_ze}")
