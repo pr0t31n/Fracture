@@ -13072,7 +13072,6 @@ def _load_settings(path: str) -> dict:
         try:
             with open(path, encoding="utf-8") as f:
                 user = json.load(f)
-            # deep merge scan section
             for k, v in user.get("engagement", {}).items():
                 settings["engagement"][k] = v
             for k, v in user.get("scan", {}).items():
@@ -13080,6 +13079,13 @@ def _load_settings(path: str) -> dict:
                     settings["scan"][k].update(v)
                 else:
                     settings["scan"][k] = v
+            for k, v in user.items():
+                if k in ("engagement", "scan"):
+                    continue
+                if isinstance(v, dict) and isinstance(settings.get(k), dict):
+                    settings[k].update(v)
+                else:
+                    settings[k] = v
         except Exception as e:
             vc.log(f"Could not load settings from {path}: {e}", "WARNING")
     return settings
