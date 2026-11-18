@@ -18270,9 +18270,20 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             if _recon_cdn:
                 _webapp_data["cdn"] = _recon_cdn
             if _recon_edge_security:
-                _webapp_data["edge_security"] = _recon_edge_security
+                _webapp_data["edge_security"] = ", ".join(_recon_edge_security) if isinstance(_recon_edge_security, list) else str(_recon_edge_security)
             if _detected_bi:
-                _webapp_data["bi_tools"] = _detected_bi
+                _webapp_data["bi_tools"] = ", ".join(_detected_bi) if isinstance(_detected_bi, list) else str(_detected_bi)
+            _dns_path = out.root / "dns_resolution.json"
+            if _dns_path.exists():
+                try:
+                    _dns_data = json.loads(_dns_path.read_text(encoding="utf-8"))
+                    _all_ips = [e["ip"] for e in _dns_data.get("resolved_ips", []) if e.get("ip")]
+                    if _all_ips:
+                        _webapp_data["backend_ips"] = _all_ips
+                    if _dns_data.get("load_balancer_detected"):
+                        _webapp_data["load_balancer"] = 1
+                except Exception:
+                    pass
             _ie.emit_intel("webapp_intel", _webapp_data)
         except Exception:
             pass
