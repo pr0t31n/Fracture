@@ -4986,6 +4986,8 @@ class OutputManager:
                 "information disclosure:",
                 "waf / edge security platform active:",
                 "technology identified:",
+                "vulnerability (version based):",
+                "known vulnerability: public exploit available:",
                 "permissive security header:",
                 "server misconfiguration:",
                 "load balancer detected:",
@@ -18310,7 +18312,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 if exploits:
                     titles_list = [e.get("Title", "") for e in exploits[:5]]
                     out.add_finding(
-                        title=f"Known Vulnerability: Public Exploit Available: {term}",
+                        title=f"Vulnerability (Version Based): {term}",
                         url=url, port=target["port"], risk="HIGH",
                         description=(
                             f"{len(exploits)} public exploit(s) found in ExploitDB for "
@@ -18337,7 +18339,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             f"{len(exploits)} public exploit(s) found for '{term}'. "
                             "Manual verification recommended."
                         ),
-                        source_finding=f"Public Exploit Available: {term}",
+                        source_finding=f"Vulnerability (Version Based): {term}",
                         priority="HIGH",
                         scope="webapp",
                         metadata={"search_term": term,
