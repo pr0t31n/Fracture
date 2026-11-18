@@ -13292,6 +13292,7 @@ _CDN_HDR_PATTERNS = [
     ("x-nf-request-id",     "Netlify"),
     ("x-amz-cf-id",         "Amazon CloudFront"),
     ("x-amz-cf-pop",        "Amazon CloudFront"),
+    ("amazon-cloudfront",   "Amazon CloudFront"),
     ("CDN-PullZone",        "BunnyCDN"),
     ("x-akamai-request-id", "Akamai"),
     ("x-akamai-session-info", "Akamai"),
@@ -14036,6 +14037,14 @@ _FINGERPRINT_HEADERS: "dict[str, tuple[str, str]]" = {
     "x-ms-version":                ("Microsoft Azure Storage / Services",
                                     "Azure Storage or Azure Services API version header, "
                                     "revealing Azure-hosted API infrastructure and version."),
+    "via-proxy":                   ("Reverse Proxy / Load Balancer",
+                                    "Proxy hop disclosure header (Via-Proxy variant). "
+                                    "Value reveals internal proxy hostnames, software "
+                                    "versions, and network topology."),
+    "via":                         ("Reverse Proxy / Load Balancer",
+                                    "Standard proxy hop header (RFC 7230 §5.7.1). "
+                                    "Value reveals intermediate proxy hostnames and "
+                                    "protocol versions in the request chain."),
 }
 
 _KNOWN_NON_SEC_HEADERS = frozenset({
