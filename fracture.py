@@ -20001,12 +20001,14 @@ def _register_screenshot(root: Path, png_path, url: str = "",
         ss_dir = root / "screenshots"
         ss_dir.mkdir(parents=True, exist_ok=True)
         _parsed = urllib.parse.urlparse(url)
-        _dedup_key = f"{ip or ''}:{port or 0}:{_parsed.path or '/'}"
+        _cls = (classification or "").lower()
+        _dedup_key = f"{ip or ''}:{port or 0}:{_parsed.path or '/'}:{_cls}"
         for existing_json in ss_dir.glob("*.json"):
             try:
                 _ej = json.loads(existing_json.read_text())
                 _ep = urllib.parse.urlparse(_ej.get("url", ""))
-                _ek = f"{_ej.get('ip', '')}:{_ej.get('port', 0)}:{_ep.path or '/'}"
+                _ec = (_ej.get("classification", "") or "").lower()
+                _ek = f"{_ej.get('ip', '')}:{_ej.get('port', 0)}:{_ep.path or '/'}:{_ec}"
                 if _ek == _dedup_key:
                     return
             except Exception:
