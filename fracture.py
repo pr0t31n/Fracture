@@ -19834,17 +19834,25 @@ def _classify_screenshot(page_title, server, status_code, url_path="", *, body_s
     if sc == 0 and "404" in t:
         return "Not Found (404)"
 
-    # ── Body-based error detection ──
-    if b and ("error" in b or "exception" in b or "stack trace" in b) and len(b) > 20:
-        if not any(k in t for k in ("login", "sign in", "log in", "dashboard")):
-            return "Error Page"
-
-    # ── Login / auth detection from title ──
-    if any(k in t for k in ("login", "sign in", "log in", "signin", "logon")):
+    # ── Login / auth detection from title or body ──
+    _login_kw_title = ("login", "sign in", "log in", "signin", "logon")
+    _login_kw_body = ("login", "sign in", "log in", "signin", "logon",
+                       "username", "password", "forgot password",
+                       "forgot your password", "remember me",
+                       "single sign-on", "sso")
+    if any(k in t for k in _login_kw_title):
         return "Login Page"
+    if b and any(k in b for k in _login_kw_body):
+        if "type=\"password\"" in b or "name=\"password\"" in b or "id=\"password\"" in b:
+            return "Login Page"
 
     # ── Management console titles ──
     if "dashboard" in t or "admin panel" in t: return "Dashboard / Admin Panel"
+
+    # ── Body-based error detection (after login check) ──
+    if b and ("error" in b or "exception" in b or "stack trace" in b) and len(b) > 20:
+        if not any(k in t for k in _login_kw_title):
+            return "Error Page"
 
     # ── CMS / framework from title ──
     if "wordpress" in t or "wp-" in t: return "WordPress Site"
