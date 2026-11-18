@@ -18222,6 +18222,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                 "hostname": target.get("hostname", ""),
                 "server": server_hdr,
                 "powered_by": powered_by,
+                "waf": _tp_waf,
                 "web_structure": _recon_web_structure,
                 "cms": list(set(detected_cms)),
                 "technologies": [{"name": n, "version": v} for n, v in _ww_versions if n],
@@ -44379,7 +44380,8 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                 "roles":            all_roles,
                 "most_privileged":  most_privileged,
                 "privilege_counts": privilege_counts,
-                "path_count":       len(path_access),
+                "paths":            path_access,
+                "target_url":       target.get("url", ""),
             })
         except Exception:
             pass
