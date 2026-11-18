@@ -16551,6 +16551,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
     # Check probe response for missing security headers.
     # Risk and format match shcheck so findings merge when both tools run.
     _HSTS_HDR = "Strict-Transport-Security"
+    _recon_ext = _is_external_scope(cfg)
     _recon_is_redirect = bool(resp.history and 300 <= resp.history[0].status_code < 400) or (300 <= resp.status_code < 400)
     for _hdr_name, _hdr_risk, _, _hdr_desc, _hdr_nist, _hdr_remed in _SECURITY_HEADERS:
         if _hdr_name == _HSTS_HDR and not target["is_https"]:
@@ -16561,7 +16562,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             out.add_finding(
                 title=f"Missing Security Header: {_hdr_name}",
                 url=url, port=target["port"],
-                risk=_hdr_risk,
+                risk=_hdr_scope_risk(_hdr_name, _recon_ext),
                 description=f"The HTTP security header '{_hdr_name}' is absent.",
                 output=f"Missing: {_hdr_name}",
                 affected=_url_rel_path(url, target["url"]),
@@ -18168,7 +18169,8 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                     if _hdr_name not in ww_found_sec_hdrs:
                         out.add_finding(
                             title=f"Missing Security Header: {_hdr_name}",
-                            url=url, port=target["port"], risk=_hdr_risk,
+                            url=url, port=target["port"],
+                            risk=_hdr_scope_risk(_hdr_name, _recon_ext),
                             description=(
                                 _hdr_desc
                                 + (_hs if _hs else "")
@@ -22417,7 +22419,7 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                     out.add_finding(
                         title=f"Missing Security Header: {_hdr_name}",
                         url=target["url"], port=port,
-                        risk=_hdr_risk,
+                        risk=_hdr_scope_risk(_hdr_name, _tls_ext),
                         description=f"The HTTP security header '{_hdr_name}' is absent.",
                         output=f"Missing: {_hdr_name}",
                         affected=_url_rel_path(target["url"], target["url"]),
@@ -23726,6 +23728,28 @@ _SECURITY_HEADERS = [
 ]
 _SEC_HDR_RISK  = {h: r for h, r, *_ in _SECURITY_HEADERS}
 
+_SEC_HDR_INTERNAL_RISK: dict = {
+    "Strict-Transport-Security": "LOW",
+    "Content-Security-Policy":   "INFO",
+    "X-Frame-Options":           "INFO",
+    "X-Content-Type-Options":    "INFO",
+    "Referrer-Policy":           "INFO",
+    "Cache-Control":             "INFO",
+    "Permissions-Policy":        "INFO",
+}
+
+
+def _is_external_scope(cfg: dict) -> bool:
+    _s = (cfg.get("scope") or os.environ.get("CRUCIBLE_SCOPE") or "").lower().strip()
+    return not _s or _s.startswith("ext")
+
+
+def _hdr_scope_risk(hdr_name: str, is_external: bool) -> str:
+    if is_external:
+        return _SEC_HDR_RISK.get(hdr_name, "LOW")
+    return _SEC_HDR_INTERNAL_RISK.get(hdr_name, "INFO")
+
+
 # Headers that govern rendered content — meaningless on pure 3xx redirects
 # because the browser follows the redirect before rendering anything.
 # STS and Cache-Control still apply (transport/caching concern, not content).
@@ -24160,9 +24184,10 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Security Headers", "running", "Security header check", 1, 5)
 
     is_https = target["is_https"]
+    _hdr_ext = _is_external_scope(cfg)
     _base_sec_hdrs_present: set = set()
     _base_sec_hdrs_absent:  set = set()
-    for hdr_name, risk, _unused_title, desc, nist_ctrl, remed in _SECURITY_HEADERS:
+    for hdr_name, _unused_risk, _unused_title, desc, nist_ctrl, remed in _SECURITY_HEADERS:
         if hdr_name == "Strict-Transport-Security" and not is_https:
             continue
         if _is_redirect and hdr_name in _REDIRECT_EXEMPT_HEADERS:
@@ -24213,7 +24238,8 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                     )
             out.add_finding(
                 title=f"Missing Security Header: {hdr_name}",
-                url=url, port=target["port"], risk=risk,
+                url=url, port=target["port"],
+                risk=_hdr_scope_risk(hdr_name, _hdr_ext),
                 description=desc, sources="fracture-headers",
                 service=target["scheme"], output_file=_sh_ev,
                 owasp="A05", nist=nist_ctrl,
@@ -24801,10 +24827,11 @@ def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                     for _sh_hname in _base_sec_hdrs_present:
                         if _sh_hname not in _sh_ep_hdrs:
                             _sh_deviated += 1
+                            _dev_risk = "MEDIUM" if _hdr_ext else "LOW"
                             out.add_finding(
                                 title=f"Missing Security Header: {_sh_hname}",
                                 url=_sh_full, port=target["port"],
-                                risk="MEDIUM",
+                                risk=_dev_risk,
                                 description=(
                                     f"The security header {_sh_hname} is present on the base URL "
                                     f"({url}) but missing from {_shp}. This indicates inconsistent "
@@ -24873,6 +24900,7 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
     """
     phase   = "shcheck"
     timeout = cfg.get("timeout", 10) + 20   # shcheck needs a little more time
+    _shc_ext = _is_external_scope(cfg)
 
     shcheck = _find_shcheck()
     if not shcheck:
@@ -25027,7 +25055,7 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
                         continue   # HSTS only applies to HTTPS
                     if tgt.get("_is_redirect") and hdr in _REDIRECT_EXEMPT_HEADERS:
                         continue
-                    risk = _SEC_HDR_RISK.get(hdr, "LOW")
+                    risk = _hdr_scope_risk(hdr, _shc_ext)
                     out.add_finding(
                         title=f"Missing Security Header: {hdr}",
                         url=tgt_url, port=port, risk=risk,
@@ -25063,7 +25091,7 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
                     continue
                 if tgt.get("_is_redirect") and hdr in _REDIRECT_EXEMPT_HEADERS:
                     continue
-                risk = _SEC_HDR_RISK.get(hdr, "LOW")
+                risk = _hdr_scope_risk(hdr, _shc_ext)
                 out.add_finding(
                     title=f"Missing Security Header: {hdr}",
                     url=tgt_url, port=port, risk=risk,
@@ -29082,10 +29110,12 @@ def _write_structure_map(out: "OutputManager", target: dict,
             _new_paths = set(paths.keys()) - _old_path_keys
             if _new_paths:
                 _sm_rows = []
+                _pu_sm = urllib.parse.urlparse(target["url"])
+                _sm_origin = f"{_pu_sm.scheme}://{_pu_sm.netloc}"
                 for _np in sorted(_new_paths):
                     _np_info = paths[_np]
                     _sm_rows.append({
-                        "url":         target["url"].rstrip("/") + _np,
+                        "url":         _sm_origin + _np,
                         "path":        _np,
                         "method":      _np_info.get("form_method", "GET"),
                         "status_code": _np_info.get("status"),
@@ -33904,13 +33934,13 @@ _NUCLEI_DYN_PANEL = re.compile(
 # line per missing header, all sharing the same template-id.  The
 # matcher-name field identifies which header is missing.
 _NUCLEI_HDR_MATCHER: dict = {
-    "strict-transport-security":        ("Strict-Transport-Security", "MEDIUM"),
-    "content-security-policy":          ("Content-Security-Policy", "MEDIUM"),
-    "permissions-policy":               ("Permissions-Policy", "LOW"),
-    "x-frame-options":                  ("X-Frame-Options", "MEDIUM"),
-    "x-content-type-options":           ("X-Content-Type-Options", "MEDIUM"),
-    "referrer-policy":                  ("Referrer-Policy", "LOW"),
-    "cache-control":                    ("Cache-Control", "LOW"),
+    "strict-transport-security":        "Strict-Transport-Security",
+    "content-security-policy":          "Content-Security-Policy",
+    "permissions-policy":               "Permissions-Policy",
+    "x-frame-options":                  "X-Frame-Options",
+    "x-content-type-options":           "X-Content-Type-Options",
+    "referrer-policy":                  "Referrer-Policy",
+    "cache-control":                    "Cache-Control",
 }
 
 
@@ -34016,12 +34046,12 @@ def _normalize_nuclei(item: dict) -> dict:
     # "strict-transport-security".  Without this check the template-id
     # regex table cannot distinguish which header is missing.
     if _tid == "http-missing-security-headers" and _matcher:
-        _hdr = _NUCLEI_HDR_MATCHER.get(_matcher)
-        if _hdr:
-            _hdr_display, _hdr_risk = _hdr
+        _hdr_display = _NUCLEI_HDR_MATCHER.get(_matcher)
+        if _hdr_display:
             return {
                 "title": f"Missing Security Header: {_hdr_display}",
-                "risk": _hdr_risk,
+                "risk": _SEC_HDR_RISK.get(_hdr_display, "LOW"),
+                "_hdr_name": _hdr_display,
                 "description": _desc or f"The {_hdr_display} HTTP security header is not present.",
                 "output": str(_output)[:2000] if _output else f"Template: {_tid}:{_matcher}",
                 "owasp": "A05:2025 Security Misconfiguration", "nist": "SI-11",
@@ -34691,6 +34721,10 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                 # requests (GAP-50).  Suppress here to avoid FPs.
                 if _nuc_title == "HTTP Methods: Unsafe Methods Enabled":
                     continue
+                # Scope-aware risk for missing security header findings
+                if _norm.get("_hdr_name"):
+                    _norm["risk"] = _hdr_scope_risk(
+                        _norm["_hdr_name"], _is_external_scope(cfg))
                 # Extract v1.1 enrichment fields from normalizer output
                 _nuc_v11 = {k: _norm[k] for k in ("cvss_score", "cvss_vector", "cwe")
                             if k in _norm and _norm[k]}
@@ -35019,6 +35053,11 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                                     _nik_base,
                                     handle.get("sess") or requests.Session())):
                             continue
+                        # Scope-aware risk for missing security header findings
+                        if _nik_norm_title.startswith("Missing Security Header: "):
+                            _nik_hdr = _nik_norm_title.split(": ", 1)[1]
+                            _norm["risk"] = _hdr_scope_risk(
+                                _nik_hdr, _is_external_scope(cfg))
                         _nik_of = str(_nik_json_path)
                         _nik_title = _norm["title"]
                         if ("Verbose Server Error" in _nik_title
