@@ -48467,6 +48467,10 @@ def main() -> None:
     # Load settings
     settings = _load_settings(args.settings or "")
     cfg      = settings["scan"]
+    for _tlk in ("no_browser_assist", "unauthenticated", "app_files",
+                  "consultant", "client_name", "client_short"):
+        if settings.get(_tlk) is not None and _tlk not in cfg:
+            cfg[_tlk] = settings[_tlk]
 
     # Apply CLI overrides
     if args.url:
