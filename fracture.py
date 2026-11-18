@@ -23727,6 +23727,8 @@ _SECURITY_HEADERS = [
      "SI-10", "Add: Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()"),
 ]
 _SEC_HDR_RISK  = {h: r for h, r, *_ in _SECURITY_HEADERS}
+_SEC_HDR_RISK["Content-Security-Policy"] = "MEDIUM"
+_SEC_HDR_RISK["X-Frame-Options"] = "MEDIUM"
 
 _SEC_HDR_INTERNAL_RISK: dict = {
     "Strict-Transport-Security": "LOW",
@@ -23738,10 +23740,13 @@ _SEC_HDR_INTERNAL_RISK: dict = {
     "Permissions-Policy":        "INFO",
 }
 
+_INTERNAL_SCOPE_PREFIXES = ("int",)
 
 def _is_external_scope(cfg: dict) -> bool:
     _s = (cfg.get("scope") or os.environ.get("CRUCIBLE_SCOPE") or "").lower().strip()
-    return not _s or _s.startswith("ext")
+    if not _s:
+        return True
+    return not _s.startswith(_INTERNAL_SCOPE_PREFIXES)
 
 
 def _hdr_scope_risk(hdr_name: str, is_external: bool) -> str:
