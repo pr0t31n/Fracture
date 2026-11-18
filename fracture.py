@@ -17208,19 +17208,6 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             http_code=resp.status_code,
             highlights=[f"Server: {server_hdr}"],
         )
-        if _ie:
-            try:
-                _sw_name, _sw_ver = _parse_software(server_hdr)
-                if _sw_name:
-                    _ie.emit_intel("software", {
-                        "software": _sw_name, "version": _sw_ver,
-                        "ip": target["ip"], "port": target["port"],
-                        "hostname": target.get("hostname", ""),
-                        "method": "http-header",
-                        "source_header": "Server",
-                    })
-            except Exception:
-                pass
     if powered_by:
         out.add_finding(
             title="Information Disclosure: X-Powered-By Header",
@@ -17233,19 +17220,6 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             http_code=resp.status_code,
             highlights=[f"X-Powered-By: {powered_by}"],
         )
-        if _ie:
-            try:
-                _pw_name, _pw_ver = _parse_software(powered_by)
-                if _pw_name:
-                    _ie.emit_intel("software", {
-                        "software": _pw_name, "version": _pw_ver,
-                        "ip": target["ip"], "port": target["port"],
-                        "hostname": target.get("hostname", ""),
-                        "method": "http-header",
-                        "source_header": "X-Powered-By",
-                    })
-            except Exception:
-                pass
     for cms in set(detected_cms):
         vc.log(f"[recon] CMS detected: {cms}", "SUCCESS")
         out.add_finding(
@@ -17258,16 +17232,6 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             remediation="Ensure the CMS and all plugins/themes are kept up to date.",
             http_code=resp.status_code,
         )
-        if _ie:
-            try:
-                _ie.emit_intel("software", {
-                    "software": cms, "version": "",
-                    "ip": target["ip"], "port": target["port"],
-                    "hostname": target.get("hostname", ""),
-                    "method": "cms-detection",
-                })
-            except Exception:
-                pass
         _cms_scanner = _CMS_SCANNER_MAP.get(cms.lower())
         out.log_action_item(
             type="deeper_scan",
@@ -18263,19 +18227,6 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
             if _detected_bi:
                 _webapp_data["bi_tools"] = _detected_bi
             _ie.emit_intel("webapp_intel", _webapp_data)
-        except Exception:
-            pass
-    # Emit software intel for whatweb/technology detections
-    if _ie:
-        try:
-            for _ww_name, _ww_ver in _ww_versions:
-                if _ww_name:
-                    _ie.emit_intel("software", {
-                        "software": _ww_name, "version": _ww_ver or "",
-                        "ip": target["ip"], "port": target["port"],
-                        "hostname": target.get("hostname", ""),
-                        "method": "whatweb",
-                    })
         except Exception:
             pass
 
@@ -21998,7 +21949,6 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                             _cert_data["expiry"] = _ss_cert_expiry
                         if _ss_cert_valid:
                             _cert_data["validation"] = _ss_cert_valid
-                        _ie.emit_intel("certificate", _cert_data)
                     except Exception:
                         pass
             # Dedicated Heartbleed check on raw output — the section-header filter
@@ -22545,7 +22495,6 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                             _ts_cert_intel["san"] = _ts_cert_san[:30]
                         if _ts_grade:
                             _ts_cert_intel["grade"] = _ts_grade
-                        _ie.emit_intel("certificate", _ts_cert_intel)
                     except Exception:
                         pass
             # ── JSON-based structured finding extraction ─────────────────────
