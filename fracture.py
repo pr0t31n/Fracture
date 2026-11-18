@@ -3414,6 +3414,35 @@ def _write_auth_status(project_dir: "Path | str", role: str, username: str,
     except Exception:
         pass
 
+    if _ie:
+        try:
+            _as_valid = 1 if status == "success" else 0
+            _as_auth_type = "unauthenticated" if status == "unauthenticated" else "session"
+            _ie.emit_intel("auth_session", {
+                "tool": "fracture",
+                "session_name": role,
+                "auth_type": _as_auth_type,
+                "valid": _as_valid,
+                "username": username,
+                "role": role,
+            })
+            for ck in cookies:
+                _ie.emit_intel("cookie", {
+                    "name": ck.get("name", ""),
+                    "value": (ck.get("value") or "")[:200],
+                    "domain": ck.get("domain", ""),
+                    "path": ck.get("path", "/"),
+                    "secure": ck.get("secure", False),
+                    "httponly": ck.get("httpOnly", False),
+                    "samesite": "",
+                    "url": landing_url or "",
+                    "role": role,
+                    "risk": "INFO",
+                    "issues": "",
+                })
+        except Exception:
+            pass
+
 
 def _lp_parse_recording(recording_txt: str, login_url: str) -> "dict | None":
     """
@@ -50489,6 +50518,9 @@ def main() -> None:
                 effective_auth = _make_session(_ctx_cfg, _scope_hostnames)
                 _attach_redirect_hook(effective_auth, _scope_hostnames, target,
                                       out, _in_scope_new, cfg=cfg)
+                _write_auth_status(out.root, "unauthenticated", "",
+                                   "unauthenticated", effective_auth,
+                                   target["url"], "", 0)
             else:
                 # Auth was attempted but failed — use a clean session so we don't
                 # send stale probe cookies while scanning as this role.
@@ -51097,6 +51129,11 @@ def main() -> None:
                 except Exception as e:
                     vc.error(f"Phase headers [{_ctx_label}] error: {e}")
                     pm.set_phase_status(f"headers#{_ctx_label}", "error", detail=str(e))
+
+            if _ctx_label == "unauthenticated" and effective_auth is not None:
+                _write_auth_status(out.root, "unauthenticated", "",
+                                   "unauthenticated", effective_auth,
+                                   target["url"], "", 0)
 
             # ── Phase 2b: shcheck ──
             if not _skip("shcheck"):
