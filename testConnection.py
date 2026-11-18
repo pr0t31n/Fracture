@@ -36,7 +36,7 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 
 AUTH_METHODS: dict[str, str] = {
     "form_login":           "Form Login  — POST credentials → session cookies (most web apps)",
@@ -1296,7 +1296,132 @@ def build_auth_session(
                         f"{_e}")
             return None
 
-        # Check baseline page first (target may redirect to OKTA)
+        # ── OKTA redirect-based detection (Priority 1 & 2) ──────────
+        # When the target returns 302/403 and the redirect or final URL
+        # lands on an OKTA domain, the HTML page may be JS-rendered with
+        # no <input type="password"> or OKTA indicators in the raw HTML.
+        # Detect OKTA by domain and attempt authn API directly.
+        _OKTA_DOMAINS = (
+            ".okta.com", ".okta-emea.com", ".okta-gov.com",
+            ".oktapreview.com", ".trexcloud.com",
+        )
+
+        def _okta_base_from_url(u: str) -> str:
+            """Extract OKTA base URL from a URL on an OKTA domain."""
+            _p = urlparse(u)
+            host = _p.hostname or ""
+            for _od in _OKTA_DOMAINS:
+                if host.endswith(_od) or host == _od.lstrip("."):
+                    return f"{_p.scheme}://{_p.netloc}"
+            return ""
+
+        def _try_okta_wellknown(base: str) -> str:
+            """Probe /.well-known/openid-configuration for OKTA issuer."""
+            try:
+                _wk = _make_session(verify_ssl, proxy)
+                _r = _wk.get(
+                    f"{base}/.well-known/openid-configuration",
+                    timeout=10)
+                if _r.ok:
+                    _j = _r.json()
+                    _iss = _j.get("issuer", "")
+                    if _iss:
+                        _ip = urlparse(_iss)
+                        return f"{_ip.scheme}://{_ip.netloc}"
+            except Exception:
+                pass
+            return ""
+
+        def _try_okta_direct(okta_base: str, label: str
+                             ) -> "tuple[requests.Session, str] | None":
+            """Attempt OKTA authn API directly against a known base."""
+            _u = auth.get("username", "")
+            _p = auth.get("password", "")
+            if not _u or not _p:
+                _errors.append(
+                    f"OKTA ({okta_base}) [{label}]: no credentials")
+                return None
+            try:
+                _fresh = _make_session(verify_ssl, proxy)
+                _ar = _fresh.post(
+                    f"{okta_base}/api/v1/authn",
+                    json={"username": _u, "password": _p},
+                    timeout=timeout)
+                _aj = _ar.json()
+                _ast = _aj.get("status", "")
+                if _ast == "SUCCESS":
+                    _stok = _aj.get("sessionToken", "")
+                    if _stok and target_url:
+                        from urllib.parse import quote
+                        _redir = (
+                            f"{okta_base}/login/"
+                            f"sessionCookieRedirect"
+                            f"?checkAccountSetupComplete=true"
+                            f"&token={_stok}"
+                            f"&redirectUrl="
+                            f"{quote(target_url, safe='')}")
+                        _fresh.get(
+                            _redir, timeout=timeout,
+                            allow_redirects=True)
+                    _ok, _det = _verify_session(_fresh, "okta_authn")
+                    if _ok:
+                        return _fresh, (
+                            f"auto-detect → OKTA redirect detection "
+                            f"({okta_base}): authenticated via "
+                            f"/api/v1/authn ({label}) "
+                            f"— verified: {_det}")
+                    _errors.append(
+                        f"OKTA ({okta_base}) [{label}]: authn "
+                        f"SUCCESS but session verify failed: {_det}")
+                elif _ast == "MFA_REQUIRED":
+                    _errors.append(
+                        f"OKTA ({okta_base}) [{label}]: credentials "
+                        f"valid — MFA required")
+                elif _ast in ("PASSWORD_EXPIRED", "PASSWORD_WARN"):
+                    _errors.append(
+                        f"OKTA ({okta_base}) [{label}]: credentials "
+                        f"valid — password expired")
+                elif _ast == "LOCKED_OUT":
+                    _errors.append(
+                        f"OKTA ({okta_base}) [{label}]: account "
+                        f"locked")
+                else:
+                    _msg = _aj.get(
+                        "errorSummary", _ast or f"HTTP {_ar.status_code}")
+                    _errors.append(
+                        f"OKTA ({okta_base}) [{label}]: {_msg}")
+            except Exception as _e:
+                _errors.append(
+                    f"OKTA ({okta_base}) [{label}]: {_e}")
+            return None
+
+        # Priority 1: redirect landed on an OKTA domain
+        if _baseline_final or _baseline_loc:
+            _redir_url = _baseline_final or _baseline_loc
+            _okta_redir_base = _okta_base_from_url(_redir_url)
+            if _okta_redir_base:
+                _r = _try_okta_direct(
+                    _okta_redir_base, "redirect-domain")
+                if _r:
+                    return _r
+
+        # Priority 2: well-known discovery on redirect target and
+        # original host (catches custom-domain OKTA deployments)
+        for _wk_candidate in filter(None, [
+            _baseline_final, _baseline_loc, target_url,
+        ]):
+            _wk_p = urlparse(_wk_candidate)
+            _wk_base = f"{_wk_p.scheme}://{_wk_p.netloc}"
+            _wk_issuer = _try_okta_wellknown(_wk_base)
+            if _wk_issuer:
+                _wk_okta = _okta_base_from_url(_wk_issuer)
+                if _wk_okta:
+                    _r = _try_okta_direct(
+                        _wk_okta, "wellknown-discovery")
+                    if _r:
+                        return _r
+
+        # Priority 3: existing HTML indicator check (baseline page)
         if _baseline_html:
             _okta_result = _try_okta_authn(
                 _baseline_html, _baseline_final or target_url)
@@ -1474,7 +1599,7 @@ def build_auth_session(
 def test_connection(
     url: str,
     auth: dict,
-    timeout: int = 10,
+    timeout: int = 20,
     proxy: str = "",
     verify_ssl: bool = False,
 ) -> dict:
