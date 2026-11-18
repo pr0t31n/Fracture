@@ -4358,7 +4358,7 @@ class OutputManager:
         except Exception:
             self._fdb = None
         if self._fdb and _ie:
-            _ie.init_db(self._fdb)
+            _ie.init_db(self._fdb, tool_name="fracture")
         self._setup_dirs()
         vc.set_error_log(self.error_log)
 
