@@ -3352,7 +3352,8 @@ def _lp_replay(profile_id: str, login_url: str, cfg: dict,
 def _write_auth_status(project_dir: "Path | str", role: str, username: str,
                        status: str, session: "requests.Session | None",
                        landing_url: str = "", landing_body: str = "",
-                       landing_code: int = 0) -> None:
+                       landing_code: int = 0,
+                       target_url: str = "") -> None:
     """Upsert one role entry into <project_dir>/authentication_status.json.
 
     Schema per entry:
@@ -3425,6 +3426,7 @@ def _write_auth_status(project_dir: "Path | str", role: str, username: str,
                 "valid": _as_valid,
                 "username": username,
                 "role": role,
+                "target_url": target_url,
             })
             for ck in cookies:
                 _ie.emit_intel("cookie", {
@@ -49261,6 +49263,7 @@ def main() -> None:
                     out.root, _early_label, _early_username, "success",
                     auth_sess, _early_landing_url,
                     _early_landing_body, _early_landing_code,
+                    target_url=target["url"],
                 )
                 vc.log(
                     f"[auth] Early auth status written: {_early_label} → "
@@ -50321,6 +50324,7 @@ def main() -> None:
                 _write_auth_status(
                     out.root, _ctx_label, _as_username, _as_status,
                     _as_session, _as_landing_url, _as_landing_body, _as_landing_code,
+                    target_url=target["url"],
                 )
 
                 # Screenshot the login URL and the authenticated landing URL.
@@ -51143,7 +51147,8 @@ def main() -> None:
             if _ctx_label == "unauthenticated" and effective_auth is not None:
                 _write_auth_status(out.root, "unauthenticated", "",
                                    "unauthenticated", effective_auth,
-                                   target["url"], "", 0)
+                                   target["url"], "", 0,
+                                   target_url=target["url"])
 
             # ── Phase 2b: shcheck ──
             if not _skip("shcheck"):
