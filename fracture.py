@@ -12067,8 +12067,12 @@ return null;
                         "[auth] Login failed — skipping browser-auth (automated call site)",
                         "INFO",
                     )
+                elif cfg.get("_no_browser_assist"):
+                    vc.log(
+                        "[auth] No-browser-assist mode — skipping browser login prompt",
+                        "INFO",
+                    )
                 else:
-                    # No --browser-auth flag — prompt interactively.
                     _ba_role_sfx = f" for role '{role_label}'" if role_label else ""
                     _ba_choice = vc.prompt(
                         f"Open a browser window to complete login manually{_ba_role_sfx}?",
@@ -12626,23 +12630,26 @@ return null;
         # automation) can complete login manually when no automated method works.
         _auto_ba_url = auth.get("login_url", "").strip() or _auto_base_url
         if _auto_ba_url and not no_interactive:
-            if cfg.get("browser_auth"):
+            if cfg.get("_no_browser_assist"):
+                vc.log("[auth:auto] No-browser-assist mode — skipping browser fallback", "INFO")
+            elif cfg.get("browser_auth"):
                 vc.log("[auth:auto] Falling back to browser-assisted login", "INFO")
                 if not auth.get("login_url"):
                     auth["login_url"] = _auto_ba_url
                 return _browser_assisted_login(_auto_ba_url)
-            _auto_ba_sfx = f" for role '{role_label}'" if role_label else ""
-            _auto_ba_choice = vc.prompt(
-                f"Open a browser window to complete login manually{_auto_ba_sfx}?",
-                prompt_type="confirm",
-                options=["Yes", "No"],
-                role=role_label,
-            ).strip()
-            if _auto_ba_choice.lower() in ("yes", "y", "1"):
-                if not auth.get("login_url"):
-                    auth["login_url"] = _auto_ba_url
-                return _browser_assisted_login(_auto_ba_url)
-            vc.log("[auth:auto] Browser login declined", "WARNING")
+            else:
+                _auto_ba_sfx = f" for role '{role_label}'" if role_label else ""
+                _auto_ba_choice = vc.prompt(
+                    f"Open a browser window to complete login manually{_auto_ba_sfx}?",
+                    prompt_type="confirm",
+                    options=["Yes", "No"],
+                    role=role_label,
+                ).strip()
+                if _auto_ba_choice.lower() in ("yes", "y", "1"):
+                    if not auth.get("login_url"):
+                        auth["login_url"] = _auto_ba_url
+                    return _browser_assisted_login(_auto_ba_url)
+                vc.log("[auth:auto] Browser login declined", "WARNING")
         return None
 
     # Transfer auth state (cookies + key headers) to a scoped session for scanning.
