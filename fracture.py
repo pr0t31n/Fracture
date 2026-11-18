@@ -50518,9 +50518,6 @@ def main() -> None:
                 effective_auth = _make_session(_ctx_cfg, _scope_hostnames)
                 _attach_redirect_hook(effective_auth, _scope_hostnames, target,
                                       out, _in_scope_new, cfg=cfg)
-                _write_auth_status(out.root, "unauthenticated", "",
-                                   "unauthenticated", effective_auth,
-                                   target["url"], "", 0)
             else:
                 # Auth was attempted but failed — use a clean session so we don't
                 # send stale probe cookies while scanning as this role.
