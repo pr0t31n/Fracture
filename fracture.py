@@ -27358,6 +27358,23 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         _hs_output = "\n".join(
             f"  • {snip}  (page: {u})" for u, snip in _hs_entries[:15]
         )
+        _hs_evi_dir = out.root / "evidence" / "crawl"
+        _hs_evi_dir.mkdir(parents=True, exist_ok=True)
+        _hs_evi = _hs_evi_dir / "html_comment_secrets.txt"
+        _hs_evi_rel = ""
+        try:
+            _hs_full = "\n".join(
+                f"[{i+1}] Page: {u}\n    Comment: {snip}\n"
+                for i, (u, snip) in enumerate(_hs_entries)
+            )
+            _hs_evi.write_text(
+                f"Sensitive data found in HTML comments "
+                f"({len(_hs_entries)} match(es))\n"
+                f"{'=' * 60}\n\n{_hs_full}"
+            )
+            _hs_evi_rel = str(_hs_evi.relative_to(out.root))
+        except Exception:
+            pass
         out.add_finding(
             title="Sensitive File Exposed: Sensitive Data Exposed in HTML Comments",
             url=url, port=target["port"], risk="MEDIUM",
@@ -27369,6 +27386,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                 f"in comments that are visible to any user viewing page source."
             ),
             output=f"Sensitive HTML comments ({len(_hs_entries)}):\n{_hs_output}",
+            output_file=_hs_evi_rel,
             affected=_url_rel_path(url, target["url"]),
             sources="fracture-crawl", service=target["scheme"],
             owasp="A05:2025 Security Misconfiguration",
