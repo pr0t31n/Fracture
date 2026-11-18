@@ -29076,11 +29076,12 @@ def _write_structure_map(out: "OutputManager", target: dict,
                 for _np in sorted(_new_paths):
                     _np_info = paths[_np]
                     _sm_rows.append({
-                        "url":     target["url"].rstrip("/") + _np,
-                        "path":    _np,
-                        "method":  _np_info.get("form_method", "GET"),
-                        "status":  _np_info.get("status"),
-                        "source":  _np_info.get("source", source or ""),
+                        "url":         target["url"].rstrip("/") + _np,
+                        "path":        _np,
+                        "method":      _np_info.get("form_method", "GET"),
+                        "status_code": _np_info.get("status"),
+                        "source":      _np_info.get("source", source or ""),
+                        "target_url":  target["url"],
                     })
                 _ie.emit_intel("structure_url", _sm_rows, bulk=True)
         except Exception:
@@ -37880,21 +37881,25 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                     _ck_ss = ((_ck._rest or {}).get("SameSite") or "").strip()
                 except Exception:
                     pass
+                _ck_issues = []
+                if _ck.name in _miss_httponly:
+                    _ck_issues.append("HttpOnly")
+                if _ck.name in _miss_secure:
+                    _ck_issues.append("Secure")
+                if _ck.name in _miss_samesite:
+                    _ck_issues.append("SameSite")
                 _ie.emit_intel("cookie", {
                     "name": _ck.name,
+                    "value": (_ck.value or "")[:200],
                     "domain": _ck.domain or "",
                     "path": _ck.path or "/",
                     "secure": bool(_ck.secure),
                     "httponly": bool(_ck_ho),
                     "samesite": _ck_ss,
-                    "ip": target["ip"],
-                    "port": target["port"],
-                    "hostname": target.get("hostname", ""),
-                    "missing_flags": {
-                        "secure": _ck.name in _miss_secure,
-                        "httponly": _ck.name in _miss_httponly,
-                        "samesite": _ck.name in _miss_samesite,
-                    },
+                    "url": target["url"],
+                    "role": "",
+                    "risk": "LOW" if _ck_issues else "INFO",
+                    "issues": ("Missing: " + ", ".join(_ck_issues)) if _ck_issues else "",
                 })
         except Exception:
             pass
