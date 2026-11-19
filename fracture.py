@@ -32735,6 +32735,16 @@ def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                         f"delta {(avg_valid-avg_invalid)*1000:.0f}ms not attributable "
                         f"to credential comparison", "INFO")
                     continue
+                # HTTP 0 means the request never completed (connection
+                # error, timeout, SSL failure) — timing reflects network
+                # behavior, not credential comparison.
+                if _sc_inv == 0 or _sc_val == 0:
+                    vc.log(
+                        f"[auth_bypass] Timing probe at {lpath}: skipped — "
+                        f"HTTP 0 (request did not complete), "
+                        f"delta {(avg_valid-avg_invalid)*1000:.0f}ms not attributable "
+                        f"to credential comparison", "INFO")
+                    continue
                 # Also skip when either probe hit an error page redirect
                 # (3xx) or server error (5xx) — the timing is unreliable.
                 if (_sc_inv >= 500 or _sc_val >= 500
@@ -44881,6 +44891,15 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                          r'|browserconfig\.xml$|manifest\.json$'
                          r'|\.webmanifest$'
                          r'|service-?worker\.js$|sw\.js$', _ep_lower):
+                continue
+            # Skip health-check / status / ping endpoints — these are
+            # intentionally unauthenticated infrastructure endpoints.
+            if re.search(
+                r'(?:^|/)(?:ping|health(?:check|z)?|status|ready'
+                r'|live(?:ness)?|readiness|heartbeat|version|info'
+                r'|api[-_]?status|server[-_]?status)/?$',
+                _ep_lower,
+            ):
                 continue
             # Skip intentionally-public pages — registration, legal,
             # password recovery, etc. are expected to be accessible
