@@ -48947,6 +48947,7 @@ def main() -> None:
             continue
         _processed_urls.add(raw_url)
         vc._current_target = raw_url
+        cfg["target_url"] = raw_url
         vc._target_index = _pending_idx
         _is_redirect_target = raw_url in _redirect_discovered
         # Reset per-target discovery state for non-redirect (genuine new primary targets).
