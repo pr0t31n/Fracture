@@ -14272,6 +14272,7 @@ def _phase_wordpress_scan(
     """Native WordPress enumeration: version, users, plugins, themes, XML-RPC,
     REST API, config/file exposure, directory listings, and backup detection.
     Runs whenever WordPress is detected — no external tool required."""
+    _check_pause()
     base       = url.rstrip("/")
     wp_timeout = min(cfg.get("timeout", 10), 8)
     hostname   = target["hostname"]
@@ -16444,6 +16445,7 @@ def _verify_http_methods(sess: requests.Session, url: str,
 def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                  out: OutputManager, sess: requests.Session,
                  landing_url: str = "") -> None:
+    _check_pause()
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
     phase   = "recon"
@@ -20534,6 +20536,355 @@ def _capture_error_screenshot(error_url: str, out: "OutputManager",
     return ""
 
 
+def _capture_sensitive_file_screenshot(file_url: str, out: "OutputManager",
+                                        phase: str, label: str,
+                                        target: dict, cfg: dict,
+                                        auth_session: "requests.Session | None" = None,
+                                        ) -> str:
+    _sf_ip = re.sub(r'[^\w]', '_', target.get("ip", "unknown"))
+    safe = re.sub(r'[^\w]', '_', label)[:60]
+    ss_dir = out.root / phase
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    ss_path = ss_dir / f"{safe}_{_sf_ip}_sensitive_file.png"
+    if _capture_screenshot_to(file_url, ss_path, target, cfg,
+                              auth_session=auth_session):
+        _register_screenshot(out.root, ss_path, url=file_url,
+                             ip=target.get("ip", ""), port=target.get("port", 0),
+                             hostname=target.get("hostname", ""),
+                             title=f"Sensitive File: {label}",
+                             description=f"Sensitive file exposed at {file_url}",
+                             classification="Sensitive File")
+        try:
+            return str(ss_path.relative_to(out.root))
+        except Exception:
+            return str(ss_path)
+    return ""
+
+
+def _parse_phpinfo_page(body: str, url: str, target: dict,
+                        out: "OutputManager", phase: str,
+                        cfg: dict) -> None:
+    _strip_tag = re.compile(r'<[^>]+>')
+    def _clean(v):
+        return _strip_tag.sub('', v).strip()
+
+    _php_ver = ""
+    _ver_m = re.search(r'PHP Version\s+([\d.]+)', body)
+    if _ver_m:
+        _php_ver = _ver_m.group(1)
+
+    _rows = re.findall(
+        r'<td\s+class="e">(.*?)</td>\s*<td\s+class="v">(.*?)</td>',
+        body, re.DOTALL | re.IGNORECASE)
+    _settings = {}
+    for k, v in _rows:
+        _settings[_clean(k)] = _clean(v)
+
+    _modules = []
+    for m in re.findall(r'<a\s+href="[^"]*#module_(\w+)"', body):
+        _modules.append(m)
+    if not _modules:
+        _mod_sect = re.findall(r'<h2><a\s+name="module_(\w+)"', body)
+        _modules = list(_mod_sect)
+
+    _ip = target.get("ip", "")
+    _port = target.get("port", 0)
+    _scheme = target.get("scheme", "http")
+    _hostname = target.get("hostname", "")
+
+    if _settings.get("allow_url_include", "").lower() in ("on", "1"):
+        out.add_finding(
+            title="PHP Misconfiguration: allow_url_include Enabled",
+            url=url, port=_port, risk="HIGH",
+            description=(
+                "allow_url_include is enabled in PHP configuration. "
+                "This allows remote file inclusion attacks where an attacker "
+                "can include and execute arbitrary PHP code from a remote URL."),
+            output=f"allow_url_include = {_settings.get('allow_url_include', 'On')}",
+            sources="fracture-files", service=_scheme, affected=url,
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation="Set allow_url_include = Off in php.ini.",
+        )
+
+    if _settings.get("allow_url_fopen", "").lower() in ("on", "1"):
+        out.add_finding(
+            title="PHP Misconfiguration: allow_url_fopen Enabled",
+            url=url, port=_port, risk="MEDIUM",
+            description=(
+                "allow_url_fopen is enabled, allowing PHP file functions to "
+                "access remote URLs. Combined with other vulnerabilities, "
+                "this can lead to SSRF or remote file inclusion."),
+            output=f"allow_url_fopen = {_settings.get('allow_url_fopen', 'On')}",
+            sources="fracture-files", service=_scheme, affected=url,
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation="Set allow_url_fopen = Off in php.ini unless remote file access is required.",
+        )
+
+    if _settings.get("display_errors", "").lower() in ("on", "1"):
+        out.add_finding(
+            title="PHP Misconfiguration: display_errors Enabled",
+            url=url, port=_port, risk="MEDIUM",
+            description=(
+                "display_errors is enabled in production. PHP errors "
+                "displayed to users can reveal internal paths, database "
+                "details, and application logic."),
+            output=f"display_errors = {_settings.get('display_errors', 'On')}",
+            sources="fracture-files", service=_scheme, affected=url,
+            owasp="A05:2025 Security Misconfiguration", nist="SI-11",
+            remediation="Set display_errors = Off and log_errors = On in php.ini for production.",
+        )
+
+    if _settings.get("expose_php", "").lower() in ("on", "1"):
+        out.add_finding(
+            title="PHP Misconfiguration: expose_php Enabled",
+            url=url, port=_port, risk="LOW",
+            description=(
+                "expose_php is enabled, adding an X-Powered-By header "
+                "that discloses the PHP version to all visitors."),
+            output=f"expose_php = {_settings.get('expose_php', 'On')}",
+            sources="fracture-files", service=_scheme, affected=url,
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation="Set expose_php = Off in php.ini.",
+        )
+
+    _obd = _settings.get("open_basedir", "")
+    if not _obd or _obd.lower() in ("no value", "none"):
+        out.add_finding(
+            title="PHP Misconfiguration: open_basedir Not Configured",
+            url=url, port=_port, risk="MEDIUM",
+            description=(
+                "open_basedir is not configured. Without this restriction, "
+                "PHP scripts can access any file on the filesystem, "
+                "increasing the impact of file inclusion and path traversal."),
+            output=f"open_basedir = {_obd or '(not set)'}",
+            sources="fracture-files", service=_scheme, affected=url,
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation="Set open_basedir to restrict PHP file access to the web root and required directories.",
+        )
+
+    _df = _settings.get("disable_functions", "")
+    if not _df or _df.lower() in ("no value", "none"):
+        out.add_finding(
+            title="PHP Misconfiguration: disable_functions Empty",
+            url=url, port=_port, risk="MEDIUM",
+            description=(
+                "disable_functions is empty. All dangerous PHP functions "
+                "(exec, system, passthru, shell_exec, etc.) are available, "
+                "making post-exploitation trivial after any code injection."),
+            output=f"disable_functions = {_df or '(empty)'}",
+            sources="fracture-files", service=_scheme, affected=url,
+            owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+            remediation="Disable dangerous functions: exec, passthru, shell_exec, system, proc_open, popen, curl_exec, eval, assert.",
+        )
+
+    if _settings.get("register_globals", "").lower() in ("on", "1"):
+        out.add_finding(
+            title="PHP Misconfiguration: register_globals Enabled",
+            url=url, port=_port, risk="HIGH",
+            description=(
+                "register_globals is enabled. This deprecated setting allows "
+                "user input to overwrite script variables, enabling "
+                "authentication bypass and variable injection attacks."),
+            output=f"register_globals = {_settings.get('register_globals', 'On')}",
+            sources="fracture-files", service=_scheme, affected=url,
+            owasp="A03:2025 Injection", nist="SI-10",
+            remediation="Upgrade PHP and set register_globals = Off (removed in PHP 5.4+).",
+        )
+
+    _db_exts = []
+    for _db_key in ("mysql", "mysqli", "pdo_mysql", "pgsql", "pdo_pgsql",
+                     "sqlite3", "pdo_sqlite", "oci8", "pdo_oci", "sqlsrv",
+                     "pdo_sqlsrv", "mongo", "mongodb", "redis"):
+        if _db_key in _modules or any(
+                _db_key.lower() == k.lower() for k in _settings):
+            _db_exts.append(_db_key)
+
+    _env_keys = []
+    for k, _v in _rows:
+        _ck = _clean(k)
+        if _ck.startswith("_ENV["):
+            _env_keys.append(_ck.replace("_ENV[", "").rstrip("]"))
+
+    _doc_root = _settings.get("DOCUMENT_ROOT", _settings.get("document_root", ""))
+    _include_path = _settings.get("include_path", "")
+    _upload_tmp = _settings.get("upload_tmp_dir", "")
+    _session_path = _settings.get("session.save_path", "")
+    _error_log = _settings.get("error_log", "")
+    _server_sw = _settings.get("SERVER_SOFTWARE", "")
+
+    _intel = {
+        "url": url,
+        "php_version": _php_ver,
+        "server_software": _server_sw,
+        "document_root": _doc_root,
+        "include_path": _include_path,
+        "upload_tmp_dir": _upload_tmp,
+        "session_save_path": _session_path,
+        "error_log": _error_log,
+        "database_extensions": _db_exts,
+        "environment_keys": _env_keys,
+        "loaded_modules": _modules,
+        "security_settings": {
+            "allow_url_include": _settings.get("allow_url_include", ""),
+            "allow_url_fopen": _settings.get("allow_url_fopen", ""),
+            "display_errors": _settings.get("display_errors", ""),
+            "expose_php": _settings.get("expose_php", ""),
+            "open_basedir": _obd,
+            "disable_functions": _df,
+            "register_globals": _settings.get("register_globals", ""),
+            "file_uploads": _settings.get("file_uploads", ""),
+            "upload_max_filesize": _settings.get("upload_max_filesize", ""),
+            "post_max_size": _settings.get("post_max_size", ""),
+        },
+    }
+    _sf_ip = re.sub(r'[^\w]', '_', _ip)
+    _intel_path = out.output_path(phase, f"phpinfo_intel_{_sf_ip}")
+    _intel_path.write_text(json.dumps(_intel, indent=2), encoding="utf-8")
+
+    if _ie:
+        try:
+            _ie.emit_intel("webapp_intel", {
+                "ip": _ip, "port": _port, "hostname": _hostname,
+                "server_software": _server_sw,
+                "php_version": _php_ver,
+                "database_extensions": _db_exts,
+                "document_root": _doc_root,
+            })
+        except Exception:
+            pass
+
+    vc.log(f"[files] phpinfo analysis: PHP {_php_ver}, "
+           f"{len(_db_exts)} DB ext, {len(_env_keys)} env keys, "
+           f"{len(_modules)} modules", "INFO")
+
+
+def _sensitive_file_followup(fpath: str, body: str, url: str,
+                              target: dict, out: "OutputManager",
+                              phase: str, cfg: dict,
+                              sess: "requests.Session") -> None:
+    _fl = fpath.lower()
+    _fname = _fl.rstrip("/").rsplit("/", 1)[-1]
+
+    if _fname in ("phpinfo.php", "info.php", "test.php") and "phpinfo()" in body.lower():
+        _parse_phpinfo_page(body, url, target, out, phase, cfg)
+        return
+
+    if _fname.startswith(".env"):
+        _env_keys = []
+        for line in body.splitlines()[:500]:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                _env_keys.append(line.split("=", 1)[0].strip())
+        if _env_keys:
+            _env_out = out.output_path(phase, f"env_keys_{re.sub(r'[^a-zA-Z0-9_]', '_', fpath)}")
+            _env_out.write_text(json.dumps({"url": url, "keys": _env_keys}, indent=2))
+            vc.log(f"[files] .env analysis: {len(_env_keys)} keys identified", "INFO")
+
+    if "/.git/" in _fl:
+        _ref_match = re.search(r'ref:\s*refs/heads/(\S+)', body)
+        if _ref_match:
+            vc.log(f"[files] Git repo: active branch = {_ref_match.group(1)}", "INFO")
+
+    if _fname == "web.config":
+        _wc_issues = []
+        _mk_m = re.search(r'<machineKey[^>]*/>', body, re.IGNORECASE)
+        if _mk_m or re.search(r'<machineKey\b', body, re.IGNORECASE):
+            _wc_issues.append("machineKey exposed (ViewState RCE possible)")
+            out.add_finding(
+                title="ASP.NET machineKey Exposed in web.config",
+                url=url, port=target["port"], risk="CRITICAL",
+                description=(
+                    "The web.config file contains a machineKey element. "
+                    "An attacker with this key can forge ViewState payloads "
+                    "to achieve remote code execution via deserialization."),
+                output=(_mk_m.group(0)[:500] if _mk_m else "machineKey element found"),
+                sources="fracture-files", service=target["scheme"],
+                affected=url,
+                owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                remediation="Remove machineKey from publicly accessible web.config or restrict access to the file.",
+            )
+        if re.search(r'connectionString', body, re.IGNORECASE):
+            _wc_issues.append("connectionString found")
+        if _wc_issues:
+            vc.log(f"[files] web.config analysis: {', '.join(_wc_issues)}", "INFO")
+
+    if _fname in ("composer.json", "package.json", "requirements.txt"):
+        try:
+            if _fname.endswith(".json"):
+                _dep_data = json.loads(body)
+                _deps = list((_dep_data.get("require") or
+                              _dep_data.get("dependencies") or {}).keys())[:50]
+            else:
+                _deps = [l.split("==")[0].split(">=")[0].split("~=")[0].strip()
+                         for l in body.splitlines()[:100]
+                         if l.strip() and not l.startswith("#")][:50]
+            if _deps:
+                _dep_out = out.output_path(phase, f"deps_{_fname.replace('.', '_')}")
+                _dep_out.write_text(json.dumps(
+                    {"url": url, "dependencies": _deps}, indent=2))
+                vc.log(f"[files] {_fname}: {len(_deps)} dependencies identified", "INFO")
+        except Exception:
+            pass
+
+    if _fname in ("docker-compose.yml", "docker-compose.yaml"):
+        if re.search(r'(?:password|passwd|secret|token)\s*[:=]',
+                     body, re.IGNORECASE):
+            out.add_finding(
+                title="Hardcoded Credentials in docker-compose.yml",
+                url=url, port=target["port"], risk="HIGH",
+                description=(
+                    "The docker-compose.yml file contains what appear to be "
+                    "hardcoded credentials or secrets."),
+                output="[credential content redacted]",
+                sources="fracture-files", service=target["scheme"],
+                affected=url,
+                owasp="A05:2025 Security Misconfiguration", nist="IA-5",
+                remediation="Use environment variables or Docker secrets instead of hardcoding credentials.",
+            )
+        if re.search(r'privileged:\s*true', body, re.IGNORECASE):
+            out.add_finding(
+                title="Privileged Docker Container in docker-compose.yml",
+                url=url, port=target["port"], risk="MEDIUM",
+                description=(
+                    "The docker-compose.yml defines a container with "
+                    "privileged mode enabled, allowing full host access."),
+                output="privileged: true found in docker-compose configuration",
+                sources="fracture-files", service=target["scheme"],
+                affected=url,
+                owasp="A05:2025 Security Misconfiguration", nist="CM-7",
+                remediation="Remove privileged mode; use specific capabilities instead.",
+            )
+
+    if "terraform.tfstate" in _fl:
+        try:
+            _tf = json.loads(body)
+            _providers = set()
+            for res in (_tf.get("resources") or []):
+                _providers.add(res.get("provider", "unknown"))
+            if _providers:
+                vc.log(
+                    f"[files] Terraform state: providers = "
+                    f"{', '.join(sorted(_providers))}", "INFO")
+        except Exception:
+            pass
+
+    if _fname.endswith(".log") or _fname in ("laravel.log", "npm-debug.log",
+                                               "yarn-error.log"):
+        _log_issues = []
+        _snip = body[:5000]
+        if re.search(r'(?:Traceback|Exception|stack trace|at \w+\.\w+\()',
+                     _snip, re.IGNORECASE):
+            _log_issues.append("stack traces")
+        if re.search(r'(?:SELECT|INSERT|UPDATE|DELETE)\s+', _snip):
+            _log_issues.append("SQL queries")
+        if re.search(r'(?:password|passwd|secret|token|api.?key)\s*[=:]',
+                     _snip, re.IGNORECASE):
+            _log_issues.append("potential credentials")
+        if _log_issues:
+            vc.log(f"[files] Log analysis ({_fname}): "
+                   f"contains {', '.join(_log_issues)}", "INFO")
+
+
 def _chrome_okta_authn_login(driver, cfg: dict, login_url: str,
                              timeout: int = 30) -> bool:
     """Authenticate headless Chrome via the OKTA authn API.
@@ -21021,6 +21372,7 @@ def _phase_endpoint_tools(
     """Run screenshot, page crawl, and directory brute-force against each
     endpoint discovered by recon/crawl phases.  Capped to avoid runaway scans.
     """
+    _check_pause()
     if not discovered_urls:
         return
 
@@ -21852,6 +22204,7 @@ _TLS_INTERNAL_RISK = {
 
 def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
                out: OutputManager, sess: requests.Session) -> None:
+    _check_pause()
     if not target["is_https"]:
         vc.log("[tls] HTTP-only target — skipping TLS phase", "WARNING")
         return
@@ -23410,6 +23763,7 @@ _TAKEOVER_FINGERPRINTS = [
 def _phase_subdomain_takeover(target: dict, cfg: dict, pm: ProgressManager,
                                out: OutputManager, sess: requests.Session) -> None:
     """Phase 1b: Subdomain takeover — dangling CNAME and AXFR detection."""
+    _check_pause()
     phase   = "subdomain_takeover"
     url     = target["url"]
     host    = target["hostname"]
@@ -24123,6 +24477,7 @@ def _analyze_csp_directives(csp_value, headers):
 
 def _phase_headers(target: dict, cfg: dict, pm: ProgressManager,
                    out: OutputManager, sess: requests.Session) -> None:
+    _check_pause()
     phase   = "headers"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -24956,6 +25311,7 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
     Any URL that is a wildcard false positive, returns 404/410, or is unreachable
     is discarded immediately — no subprocess is spawned and no file is written.
     """
+    _check_pause()
     phase   = "shcheck"
     timeout = cfg.get("timeout", 10) + 20   # shcheck needs a little more time
     _shc_ext = _is_external_scope(cfg)
@@ -25183,6 +25539,7 @@ def _phase_screenshot(target: dict, cfg: dict, pm: ProgressManager,
     authenticated view.  The session is also used for HTTP HEAD/GET probes
     so status-code classification matches the authenticated context.
     """
+    _check_pause()
     phase    = "screenshot"
     url      = target["url"]
     hostname = target["hostname"]
@@ -25407,6 +25764,7 @@ def _phase_webfiles(target: dict, cfg: dict, pm: ProgressManager,
     Files saved to: recon/web/<hostname>_<port>/
     Creates an INFO finding listing all downloaded files.
     """
+    _check_pause()
     phase    = "webfiles"
     url      = target["url"]
     hostname = target["hostname"]
@@ -25526,6 +25884,7 @@ def _phase_ffuf(target: dict, cfg: dict, pm: ProgressManager,
 
     Output saved to ffuf/ subdirectory.
     """
+    _check_pause()
     phase  = "ffuf"
     url    = target["url"]
     host   = target["hostname"]
@@ -26441,6 +26800,7 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
     Returns a partial crawl_data dict (same schema as _phase_crawl output)
     containing only the incremental results — the caller merges them.
     """
+    _check_pause()
     phase      = "crawl"
     url        = target["url"]
     timeout    = cfg.get("timeout", 10)
@@ -26964,6 +27324,7 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
 def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                  out: OutputManager, sess: requests.Session,
                  extra_seeds: "list[str] | None" = None) -> dict:
+    _check_pause()
     phase     = "crawl"
     url       = target["url"]
     timeout   = cfg.get("timeout", 10)
@@ -27822,6 +28183,7 @@ def _phase_manual_crawl(out: "OutputManager", target: dict, cfg: dict,
     These are merged into _ep_base before the shcheck / crawl / injection phases
     run so all subsequently discovered paths are tested like any other endpoint.
     """
+    _check_pause()
     mitmdump = shutil.which("mitmdump")
     if not mitmdump:
         vc.log("[manual-crawl] mitmdump not found — skipping (install mitmproxy to enable)", "WARNING")
@@ -28104,6 +28466,7 @@ def _phase_jwt(target: dict, cfg: dict, pm: ProgressManager,
 
     Output saved to: jwt/<hostname>_<port>_jwt_tool.txt
     """
+    _check_pause()
     phase   = "jwt"
     url     = target["url"]
     port    = target["port"]
@@ -29250,6 +29613,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                      out: OutputManager, sess: requests.Session,
                      crawl_data: dict, fast: bool = False,
                      waf_cdn: str = "") -> None:
+    _check_pause()
     phase   = "injection"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -29276,6 +29640,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         _seen_canon: set = set()
         _filtered_params: list = []
         for entry in params:
+            _check_pause()
             purl = entry.get("url", "")
             try:
                 _pp = urllib.parse.urlparse(purl)
@@ -29401,6 +29766,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     # confirm (the error persists), risk = HIGH and title is marked
     # "Suspected" — still worth investigating but not auto-CRITICAL.
     for entry in params:
+        _check_pause()
         purl = entry["url"]
         for param in entry["params"]:
             try: rb = _qs_inject(purl, param, "test", sess, timeout)
@@ -29533,6 +29899,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Injection Testing", "running", "XSS", 3, 28)
     # 4. Reflected XSS
     for entry in params[:10]:
+        _check_pause()
         purl = entry["url"]
         for param in entry["params"]:
             for payload in _XSS_PAYLOADS[:3]:
@@ -29662,6 +30029,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Injection Testing", "running", "SSTI", 4, 28)
     # 5. SSTI
     for entry in params[:10]:
+        _check_pause()
         purl = entry["url"]
         for param in entry["params"]:
             for payload, expected in _ssti_probes():
@@ -29699,6 +30067,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         _sstimap_dir.mkdir(parents=True, exist_ok=True)
         _sstimap_found_params: set = set()
         for entry in params[:8]:
+            _check_pause()
             purl = entry["url"]
             for param in entry["params"][:5]:
                 _sstikey = (purl, param)
@@ -29776,6 +30145,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Injection Testing", "running", "Command injection", 6, 28)
     # 6. Command injection
     for entry in params[:10]:
+        _check_pause()
         purl = entry["url"]
         for param in entry["params"]:
             for cmd_pay, cmd_pat in _CMD_PAYLOADS:
@@ -29803,6 +30173,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         commix_dir.mkdir(parents=True, exist_ok=True)
         _cmx_tested: set = set()
         for entry in params[:8]:
+            _check_pause()
             purl = entry["url"]
             for param in entry["params"][:5]:
                 _cmx_key = (purl, param)
@@ -29889,6 +30260,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Injection Testing", "running", "CRLF", 8, 28)
     # 7. CRLF injection
     for entry in params[:10]:
+        _check_pause()
         purl = entry["url"]
         for param in entry["params"]:
             r = _qs_inject(purl, param, _CRLF_PAYLOAD, sess, timeout)
@@ -30024,6 +30396,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     # 11. NoSQL injection — baseline-gated (like LDAP/SQLi).
     vc.status(phase, "Injection Testing", "running", "NoSQL injection", 12, 28)
     for entry in params[:10]:
+        _check_pause()
         purl = entry["url"]
         for param in entry["params"]:
             _nosql_base_r = _qs_inject(purl, param, "fracture_nosql_safe", sess, timeout)
@@ -30076,6 +30449,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     # must NOT match the regex for the finding to fire.
     vc.status(phase, "Injection Testing", "running", "LDAP injection", 13, 28)
     for entry in params[:10]:
+        _check_pause()
         purl = entry["url"]
         for param in entry["params"]:
             # Baseline: fetch with a harmless value
@@ -30123,6 +30497,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     # 13. XPath injection
     vc.status(phase, "Injection Testing", "running", "XPath injection", 14, 28)
     for entry in params[:10]:
+        _check_pause()
         purl = entry["url"]
         for param in entry["params"]:
             for xpath_pay, xpath_err in _XPATH_PAYLOADS:
@@ -30148,6 +30523,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Injection Testing", "running", "Log injection", 15, 28)
     _log_found: set = set()
     for entry in params[:10]:
+        _check_pause()
         purl = entry["url"]
         for param in entry["params"]:
             if purl in _log_found:
@@ -30176,6 +30552,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     # 15. HTTP Parameter Pollution
     vc.status(phase, "Injection Testing", "running", "HTTP Parameter Pollution", 16, 28)
     for entry in params[:10]:
+        _check_pause()
         purl = entry["url"]
         for param in entry["params"]:
             try:
@@ -30219,6 +30596,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     # 16. Code injection / eval() RCE probe
     vc.status(phase, "Injection Testing", "running", "Code injection", 17, 28)
     for entry in params[:10]:
+        _check_pause()
         purl = entry["url"]
         for param in entry["params"]:
             for ci_pay, ci_pat in _code_inject_probes():
@@ -30366,6 +30744,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "Injection Testing", "running", "JSONP endpoints", 20, 28)
     _jsonp_wrap_re = re.compile(r'^[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(', re.M)
     for entry in params[:15]:
+        _check_pause()
         purl = entry["url"]
         for cb_param in _JSONP_CB_PARAMS:
             r = _qs_inject(purl, cb_param, "fracture_jsonp_cb", sess, timeout)
@@ -30408,6 +30787,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     _bool_sqli_true  = "' OR '1'='1"
     _bool_sqli_false = "' OR '1'='2"
     for entry in params[:8]:
+        _check_pause()
         purl = entry["url"]
         # Skip handler URLs whose params are never database-bound
         if _INJECTION_SKIP_URL_RE.search(purl):
@@ -30462,6 +30842,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     ]
     import time as _ti
     for entry in params[:5]:
+        _check_pause()
         purl = entry["url"]
         # Skip handler URLs whose params are never database-bound
         if _INJECTION_SKIP_URL_RE.search(purl):
@@ -30792,6 +31173,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     _hpp_canary = "fr4ctur3_hpp_" + str(int(time.time()))[-6:]
     _hpp_found: list = []
     for entry in params[:30]:
+        _check_pause()
         purl = entry["url"]
         for param_name in entry["params"][:5]:
             try:
@@ -31037,12 +31419,14 @@ _TRAVERSAL_RE = re.compile(r'root:.*:/bin/|daemon:.*:/usr/sbin|Win\.ini|\[boot l
 def _phase_traversal(target: dict, cfg: dict, pm: ProgressManager,
                      out: OutputManager, sess: requests.Session,
                      crawl_data: dict) -> None:
+    _check_pause()
     phase   = "traversal"
     timeout = cfg.get("timeout", 10)
     params  = crawl_data.get("params", [])
     vc.status(phase, "Path Traversal", "running", "Testing params", 0, len(params))
 
     for idx, entry in enumerate(params[:30]):
+        _check_pause()
         purl = entry["url"]
         vc.status(phase, "Path Traversal", "running", "Testing", idx, len(params))
         for param in entry["params"]:
@@ -31109,6 +31493,7 @@ _BL_ASPNET_CTRL_RE = re.compile(r'(?:^|\$)(drp|ddl|chk|rdo|rad|btn|lst)', re.I)
 def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
                           out: OutputManager, sess: requests.Session,
                           crawl_data: dict) -> None:
+    _check_pause()
     phase   = "business_logic"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -31120,6 +31505,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
 
     # 1. Negative / zero value injection into numeric form fields
     for form in forms[:30]:
+        _check_pause()
         action = form.get("action", url)
         method = form.get("method", "GET").upper()
         inputs = form.get("inputs", [])
@@ -31309,6 +31695,7 @@ def _phase_business_logic(target: dict, cfg: dict, pm: ProgressManager,
     # 4. Hidden price / discount field tampering
     vc.status(phase, "Business Logic", "running", "Parameter tampering", 3, 4)
     for form in forms[:30]:
+        _check_pause()
         action = form.get("action", url)
         method = form.get("method", "GET").upper()
         inputs = form.get("inputs", [])
@@ -31398,6 +31785,7 @@ _SSRF_RESPONSE_INDICATORS = re.compile(
 def _phase_ssrf(target: dict, cfg: dict, pm: ProgressManager,
                 out: OutputManager, sess: requests.Session,
                 crawl_data: dict) -> None:
+    _check_pause()
     phase   = "ssrf"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -31913,6 +32301,7 @@ def _probe_login_default_creds(login_url: str, target: dict,
         )
 
     for uname, pwd in _ab_creds:
+        _check_pause()
         _pwd_disp = repr(pwd) if pwd else "'(blank)'"
         vc.log(f"[auth_bypass] Testing default creds: {uname!r}/{_pwd_disp}", "INFO")
 
@@ -32006,6 +32395,7 @@ _SQLI_BYPASS_PAYLOADS = [
 def _phase_auth_bypass(target: dict, cfg: dict, pm: ProgressManager,
                        out: OutputManager, sess: requests.Session,
                        crawl_data: dict) -> list:
+    _check_pause()
     phase      = "auth_bypass"
     url        = target["url"]
     timeout    = cfg.get("timeout", 10)
@@ -32907,6 +33297,7 @@ _SENSITIVE_FILES: list = [
 
 def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
                  out: OutputManager, sess: requests.Session) -> None:
+    _check_pause()
     phase      = "files"
     url        = target["url"]
     timeout    = cfg.get("timeout", 10)
@@ -32935,6 +33326,7 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
         pass
 
     for idx, (fpath, risk, fdesc) in enumerate(_SENSITIVE_FILES):
+        _check_pause()
         vc.status(phase, "Sensitive Files", "running", fpath, idx, total)
         try:
             _fpath_full_url = url.rstrip("/") + fpath
@@ -32977,6 +33369,30 @@ def _phase_files(target: dict, cfg: dict, pm: ProgressManager,
                 except Exception:
                     pass
                 vc.log(f"[files] Found: {fpath} (risk={risk})", "SUCCESS")
+                # Screenshot capture for every sensitive file finding
+                _sf_label = re.sub(r'[^\w]', '_', fpath.lstrip("/"))[:50]
+                _capture_sensitive_file_screenshot(
+                    _fpath_full_url, out, phase, _sf_label, target, cfg,
+                    auth_session=sess)
+                # Type-specific follow-up analysis
+                _sensitive_file_followup(fpath, r.text, _fpath_full_url,
+                                          target, out, phase, cfg, sess)
+                # Trawler action item for every sensitive file
+                out.log_action_item(
+                    type="sensitive_file_trawler",
+                    recommended_tool="trawler",
+                    target=f"{target['ip']}:{target['port']}",
+                    ip=target["ip"], port=target["port"],
+                    hostname=target.get("hostname", ""),
+                    title=f"Sensitive File Exposed — Deep Analysis ({fpath})",
+                    description=(
+                        f"Fracture identified {fpath} exposed at "
+                        f"{_fpath_full_url} (risk={risk}). Run Trawler to "
+                        f"perform deeper analysis of the exposed content and "
+                        f"identify additional attack surface."),
+                    source_finding="sensitive_file_exposure",
+                    priority=risk, scope="webapp",
+                )
                 if risk == "CRITICAL" and any(kw in fpath.lower() for kw in
                         ("credentials", "tfstate", ".env", "secret")):
                     out.log_action_item(
@@ -35200,6 +35616,44 @@ def _collect_vulnscan_bg(handle: dict) -> None:
                                 target, cfg)
                             if _nik_ss:
                                 _nik_of = f"{_nik_of},{_nik_ss}"
+                        if ("Sensitive File" in _nik_title
+                                or "Sensitive Path" in _nik_title):
+                            _nik_sf_safe = re.sub(r'[^\w]', '_', _nik_url_path or "root")[:40]
+                            _nik_sf_ss = _capture_sensitive_file_screenshot(
+                                _nik_full_url, out, phase,
+                                f"nikto_{_nik_sf_safe}",
+                                target, cfg)
+                            if _nik_sf_ss:
+                                _nik_of = f"{_nik_of},{_nik_sf_ss}"
+                            out.log_action_item(
+                                type="sensitive_file_trawler",
+                                recommended_tool="trawler",
+                                target=f"{target['ip']}:{target['port']}",
+                                ip=target["ip"], port=target["port"],
+                                hostname=target.get("hostname", ""),
+                                title=f"Sensitive File Exposed — Deep Analysis ({_nik_url_path})",
+                                description=(
+                                    f"Nikto identified a sensitive file at "
+                                    f"{_nik_full_url}. Run Trawler for deeper "
+                                    f"analysis of the exposed content."),
+                                source_finding="nikto_sensitive_file",
+                                priority=_norm["risk"], scope="webapp",
+                            )
+                            if _nik_url_path:
+                                try:
+                                    _nik_sf_sess = handle.get("sess") or requests.Session()
+                                    _nik_sf_r = _nik_sf_sess.get(
+                                        _nik_full_url,
+                                        timeout=cfg.get("timeout", 10),
+                                        allow_redirects=False)
+                                    if (_nik_sf_r.status_code == 200
+                                            and len(_nik_sf_r.text) > 5):
+                                        _sensitive_file_followup(
+                                            _nik_url_path, _nik_sf_r.text,
+                                            _nik_full_url, target, out,
+                                            phase, cfg, _nik_sf_sess)
+                                except Exception:
+                                    pass
                         out.add_finding(
                             title=_nik_title,
                             url=_nik_full_url, port=target["port"],
@@ -35620,6 +36074,7 @@ _INTROSPECTION_QUERY = '{"query":"{__schema{types{name}}}"}'
 
 def _phase_graphql(target: dict, cfg: dict, pm: ProgressManager,
                    out: OutputManager, sess: requests.Session) -> None:
+    _check_pause()
     phase   = "graphql"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -35627,6 +36082,7 @@ def _phase_graphql(target: dict, cfg: dict, pm: ProgressManager,
 
     found_gql = None
     for gpath in _GRAPHQL_PATHS:
+        _check_pause()
         try:
             r = sess.post(url + gpath,
                           data=_INTROSPECTION_QUERY,
@@ -36643,6 +37099,7 @@ def _validate_telerik(target: dict, cfg: dict, out: "OutputManager",
 def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
                       out: OutputManager, auth_sess: requests.Session,
                       crawl_data: dict) -> dict:
+    _check_pause()
     phase   = "auth_recon"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -37006,6 +37463,7 @@ def _validate_method_functional(method, link, r, auth_sess, timeout,
 def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
                           out: OutputManager, auth_sess: requests.Session,
                           auth_recon_data: dict) -> None:
+    _check_pause()
     phase   = "authorization"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -37425,6 +37883,7 @@ def _phase_authorization(target: dict, cfg: dict, pm: ProgressManager,
 # ─────────────────────────────────────────────
 def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                    out: OutputManager, auth_sess: requests.Session) -> None:
+    _check_pause()
     phase    = "session"
     url      = target["url"]
     hostname = target["hostname"]
@@ -37444,6 +37903,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         r'back[-_]?url|goto|continue|referer|origin[-_]?url|'
         r'_pk_|_ga|_gid|_gat|__utm|_fbp|_gcl|__hstc|__hssc|hubspot)')
     for cookie in auth_sess.cookies:
+        _check_pause()
         val = cookie.value or ""
         if len(val) < 8:
             continue
@@ -37527,6 +37987,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
     try:
         session_cookie_name = None
         for cookie in auth_sess.cookies:
+            _check_pause()
             if re.search(r'sess|token|auth|sid', cookie.name, re.I):
                 session_cookie_name = cookie.name
                 break
@@ -38499,6 +38960,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         _broad_domain_cookies = []
         _broad_path_cookies = []
         for cookie in auth_sess.cookies:
+            _check_pause()
             if _INFRA_COOKIE_RE.match(cookie.name):
                 continue
             # Domain scope check
@@ -38590,6 +39052,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         return json.loads(base64.urlsafe_b64decode(padded))
     _jwt_candidates = []
     for cookie in auth_sess.cookies:
+        _check_pause()
         if _JWT_RE.match(cookie.value or ""):
             _jwt_candidates.append(("cookie", cookie.name, cookie.value))
     _auth_hdr = ""
@@ -38850,6 +39313,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
         _timeout_issues = []
         _no_expiry_cookies = []
         for cookie in auth_sess.cookies:
+            _check_pause()
             if _INFRA_COOKIE_RE.match(cookie.name):
                 continue
             if not re.search(r'sess|token|auth|sid', cookie.name, re.I):
@@ -39132,6 +39596,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
     are never touched so that access_matrix (which runs after) still has
     valid sessions for its probes.
     """
+    _check_pause()
     phase    = "logout"
     url      = target["url"]
     hostname = target["hostname"]
@@ -39871,6 +40336,7 @@ def _phase_logout(target: dict, cfg: dict, pm: ProgressManager,
 def _phase_csrf(target: dict, cfg: dict, pm: ProgressManager,
                 out: OutputManager, auth_sess: requests.Session,
                 auth_recon_data: dict) -> None:
+    _check_pause()
     phase   = "csrf"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -39878,6 +40344,7 @@ def _phase_csrf(target: dict, cfg: dict, pm: ProgressManager,
     vc.status(phase, "CSRF Testing", "running", "Form analysis", 0, len(forms))
 
     for idx, form in enumerate(forms[:30]):
+        _check_pause()
         action = form.get("action", url)
         method = form.get("method", "GET")
         inputs = form.get("inputs", [])
@@ -39964,6 +40431,7 @@ def _phase_cross_user(target: dict, cfg: dict, pm: ProgressManager,
                       auth_sess: requests.Session,
                       auth2_sess: requests.Session,
                       auth_recon_data: dict) -> None:
+    _check_pause()
     phase    = "cross_user"
     url      = target["url"]
     timeout  = cfg.get("timeout", 10)
@@ -40176,6 +40644,7 @@ def _phase_logging_monitoring(target: dict, cfg: dict, pm: ProgressManager,
                                out: OutputManager, sess: requests.Session,
                                crawl_data: dict) -> None:
     """Phase 10b: Security Logging & Monitoring Failures — OWASP A09:2025."""
+    _check_pause()
     phase   = "logging_monitoring"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -40838,6 +41307,7 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
                             out: OutputManager, sess: requests.Session,
                             crawl_data: dict) -> None:
     """Phase 7b: Account lockout and brute-force protection testing."""
+    _check_pause()
     phase   = "account_lockout"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -40848,6 +41318,7 @@ def _phase_account_lockout(target: dict, cfg: dict, pm: ProgressManager,
     # Identify login forms
     login_forms = []
     for form in forms:
+        _check_pause()
         inputs = form.get("inputs", [])
         has_user = any(_LOCKOUT_USERNAME_FIELDS.search(i.get("name", "") + i.get("type", ""))
                        for i in inputs)
@@ -41383,6 +41854,7 @@ def _phase_open_redirect(target: dict, cfg: dict, pm: ProgressManager,
                          out: OutputManager, sess: requests.Session,
                          crawl_data: dict) -> None:
     """Phase 16: Open redirect testing on URL-like parameters."""
+    _check_pause()
     phase   = "open_redirect"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -41396,6 +41868,7 @@ def _phase_open_redirect(target: dict, cfg: dict, pm: ProgressManager,
     _found: set = set()
 
     for purl, param in redir_params:
+        _check_pause()
         if purl in _found:
             continue
         for payload in _OPEN_REDIRECT_PAYLOADS:
@@ -41450,6 +41923,7 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
                            out: OutputManager, sess: requests.Session,
                            crawl_data: dict) -> None:
     """Phase 17: Detect insecure deserialization endpoints and patterns."""
+    _check_pause()
     phase   = "deserialization"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -41464,6 +41938,7 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
         b"---\n!!",        # YAML prefix
     ]
     for form in forms[:10]:
+        _check_pause()
         action = form.get("action", url)
         inputs = form.get("inputs", [])
         for inp in inputs:
@@ -41546,6 +42021,7 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
         r'yaml\.(?:safe_)?load|found.*undefined.*tag.*!!python|'
         r'ConstructorError|yaml\.constructor', re.I)
     for form in forms[:5]:
+        _check_pause()
         action = form.get("action", url)
         inputs = form.get("inputs", [])
         for inp in inputs:
@@ -42279,6 +42755,7 @@ def _phase_sri_check(target: dict, cfg: dict, pm: ProgressManager,
                      out: OutputManager, sess: requests.Session,
                      crawl_data: dict) -> None:
     """A08: detect external <script>/<link> elements served without SRI."""
+    _check_pause()
     phase = "sri_check"
     url   = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -42372,6 +42849,7 @@ def _phase_sri_check(target: dict, cfg: dict, pm: ProgressManager,
 def _phase_host_header_ssrf(target: dict, cfg: dict, pm: ProgressManager,
                              out: OutputManager, sess: requests.Session,
                              crawl_data: dict) -> None:
+    _check_pause()
     phase = "host_header_ssrf"
     url   = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -42392,6 +42870,7 @@ def _phase_host_header_ssrf(target: dict, cfg: dict, pm: ProgressManager,
         ("X-Forwarded-Host",     {"X-Forwarded-Host": "attacker.fracture-internal"}),
     ]
     for label, hdrs in spoofs:
+        _check_pause()
         try:
             r = sess.get(url, timeout=timeout, verify=False,
                           allow_redirects=False, headers=hdrs)
@@ -42455,6 +42934,7 @@ def _phase_file_upload_info(target: dict, cfg: dict, pm: ProgressManager,
                             out: OutputManager, sess: requests.Session,
                             crawl_data: dict) -> None:
     """Phase 18: Detect file upload endpoints and report accepted file types (informational)."""
+    _check_pause()
     phase   = "file_upload_info"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -42652,6 +43132,7 @@ def _phase_mass_assignment(target: dict, cfg: dict, pm: ProgressManager,
                            out: OutputManager, sess: requests.Session,
                            crawl_data: dict) -> None:
     """Phase 19: Test web forms and JSON endpoints for mass assignment vulnerabilities."""
+    _check_pause()
     phase   = "mass_assignment"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -42662,6 +43143,7 @@ def _phase_mass_assignment(target: dict, cfg: dict, pm: ProgressManager,
 
     # 1. Form-based mass assignment
     for form in forms[:15]:
+        _check_pause()
         action  = form.get("action", url)
         method  = form.get("method", "POST")
         inputs  = form.get("inputs", [])
@@ -43719,6 +44201,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     prebuilt_sessions: {role_label: requests.Session} collected during the
     context loop. When provided, skips re-authentication entirely.
     """
+    _check_pause()
     import copy as _copy
 
     phase       = "access_matrix"
@@ -43734,6 +44217,7 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
     # config with its own username/password.
     _role_cfgs: dict = {}
     for _rc in auth_matrix:
+        _check_pause()
         _rc_role = _rc.get("role", "")
         _rc_auth = _copy.deepcopy(cfg.get("auth", {}))
         _rc_auth["enabled"]  = True
@@ -44629,6 +45113,7 @@ def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
       CRITICAL — response body is identical to Role 1's (same data returned)
       HIGH     — response is 200 but body differs (function reached, different view)
     """
+    _check_pause()
     phase   = "bfla"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
@@ -44646,6 +45131,7 @@ def _phase_bfla(target: dict, cfg: dict, pm: ProgressManager,
     _bfla_high:     list = []   # HTTP 200 but body differs
 
     for idx, ep in enumerate(role1_endpoints):
+        _check_pause()
         ep_url = ep["url"]
         vc.status(phase, "BFLA Testing", "running",
                   f"Endpoint {idx+1}/{total}", idx + 1, total)
@@ -46296,6 +46782,7 @@ def _phase_websocket(target: dict, cfg: dict, pm: ProgressManager,
                      out: OutputManager, sess: requests.Session,
                      crawl_data: dict) -> None:
     """WebSocket security testing — discovery, auth, origin, message injection."""
+    _check_pause()
     import socket as _sock, ssl as _ssl2, select as _sel2
     import hashlib as _hashlib, base64 as _b64ws, struct as _struct_ws
 
