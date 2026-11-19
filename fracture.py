@@ -5212,6 +5212,10 @@ class OutputManager:
                     _risk_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
                     if _risk_rank.get((risk or "").upper(), 0) > _risk_rank.get((ex.get("risk") or "").upper(), 0):
                         ex["risk"] = risk
+                    # propagate boolean exploit/KEV flags (OR semantics)
+                    for _bf in ("exploitdb", "metasploit", "kev"):
+                        if entry.get(_bf):
+                            ex[_bf] = True
                     # update http_code — always prefer the latest non-zero value
                     if http_code:
                         ex["http_code"] = int(http_code)
@@ -24050,7 +24054,7 @@ _FRACTURE_VULN_MAP = {
     "jquery": [
         ("1",     "3.5.0",  "MEDIUM",   ["CVE-2020-11022","CVE-2020-11023"],  "jQuery <3.5.0 — XSS via .html()/.append() in IE/Edge legacy."),
         ("2",     "3.5.0",  "MEDIUM",   ["CVE-2020-11022","CVE-2020-11023"],  "jQuery <3.5.0 — XSS via .html()/.append() in IE/Edge legacy."),
-        ("3.0",   "3.5.0",  "MEDIUM",   ["CVE-2020-11022","CVE-2020-11023"],  "jQuery <3.5.0 — XSS via .html()/.append() in IE/Edge legacy."),
+        ("3.",    "3.5.0",  "MEDIUM",   ["CVE-2020-11022","CVE-2020-11023"],  "jQuery <3.5.0 — XSS via .html()/.append() in IE/Edge legacy."),
     ],
     "tomcat": [
         ("9.0",   "9.0.31", "HIGH",     ["CVE-2020-1938"],  "Ghostcat — AJP file inclusion + potential RCE."),
