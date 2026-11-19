@@ -34954,8 +34954,12 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
         cmd = [nuclei, "-l", str(_nuc_list_file),
                "-s", "critical,high,medium,low,info",
                "-silent", "-jsonl", "-no-interactsh",
-               "-stats", "-c", "25",
+               "-duc", "-stats", "-c", "25",
                "-o", str(nuc_out)]
+        _nuc_env = os.environ.copy()
+        _nuc_home = Path(out.root) / ".nuclei_home"
+        _nuc_home.mkdir(parents=True, exist_ok=True)
+        _nuc_env["HOME"] = str(_nuc_home)
         if _vs_cookie_str:
             cmd += ["-H", f"Cookie: {_vs_cookie_str}"]
         for _ah_name, _ah_val in _vs_auth_headers:
@@ -34980,7 +34984,7 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
         try:
             _nuc_started = datetime.now().astimezone()
             proc = _popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-                          preexec_fn=_go_mem_limit_preexec)
+                          preexec_fn=_go_mem_limit_preexec, env=_nuc_env)
             _register_proc(proc)
             handle["nuclei_proc"]    = proc
             handle["nuclei_cmd"]     = cmd
