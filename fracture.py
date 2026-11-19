@@ -46,6 +46,7 @@ def _safe_cfg_copy(cfg):
 
 import secrets
 import statistics
+import html as _html_mod
 import tempfile
 import time
 import hashlib
@@ -28779,12 +28780,18 @@ def _strip_url_echo(text: str, r, extra: "list[str] | None" = None) -> str:
                     urllib.parse.unquote_plus(r.url)):
         if variant:
             text = text.replace(variant, "")
+            _he = _html_mod.escape(variant)
+            if _he != variant:
+                text = text.replace(_he, "")
     for val in (extra or []):
         for enc in (val,
                     urllib.parse.quote(val, safe=''),
                     urllib.parse.quote_plus(val)):
             if enc:
                 text = text.replace(enc, "")
+        _he = _html_mod.escape(val)
+        if _he != val:
+            text = text.replace(_he, "")
     return text
 
 
@@ -29966,10 +29973,16 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 _csv_marker = "fracture'!A0"
                 _csv_body = r.text if r else ""
                 _csv_body = re.sub(
-                    r'(?:href|src|action|content|data(?:-[a-z][a-z0-9-]*)?)(?:\s*)=(?:\s*)["\'][^"\']*'
+                    r'(?:href|src|action|content|value|data(?:-[a-z][a-z0-9-]*)?)(?:\s*)=(?:\s*)["\'][^"\']*'
                     + re.escape(urllib.parse.quote(_csv_marker, safe=''))
                     + r'[^"\']*["\']',
                     '', _csv_body, flags=re.I)
+                for _csv_raw in (_CSV_INJECT_PAYLOADS[0], _csv_marker):
+                    for _csv_enc in (_csv_raw,
+                                     _html_mod.escape(_csv_raw),
+                                     _csv_raw.replace("'", "&#039;"),
+                                     _csv_raw.replace("'", "&apos;")):
+                        _csv_body = _csv_body.replace(_csv_enc, "")
                 if (r and r.status_code in (200, 201, 302)
                         and _csv_marker in urllib.parse.unquote(_csv_body)):
                     _csv_found_forms.add(action)
@@ -30003,6 +30016,15 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             for nosql_pay, nosql_err in _NOSQL_PAYLOADS:
                 r = _qs_inject(purl, param, nosql_pay, sess, timeout)
                 _nosql_body = _strip_url_echo(r.text, r, [nosql_pay]) if r else ""
+                if _nosql_body:
+                    _he_pay = _html_mod.escape(nosql_pay)
+                    if _he_pay != nosql_pay:
+                        _nosql_body = _nosql_body.replace(_he_pay, "")
+                    _nosql_body = _html_mod.unescape(_nosql_body)
+                    for _nenc in (nosql_pay,
+                                  urllib.parse.quote(nosql_pay, safe=''),
+                                  urllib.parse.quote_plus(nosql_pay)):
+                        _nosql_body = _nosql_body.replace(_nenc, "")
                 if r and _inj_is_login_page(r):
                     continue
                 if r and nosql_err.search(_nosql_body):
@@ -30203,9 +30225,14 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         r'\?[^\s<>"\']*' + _pat_core + r'[^\s<>"\']*',
                         '', _ci_body, flags=re.I)
                     _ci_body = re.sub(
-                        r'(?:href|src|action|content)(?:\s*)=(?:\s*)["\'][^"\']*'
+                        r'(?:href|src|action|content|value|data(?:-[a-z][a-z0-9-]*)?)(?:\s*)=(?:\s*)["\'][^"\']*'
                         + _pat_core + r'[^"\']*["\']',
                         '', _ci_body, flags=re.I)
+                _ci_body = _html_mod.unescape(_ci_body)
+                for _enc in (ci_pay,
+                             urllib.parse.quote(ci_pay, safe=''),
+                             urllib.parse.quote_plus(ci_pay)):
+                    _ci_body = _ci_body.replace(_enc, "")
                 if ci_pat.search(_ci_body):
                     _rq, _rp = _save_http_evidence(out, phase, f"codeinject_{param}", r, endpoint_url=purl, method="GET")
                     out.add_finding(
