@@ -28651,6 +28651,19 @@ _INJ_AUTH_PATH_RE = re.compile(
     r'(/login|/signin|/sign-in|/auth/login|/oauth|/sso/|/sign-on)',
     re.IGNORECASE,
 )
+_DC_LOGIN_FAIL_RE = re.compile(
+    r'invalid\s+(username|password|credentials|login)'
+    r'|incorrect\s+(username|password|credentials)'
+    r'|authentication\s+failed'
+    r'|login\s+failed'
+    r'|not\s+allowed\s+to\s+sign\s+on'
+    r'|access\s+denied'
+    r'|account\s+(locked|disabled|suspended)'
+    r'|bad\s+credentials'
+    r'|wrong\s+password'
+    r'|<input\s+type=["\']password["\']',
+    re.IGNORECASE,
+)
 
 def _inj_is_login_page(r) -> bool:
     """Return True if the injection response is a login/auth redirect page."""
@@ -28658,7 +28671,7 @@ def _inj_is_login_page(r) -> bool:
         return False
     try:
         _url = (r.url or "").lower()
-        _body = (r.text or "")[:8000].lower()
+        _body = (r.text or "")[:32000].lower()
     except Exception:
         return False
     if _INJ_AUTH_PATH_RE.search(_url):
@@ -30008,11 +30021,16 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
 
-    # 11. NoSQL injection
+    # 11. NoSQL injection — baseline-gated (like LDAP/SQLi).
     vc.status(phase, "Injection Testing", "running", "NoSQL injection", 12, 28)
     for entry in params[:10]:
         purl = entry["url"]
         for param in entry["params"]:
+            _nosql_base_r = _qs_inject(purl, param, "fracture_nosql_safe", sess, timeout)
+            _nosql_base_body = ""
+            if _nosql_base_r:
+                _nosql_base_body = _strip_url_echo(
+                    _nosql_base_r.text, _nosql_base_r, ["fracture_nosql_safe"])
             for nosql_pay, nosql_err in _NOSQL_PAYLOADS:
                 r = _qs_inject(purl, param, nosql_pay, sess, timeout)
                 _nosql_body = _strip_url_echo(r.text, r, [nosql_pay]) if r else ""
@@ -30020,12 +30038,21 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     _he_pay = _html_mod.escape(nosql_pay)
                     if _he_pay != nosql_pay:
                         _nosql_body = _nosql_body.replace(_he_pay, "")
-                    _nosql_body = _html_mod.unescape(_nosql_body)
+                    # Multi-level HTML unescape to catch double-entity-encoded reflections
+                    _prev = None
+                    while _nosql_body != _prev:
+                        _prev = _nosql_body
+                        _nosql_body = _html_mod.unescape(_nosql_body)
                     for _nenc in (nosql_pay,
                                   urllib.parse.quote(nosql_pay, safe=''),
                                   urllib.parse.quote_plus(nosql_pay)):
                         _nosql_body = _nosql_body.replace(_nenc, "")
                 if r and _inj_is_login_page(r):
+                    continue
+                # Baseline gate: skip if the error regex also matches the
+                # baseline (harmless) response — means the page naturally
+                # contains those tokens.
+                if _nosql_base_body and nosql_err.search(_nosql_base_body):
                     continue
                 if r and nosql_err.search(_nosql_body):
                     _rq, _rp = _save_http_evidence(out, phase, f"nosql_{param}", r, endpoint_url=purl, method="GET")
@@ -31893,7 +31920,6 @@ def _probe_login_default_creds(login_url: str, target: dict,
         _method_used = auth_method or "unknown"
 
         if _use_cfg_auth and _verify_url:
-            # Build a one-off auth config with the test credentials
             _test_cfg = dict(cfg)
             _test_auth = dict(cfg["auth"])
             _test_auth["username"] = uname
@@ -31903,14 +31929,15 @@ def _probe_login_default_creds(login_url: str, target: dict,
                 _test_sess = _build_auth_session(
                     _test_cfg, no_interactive=True, quiet=True)
                 if _test_sess:
-                    # Verify: hit the auth-gated page and check for real content
                     _vr = _test_sess.get(_verify_url, timeout=cfg.get("timeout", 10),
                                          allow_redirects=True)
                     if _vr and _vr.status_code == 200 and not _inj_is_login_page(_vr):
-                        _success = True
-                        _method_used = (cfg["auth"].get("method")
-                                        or cfg["auth"].get("auth_type")
-                                        or "form_login")
+                        _vr_body = (_vr.text or "")[:32000].lower()
+                        if not _DC_LOGIN_FAIL_RE.search(_vr_body):
+                            _success = True
+                            _method_used = (cfg["auth"].get("method")
+                                            or cfg["auth"].get("auth_type")
+                                            or "form_login")
             except Exception:
                 pass
         else:
@@ -41504,7 +41531,20 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
 
     vc.status(phase, "Deserialization", "running", "YAML deserialization probe", 2, 3)
     # 3. YAML deserialization probe via form fields and API endpoints
+    # The payload contains "fracture_yaml_rce" as an execution marker, but
+    # that marker is IN the payload — any app that echoes POST values
+    # (even HTML-entity-encoded) reflects it, causing false positives on
+    # non-Python stacks (e.g. ASP.NET MOVEit Transfer).  Now we:
+    #   a) fetch a baseline POST with harmless data,
+    #   b) only match yaml-parser error signatures (not the execution
+    #      marker), and
+    #   c) require the response to differ from baseline.
     _yaml_payload = "!!python/object/apply:os.system ['echo fracture_yaml_rce']"
+    _yaml_err_re = re.compile(
+        r'yaml\.scanner\.ScannerError|yaml\.parser\.ParserError|'
+        r'could not determine a constructor|unsafe.*load|'
+        r'yaml\.(?:safe_)?load|found.*undefined.*tag.*!!python|'
+        r'ConstructorError|yaml\.constructor', re.I)
     for form in forms[:5]:
         action = form.get("action", url)
         inputs = form.get("inputs", [])
@@ -41512,35 +41552,52 @@ def _phase_deserialization(target: dict, cfg: dict, pm: ProgressManager,
             pname = inp.get("name", "")
             if not pname:
                 continue
-            data = {i["name"]: "test" for i in inputs if i.get("name")}
+            base_data = {i["name"]: "test" for i in inputs if i.get("name")}
+            try:
+                _yaml_bl = sess.post(action, data=base_data, timeout=timeout)
+            except Exception:
+                _yaml_bl = None
+            _yaml_bl_body = ""
+            if _yaml_bl:
+                _yaml_bl_body = _yaml_bl.text or ""
+                _yaml_bl_body = _html_mod.unescape(_yaml_bl_body)
+            data = dict(base_data)
             data[pname] = _yaml_payload
             try:
                 r = sess.post(action, data=data, timeout=timeout)
-                # Strip payload reflections before checking for the
-                # execution marker — same false-positive risk as code
-                # injection: some apps echo POST field values back.
                 _yaml_body = r.text
+                _he_pay = _html_mod.escape(_yaml_payload)
+                if _he_pay != _yaml_payload:
+                    _yaml_body = _yaml_body.replace(_he_pay, "")
+                _yaml_body = _html_mod.unescape(_yaml_body)
                 for _enc in (_yaml_payload,
                              urllib.parse.quote(_yaml_payload),
                              urllib.parse.quote_plus(_yaml_payload)):
                     _yaml_body = _yaml_body.replace(_enc, "")
-                if (re.search(r'fracture_yaml_rce|yaml.*error|unsafe.*load', _yaml_body, re.I)
-                          or r.status_code == 500):
-                    _rq, _rp = _save_http_evidence(out, phase, f"deser_yaml_{pname}", r)
-                    out.add_finding(
-                        title="Insecure Deserialization — YAML Tag Injection",
-                        url=action, port=target["port"], risk="CRITICAL",
-                        description=(f"Field '{pname}' at {action} accepted a YAML tag injection payload "
-                                     f"({_yaml_payload!r}). The response indicates YAML parsing of the input."),
-                        output=f"Field: {pname}\nPayload: {_yaml_payload}\nResponse ({r.status_code}): {r.text[:400]}",
-                        output_file=f"{_rq},{_rp}",
-                        sources="fracture-deserialization", service=target["scheme"],
-                        affected=action, owasp="A08:2025 Software and Data Integrity Failures",
-                        nist="SI-7",
-                        remediation="Use yaml.safe_load() instead of yaml.load(). Never pass user input to YAML parsers that process Python tags.",
-                    )
-                    vc.log(f"[deserialization] YAML tag injection at {action}", "SUCCESS")
-                    break
+                _yaml_match = _yaml_err_re.search(_yaml_body)
+                _yaml_500 = (r.status_code == 500 and
+                             (_yaml_bl is None or _yaml_bl.status_code != 500))
+                if not _yaml_match and not _yaml_500:
+                    continue
+                if _yaml_bl and _yaml_err_re.search(_yaml_bl_body):
+                    continue
+                if _yaml_bl and abs(len(r.text) - len(_yaml_bl.text)) < max(50, len(_yaml_bl.text) * 0.05):
+                    continue
+                _rq, _rp = _save_http_evidence(out, phase, f"deser_yaml_{pname}", r)
+                out.add_finding(
+                    title="Insecure Deserialization — YAML Tag Injection",
+                    url=action, port=target["port"], risk="CRITICAL",
+                    description=(f"Field '{pname}' at {action} accepted a YAML tag injection payload "
+                                 f"({_yaml_payload!r}). The response indicates YAML parsing of the input."),
+                    output=f"Field: {pname}\nPayload: {_yaml_payload}\nResponse ({r.status_code}): {r.text[:400]}",
+                    output_file=f"{_rq},{_rp}",
+                    sources="fracture-deserialization", service=target["scheme"],
+                    affected=action, owasp="A08:2025 Software and Data Integrity Failures",
+                    nist="SI-7",
+                    remediation="Use yaml.safe_load() instead of yaml.load(). Never pass user input to YAML parsers that process Python tags.",
+                )
+                vc.log(f"[deserialization] YAML tag injection at {action}", "SUCCESS")
+                break
             except Exception:
                 pass
 
