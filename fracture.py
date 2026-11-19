@@ -49581,6 +49581,20 @@ def main() -> None:
         except Exception:
             pass
 
+        # Baseline webapp_intel: ensure every target has a row even if
+        # recon fails (DNS unresolvable, timeout, etc.).  The recon emit
+        # uses INSERT OR REPLACE and will enrich it later.
+        if _ie:
+            try:
+                _ie.emit_intel("webapp_intel", {
+                    "url": target["url"],
+                    "ip": target.get("ip", target.get("hostname", "")),
+                    "port": target["port"],
+                    "hostname": target.get("hostname", ""),
+                })
+            except Exception:
+                pass
+
         if pm.get_state()["completed_phases"]:
             vc.log("Checkpoint found — resuming from previous run", "INFO")
 
