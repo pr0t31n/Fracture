@@ -37137,6 +37137,7 @@ def _phase_auth_recon(target: dict, cfg: dict, pm: ProgressManager,
     max_depth = cfg.get("crawl_depth", 3)
 
     while queue_urls and page_count < max_pages:
+        _check_pause()
         current_url, depth = queue_urls.pop(0)
         _norm_cur = current_url.rstrip("/")
         if _norm_cur in visited:
@@ -49307,6 +49308,46 @@ def main() -> None:
     _processed_urls:      set  = set()
     _redirect_discovered: set  = set()  # tracks redirect-discovered target URLs
     _pending_idx = 0
+
+    # ── Resume: restore outer target-loop state ──────────────────────
+    # Each target's checkpoint.json saves the full outer-loop state
+    # (processed_urls, pending_urls, pending_idx, redirect_discovered)
+    # at the time that target was active.  Pick the checkpoint with the
+    # MOST processed_urls — that's the furthest-progressed checkpoint,
+    # which is more reliable than newest-timestamp (a broken resume can
+    # write a newer but less-complete checkpoint on an earlier target).
+    if args.resume:
+        _best_cp_ss, _best_cp_n = None, 0
+        _cp_base = Path(cfg["project"]).resolve()
+        for _cpd in sorted(_cp_base.iterdir()):
+            if not _cpd.is_dir() or _cpd.name.startswith("."):
+                continue
+            _cpf = _cpd / "checkpoint.json"
+            if not _cpf.exists():
+                continue
+            try:
+                _cpdata = json.loads(_cpf.read_text(encoding="utf-8"))
+                _cpss = _cpdata.get("scan_state", {})
+                _cpn = len(_cpss.get("processed_urls", []))
+                if _cpn > _best_cp_n:
+                    _best_cp_n = _cpn
+                    _best_cp_ss = _cpss
+            except Exception:
+                continue
+        if _best_cp_ss:
+            _r_processed = set(_best_cp_ss.get("processed_urls", []))
+            _r_pending = _best_cp_ss.get("pending_urls", [])
+            _r_redirects = set(_best_cp_ss.get("redirect_discovered", []))
+            if _r_processed:
+                _processed_urls = _r_processed
+                vc.log(f"[resume] Restored {len(_processed_urls)} processed target(s) "
+                       f"— completed targets will be skipped", "INFO")
+            if _r_pending and len(_r_pending) >= len(_pending_urls):
+                _pending_urls = _r_pending
+                vc.log(f"[resume] Restored {len(_pending_urls)} target(s) in queue "
+                       f"(includes redirect-discovered)", "INFO")
+            if _r_redirects:
+                _redirect_discovered = _r_redirects
 
     # Per-target auth: save the original global auth config so each original target
     # can start from a clean slate, optionally overlaid with per-URL overrides.
