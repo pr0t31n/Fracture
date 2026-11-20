@@ -4739,7 +4739,7 @@ class OutputManager:
             r"|Unknown Header Identified"
             r"|Inconsistent Security Header Usage"
             r"|Endpoint-Specific Header"
-            r"|Technology Identified|Software Identified|Software Version Detected|Vulnerable Component):",
+            r"|Technology Identified|Software Detected|Software Identified|Software Version Detected|Vulnerable Component):",
             t,
         ):
             for ln in (output or "").split("\n"):
@@ -15171,7 +15171,7 @@ def _phase_wordpress_scan(
         _p_ev.write_text(r.text[:5000], encoding="utf-8")
         _ver_str = f" v{_p_ver}" if _p_ver else ""
         out.add_finding(
-            title="Software Identified: WordPress Plugin Detected",
+            title="Software Detected: WordPress Plugin Detected",
             url=base, port=target["port"], risk="INFO",
             description=(
                 "WordPress plugin(s) confirmed via readme.txt enumeration. "
@@ -15238,7 +15238,7 @@ def _phase_wordpress_scan(
         ]
         _theme_ev = ",".join(_ev for _, _, _, _ev, _ in _detected_themes)
         out.add_finding(
-            title="Software Identified: WordPress Theme Detected",
+            title="Software Detected: WordPress Theme Detected",
             url=base, port=target["port"], risk="INFO",
             description=(
                 f"{len(_detected_themes)} theme(s) detected via style.css. "
@@ -15281,7 +15281,7 @@ def _phase_wordpress_scan(
                 except Exception:
                     pass
                 out.add_finding(
-                    title=f"Software Identified: WordPress Parent Theme Detected: {_pt_name}{_pt_ver_str}",
+                    title=f"Software Detected: WordPress Parent Theme Detected: {_pt_name}{_pt_ver_str}",
                     url=base + _psc, port=target["port"], risk="INFO",
                     description=(
                         f"Parent theme '{_pt_name}' (slug: {_t_parent})"
@@ -18147,7 +18147,7 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
                             _ww_hl_tech = [f"{pname} {version}".strip()] if version else [pname]
                             out.add_finding(
                                 title=(f"Software Version Detected: {pname} {version}".strip()
-                                       if version else f"Software Identified: {pname}"),
+                                       if version else f"Software Detected: {pname}"),
                                 url=url, port=target["port"], risk="INFO",
                                 description=(
                                     f"whatweb identified {pname}"
@@ -33880,6 +33880,7 @@ def _normalize_nikto(vuln: dict) -> dict:
         "network is unreachable", "connection timed out",
         "connection refused", "no route to host",
         "host is unreachable", "name resolution failed",
+        "unable to connect",
     )):
         return None
 
@@ -33989,7 +33990,7 @@ _NUCLEI_NORM: "list[tuple]" = [
      "Patch OpenSSL to a version not affected by Heartbleed."),
     # ── Server / technology ──
     (r"^tech-detect$|^wappalyzer-",
-     "Software Identified", "INFO",
+     "Software Detected", "INFO",
      "A05:2025 Security Misconfiguration", "CM-7",
      "Review exposed technology stack for known vulnerabilities."),
     (r"^waf-detect$|^waf-",
@@ -34672,7 +34673,7 @@ def _normalize_nuclei(item: dict) -> dict:
             _tech_display = _name
         else:
             _tech_display = "Unknown Technology"
-        _sw_cat = "Software Version Detected" if re.search(r'\d+\.\d+', _tech_display) else "Software Identified"
+        _sw_cat = "Software Version Detected" if re.search(r'\d+\.\d+', _tech_display) else "Software Detected"
         return {
             "title": f"{_sw_cat}: {_tech_display}", "risk": "INFO",
             "description": _desc or f"{_tech_display} detected by nuclei ({_tid}).",
@@ -34812,7 +34813,7 @@ def _normalize_nuclei(item: dict) -> dict:
                 if _clean.endswith(_sfx):
                     _clean = _clean[:-len(_sfx)].strip()
                     break
-            _sw_cat2 = "Software Version Detected" if re.search(r'\d+\.\d+', _clean) else "Software Identified"
+            _sw_cat2 = "Software Version Detected" if re.search(r'\d+\.\d+', _clean) else "Software Detected"
             return {
                 "title": f"{_sw_cat2}: {_clean}", "risk": _sev or "INFO",
                 "description": _desc or f"{_name} ({_tid})",
