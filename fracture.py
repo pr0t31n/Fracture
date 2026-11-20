@@ -33884,6 +33884,14 @@ def _normalize_nikto(vuln: dict) -> dict:
     )):
         return None
 
+    # Drop informational nikto entries that duplicate proper findings.
+    if any(p in _msg_low for p in (
+        "retrieved via header",
+        "retrieved x-powered-by header",
+        "retrieved x-aspnet-version header",
+    )):
+        return None
+
     # Fallback: use first sentence of msg as title (no "Nikto:" prefix so
     # identical findings from different tools still merge by title).
     _fb_title = msg.split(". ")[0].strip().rstrip(".") if msg else f"Nikto ID {_nik_id}"
