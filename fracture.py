@@ -27062,6 +27062,7 @@ def _phase_spa_crawl(target: dict, cfg: dict, pm: "ProgressManager",
         vc.status(phase, "Crawl", "running", "SPA headless crawl", 0, max_pages)
 
         while queue and page_count < max_pages:
+            _check_pause()
             current = queue.pop(0)
             norm_c  = current.rstrip("/")
             if norm_c in visited:
@@ -27376,6 +27377,7 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         vc.log(f"[crawl] App path prefix detected: {_app_prefix} — scoping crawl", "INFO")
 
     while queue_urls and page_count < max_pages:
+        _check_pause()
         current_url, depth = queue_urls.pop(0)
         _norm_cur = current_url.rstrip("/")
         if _norm_cur in visited:
