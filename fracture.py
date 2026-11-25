@@ -60,6 +60,56 @@ from pathlib import Path
 
 VERSION = Path(__file__).resolve().parent.joinpath("VERSION").read_text().strip()
 
+# ── Shared proxy helper (graceful degradation if not installed) ──
+try:
+    if "/opt/pr0t31n/shared" not in sys.path:
+        sys.path.insert(0, "/opt/pr0t31n/shared")
+    import pr0t31n_proxy as _pp
+except ImportError:
+    _pp = None
+
+# Module-level proxy state — set once at scan start by _init_proxy()
+_PROXY_URL = ""
+_PROXYCHAINS_CONF = None
+
+
+def _init_proxy(cfg, run_dir=None):
+    """Build proxy URL from config and write proxychains conf if needed."""
+    global _PROXY_URL, _PROXYCHAINS_CONF
+    proxy_addr = cfg.get("proxy", "")
+    if not proxy_addr:
+        _PROXY_URL = ""
+        _PROXYCHAINS_CONF = None
+        return
+    if _pp:
+        _PROXY_URL = _pp.build_proxy_url(
+            proxy_addr,
+            cfg.get("proxy_type", "http"),
+            cfg.get("dns_over_proxy", False),
+        )
+    else:
+        _PROXY_URL = proxy_addr
+    if run_dir and _pp and _pp.is_socks(_PROXY_URL):
+        _PROXYCHAINS_CONF = _pp.write_proxychains_conf(
+            _PROXY_URL, run_dir,
+            dns_over_proxy=cfg.get("dns_over_proxy", False),
+        )
+    elif run_dir and _pp:
+        _PROXYCHAINS_CONF = _pp.write_proxychains_conf(
+            _PROXY_URL, run_dir, dns_over_proxy=False,
+        )
+
+
+def _proxy_env(env=None):
+    """Merge proxy env vars for tools that use HTTP_PROXY."""
+    if not _PROXY_URL or not _pp:
+        return env
+    pe = _pp.proxy_env(_PROXY_URL)
+    if env is None:
+        env = os.environ.copy()
+    env.update(pe)
+    return env
+
 # ── Adaptive concurrency ──────────────────────────────────────────────────────
 def _hw_detect():
     """Return (logical_cpu_count, ram_gb) for the local machine."""
@@ -4304,14 +4354,40 @@ def _run(cmd: list, **kwargs) -> subprocess.CompletedProcess:
             kwargs["env"] = _env
         else:
             kwargs["preexec_fn"] = _mem_limit_preexec
+    # Proxy injection
+    if _PROXY_URL and _pp:
+        _orig_bin = Path(cmd[0]).name if cmd else ""
+        _pi = _pp._tool_info(_orig_bin)
+        if _pi and _pi.get("env"):
+            _env = kwargs.get("env")
+            if _env is None:
+                _env = os.environ.copy()
+            _env.update(_pp.proxy_env(_PROXY_URL))
+            kwargs["env"] = _env
+        elif not (_pi and (_pi.get("offline") or _pi.get("special"))):
+            cmd = _pp.proxy_wrap_cmd(
+                cmd, _PROXY_URL, proxychains_conf=_PROXYCHAINS_CONF)
     return subprocess.run(cmd, **{**_POPEN_FLAGS, **kwargs})
 
 
 def _popen(cmd: list, **kwargs) -> subprocess.Popen:
     """Open a subprocess with memory limits, suppressing console windows on Windows."""
+    # Proxy injection: wrap command before memory-limit setup so the original
+    # binary name is used for Go-binary detection.
+    _orig_bin = Path(cmd[0]).name if cmd else ""
+    if _PROXY_URL and _pp:
+        _pi = _pp._tool_info(_orig_bin)
+        if _pi and _pi.get("env"):
+            _env = kwargs.get("env")
+            if _env is None:
+                _env = os.environ.copy()
+            _env.update(_pp.proxy_env(_PROXY_URL))
+            kwargs["env"] = _env
+        elif not (_pi and (_pi.get("offline") or _pi.get("special"))):
+            cmd = _pp.proxy_wrap_cmd(
+                cmd, _PROXY_URL, proxychains_conf=_PROXYCHAINS_CONF)
     if "preexec_fn" not in kwargs and sys.platform != "win32":
-        _bin = Path(cmd[0]).name if cmd else ""
-        if _bin in _GO_BINARIES:
+        if _orig_bin in _GO_BINARIES:
             kwargs["preexec_fn"] = _go_mem_limit_preexec
             _env = kwargs.get("env")
             if _env is None:
@@ -5457,7 +5533,13 @@ def _make_session(cfg: dict, scope_hostnames: "set | None" = None) -> requests.S
         sess.headers.update(extra)
     proxy = cfg.get("proxy", "")
     if proxy:
-        sess.proxies = {"http": proxy, "https": proxy}
+        if _pp:
+            _proxy_url = _pp.build_proxy_url(
+                proxy, cfg.get("proxy_type", "http"),
+                cfg.get("dns_over_proxy", False))
+        else:
+            _proxy_url = proxy
+        sess.proxies = {"http": _proxy_url, "https": _proxy_url}
     # ── Per-request delay (anti-WAF throttle) ─────────────────────────────
     # When cfg["request_delay"] > 0, every response triggers a sleep before
     # the calling code returns. Implemented as a response hook so it applies
@@ -12992,6 +13074,8 @@ DEFAULT_SETTINGS: dict = {
         "user_agent":       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "extra_headers":    {},
         "proxy":            "",
+        "proxy_type":       "http",
+        "dns_over_proxy":   False,
         "verify_ssl":       False,
         "phases": {
             "recon": True, "screenshot": True, "webfiles": True,
@@ -17760,6 +17844,26 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         )
         whatweb = None
         _ww_skipped_stealth = True
+    # When SOCKS proxy is active and whatweb can't use it, use built-in
+    _use_builtin_whatweb = (
+        _PROXY_URL and _pp and _pp.is_socks(_PROXY_URL)
+    )
+    if whatweb and _use_builtin_whatweb:
+        vc.log("[recon] Built-in tech fingerprint (SOCKS proxy active, whatweb bypassed)", "INFO")
+        ww_out = out.output_path(phase, "whatweb_" + target["hostname"])
+        try:
+            _bww_res = _pp.builtin_whatweb(url, session=sess)
+            ww_out.write_text(json.dumps(_bww_res, indent=2), encoding="utf-8")
+            _bww_techs = _bww_res.get("technologies", [])
+            for _bww_t in _bww_techs:
+                _bww_name = _bww_t.get("name", "")
+                _bww_cat = _bww_t.get("category", "")
+                if _bww_name:
+                    _ww_versions.append((_bww_name, ""))
+                    vc.log(f"[recon] Detected: {_bww_name} ({_bww_cat})", "INFO")
+        except Exception as _bww_e:
+            vc.log(f"[recon] Built-in whatweb failed: {_bww_e}", "WARNING")
+        whatweb = None  # skip the subprocess path below
     if whatweb:
         ww_out = out.output_path(phase, "whatweb_" + target["hostname"])
         cmd = [whatweb, f"--log-json={ww_out}", "-a", "3", "--quiet", "--no-errors"]
@@ -23609,6 +23713,31 @@ def _phase_tls(target: dict, cfg: dict, pm: ProgressManager,
 
     # ── webanalyze (Wappalyzer-equivalent technology detection) ────────────
     _wa_bin = _find_tool("webanalyze")
+    # When SOCKS proxy is active, webanalyze can't use it — use built-in
+    if _wa_bin and _PROXY_URL and _pp and _pp.is_socks(_PROXY_URL):
+        vc.log(f"[tls] Built-in webanalyze on {target['url']} (SOCKS proxy active)", "INFO")
+        _wa_out = out.output_path("recon", f"webanalyze_{hostname}.json")
+        try:
+            _bwa_res = _pp.builtin_webanalyze(target["url"], session=sess)
+            _wa_out.write_text(json.dumps(_bwa_res, indent=2), encoding="utf-8")
+            _bwa_techs = [t.get("name", "") for t in _bwa_res.get("technologies", []) if t.get("name")]
+            if _bwa_techs:
+                _wa_unique = list(dict.fromkeys(_bwa_techs))
+                out.add_finding(
+                    title="Technology Stack Identified (Wappalyzer)",
+                    url=target["url"], port=port,
+                    risk="INFO",
+                    description=(
+                        f"Built-in Wappalyzer-style fingerprint identified {len(_wa_unique)} "
+                        f"technologies: {', '.join(_wa_unique[:30])}"
+                        + (f" (+{len(_wa_unique)-30} more)" if len(_wa_unique) > 30 else "")
+                    ),
+                    sources="webanalyze (built-in)", service="https" if target.get("is_https") else "http",
+                    output_file=str(_wa_out),
+                )
+        except Exception as _bwa_e:
+            vc.log(f"[tls] Built-in webanalyze failed: {_bwa_e}", "WARNING")
+        _wa_bin = None  # skip subprocess path
     if _wa_bin:
         vc.log(f"[tls] Running webanalyze on {target['url']}", "INFO")
         _wa_out = out.output_path("recon", f"webanalyze_{hostname}.json")
@@ -25337,6 +25466,13 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 pass
 
+    # When SOCKS proxy is active, shcheck cannot route through it.
+    # Use the built-in security header checker instead.
+    _use_builtin_shcheck = (
+        _PROXY_URL and _pp and _pp.is_socks(_PROXY_URL)
+        and _pp is not None
+    )
+
     vc.status(phase, "shcheck", "running", "Security header check", 0, len(targets_to_scan))
 
     for i, tgt in enumerate(targets_to_scan):
@@ -25366,6 +25502,25 @@ def _phase_shcheck(target: dict, cfg: dict, pm: ProgressManager,
             except Exception:
                 vc.log(f"[shcheck] Skipping {tgt_url} — unreachable", "INFO")
                 continue
+
+        # ── Built-in shcheck over SOCKS ──────────────────────────────────
+        if _use_builtin_shcheck:
+            vc.log(f"[shcheck] Built-in header check on {tgt_url} (SOCKS proxy active)", "INFO")
+            try:
+                _bi_res = _pp.builtin_shcheck(tgt_url, session=sess)
+                _bi_lines = []
+                for _h in _bi_res.get("present", []):
+                    _bi_lines.append(f"[*] {_h['header']}: {_h.get('value', '')} — {_h.get('note', '')}")
+                for _h in _bi_res.get("missing", []):
+                    _bi_lines.append(f"[!] Missing: {_h['header']} — {_h.get('note', '')}")
+                for _h in _bi_res.get("dangerous", []):
+                    _bi_lines.append(f"[!] {_h['header']}: {_h.get('value', '')} — {_h.get('note', '')}")
+                _bi_text = "\n".join(_bi_lines)
+                out_f.write_text(json.dumps(_bi_res, indent=2), encoding="utf-8")
+            except Exception as _bi_e:
+                vc.log(f"[shcheck] Built-in check failed on {tgt_url}: {_bi_e}", "WARNING")
+            vc.status(phase, "shcheck", "running", "Scanning", i + 1, len(targets_to_scan))
+            continue
 
         # Build command: python3 path/to/shcheck.py if it's a .py script
         _flags = ["-k", "--colors=none", "-j"]
@@ -28268,10 +28423,14 @@ def _phase_manual_crawl(out: "OutputManager", target: dict, cfg: dict,
     # Start mitmdump
     _proxy_proc: "subprocess.Popen | None" = None
     try:
-        _proxy_proc = _popen(
-            [mitmdump, "-p", str(_proxy_port),
+        _mitm_cmd = [mitmdump, "-p", str(_proxy_port),
              "--addon-file", _mitm_addon,
-             "--ssl-insecure", "--quiet"],
+             "--ssl-insecure", "--quiet"]
+        # Chain through upstream proxy when configured
+        if _PROXY_URL and _pp:
+            _mitm_cmd.extend(_pp.mitmdump_proxy_args(_PROXY_URL))
+        _proxy_proc = _popen(
+            _mitm_cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -32142,6 +32301,8 @@ def _run_authprobe_json(url: str, login_url: "str | None" = None,
         return None
     cmd = [sys.executable, authprobe, "--url", url, "--json", "--no-verify",
            "--timeout", str(ap_timeout)]
+    if _PROXY_URL:
+        cmd += ["--proxy", _PROXY_URL]
     if login_url:
         cmd += ["--login-url", login_url]
     if username is not None:
@@ -35815,6 +35976,29 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
         import time as _zap_time
         _zap_time.sleep(3)
 
+    # Configure ZAP outgoing proxy when proxy is active
+    if _zap_ready and _PROXY_URL:
+        try:
+            _zpu = urllib.parse.urlparse(_PROXY_URL)
+            _zp_host = _zpu.hostname or ""
+            _zp_port = str(_zpu.port or 1080)
+            _zap_req.get(
+                f"{_zap_base}/JSON/core/action/setOptionProxyChainName/",
+                params={"String": _zp_host}, timeout=10)
+            _zap_req.get(
+                f"{_zap_base}/JSON/core/action/setOptionProxyChainPort/",
+                params={"Integer": _zp_port}, timeout=10)
+            _zap_req.get(
+                f"{_zap_base}/JSON/core/action/setOptionUseProxyChain/",
+                params={"Boolean": "true"}, timeout=10)
+            if _zpu.scheme.startswith("socks"):
+                _zap_req.get(
+                    f"{_zap_base}/JSON/core/action/setOptionUseSocksProxy/",
+                    params={"Boolean": "true"}, timeout=10)
+            vc.log(f"[zap] Outgoing proxy configured: {_PROXY_URL}", "INFO")
+        except Exception as _zp_e:
+            vc.log(f"[zap] Could not configure outgoing proxy: {_zp_e}", "WARNING")
+
     if not _zap_ready:
         vc.log("[zap] ZAP daemon did not become ready within 120s — aborting", "WARNING")
         out.log_error("zap", " ".join(cmd), "daemon startup timeout (120s)")
@@ -36703,6 +36887,11 @@ def _enumerate_iis_shortname(target: dict, cfg: dict, out: "OutputManager",
             _ss_cmd.extend(["--header", f"{_hk}: {_hv}"])
 
         vc.log(f"[iis-shortname] shortscan → {_base}", "INFO")
+        # Proxy wrap: shortscan has no native proxy support
+        if _PROXY_URL and _pp:
+            _ss_cmd = _pp.proxy_wrap_cmd(
+                _ss_cmd, _PROXY_URL, tool_name="shortscan",
+                proxychains_conf=_PROXYCHAINS_CONF)
         _ss_started = datetime.now().astimezone()
         try:
             _ss_proc = subprocess.run(
@@ -49234,6 +49423,12 @@ def main() -> None:
         cfg["no_cve_correlation"] = True
     if args.browser_auth:
         cfg["browser_auth"] = True
+    if getattr(args, "proxy", None):
+        cfg["proxy"] = args.proxy
+    if getattr(args, "proxy_type", None):
+        cfg["proxy_type"] = args.proxy_type
+    if getattr(args, "dns_over_proxy", False):
+        cfg["dns_over_proxy"] = True
     if args.chromedriver:
         cfg["chromedriver_path"] = args.chromedriver
 
@@ -49290,6 +49485,10 @@ def main() -> None:
 
     _print_banner()
 
+    # Initialize proxy state from config
+    _init_proxy(cfg, run_dir=Path(cfg["project"]) if cfg.get("project") else None)
+    if _PROXY_URL:
+        vc.log(f"Proxy: {_PROXY_URL}" + (" (DNS-over-proxy)" if cfg.get("dns_over_proxy") else ""), "INFO")
     vc.log(f"Fracture v{VERSION} starting", "INFO")
     vc._target_total = len(target_urls)
     vc.log(f"Target(s): {', '.join(target_urls)}", "INFO")

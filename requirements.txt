@@ -18,3 +18,4 @@ dnspython>=2.4.0
 #   wpscan        — WordPress vulnerability scanner
 #   sslscan       — SSL/TLS cipher enumeration
 #   testssl.sh    — comprehensive TLS analysis
+PySocks>=1.7.1
