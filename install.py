@@ -293,6 +293,7 @@ APT_PACKAGES = [
     "ruby", "ruby-dev", "ruby-bundler",
     "libssl-dev", "libcurl4-openssl-dev",
     "libyaml-dev",
+    "proxychains4",
 ]
 # Kali-only packages — not in standard Ubuntu/Debian repos.
 APT_PACKAGES_KALI = ["feroxbuster", "exploitdb"]
@@ -329,6 +330,7 @@ BREW_PACKAGES = [
     # Firefox fallback for SPA crawl
     "geckodriver",
     "mitmproxy",
+    "proxychains-ng",
 ]
 
 
@@ -511,6 +513,7 @@ PIP_PACKAGES = [
     "termcolor>=2.0.0",
     "dnspython>=2.4.0",
     "arjun",
+    "PySocks>=1.7.1",
 ]
 
 OFFLINE_BUNDLE_URLS = {
