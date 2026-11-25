@@ -24228,6 +24228,167 @@ _FRACTURE_VULN_MAP = {
 }
 
 
+
+
+# ── Client-side JavaScript library vulnerability database ──────────────
+# Used by _scan_js_libraries() to detect vulnerable client-side JS.
+# Each key is a lowercase library name; values are
+# (version_prefix, fixed_in, risk, cves, description).
+# Same format as _FRACTURE_VULN_MAP for reuse of _check_component_vuln().
+
+_JS_VULN_DB = {
+    "moment": [
+        ("2.",  "2.29.4", "MEDIUM", ["CVE-2022-31129","CVE-2022-24785"],
+         "moment.js < 2.29.4 — ReDoS in string parsing (CVE-2022-31129) "
+         "and path traversal in locale loading (CVE-2022-24785)."),
+        ("1.",  "2.29.4", "MEDIUM", ["CVE-2022-31129","CVE-2022-24785"],
+         "moment.js 1.x — all versions affected by CVE-2022-31129/24785. EOL."),
+    ],
+    "moment.js": [
+        ("2.",  "2.29.4", "MEDIUM", ["CVE-2022-31129","CVE-2022-24785"],
+         "moment.js < 2.29.4 — ReDoS in string parsing (CVE-2022-31129) "
+         "and path traversal in locale loading (CVE-2022-24785)."),
+    ],
+    "lodash": [
+        ("4.17.0", "4.17.21", "HIGH", ["CVE-2021-23337","CVE-2020-28500","CVE-2020-8203","CVE-2019-10744"],
+         "lodash < 4.17.21 — command injection via template (CVE-2021-23337), "
+         "ReDoS in trimEnd (CVE-2020-28500), prototype pollution (CVE-2020-8203, CVE-2019-10744)."),
+        ("4.",     "4.17.21", "HIGH", ["CVE-2019-10744"],
+         "lodash < 4.17.21 — prototype pollution via defaultsDeep (CVE-2019-10744)."),
+        ("3.",     "4.17.21", "HIGH", ["CVE-2019-10744"],
+         "lodash 3.x — all versions affected; EOL."),
+    ],
+    "angularjs": [
+        ("1.8.", "1.8.4",  "HIGH", ["CVE-2024-21490","CVE-2022-25844"],
+         "AngularJS 1.8.x < 1.8.4 — ReDoS via input[url] validation (CVE-2022-25844). EOL."),
+        ("1.6.", "1.6.10", "HIGH", ["CVE-2019-10768","CVE-2019-14863"],
+         "AngularJS 1.6.x < 1.6.10 — prototype pollution via merge (CVE-2019-10768), "
+         "XSS via SVG (CVE-2019-14863)."),
+        ("1.5.", "1.5.11", "CRITICAL", [],
+         "AngularJS 1.5.x — multiple sandbox escape XSS. Upgrade to 1.8.3+."),
+        ("1.4.", "1.5.0",  "CRITICAL", [],
+         "AngularJS 1.4.x — sandbox escape XSS."),
+        ("1.3.", "1.5.0",  "CRITICAL", [],
+         "AngularJS 1.3.x — sandbox escape XSS."),
+        ("1.2.", "1.5.0",  "CRITICAL", ["CVE-2020-7676"],
+         "AngularJS 1.2.x — sandbox escape XSS + prototype pollution (CVE-2020-7676)."),
+    ],
+    "angular": [
+        ("1.8.", "1.8.4",  "HIGH", ["CVE-2022-25844"],
+         "AngularJS 1.8.x < 1.8.4 — ReDoS (CVE-2022-25844). EOL."),
+        ("1.6.", "1.6.10", "HIGH", ["CVE-2019-10768"],
+         "AngularJS 1.6.x < 1.6.10 — prototype pollution via merge."),
+        ("1.",   "1.5.0",  "CRITICAL", [],
+         "AngularJS 1.x (< 1.5) — sandbox escape XSS."),
+    ],
+    "vue": [
+        ("2.5.",  "2.5.17",  "MEDIUM", [],
+         "Vue.js < 2.5.17 — XSS in SSR mode via template compilation."),
+        ("2.",    "2.7.16",  "LOW",    [],
+         "Vue.js 2.x — EOL since Dec 2023. Migrate to Vue 3."),
+    ],
+    "handlebars": [
+        ("4.",  "4.7.7",  "CRITICAL", ["CVE-2021-23369","CVE-2019-19919"],
+         "Handlebars < 4.7.7 — RCE via template compilation (CVE-2021-23369), "
+         "prototype pollution (CVE-2019-19919)."),
+        ("3.",  "4.7.7",  "CRITICAL", ["CVE-2021-23369"],
+         "Handlebars 3.x — all versions affected by CVE-2021-23369. EOL."),
+    ],
+    "marked": [
+        ("4.",  "4.0.10", "MEDIUM", ["CVE-2022-21680","CVE-2022-21681"],
+         "marked < 4.0.10 — ReDoS in heading/inline patterns (CVE-2022-21680/21681)."),
+        ("0.",  "4.0.10", "MEDIUM", ["CVE-2022-21680"],
+         "marked < 4.0.10 — ReDoS (CVE-2022-21680). All 0.x versions affected."),
+        ("1.",  "4.0.10", "MEDIUM", ["CVE-2022-21680"],
+         "marked < 4.0.10 — ReDoS (CVE-2022-21680)."),
+        ("2.",  "4.0.10", "MEDIUM", ["CVE-2022-21680"],
+         "marked < 4.0.10 — ReDoS (CVE-2022-21680)."),
+        ("3.",  "4.0.10", "MEDIUM", ["CVE-2022-21680"],
+         "marked < 4.0.10 — ReDoS (CVE-2022-21680)."),
+    ],
+    "dompurify": [
+        ("2.",  "2.3.1",  "HIGH",   ["CVE-2021-23358"],
+         "DOMPurify < 2.3.1 — mXSS bypass (CVE-2021-23358)."),
+    ],
+    "highlight.js": [
+        ("10.", "10.4.1", "MEDIUM", ["CVE-2020-26237"],
+         "highlight.js < 10.4.1 — prototype pollution (CVE-2020-26237)."),
+        ("9.",  "10.4.1", "MEDIUM", ["CVE-2020-26237"],
+         "highlight.js 9.x — all versions affected by CVE-2020-26237."),
+    ],
+    "underscore": [
+        ("1.",  "1.13.6", "HIGH",   ["CVE-2021-25926"],
+         "underscore.js < 1.13.6 — arbitrary code execution via template "
+         "(CVE-2021-25926). Template function allows code injection."),
+    ],
+    "bootstrap": [
+        ("3.",  "3.4.0",  "MEDIUM", ["CVE-2018-14040","CVE-2018-14041","CVE-2018-14042"],
+         "Bootstrap < 3.4.0 — XSS in collapse, tooltip, and scrollspy data "
+         "attributes (CVE-2018-14040/14041/14042)."),
+        ("4.",  "4.3.1",  "MEDIUM", ["CVE-2019-8331"],
+         "Bootstrap 4.x < 4.3.1 — XSS in tooltip/popover title (CVE-2019-8331)."),
+    ],
+    "axios": [
+        ("0.",  "1.6.0",  "MEDIUM", ["CVE-2023-45857"],
+         "axios < 1.6.0 — XSRF token leakage to third-party hosts (CVE-2023-45857)."),
+        ("1.",  "1.6.0",  "MEDIUM", ["CVE-2023-45857"],
+         "axios < 1.6.0 — XSRF token leakage to third-party hosts (CVE-2023-45857)."),
+    ],
+    "prototype": [
+        ("1.",  "1.7.4",  "HIGH",   ["CVE-2007-2383","CVE-2008-7220"],
+         "Prototype.js — multiple XSS and information disclosure vulnerabilities. "
+         "Library is unmaintained; migrate to a modern framework."),
+    ],
+    "dojo": [
+        ("1.",  "1.16.4", "HIGH",   ["CVE-2020-5259","CVE-2021-23450"],
+         "Dojo < 1.16.4 — prototype pollution (CVE-2021-23450), "
+         "XSS (CVE-2020-5259)."),
+    ],
+    "yui": [
+        ("3.",  "3.18.2", "HIGH",   [],
+         "YUI 3.x — library is EOL (Yahoo deprecated Aug 2014). "
+         "Multiple unpatched XSS and CSRF vulnerabilities."),
+        ("2.",  "3.0.0",  "HIGH",   [],
+         "YUI 2.x — EOL and unmaintained. Migrate."),
+    ],
+    "ember": [
+        ("3.",  "3.28.12","HIGH",   ["CVE-2021-32826"],
+         "Ember.js < 3.28.12 — prototype pollution via attrs (CVE-2021-32826)."),
+    ],
+    "knockout": [
+        ("3.",  "3.5.1",  "MEDIUM", [],
+         "Knockout < 3.5.1 — XSS via component binding when user-controlled "
+         "template names are used. Upgrade to 3.5.1+."),
+    ],
+    "datatables": [
+        ("1.",  "1.11.3", "MEDIUM", ["CVE-2020-28458"],
+         "DataTables < 1.11.3 — prototype pollution in column definitions (CVE-2020-28458)."),
+    ],
+    "ckeditor": [
+        ("4.",  "4.24.0", "HIGH",   ["CVE-2024-24816","CVE-2021-33829"],
+         "CKEditor 4 < 4.24.0 — multiple XSS vulnerabilities including "
+         "CVE-2024-24816 and CVE-2021-33829. CKEditor 4 is EOL."),
+    ],
+    "tinymce": [
+        ("5.",  "5.10.9", "MEDIUM", ["CVE-2024-29881"],
+         "TinyMCE 5.x < 5.10.9 — XSS via noscript element (CVE-2024-29881)."),
+        ("6.",  "6.8.1",  "MEDIUM", ["CVE-2024-29881"],
+         "TinyMCE 6.x < 6.8.1 — XSS via noscript element (CVE-2024-29881)."),
+    ],
+    "select2": [
+        ("4.",  "4.0.13", "MEDIUM", ["CVE-2016-10744"],
+         "Select2 < 4.0.13 — XSS via selection title (CVE-2016-10744)."),
+    ],
+    "plupload": [
+        ("2.",  "2.3.9",  "HIGH",   ["CVE-2021-23562"],
+         "Plupload < 2.3.9 — open redirect / XSS (CVE-2021-23562)."),
+    ],
+    "sockjs": [
+        ("0.",  "0.3.20", "MEDIUM", ["CVE-2020-7693"],
+         "SockJS < 0.3.20 — improper URL parsing (CVE-2020-7693)."),
+    ],
+}
+
 def _check_component_vuln(plugin_name: str, version: str) -> dict | None:
     """Return None when component+version is not known-vulnerable.
     Otherwise return a dict with risk/description/cves/fixed_in/match.
@@ -24269,6 +24430,286 @@ def _check_component_vuln(plugin_name: str, version: str) -> dict | None:
             "cves":        cves,
             "fixed_in":    fixed_in,
             "match":       f"{prefix}.x < {fixed_in}",
+        }
+    return None
+
+
+
+
+# ── Client-side JS library version extraction patterns ─────────────────
+# Each tuple: (compiled_regex_for_url, compiled_regex_for_content, library_name)
+# URL patterns match CDN paths and common filename conventions.
+# Content patterns match version strings embedded in JS source.
+
+_JS_URL_PATTERNS = [
+    # CDN + filename patterns: library-version.min.js, library/version/library.min.js
+    (re.compile(r'(?:^|/)moment[@._-]?(\d+\.\d+\.\d+)', re.I), "moment"),
+    (re.compile(r'(?:^|/)lodash[@._-]?(\d+\.\d+\.\d+)', re.I), "lodash"),
+    (re.compile(r'(?:^|/)angular[@._-]?(\d+\.\d+\.\d+)', re.I), "angularjs"),
+    (re.compile(r'(?:^|/)vue[@._-]?(\d+\.\d+\.\d+)', re.I), "vue"),
+    (re.compile(r'(?:^|/)handlebars[@._-]?(\d+\.\d+\.\d+)', re.I), "handlebars"),
+    (re.compile(r'(?:^|/)marked[@._-]?(\d+\.\d+\.\d+)', re.I), "marked"),
+    (re.compile(r'(?:^|/)purify[@._-]?(\d+\.\d+\.\d+)', re.I), "dompurify"),
+    (re.compile(r'(?:^|/)dompurify[@._-]?(\d+\.\d+\.\d+)', re.I), "dompurify"),
+    (re.compile(r'(?:^|/)highlight[@._-]?(\d+\.\d+\.\d+)', re.I), "highlight.js"),
+    (re.compile(r'(?:^|/)underscore[@._-]?(\d+\.\d+\.\d+)', re.I), "underscore"),
+    (re.compile(r'(?:^|/)backbone[@._-]?(\d+\.\d+\.\d+)', re.I), "backbone"),
+    (re.compile(r'(?:^|/)bootstrap[@._-]?(\d+\.\d+\.\d+)', re.I), "bootstrap"),
+    (re.compile(r'(?:^|/)axios[@._-]?(\d+\.\d+\.\d+)', re.I), "axios"),
+    (re.compile(r'(?:^|/)prototype[@._-]?(\d+\.\d+\.\d+)', re.I), "prototype"),
+    (re.compile(r'(?:^|/)dojo[@._-]?(\d+\.\d+\.\d+)', re.I), "dojo"),
+    (re.compile(r'(?:^|/)yui[@._-]?(\d+\.\d+\.\d+)', re.I), "yui"),
+    (re.compile(r'(?:^|/)ember[@._-]?(\d+\.\d+\.\d+)', re.I), "ember"),
+    (re.compile(r'(?:^|/)knockout[@._-]?(\d+\.\d+\.\d+)', re.I), "knockout"),
+    (re.compile(r'(?:^|/)datatables[@._-]?(\d+\.\d+\.\d+)', re.I), "datatables"),
+    (re.compile(r'(?:^|/)jquery[@._-]?(\d+\.\d+\.\d+)', re.I), "jquery"),
+    (re.compile(r'(?:^|/)ckeditor[@._-]?(\d+\.\d+\.\d+)', re.I), "ckeditor"),
+    (re.compile(r'(?:^|/)tinymce[@._-]?(\d+\.\d+\.\d+)', re.I), "tinymce"),
+    (re.compile(r'(?:^|/)select2[@._-]?(\d+\.\d+\.\d+)', re.I), "select2"),
+    (re.compile(r'(?:^|/)plupload[@._-]?(\d+\.\d+\.\d+)', re.I), "plupload"),
+    (re.compile(r'(?:^|/)sockjs[@._-]?(\d+\.\d+\.\d+)', re.I), "sockjs"),
+    # CDN path style: /ajax/libs/<lib>/<ver>/
+    (re.compile(r'/ajax/libs/moment\.js/(\d+\.\d+\.\d+)', re.I), "moment"),
+    (re.compile(r'/ajax/libs/lodash\.js/(\d+\.\d+\.\d+)', re.I), "lodash"),
+    (re.compile(r'/ajax/libs/angularjs/(\d+\.\d+\.\d+)', re.I), "angularjs"),
+    (re.compile(r'/ajax/libs/angular\.js/(\d+\.\d+\.\d+)', re.I), "angularjs"),
+    (re.compile(r'/ajax/libs/vue/(\d+\.\d+\.\d+)', re.I), "vue"),
+    (re.compile(r'/ajax/libs/handlebars\.js/(\d+\.\d+\.\d+)', re.I), "handlebars"),
+    (re.compile(r'/ajax/libs/highlight\.js/(\d+\.\d+\.\d+)', re.I), "highlight.js"),
+    (re.compile(r'/ajax/libs/underscore\.js/(\d+\.\d+\.\d+)', re.I), "underscore"),
+    (re.compile(r'/ajax/libs/twitter-bootstrap/(\d+\.\d+\.\d+)', re.I), "bootstrap"),
+    (re.compile(r'/ajax/libs/dojo/(\d+\.\d+\.\d+)', re.I), "dojo"),
+    (re.compile(r'/ajax/libs/datatables/(\d+\.\d+\.\d+)', re.I), "datatables"),
+    # npm CDN style: /npm/<pkg>@<ver>/
+    (re.compile(r'/npm/moment@(\d+\.\d+\.\d+)', re.I), "moment"),
+    (re.compile(r'/npm/lodash@(\d+\.\d+\.\d+)', re.I), "lodash"),
+    (re.compile(r'/npm/angular@(\d+\.\d+\.\d+)', re.I), "angularjs"),
+    (re.compile(r'/npm/vue@(\d+\.\d+\.\d+)', re.I), "vue"),
+    (re.compile(r'/npm/handlebars@(\d+\.\d+\.\d+)', re.I), "handlebars"),
+    (re.compile(r'/npm/marked@(\d+\.\d+\.\d+)', re.I), "marked"),
+    (re.compile(r'/npm/dompurify@(\d+\.\d+\.\d+)', re.I), "dompurify"),
+    (re.compile(r'/npm/axios@(\d+\.\d+\.\d+)', re.I), "axios"),
+    (re.compile(r'/npm/bootstrap@(\d+\.\d+\.\d+)', re.I), "bootstrap"),
+    (re.compile(r'/npm/underscore@(\d+\.\d+\.\d+)', re.I), "underscore"),
+]
+
+# Content-based version signatures — match version strings inside JS source.
+# Format: (compiled_regex, group_index, library_name)
+_JS_CONTENT_SIGNATURES = [
+    (re.compile(r'/\*!?\s*moment\.js\s*(?:v|version)?\s*(\d+\.\d+\.\d+)', re.I), 1, "moment"),
+    (re.compile(r'moment\.version\s*=\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "moment"),
+    (re.compile(r'/\*!?\s*lodash\s*(?:v|version)?\s*(\d+\.\d+\.\d+)', re.I), 1, "lodash"),
+    (re.compile(r'lodash\.VERSION\s*=\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "lodash"),
+    (re.compile(r'VERSION\s*[:=]\s*["\'](\d+\.\d+\.\d+).*AngularJS', re.I), 1, "angularjs"),
+    (re.compile(r'angular\.version\s*=.*full:\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "angularjs"),
+    (re.compile(r'/\*!?\s*(?:AngularJS|angular)\s+v?(\d+\.\d+\.\d+)', re.I), 1, "angularjs"),
+    (re.compile(r'/\*!?\s*Vue\.js\s+v?(\d+\.\d+\.\d+)', re.I), 1, "vue"),
+    (re.compile(r'Vue\.version\s*=\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "vue"),
+    (re.compile(r'/\*!?\s*Handlebars\s+v?(\d+\.\d+\.\d+)', re.I), 1, "handlebars"),
+    (re.compile(r'Handlebars\.VERSION\s*=\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "handlebars"),
+    (re.compile(r'/\*!?\s*Underscore\.js\s+v?(\d+\.\d+\.\d+)', re.I), 1, "underscore"),
+    (re.compile(r'_\.VERSION\s*=\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "underscore"),
+    (re.compile(r'/\*!?\s*highlight\.js\s+v?(\d+\.\d+\.\d+)', re.I), 1, "highlight.js"),
+    (re.compile(r'/\*!?\s*Bootstrap\s+v?(\d+\.\d+\.\d+)', re.I), 1, "bootstrap"),
+    (re.compile(r'/\*!?\s*jQuery\s+v?(\d+\.\d+\.\d+)', re.I), 1, "jquery"),
+    (re.compile(r'jQuery\.fn\.jquery\s*=\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "jquery"),
+    (re.compile(r'\$\.fn\.jquery\s*=\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "jquery"),
+    (re.compile(r'/\*!?\s*axios\s+v?(\d+\.\d+\.\d+)', re.I), 1, "axios"),
+    (re.compile(r'/\*!?\s*Dojo\s+v?(\d+\.\d+\.\d+)', re.I), 1, "dojo"),
+    (re.compile(r'/\*!?\s*Ember(?:\.js)?\s+v?(\d+\.\d+\.\d+)', re.I), 1, "ember"),
+    (re.compile(r'Ember\.VERSION\s*=\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "ember"),
+    (re.compile(r'/\*!?\s*Knockout\s+(?:JavaScript library )?v?(\d+\.\d+\.\d+)', re.I), 1, "knockout"),
+    (re.compile(r'ko\.version\s*=\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "knockout"),
+    (re.compile(r'/\*!?\s*DataTables\s+v?(\d+\.\d+\.\d+)', re.I), 1, "datatables"),
+    (re.compile(r'/\*!?\s*CKEditor\s+v?(\d+\.\d+\.\d+)', re.I), 1, "ckeditor"),
+    (re.compile(r'CKEDITOR\.version\s*=\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "ckeditor"),
+    (re.compile(r'/\*!?\s*TinyMCE\s+v?(\d+\.\d+\.\d+)', re.I), 1, "tinymce"),
+    (re.compile(r'tinymce\.majorVersion\s*=\s*["\'](\d+)', re.I), 1, "tinymce"),
+    (re.compile(r'/\*!?\s*Select2\s+v?(\d+\.\d+\.\d+)', re.I), 1, "select2"),
+    (re.compile(r'/\*!?\s*Plupload\s+v?(\d+\.\d+\.\d+)', re.I), 1, "plupload"),
+    (re.compile(r'/\*!?\s*Prototype\s+JavaScript\s+framework\s*,?\s*v?(\d+\.\d+\.\d+)', re.I), 1, "prototype"),
+    (re.compile(r'Prototype\.Version\s*=\s*["\'](\d+\.\d+[.\d]*)', re.I), 1, "prototype"),
+    (re.compile(r'/\*!?\s*YUI\s+v?(\d+\.\d+\.\d+)', re.I), 1, "yui"),
+    (re.compile(r'YUI\.version\s*=\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "yui"),
+    (re.compile(r'/\*!?\s*SockJS\s+v?(\d+\.\d+\.\d+)', re.I), 1, "sockjs"),
+    (re.compile(r'/\*!?\s*DOMPurify\s+v?(\d+\.\d+\.\d+)', re.I), 1, "dompurify"),
+    (re.compile(r'/\*!?\s*marked\s+v?(\d+\.\d+\.\d+)', re.I), 1, "marked"),
+    (re.compile(r'marked\.version\s*=\s*["\'](\d+\.\d+\.\d+)', re.I), 1, "marked"),
+]
+
+
+def _extract_js_versions_from_url(src_url: str) -> list:
+    """Extract (library_name, version) pairs from a script URL."""
+    hits = []
+    for pat, lib in _JS_URL_PATTERNS:
+        m = pat.search(src_url)
+        if m:
+            hits.append((lib, m.group(1)))
+    return hits
+
+
+def _extract_js_versions_from_content(js_text: str) -> list:
+    """Extract (library_name, version) pairs from JS source content."""
+    hits = []
+    scan_region = js_text[:8192]
+    for pat, grp, lib in _JS_CONTENT_SIGNATURES:
+        m = pat.search(scan_region)
+        if m:
+            hits.append((lib, m.group(grp)))
+    return hits
+
+
+def _scan_js_libraries(
+    target: dict, out: "OutputManager", sess: "requests.Session",
+    timeout: int, all_script_srcs: list, crawl_html_cache: dict,
+    phase: str = "crawl"
+):
+    """Scan crawled pages for vulnerable client-side JavaScript libraries.
+
+    all_script_srcs: list of all <script src="..."> URLs (including external/CDN)
+    crawl_html_cache: dict of {url: html_text} from crawled pages
+    """
+    detected: dict = {}  # {(lib, version): {"source_url": ..., "source_type": ...}}
+
+    # 1. Extract from script URLs (CDN/filename patterns)
+    for src_url in all_script_srcs:
+        for lib, ver in _extract_js_versions_from_url(src_url):
+            key = (lib, ver)
+            if key not in detected:
+                detected[key] = {"source_url": src_url, "source_type": "script_url"}
+
+    # 2. Extract from inline scripts + page HTML (version comments/assignments)
+    for page_url, html in crawl_html_cache.items():
+        # Inline <script> blocks
+        for m in re.finditer(r'<script\b[^>]*>(.*?)</script>', html, re.S | re.I):
+            body = m.group(1).strip()
+            if body:
+                for lib, ver in _extract_js_versions_from_content(body):
+                    key = (lib, ver)
+                    if key not in detected:
+                        detected[key] = {"source_url": page_url, "source_type": "inline_script"}
+
+        # Also extract from <script src> in the HTML (catches cross-origin CDN URLs
+        # that _crawl_page skips for the same-origin all_js list)
+        for sm in re.finditer(r'<script[^>]+\bsrc=["\'](.*?)["\'\s>]', html, re.I):
+            src_url = sm.group(1)
+            for lib, ver in _extract_js_versions_from_url(src_url):
+                key = (lib, ver)
+                if key not in detected:
+                    detected[key] = {"source_url": src_url, "source_type": "script_url"}
+
+    # 3. Fetch up to 15 external JS files for content-based scanning
+    _fetched_js: set = set()
+    for src_url in all_script_srcs:
+        if len(_fetched_js) >= 15:
+            break
+        if src_url in _fetched_js:
+            continue
+        # Only fetch if no URL-based detection already found versions from it
+        already_found = any(d["source_url"] == src_url for d in detected.values())
+        if already_found:
+            continue
+        try:
+            jr = sess.get(src_url, timeout=min(timeout, 5), verify=False)
+            if jr.status_code == 200 and len(jr.text) < 4 * 1024 * 1024:
+                _fetched_js.add(src_url)
+                for lib, ver in _extract_js_versions_from_content(jr.text):
+                    key = (lib, ver)
+                    if key not in detected:
+                        detected[key] = {"source_url": src_url, "source_type": "js_content"}
+        except Exception:
+            continue
+
+    if not detected:
+        return
+
+    # 4. Check detected libraries against both _JS_VULN_DB and _FRACTURE_VULN_MAP
+    vuln_count = 0
+    for (lib, ver), info in sorted(detected.items()):
+        # Check _JS_VULN_DB first, then fall back to _FRACTURE_VULN_MAP
+        vuln = None
+        records = _JS_VULN_DB.get(lib)
+        if records:
+            vuln = _check_component_vuln_records(lib, ver, records)
+        if not vuln:
+            vuln = _check_component_vuln(lib, ver)
+        if not vuln:
+            continue
+
+        vuln_count += 1
+        _cve_str = ",".join(vuln.get("cves") or [])
+        _hl = [f"{lib} {ver}"]
+        if vuln.get("cves"):
+            _hl.extend(vuln["cves"][:3])
+
+        out.add_finding(
+            title=f"Vulnerable JavaScript Library: {lib} {ver}",
+            url=target["url"], port=target["port"],
+            risk=vuln["risk"],
+            description=vuln["description"],
+            output=(
+                f"Library: {lib}\n"
+                f"Version: {ver}\n"
+                f"Source: {info['source_url']}\n"
+                f"Detection: {info['source_type']}\n"
+                f"Fixed in: {vuln.get('fixed_in', 'latest')}\n"
+                f"CVEs: {_cve_str or 'N/A'}"
+            ),
+            affected=lib,
+            sources="fracture-js-audit",
+            service=target["scheme"],
+            cves=_cve_str,
+            owasp="A06:2025 Vulnerable and Outdated Components",
+            nist="SI-2",
+            remediation=(
+                f"Upgrade {lib} to version {vuln.get('fixed_in', 'latest')} "
+                f"or newer. If the library is loaded from a CDN, update the "
+                f"CDN URL to reference the patched version. If bundled, "
+                f"update the package dependency and rebuild."
+            ),
+            highlights=_hl,
+            command_type="python",
+        )
+
+    if vuln_count:
+        vc.log(f"[crawl/js-audit] {vuln_count} vulnerable JS librar{'y' if vuln_count == 1 else 'ies'} detected", "SUCCESS")
+    else:
+        vc.log(f"[crawl/js-audit] {len(detected)} JS libraries detected, none vulnerable", "INFO")
+
+
+def _check_component_vuln_records(lib: str, version: str, records: list) -> dict | None:
+    """Check a version against specific records (like _check_component_vuln but
+    takes the records list directly instead of looking up in _FRACTURE_VULN_MAP)."""
+    if not version:
+        return None
+
+    def _vt(v: str):
+        parts = []
+        for p in v.split("."):
+            try: parts.append(int(re.match(r"\d+", p).group(0)))
+            except (AttributeError, ValueError): parts.append(0)
+        return tuple(parts)
+
+    try:
+        _vt(version)
+    except Exception:
+        return None
+
+    for prefix, fixed_in, risk, cves, desc in records:
+        try:
+            if not version.startswith(prefix):
+                continue
+            if _vt(version) >= _vt(fixed_in):
+                continue
+        except Exception:
+            continue
+        return {
+            "risk":        risk,
+            "description": desc + f" Observed: {lib} {version}, "
+                                   f"first patched in {fixed_in}.",
+            "cves":        cves,
+            "fixed_in":    fixed_in,
+            "match":       f"{prefix}x < {fixed_in}",
         }
     return None
 
@@ -27596,6 +28037,8 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                         _pg_html, headers=dict(_cr.headers), exclude=_crawl_excl_hosts):
                     if _lh not in _crawl_leaked_hosts:
                         _crawl_leaked_hosts[_lh] = current_url
+                # Cache HTML for JS library scanning
+                _crawl_html_cache[current_url] = _pg_html
                 # Exception disclosure collection (#12)
                 for _es in _detect_exception_disclosure(_pg_html):
                     _es_key = _es[:40].lower()
@@ -27686,6 +28129,14 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
         all_forms.extend(data["forms"])
         all_js.extend(data["js_files"])
         all_links.extend(data["links"])
+        # Collect ALL script src URLs (including external CDN) for JS lib audit
+        if _pg_html:
+            _SRC_P = re.compile(r"""<script[^>]+\bsrc=["']([^"'>\s]+)""", re.I)
+            for _ssm in _SRC_P.finditer(_pg_html):
+                _ssrc = _ssm.group(1).strip()
+                if _ssrc and _ssrc not in _crawl_all_script_srcs:
+                    _abs_ssrc = urllib.parse.urljoin(current_url, _ssrc)
+                    _crawl_all_script_srcs.append(_abs_ssrc)
         if depth < max_depth:
             for link in data["links"]:
                 _lp = urllib.parse.urlparse(link).path or ""
@@ -28344,6 +28795,16 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
                     vc.log(f"[crawl] Secret in JS: {secret_type} at {js_url} (char {col})", "SUCCESS")
         except Exception:
             pass
+
+    # ── JS library vulnerability audit ──────────────────────────────────
+    if _crawl_html_cache:
+        try:
+            vc.status(phase, "Crawl", "running", "JS library audit", max_pages - 1, max_pages)
+            _scan_js_libraries(
+                target, out, sess, timeout,
+                _crawl_all_script_srcs, _crawl_html_cache, phase)
+        except Exception as _jsae:
+            vc.error(f"[crawl/js-audit] JS library scan error: {_jsae}")
 
     vc.status(phase, "Crawl", "complete", "Done", max_pages, max_pages)
     vc.log("[crawl] Phase complete", "SUCCESS")
