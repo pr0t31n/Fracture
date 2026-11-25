@@ -2,7 +2,7 @@
   "version": "1.7.0",
   "tool": "fracture",
   "generated": "(complete: upgraded existing + scaffolded missing)",
-  "total": 529,
+  "total": 536,
   "from_existing": 340,
   "newly_scaffolded": 64,
   "findings": [
@@ -34495,6 +34495,616 @@
         "garak"
       ],
       "category": "AI/ML Service Detected"
+    },
+    {
+      "id": "FR-531",
+      "title": "External Service Interaction (HTTP)",
+      "aliases": [
+        "Blind SSRF",
+        "Out-of-Band SSRF",
+        "SSRF via OOB Callback"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "CRITICAL",
+      "cwe": [
+        "CWE-918"
+      ],
+      "cve_examples": [
+        "CVE-2021-26855",
+        "CVE-2019-5464",
+        "CVE-2021-21975"
+      ],
+      "cvss_v3_base": 9.1,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A10:2025 Server-Side Request Forgery (SSRF)",
+      "owasp_api": "API7:2023 Server Side Request Forgery",
+      "nist_csf2": [
+        "PR.DS-2"
+      ],
+      "nist_800_53": [
+        "SC-7",
+        "SI-10"
+      ],
+      "nist_800_171": [
+        "3.13.1"
+      ],
+      "pci_dss_4": [
+        "6.2.4"
+      ],
+      "iso_27001": [
+        "A.8.9"
+      ],
+      "iso_27002": [
+        "8.9"
+      ],
+      "soc2": [
+        "CC6.1"
+      ],
+      "hitrust": [
+        "09.w"
+      ],
+      "gdpr": [
+        "Art. 32"
+      ],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        },
+        {
+          "technique": "T1090",
+          "tactic": "Command and Control",
+          "name": "Proxy"
+        }
+      ],
+      "searchsploit_terms": [
+        "ssrf",
+        "server side request forgery"
+      ],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Implement a strict allowlist of permitted outbound URLs and protocols. Deny all requests to internal/private IP ranges (RFC 1918, link-local, loopback). Use a dedicated HTTP client library that does not follow redirects to internal addresses.",
+      "remediation_component": "Application",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "burp-collaborator",
+        "interactsh",
+        "fracture-oob"
+      ],
+      "description": "The application makes server-side HTTP requests to attacker-controlled URLs. When user input is used to construct outbound requests without validation, an attacker can force the server to interact with arbitrary internal or external services. This was confirmed via out-of-band callback — the target server made an HTTP request to the Fracture OOB callback server.",
+      "impact": "An attacker can use the server as a proxy to scan and interact with internal services that are not directly accessible, read cloud metadata endpoints (169.254.169.254) to steal IAM credentials, pivot to internal APIs, exfiltrate data through DNS or HTTP channels, and potentially achieve remote code execution on internal services.",
+      "_x_owasp": "A10:2025 Server-Side Request Forgery (SSRF)",
+      "_x_nist": "SI-10",
+      "_x_sources": [
+        "fracture-oob"
+      ],
+      "_x_cves": [],
+      "_x_service": "http",
+      "_x_phase": "injection",
+      "_x_remediation": "Implement a strict allowlist of permitted outbound URLs and protocols. Deny all requests to internal/private IP ranges."
+    },
+    {
+      "id": "FR-532",
+      "title": "Injection: Blind XML External Entity (XXE) — OOB",
+      "aliases": [
+        "Blind XXE",
+        "Out-of-Band XXE",
+        "XXE via DNS/HTTP Callback"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "CRITICAL",
+      "cwe": [
+        "CWE-611",
+        "CWE-827"
+      ],
+      "cve_examples": [
+        "CVE-2018-11776",
+        "CVE-2014-3529",
+        "CVE-2017-12629"
+      ],
+      "cvss_v3_base": 9.1,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A03:2025 Injection",
+      "owasp_api": "API8:2023 Security Misconfiguration",
+      "nist_csf2": [
+        "PR.DS-2"
+      ],
+      "nist_800_53": [
+        "SI-10",
+        "SC-23"
+      ],
+      "nist_800_171": [
+        "3.13.1",
+        "3.14.1"
+      ],
+      "pci_dss_4": [
+        "6.2.4"
+      ],
+      "iso_27001": [
+        "A.8.9",
+        "A.8.28"
+      ],
+      "iso_27002": [
+        "8.9",
+        "8.28"
+      ],
+      "soc2": [
+        "CC6.1"
+      ],
+      "hitrust": [
+        "09.w"
+      ],
+      "gdpr": [
+        "Art. 32"
+      ],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        },
+        {
+          "technique": "T1005",
+          "tactic": "Collection",
+          "name": "Data from Local System"
+        }
+      ],
+      "searchsploit_terms": [
+        "xxe",
+        "xml external entity"
+      ],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Disable external entity processing and DTD loading in all XML parsers. Use defusedxml (Python), FEATURE_SECURE_PROCESSING (Java), or equivalent hardened parser configurations. Validate Content-Type headers and reject unexpected XML payloads.",
+      "remediation_component": "Application",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "burp-collaborator",
+        "interactsh",
+        "fracture-oob"
+      ],
+      "description": "The application's XML parser processes external entity declarations, confirmed via out-of-band callback. When the application parsed an XML document containing a DOCTYPE with an external entity pointing to the OOB callback server, the server received an HTTP request from the target, proving the parser resolves external entities.",
+      "impact": "An attacker can read arbitrary files from the server filesystem (e.g. /etc/passwd, application configuration files, database credentials), perform SSRF to scan internal networks, exfiltrate data via out-of-band channels, and potentially achieve denial of service through recursive entity expansion (Billion Laughs).",
+      "_x_owasp": "A03:2025 Injection",
+      "_x_nist": "SI-10",
+      "_x_sources": [
+        "fracture-oob"
+      ],
+      "_x_cves": [],
+      "_x_service": "http",
+      "_x_phase": "injection",
+      "_x_remediation": "Disable external entity processing and DTD loading in all XML parsers."
+    },
+    {
+      "id": "FR-533",
+      "title": "Injection: Blind Command Injection (OOB)",
+      "aliases": [
+        "Blind RCE",
+        "Out-of-Band Command Injection",
+        "OOB OS Command Injection"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "CRITICAL",
+      "cwe": [
+        "CWE-78",
+        "CWE-77"
+      ],
+      "cve_examples": [
+        "CVE-2021-44228",
+        "CVE-2014-6271",
+        "CVE-2019-11510"
+      ],
+      "cvss_v3_base": 9.8,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A03:2025 Injection",
+      "owasp_api": "API8:2023 Security Misconfiguration",
+      "nist_csf2": [
+        "PR.DS-2",
+        "PR.IP-1"
+      ],
+      "nist_800_53": [
+        "SI-10",
+        "SI-3"
+      ],
+      "nist_800_171": [
+        "3.14.1",
+        "3.14.2"
+      ],
+      "pci_dss_4": [
+        "6.2.4",
+        "6.3.1"
+      ],
+      "iso_27001": [
+        "A.8.9",
+        "A.8.28"
+      ],
+      "iso_27002": [
+        "8.9",
+        "8.28"
+      ],
+      "soc2": [
+        "CC6.1",
+        "CC7.1"
+      ],
+      "hitrust": [
+        "09.w",
+        "10.a"
+      ],
+      "gdpr": [
+        "Art. 32",
+        "Art. 25"
+      ],
+      "mitre_attack": [
+        {
+          "technique": "T1059",
+          "tactic": "Execution",
+          "name": "Command and Scripting Interpreter"
+        },
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [
+        "command injection",
+        "os command injection",
+        "rce"
+      ],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Never pass user input to OS command interpreters. Use language-native APIs instead of shell commands. If shell execution is unavoidable, use strict allowlists for permitted characters and commands, and use parameterised command execution (e.g. subprocess with shell=False in Python).",
+      "remediation_component": "Application",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "commix",
+        "fracture-oob"
+      ],
+      "description": "The application passes user-controlled input to an operating system command interpreter without adequate sanitisation. This was confirmed via out-of-band callback — injected command substitution payloads caused the server to execute curl/wget to the Fracture OOB callback server.",
+      "impact": "An attacker achieves arbitrary command execution on the server with the privileges of the web application process. This enables full system compromise: reading/writing files, installing backdoors, pivoting to internal networks, exfiltrating databases, and establishing persistent access.",
+      "_x_owasp": "A03:2025 Injection",
+      "_x_nist": "SI-10",
+      "_x_sources": [
+        "fracture-oob"
+      ],
+      "_x_cves": [],
+      "_x_service": "http",
+      "_x_phase": "injection",
+      "_x_remediation": "Never pass user input to OS command interpreters. Use language-native APIs."
+    },
+    {
+      "id": "FR-534",
+      "title": "SMTP Header Injection",
+      "aliases": [
+        "Email Header Injection",
+        "CRLF Injection in Email",
+        "Mail Header Injection"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "cwe": [
+        "CWE-93",
+        "CWE-74"
+      ],
+      "cve_examples": [
+        "CVE-2016-4803",
+        "CVE-2011-3368"
+      ],
+      "cvss_v3_base": 7.5,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A03:2025 Injection",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-2"
+      ],
+      "nist_800_53": [
+        "SI-10"
+      ],
+      "nist_800_171": [
+        "3.14.1"
+      ],
+      "pci_dss_4": [
+        "6.2.4"
+      ],
+      "iso_27001": [
+        "A.8.9"
+      ],
+      "iso_27002": [
+        "8.9"
+      ],
+      "soc2": [
+        "CC6.1"
+      ],
+      "hitrust": [
+        "09.w"
+      ],
+      "gdpr": [
+        "Art. 32"
+      ],
+      "mitre_attack": [
+        {
+          "technique": "T1566",
+          "tactic": "Initial Access",
+          "name": "Phishing"
+        }
+      ],
+      "searchsploit_terms": [
+        "smtp header injection",
+        "email injection"
+      ],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Sanitise all user input used in email headers by stripping or rejecting CRLF characters (\\r\\n). Use a well-tested email library that handles header encoding. Validate email addresses against RFC 5322 format before use.",
+      "remediation_component": "Application",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "fracture-oob"
+      ],
+      "description": "The application incorporates user input into SMTP headers without sanitising CRLF sequences. By injecting carriage return and line feed characters, an attacker can add arbitrary email headers (Bcc, Cc, Subject, body content) to messages sent by the application.",
+      "impact": "An attacker can hijack the application's email sending functionality to send spam or phishing emails through the organisation's mail infrastructure, add arbitrary recipients to sensitive communications, modify email content and headers, and potentially use the server as an open relay damaging the organisation's email reputation and deliverability.",
+      "_x_owasp": "A03:2025 Injection",
+      "_x_nist": "SI-10",
+      "_x_sources": [
+        "fracture-oob"
+      ],
+      "_x_cves": [],
+      "_x_service": "http",
+      "_x_phase": "injection",
+      "_x_remediation": "Sanitise all user input used in email headers by stripping CRLF characters."
+    },
+    {
+      "id": "FR-535",
+      "title": "Server-Side Include (SSI) Injection",
+      "aliases": [
+        "SSI Injection",
+        "Server Side Include Injection"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "HIGH",
+      "cwe": [
+        "CWE-97",
+        "CWE-78"
+      ],
+      "cve_examples": [
+        "CVE-2009-1527"
+      ],
+      "cvss_v3_base": 8.6,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A03:2025 Injection",
+      "owasp_api": "",
+      "nist_csf2": [
+        "PR.DS-2"
+      ],
+      "nist_800_53": [
+        "SI-10",
+        "CM-7"
+      ],
+      "nist_800_171": [
+        "3.14.1"
+      ],
+      "pci_dss_4": [
+        "6.2.4"
+      ],
+      "iso_27001": [
+        "A.8.9"
+      ],
+      "iso_27002": [
+        "8.9"
+      ],
+      "soc2": [
+        "CC6.1"
+      ],
+      "hitrust": [
+        "09.w"
+      ],
+      "gdpr": [
+        "Art. 32"
+      ],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        },
+        {
+          "technique": "T1059",
+          "tactic": "Execution",
+          "name": "Command and Scripting Interpreter"
+        }
+      ],
+      "searchsploit_terms": [
+        "ssi injection",
+        "server side include"
+      ],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Disable SSI processing unless explicitly required. If SSI must remain enabled, sanitise user input to remove or encode SSI directives (<!--#...-->). Configure the web server to process SSI only on specific file extensions (.shtml).",
+      "remediation_component": "Application",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "fracture-oob"
+      ],
+      "description": "The application reflects user input into pages processed by the web server's SSI engine without sanitisation. Injected SSI directives (<!--#exec cmd=\"...\"--> or <!--#include virtual=\"...\"--> ) are executed server-side, confirmed via out-of-band callback.",
+      "impact": "An attacker can execute arbitrary operating system commands on the web server, include the content of arbitrary local or remote files, and read server environment variables. This can lead to full server compromise, data exfiltration, and lateral movement within the network.",
+      "_x_owasp": "A03:2025 Injection",
+      "_x_nist": "SI-10",
+      "_x_sources": [
+        "fracture-oob"
+      ],
+      "_x_cves": [],
+      "_x_service": "http",
+      "_x_phase": "injection",
+      "_x_remediation": "Disable SSI processing unless explicitly required."
+    },
+    {
+      "id": "FR-536",
+      "title": "Injection: XML Injection",
+      "aliases": [
+        "XML Structure Injection",
+        "XML Tag Injection",
+        "XML Content Injection"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "MEDIUM",
+      "cwe": [
+        "CWE-91"
+      ],
+      "cve_examples": [
+        "CVE-2016-9879"
+      ],
+      "cvss_v3_base": 5.3,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A03:2025 Injection",
+      "owasp_api": "API8:2023 Security Misconfiguration",
+      "nist_csf2": [
+        "PR.DS-2"
+      ],
+      "nist_800_53": [
+        "SI-10"
+      ],
+      "nist_800_171": [
+        "3.14.1"
+      ],
+      "pci_dss_4": [
+        "6.2.4"
+      ],
+      "iso_27001": [
+        "A.8.9"
+      ],
+      "iso_27002": [
+        "8.9"
+      ],
+      "soc2": [
+        "CC6.1"
+      ],
+      "hitrust": [
+        "09.w"
+      ],
+      "gdpr": [
+        "Art. 32"
+      ],
+      "mitre_attack": [
+        {
+          "technique": "T1190",
+          "tactic": "Initial Access",
+          "name": "Exploit Public-Facing Application"
+        }
+      ],
+      "searchsploit_terms": [
+        "xml injection"
+      ],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Validate and sanitise all XML input using a whitelist of allowed elements and attributes. Use an XML schema (XSD) to validate incoming documents. Disable DTD processing and external entity resolution in XML parsers.",
+      "remediation_component": "Application",
+      "remediation_category": "Input Validation",
+      "remediation_effort": "Moderate",
+      "validation_tools": [
+        "fracture"
+      ],
+      "description": "User-supplied XML tags or elements are incorporated into server-side XML processing without sanitisation. Unlike XXE (which exploits entity expansion), generic XML injection manipulates the XML document structure itself — adding, modifying, or closing XML elements to alter application logic.",
+      "impact": "An attacker can manipulate the structure of XML documents processed by the application, potentially bypassing business logic, injecting additional data elements, modifying values in XML-based data stores, or escalating to XXE if entity processing is separately enabled. XML injection in SOAP services can alter method parameters or add unauthorised operations.",
+      "_x_owasp": "A03:2025 Injection",
+      "_x_nist": "SI-10",
+      "_x_sources": [
+        "fracture-injection"
+      ],
+      "_x_cves": [],
+      "_x_service": "http",
+      "_x_phase": "injection",
+      "_x_remediation": "Validate and sanitise all XML input using a whitelist of allowed elements and attributes."
+    },
+    {
+      "id": "FR-537",
+      "title": "Injection: XML Injection (Parser Error)",
+      "aliases": [
+        "XML Parser Error Disclosure",
+        "XML Processing Error"
+      ],
+      "source_tools": [
+        "fracture"
+      ],
+      "risk": "LOW",
+      "cwe": [
+        "CWE-91",
+        "CWE-209"
+      ],
+      "cve_examples": [],
+      "cvss_v3_base": 3.7,
+      "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N",
+      "nessus_plugin_ids": [],
+      "qualys_qids": [],
+      "owasp_web": "A03:2025 Injection",
+      "owasp_api": "",
+      "nist_csf2": [],
+      "nist_800_53": [
+        "SI-11"
+      ],
+      "nist_800_171": [],
+      "pci_dss_4": [
+        "6.2.4"
+      ],
+      "iso_27001": [
+        "A.8.9"
+      ],
+      "iso_27002": [
+        "8.9"
+      ],
+      "soc2": [],
+      "hitrust": [],
+      "gdpr": [],
+      "mitre_attack": [],
+      "searchsploit_terms": [],
+      "metasploit_modules": [],
+      "kev": false,
+      "remediation_brief": "Suppress detailed XML parsing errors in production responses. Validate XML input against a schema before processing. Return generic error messages to users.",
+      "remediation_component": "Application",
+      "remediation_category": "Error Handling",
+      "remediation_effort": "Easy",
+      "validation_tools": [
+        "fracture"
+      ],
+      "description": "The endpoint processes XML input and returns detailed parsing errors when receiving malformed XML. Verbose parser error messages may reveal internal path structures, library versions, or XML schema details that aid further attacks.",
+      "impact": "Detailed XML parser errors leak internal information about the application's XML processing implementation, file paths, library versions, and expected document structure. This information enables targeted XXE, XML injection, or denial-of-service attacks against the XML parser.",
+      "_x_owasp": "A03:2025 Injection",
+      "_x_nist": "SI-11",
+      "_x_sources": [
+        "fracture-injection"
+      ],
+      "_x_cves": [],
+      "_x_service": "http",
+      "_x_phase": "injection",
+      "_x_remediation": "Suppress detailed XML parsing errors in production responses."
     }
   ]
 }

