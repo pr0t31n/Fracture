@@ -3475,6 +3475,17 @@ def _write_auth_status(project_dir: "Path | str", role: str, username: str,
         try:
             _as_valid = 1 if status == "success" else 0
             _as_auth_type = "unauthenticated" if status == "unauthenticated" else "session"
+            _as_cookies_payload = []
+            for ck in cookies:
+                _as_cookies_payload.append({
+                    "name": ck.get("name", ""),
+                    "value": (ck.get("value") or "")[:200],
+                    "domain": ck.get("domain", ""),
+                    "path": ck.get("path", "/"),
+                    "secure": ck.get("secure", False),
+                    "httponly": ck.get("httpOnly", False),
+                    "samesite": "",
+                })
             _ie.emit_intel("auth_session", {
                 "tool": "fracture",
                 "session_name": role,
@@ -3483,6 +3494,7 @@ def _write_auth_status(project_dir: "Path | str", role: str, username: str,
                 "username": username,
                 "role": role,
                 "target_url": target_url,
+                "cookies": _as_cookies_payload,
             })
             for ck in cookies:
                 _ie.emit_intel("cookie", {
@@ -8227,10 +8239,15 @@ document.addEventListener('submit', function(e) {
         #    and in the spider below accept links from the redirected page.
         _effective_base = base  # updated below if redirect changes the hostname
         try:
+            # Try allow_redirects=False first — if the server returns 3xx
+            # we can read the Location header directly.  This is more
+            # reliable than allow_redirects=True when a load balancer (F5
+            # BIG-IP) resets the follow-up connection for the redirect target.
             _base_r0 = None
+            _base_no_redir = None
             for _bf_attempt in range(3):
                 try:
-                    _base_r0 = sess.get(base, timeout=timeout, allow_redirects=True)
+                    _base_no_redir = sess.get(base, timeout=timeout, allow_redirects=False)
                     break
                 except Exception as _bf_exc:
                     if _bf_attempt < 2:
@@ -8238,7 +8255,58 @@ document.addEventListener('submit', function(e) {
                         import time as _t_bf; _t_bf.sleep(1.5 * (_bf_attempt + 1))
                     else:
                         raise
-            _base_r0  # type: ignore — guaranteed non-None after the loop
+            if _base_no_redir is not None and _base_no_redir.status_code in (301, 302, 303, 307, 308):
+                _loc_hdr = _base_no_redir.headers.get("Location", "").strip()
+                if _loc_hdr:
+                    _loc_abs = _uj4(base, _loc_hdr)
+                    vc.log(f"[auth] Base URL returned {_base_no_redir.status_code} → {_loc_abs}", "INFO")
+                    # Check if the redirect destination is a login form
+                    for _rd_att in range(3):
+                        try:
+                            _redir_resp = sess.get(_loc_abs, timeout=timeout, allow_redirects=True)
+                            _redir_page = _analyse_form_page(_redir_resp.text, _redir_resp.url)
+                            if _redir_page.get("login_form") or (
+                                    _redir_page.get("has_username")
+                                    and _redir_page.get("has_password")):
+                                vc.log(
+                                    f"[auth] Login form found at redirect destination: "
+                                    f"{_redir_resp.url}",
+                                    "SUCCESS",
+                                )
+                                return _redir_resp.url
+                            if _redir_page.get("js_rendered_login"):
+                                vc.log(
+                                    f"[auth] JS-rendered login at redirect destination: "
+                                    f"{_redir_resp.url}",
+                                    "INFO",
+                                )
+                                return _redir_resp.url
+                            # Redirect destination fetched but not a login form —
+                            # use it as the base page for further scanning.
+                            _base_r0 = _redir_resp
+                            break
+                        except Exception as _rd_exc:
+                            if _rd_att < 2:
+                                import time as _t_rd; _t_rd.sleep(1.0 * (_rd_att + 1))
+                            else:
+                                vc.log(f"[auth] Redirect destination fetch failed: {_rd_exc.__class__.__name__}", "WARN")
+            # Fallback: if no-redirect gave a 200 or redirect fetch failed, use it
+            if _base_r0 is None and _base_no_redir is not None:
+                if _base_no_redir.status_code == 200:
+                    _base_r0 = _base_no_redir
+                else:
+                    # Last resort: try allow_redirects=True
+                    for _bf2 in range(3):
+                        try:
+                            _base_r0 = sess.get(base, timeout=timeout, allow_redirects=True)
+                            break
+                        except Exception:
+                            if _bf2 < 2:
+                                import time as _t_bf2; _t_bf2.sleep(1.5 * (_bf2 + 1))
+                            else:
+                                raise
+            if _base_r0 is None:
+                raise ConnectionError("Base URL unreachable after all retry strategies")
             _redir_netloc = _up4(_base_r0.url).netloc
             if _redir_netloc and _redir_netloc != _base_host:
                 vc.log(
