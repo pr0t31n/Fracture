@@ -9359,6 +9359,43 @@ return null;
         # 6. unchanged
         return configured_uf
 
+    # ── Password-field resolver (handles j_password, passwd, etc.) ────────────
+    def _resolve_password_field(html: str, configured_pf: str) -> str:
+        """Given login-form HTML and the configured login_password_field name,
+        return the actual <input type="password"> name from the form.
+        Spring Security uses j_password, Django uses password, etc."""
+        import re as _re_pf
+        if not html:
+            return configured_pf
+        pw_form_body = None
+        for _fm in _re_pf.finditer(r'(?s)<form\b[^>]*>(.+?)</form>', html, _re_pf.IGNORECASE):
+            _body = _fm.group(1)
+            if _re_pf.search(r'<input[^>]+type=["\']?password["\']?',
+                              _body, _re_pf.IGNORECASE):
+                pw_form_body = _body
+                break
+        scope = pw_form_body or html
+        # 1. Exact match on configured name
+        for _inp in _re_pf.finditer(r'<input\b([^>]*)/?>', scope, _re_pf.IGNORECASE):
+            attrs = _inp.group(1)
+            _t_m = _re_pf.search(r'\btype=["\']?(\w+)["\']?', attrs, _re_pf.IGNORECASE)
+            if not _t_m or _t_m.group(1).lower() != "password":
+                continue
+            _n_m = _re_pf.search(r'\bname=["\']([^"\']+)["\']', attrs, _re_pf.IGNORECASE)
+            if _n_m and _n_m.group(1) == configured_pf:
+                return configured_pf
+        # 2. Form has a password input with a different name — use it
+        for _inp in _re_pf.finditer(r'<input\b([^>]*)/?>', scope, _re_pf.IGNORECASE):
+            attrs = _inp.group(1)
+            _t_m = _re_pf.search(r'\btype=["\']?(\w+)["\']?', attrs, _re_pf.IGNORECASE)
+            if not _t_m or _t_m.group(1).lower() != "password":
+                continue
+            _n_m = _re_pf.search(r'\bname=["\']([^"\']+)["\']', attrs, _re_pf.IGNORECASE)
+            if _n_m:
+                return _n_m.group(1)
+        # 3. Unchanged
+        return configured_pf
+
     # ── Login POST helper ─────────────────────────────────────────────────────
     def _login_post(base_url: str, *, api_endpoint: bool = False) -> "tuple[requests.Response | None, str]":
         """CSRF prefetch + POST credentials to resolved form action. Returns (resp, post_url).
@@ -9436,6 +9473,15 @@ return null;
                     vc.log(f"[auth] Username field auto-resolved: "
                            f"'{configured_uf}' → '{uf}' (form uses email/synonym field)",
                            "INFO")
+            except Exception:
+                pass
+            try:
+                _resolved_pf = _resolve_password_field(_login_html, pf)
+                if _resolved_pf != pf:
+                    vc.log(f"[auth] Password field auto-resolved: "
+                           f"'{pf}' → '{_resolved_pf}' (form uses different field name)",
+                           "INFO")
+                    pf = _resolved_pf
             except Exception:
                 pass
         if login_mode == "fields":
@@ -12686,6 +12732,25 @@ return null;
                                 continue
                         except Exception:
                             pass  # verification failed — trust _auto_has_auth
+
+                    # Check: did the inner auth call explicitly mark auth as
+                    # failed? The inner _build_auth_session sets auth_verified=False
+                    # when it detects "Bad credentials", login form still present,
+                    # or no new cookies. Cookies alone (from tracking/LB) pass
+                    # _auto_has_auth and can survive the baseline check if the
+                    # session ID rotated, but UNVERIFIED means creds were wrong.
+                    _auto_inner_v = _auto_cfg.get("auth", {}).get("auth_verified")
+                    if _auto_inner_v is False:
+                        vc.log(
+                            f"[auth:auto] Method '{_auto_m}' — inner auth "
+                            "returned UNVERIFIED (credentials rejected) — "
+                            "skipping", "WARNING")
+                        # Propagate login_url even from failed attempts
+                        _auto_lp_uv = _auto_cfg.get(
+                            "auth", {}).get("login_url", "").strip()
+                        if _auto_lp_uv and not auth.get("login_url"):
+                            auth["login_url"] = _auto_lp_uv
+                        continue
 
                     vc.log(
                         f"[auth:auto] Success with method '{_auto_m}' — "
