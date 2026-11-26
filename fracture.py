@@ -55,7 +55,7 @@ import urllib.parse
 import warnings
 import xml.etree.ElementTree as _ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 VERSION = Path(__file__).resolve().parent.joinpath("VERSION").read_text().strip()
@@ -67,6 +67,13 @@ try:
     import pr0t31n_proxy as _pp
 except ImportError:
     _pp = None
+
+try:
+    import pr0t31n_page_sig as _ps
+except ImportError:
+    _ps = None
+
+_AUTH_RECIPE_DIR = Path("/opt/pr0t31n/Fracture/auth_recipes")
 
 # Module-level proxy state — set once at scan start by _init_proxy()
 _PROXY_URL = ""
@@ -2274,6 +2281,30 @@ def _heartbeat_between_phases(
 
     blocked, reason, info = _heartbeat_check(target_url, baseline, _timeout)
     if not blocked:
+        # Session-level heartbeat: check auth is still alive (separate from WAF block)
+        _shb_cfg = ctx_cfg if ctx_cfg is not None else cfg
+        _shb = _shb_cfg.get("_session_hb_baseline")
+        if _shb and effective_auth is not None:
+            if not _session_heartbeat_check(effective_auth, target_url, _shb, vc,
+                                             timeout=_timeout):
+                vc.log(
+                    f"[heartbeat] Session expired after phase '{last_phase}'{_lbl} "
+                    f"— attempting re-authentication",
+                    "WARNING",
+                )
+                _reauth_fn = cfg.get("_reauth_fn")
+                if _reauth_fn:
+                    try:
+                        _new_sess = _reauth_fn()
+                        if _new_sess is not None:
+                            vc.log("[heartbeat] Re-authentication succeeded", "SUCCESS")
+                            _new_shb = _session_heartbeat_init(_new_sess, target_url, vc)
+                            if _new_shb:
+                                _shb_cfg["_session_hb_baseline"] = _new_shb
+                            return _new_sess
+                    except Exception:
+                        pass
+                vc.log("[heartbeat] Re-authentication unavailable or failed", "WARNING")
         return effective_auth
 
     # ── Block detected — log which phase triggered it ────────────────────
@@ -3718,6 +3749,1144 @@ def _lp_save_profile(profile_id: str, login_url: str, browser_used: str,
         "login_page_fingerprint": _lp_fp,
     })
     _lp_save_index(index)
+
+
+# ─────────────────────────────────────────────
+# Headless auto-login, auth recipes, escalation chain
+# ─────────────────────────────────────────────
+_HA_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+_HA_USERNAME_NAMES = [
+    "username", "user", "email", "login", "j_username", "user_name",
+    "userid", "loginId", "EmailAddress", "loginUsername", "uname",
+    "txtUsername", "tbUsername", "txtUser", "tbUser", "userName",
+    "login_field", "session[username_or_email]", "log",
+]
+
+_HA_PASSWORD_NAMES = [
+    "password", "pass", "passwd", "j_password", "pwd",
+    "txtPassword", "tbPassword", "txtPass", "tbPass", "loginPassword",
+    "user_password", "session[password]", "userPassword",
+]
+
+_HA_USERNAME_PREFIXES = ["ctl00$", "txtuser", "tbuser"]
+_HA_PASSWORD_PREFIXES = ["ctl00$", "txtpass", "tbpass"]
+
+_HA_SESSION_COOKIE_NAMES = {
+    "jsessionid", "asp.net_sessionid", "phpsessid", "session",
+    "session_id", "sessionid", "sid", "connect.sid", "laravel_session",
+    "ci_session", "_session_id", "rack.session",
+}
+
+_HA_LOGIN_PATH_PATTERNS = re.compile(
+    r'/login|/signin|/sign-in|/auth|/sso|/account/login|/j_spring_security_check',
+    re.IGNORECASE,
+)
+
+
+def _headless_auto_login(login_url, username, password, sess, cfg, vc,
+                          timeout=30):
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+    except ImportError:
+        vc.log("[auth:headless] selenium not available — skipping", "INFO")
+        return False
+
+    driver = None
+    browser_type = None
+    try:
+        driver, browser_type = _launch_headless_driver(cfg, vc)
+    except Exception as e:
+        vc.log(f"[auth:headless] Failed to launch browser: {e}", "WARNING")
+        return False
+
+    if driver is None:
+        vc.log("[auth:headless] No headless browser available", "INFO")
+        return False
+
+    pre_url = login_url
+    recipe_data = {}
+    try:
+        vc.log(f"[auth:headless] Navigating to {login_url} ({browser_type})",
+               "INFO")
+        driver.get(login_url)
+
+        try:
+            WebDriverWait(driver, timeout).until(
+                lambda d: d.find_elements(By.CSS_SELECTOR,
+                    "input[type='text'], input[type='email'], "
+                    "input[type='password'], input[name]")
+            )
+        except Exception:
+            vc.log("[auth:headless] No input fields found after wait", "WARNING")
+            return False
+
+        u_elem = _headless_find_field(driver, _HA_USERNAME_NAMES,
+                                       _HA_USERNAME_PREFIXES, ["text", "email"])
+        if u_elem is None:
+            vc.log("[auth:headless] Could not locate username field", "WARNING")
+            return False
+
+        p_elem = _headless_find_field(driver, _HA_PASSWORD_NAMES,
+                                       _HA_PASSWORD_PREFIXES, ["password"])
+        if p_elem is None:
+            vc.log("[auth:headless] Could not locate password field", "WARNING")
+            return False
+
+        u_field_name = u_elem.get_attribute("name") or ""
+        p_field_name = p_elem.get_attribute("name") or ""
+
+        hidden_fields = {}
+        try:
+            for h in driver.find_elements(By.CSS_SELECTOR,
+                                           "input[type='hidden']"):
+                hname = h.get_attribute("name")
+                if hname:
+                    hidden_fields[hname] = h.get_attribute("value") or ""
+        except Exception:
+            pass
+
+        form_action = ""
+        try:
+            form = u_elem.find_element(By.XPATH, "ancestor::form")
+            form_action = form.get_attribute("action") or ""
+        except Exception:
+            pass
+
+        pre_cookies = {c["name"] for c in driver.get_cookies()}
+
+        u_elem.clear()
+        u_elem.send_keys(username)
+        p_elem.clear()
+        p_elem.send_keys(password)
+
+        submitted = _headless_click_submit(driver, p_elem)
+        if not submitted:
+            vc.log("[auth:headless] Could not find/click submit button",
+                   "WARNING")
+            return False
+
+        success = _headless_wait_for_auth_result(driver, pre_url, pre_cookies,
+                                                  timeout=min(timeout, 15))
+
+        if success:
+            count = _harvest_browser_cookies(driver, sess)
+            vc.log(
+                f"[auth:headless] Login succeeded — harvested {count} cookies "
+                f"(URL: {driver.current_url})",
+                "SUCCESS",
+            )
+
+            post_url = driver.current_url
+            post_cookies = {c["name"] for c in driver.get_cookies()}
+            new_cookie_names = list(post_cookies - pre_cookies)
+
+            parsed = urllib.parse.urlparse(post_url)
+            success_pattern = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+            recipe_data = {
+                "login_url": login_url,
+                "username_field": u_field_name,
+                "password_field": p_field_name,
+                "form_action": form_action,
+                "hidden_field_names": list(hidden_fields.keys()),
+                "pre_auth_cookies": list(pre_cookies),
+                "post_auth_cookie_names": new_cookie_names,
+                "success_url_pattern": success_pattern,
+                "headless_required": True,
+            }
+            _record_auth_recipe(vc=vc, **recipe_data)
+            return True
+        else:
+            vc.log(
+                f"[auth:headless] Login appears to have failed "
+                f"(still at: {driver.current_url})",
+                "WARNING",
+            )
+            return False
+
+    except Exception as e:
+        vc.log(f"[auth:headless] Error during login: {e}", "WARNING")
+        return False
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+def _launch_headless_driver(cfg, vc):
+    from selenium import webdriver
+
+    try:
+        from selenium.webdriver.chrome.options import Options as ChromeOpts
+        opts = ChromeOpts()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--window-size=1920,1080")
+        opts.add_argument(f"--user-agent={_HA_CHROME_UA}")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+
+        svc = None
+        cdp = cfg.get("chromedriver_path", "")
+        if cdp:
+            from selenium.webdriver.chrome.service import Service
+            svc = Service(cdp)
+
+        if svc:
+            driver = webdriver.Chrome(service=svc, options=opts)
+        else:
+            driver = webdriver.Chrome(options=opts)
+
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": "Object.defineProperty(navigator, 'webdriver', "
+                        "{get: () => undefined})"},
+        )
+        return driver, "chrome"
+    except Exception as e:
+        vc.log(f"[auth:headless] Chrome unavailable: {e}", "INFO")
+
+    try:
+        from selenium.webdriver.firefox.options import Options as FFOpts
+        opts = FFOpts()
+        opts.add_argument("--headless")
+        opts.set_preference("general.useragent.override", _HA_CHROME_UA)
+        driver = webdriver.Firefox(options=opts)
+        return driver, "firefox"
+    except Exception as e:
+        vc.log(f"[auth:headless] Firefox unavailable: {e}", "INFO")
+
+    return None, None
+
+
+def _headless_find_field(driver, name_list, prefix_list, type_list):
+    from selenium.webdriver.common.by import By
+
+    for name in name_list:
+        try:
+            elems = driver.find_elements(By.CSS_SELECTOR,
+                                          f"input[name='{name}']")
+            for el in elems:
+                if el.is_displayed():
+                    return el
+        except Exception:
+            pass
+
+    for name in name_list:
+        try:
+            xpath = (f"//input[translate(@name,"
+                     f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                     f"'abcdefghijklmnopqrstuvwxyz')='{name.lower()}']")
+            elems = driver.find_elements(By.XPATH, xpath)
+            for el in elems:
+                if el.is_displayed():
+                    return el
+        except Exception:
+            pass
+
+    for pfx in prefix_list:
+        try:
+            elems = driver.find_elements(By.CSS_SELECTOR,
+                                          f"input[name*='{pfx}']")
+            for el in elems:
+                if not el.is_displayed():
+                    continue
+                etype = (el.get_attribute("type") or "").lower()
+                if etype in type_list or etype == "":
+                    return el
+        except Exception:
+            pass
+
+    for t in type_list:
+        try:
+            elems = driver.find_elements(By.CSS_SELECTOR,
+                                          f"input[type='{t}']")
+            for el in elems:
+                if el.is_displayed():
+                    return el
+        except Exception:
+            pass
+
+    return None
+
+
+def _headless_click_submit(driver, password_elem):
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+
+    form = None
+    try:
+        form = password_elem.find_element(By.XPATH, "ancestor::form")
+    except Exception:
+        pass
+
+    search_root = form if form else driver
+
+    try:
+        btns = search_root.find_elements(By.CSS_SELECTOR,
+                                          "input[type='submit']")
+        for btn in btns:
+            if btn.is_displayed():
+                btn.click()
+                return True
+    except Exception:
+        pass
+
+    try:
+        btns = search_root.find_elements(By.CSS_SELECTOR,
+                                          "button[type='submit']")
+        for btn in btns:
+            if btn.is_displayed():
+                btn.click()
+                return True
+    except Exception:
+        pass
+
+    try:
+        for btn in search_root.find_elements(By.TAG_NAME, "button"):
+            if not btn.is_displayed():
+                continue
+            txt = (btn.text or "").strip().lower()
+            if re.search(r'\b(log\s*in|sign\s*in|submit|login|enter)\b', txt):
+                btn.click()
+                return True
+    except Exception:
+        pass
+
+    try:
+        for a in search_root.find_elements(By.CSS_SELECTOR,
+                                            "a[role='button'], a.btn"):
+            if not a.is_displayed():
+                continue
+            txt = (a.text or "").strip().lower()
+            if re.search(r'\b(log\s*in|sign\s*in|login)\b', txt):
+                a.click()
+                return True
+    except Exception:
+        pass
+
+    try:
+        password_elem.send_keys(Keys.RETURN)
+        return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _headless_wait_for_auth_result(driver, original_url, pre_cookies,
+                                    timeout=15):
+    from selenium.webdriver.support.ui import WebDriverWait
+
+    parsed_orig = urllib.parse.urlparse(original_url)
+    orig_path = parsed_orig.path.rstrip("/")
+
+    def _check(d):
+        cur = d.current_url
+        parsed_cur = urllib.parse.urlparse(cur)
+        cur_path = parsed_cur.path.rstrip("/")
+
+        if cur_path != orig_path:
+            if not _HA_LOGIN_PATH_PATTERNS.search(cur_path):
+                return True
+
+        cur_cookies = {c["name"] for c in d.get_cookies()}
+        new_cookies = cur_cookies - pre_cookies
+        for cn in new_cookies:
+            if cn.lower() in _HA_SESSION_COOKIE_NAMES:
+                return True
+
+        if len(new_cookies) >= 2:
+            return True
+
+        return False
+
+    try:
+        WebDriverWait(driver, timeout).until(_check)
+        return True
+    except Exception:
+        try:
+            cur_cookies = {c["name"] for c in driver.get_cookies()}
+            new_cookies = cur_cookies - pre_cookies
+            if len(new_cookies) >= 1:
+                return True
+        except Exception:
+            pass
+        return False
+
+
+def _harvest_browser_cookies(driver, sess, scope_domains=None):
+    count = 0
+    try:
+        for ck in driver.get_cookies():
+            name = ck.get("name", "")
+            value = ck.get("value", "")
+            domain = ck.get("domain", "")
+            path = ck.get("path", "/")
+
+            if scope_domains:
+                bare = domain.lstrip(".")
+                if not any(bare == sd or bare.endswith("." + sd)
+                           for sd in scope_domains):
+                    continue
+
+            try:
+                sess.cookies.set(
+                    name, value,
+                    domain=domain,
+                    path=path,
+                )
+                count += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return count
+
+
+def _record_auth_recipe(login_url, username_field, password_field,
+                         form_action, hidden_field_names, pre_auth_cookies,
+                         post_auth_cookie_names, success_url_pattern,
+                         headless_required, vc):
+    url_hash = hashlib.sha256(login_url.encode()).hexdigest()[:16]
+    recipe_id = f"recipe_{url_hash}"
+
+    recipe = {
+        "id": recipe_id,
+        "login_url": login_url,
+        "username_field": username_field,
+        "password_field": password_field,
+        "form_action": form_action,
+        "hidden_field_names": hidden_field_names,
+        "pre_auth_cookies": pre_auth_cookies,
+        "post_auth_cookie_names": post_auth_cookie_names,
+        "success_url_pattern": success_url_pattern,
+        "headless_required": headless_required,
+        "created": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        _AUTH_RECIPE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _AUTH_RECIPE_DIR / f"{url_hash}.json"
+        path.write_text(json.dumps(recipe, indent=2), encoding="utf-8")
+        vc.log(f"[auth:recipe] Saved recipe {recipe_id} → {path}", "INFO")
+    except Exception as e:
+        vc.log(f"[auth:recipe] Failed to save recipe: {e}", "WARNING")
+
+    return recipe
+
+
+def _load_auth_recipe(login_url):
+    url_hash = hashlib.sha256(login_url.encode()).hexdigest()[:16]
+    path = _AUTH_RECIPE_DIR / f"{url_hash}.json"
+    if path.is_file():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return None
+
+
+def _replay_auth_recipe(recipe, username, password, sess, vc, timeout=20):
+    login_url = recipe.get("login_url", "")
+    form_action = recipe.get("form_action", "")
+    u_field = recipe.get("username_field", "username")
+    p_field = recipe.get("password_field", "password")
+    hidden_names = recipe.get("hidden_field_names", [])
+    expected_cookies = set(recipe.get("post_auth_cookie_names", []))
+    success_pattern = recipe.get("success_url_pattern", "")
+
+    if recipe.get("headless_required"):
+        return _replay_via_headless(recipe, username, password, sess, vc,
+                                     timeout)
+
+    try:
+        r = sess.get(login_url, timeout=timeout, allow_redirects=True)
+    except Exception as e:
+        vc.log(f"[auth:recipe] Could not fetch login page: {e}", "WARNING")
+        return False
+
+    hidden_data = {}
+    for hname in hidden_names:
+        m = re.search(
+            rf'<input[^>]+name=["\']?{re.escape(hname)}["\']?[^>]+'
+            rf'value=["\']?([^"\'>\s]*)',
+            r.text, re.IGNORECASE,
+        )
+        if not m:
+            m = re.search(
+                rf'value=["\']?([^"\'>\s]*)[^>]+'
+                rf'name=["\']?{re.escape(hname)}["\']?',
+                r.text, re.IGNORECASE,
+            )
+        if m:
+            hidden_data[hname] = m.group(1)
+        else:
+            hidden_data[hname] = ""
+
+    form_data = {u_field: username, p_field: password}
+    form_data.update(hidden_data)
+
+    action_url = form_action
+    if action_url and not action_url.startswith("http"):
+        action_url = urllib.parse.urljoin(r.url, action_url)
+    if not action_url:
+        action_url = r.url
+
+    pre_cookies = {c.name for c in sess.cookies}
+
+    try:
+        resp = sess.post(action_url, data=form_data, timeout=timeout,
+                          allow_redirects=True)
+    except Exception as e:
+        vc.log(f"[auth:recipe] POST failed: {e}", "WARNING")
+        return False
+
+    post_cookies = {c.name for c in sess.cookies}
+    new_cookies = post_cookies - pre_cookies
+
+    if expected_cookies and expected_cookies & new_cookies:
+        vc.log(
+            f"[auth:recipe] Replay succeeded — expected cookies present "
+            f"({expected_cookies & new_cookies})",
+            "SUCCESS",
+        )
+        return True
+
+    if success_pattern and resp.url.startswith(success_pattern):
+        vc.log("[auth:recipe] Replay succeeded — URL matches pattern", "SUCCESS")
+        return True
+
+    if new_cookies:
+        vc.log(
+            f"[auth:recipe] Replay produced new cookies ({new_cookies}) "
+            f"but no expected session cookies — may be partial",
+            "WARNING",
+        )
+        for cn in new_cookies:
+            if cn.lower() in _HA_SESSION_COOKIE_NAMES:
+                vc.log(f"[auth:recipe] Session cookie '{cn}' found — accepting",
+                       "SUCCESS")
+                return True
+
+    vc.log("[auth:recipe] Replay did not produce expected auth indicators",
+           "WARNING")
+    return False
+
+
+def _replay_via_headless(recipe, username, password, sess, vc, timeout=20):
+    try:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+    except ImportError:
+        vc.log("[auth:recipe] selenium required for headless replay", "WARNING")
+        return False
+
+    driver = None
+    try:
+        driver, btype = _launch_headless_driver({}, vc)
+        if driver is None:
+            return False
+
+        login_url = recipe.get("login_url", "")
+        u_field = recipe.get("username_field", "username")
+        p_field = recipe.get("password_field", "password")
+
+        driver.get(login_url)
+
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.find_elements(By.CSS_SELECTOR,
+                "input[type='text'], input[type='email'], "
+                "input[type='password']")
+        )
+
+        u_elem = None
+        p_elem = None
+        try:
+            if u_field:
+                elems = driver.find_elements(By.CSS_SELECTOR,
+                                              f"input[name='{u_field}']")
+                u_elem = next((e for e in elems if e.is_displayed()), None)
+        except Exception:
+            pass
+        if u_elem is None:
+            u_elem = _headless_find_field(driver, _HA_USERNAME_NAMES,
+                                           _HA_USERNAME_PREFIXES,
+                                           ["text", "email"])
+
+        try:
+            if p_field:
+                elems = driver.find_elements(By.CSS_SELECTOR,
+                                              f"input[name='{p_field}']")
+                p_elem = next((e for e in elems if e.is_displayed()), None)
+        except Exception:
+            pass
+        if p_elem is None:
+            p_elem = _headless_find_field(driver, _HA_PASSWORD_NAMES,
+                                           _HA_PASSWORD_PREFIXES,
+                                           ["password"])
+
+        if u_elem is None or p_elem is None:
+            vc.log("[auth:recipe:headless] Could not locate fields", "WARNING")
+            return False
+
+        pre_cookies = {c["name"] for c in driver.get_cookies()}
+
+        u_elem.clear()
+        u_elem.send_keys(username)
+        p_elem.clear()
+        p_elem.send_keys(password)
+
+        if not _headless_click_submit(driver, p_elem):
+            vc.log("[auth:recipe:headless] Could not submit", "WARNING")
+            return False
+
+        success = _headless_wait_for_auth_result(driver, login_url, pre_cookies,
+                                                  timeout=min(timeout, 15))
+        if success:
+            count = _harvest_browser_cookies(driver, sess)
+            vc.log(
+                f"[auth:recipe:headless] Replay succeeded — {count} cookies",
+                "SUCCESS",
+            )
+            return True
+
+        vc.log("[auth:recipe:headless] Replay did not succeed", "WARNING")
+        return False
+
+    except Exception as e:
+        vc.log(f"[auth:recipe:headless] Error: {e}", "WARNING")
+        return False
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+# Connection-class errors that trigger auth escalation L1→L2
+_HA_CONN_ERRORS = (
+    ConnectionError, ConnectionResetError, ConnectionRefusedError,
+    ConnectionAbortedError, OSError,
+)
+
+try:
+    import requests as _ha_rq
+    _HA_CONN_ERRORS = _HA_CONN_ERRORS + (_ha_rq.exceptions.ConnectionError,)
+except ImportError:
+    pass
+
+try:
+    from urllib3.exceptions import ProtocolError as _ha_PE, NewConnectionError as _ha_NCE
+    _HA_CONN_ERRORS = _HA_CONN_ERRORS + (_ha_PE, _ha_NCE)
+except ImportError:
+    pass
+
+
+def _auth_escalation(login_url, username, password, sess, cfg, vc,
+                      role_label="", timeout=20, scope_hostnames=None,
+                      l1_result=None):
+    _role_sfx = f" (role: {role_label})" if role_label else ""
+
+    if l1_result is not None:
+        l1_ok, l1_exc = l1_result
+        if l1_ok:
+            return sess
+        if l1_exc is None or not isinstance(l1_exc, _HA_CONN_ERRORS):
+            return None
+
+    # L2: HTTP with connection resilience
+    vc.log(f"[auth:L2] Retrying with connection resilience{_role_sfx}", "INFO")
+
+    orig_ua = sess.headers.get("User-Agent", "")
+    sess.headers["User-Agent"] = _HA_CHROME_UA
+
+    l2_ok = False
+    for attempt in range(2):
+        try:
+            r = sess.get(login_url, timeout=timeout, allow_redirects=False)
+            if r.status_code in (200, 301, 302, 303, 307, 308):
+                vc.log(
+                    f"[auth:L2] Connection succeeded with UA rotation "
+                    f"(HTTP {r.status_code})",
+                    "INFO",
+                )
+                l2_ok = True
+                break
+        except _HA_CONN_ERRORS:
+            if attempt == 0:
+                try:
+                    sess.close()
+                    from requests.adapters import HTTPAdapter
+                    sess.mount("https://", HTTPAdapter(max_retries=0))
+                    sess.mount("http://", HTTPAdapter(max_retries=0))
+                except Exception:
+                    pass
+                import time as _ha_time
+                _ha_time.sleep(1.0)
+        except Exception:
+            break
+
+    if not l2_ok:
+        sess.headers["User-Agent"] = orig_ua
+        vc.log(f"[auth:L2] Connection resilience failed{_role_sfx}", "WARNING")
+
+    # L3: Headless browser / recipe replay
+    vc.log(f"[auth:L3] Attempting headless login{_role_sfx}", "INFO")
+
+    recipe = _load_auth_recipe(login_url)
+    if recipe:
+        vc.log(
+            f"[auth:L3] Found recipe {recipe['id']} "
+            f"(created: {recipe.get('created', 'unknown')})",
+            "INFO",
+        )
+        if _replay_auth_recipe(recipe, username, password, sess, vc,
+                                timeout=timeout):
+            return sess
+
+        vc.log("[auth:L3] Recipe replay failed — trying fresh headless login",
+               "INFO")
+
+    if _headless_auto_login(login_url, username, password, sess, cfg, vc,
+                             timeout=max(timeout, 30)):
+        return sess
+
+    vc.log(f"[auth:L3] Headless login failed{_role_sfx}", "WARNING")
+
+    # L4: Operator prompt with 5-minute timeout
+    vc.log(f"[auth:L4] All automated auth methods exhausted{_role_sfx}",
+           "WARNING")
+
+    prompt_msg = (
+        f"Authentication failed for {login_url}{_role_sfx} after trying:\n"
+        f"  - HTTP form login (connection error)\n"
+        f"  - Connection resilience (UA rotation, fresh TCP)\n"
+        f"  - Headless browser auto-login\n\n"
+        f"Enable browser-assisted login? The captured session will be saved "
+        f"as a recipe and replayed for additional roles."
+    )
+
+    response = vc.prompt(
+        prompt_msg,
+        prompt_type="confirm",
+        options=["Enable browser-assisted login", "Continue unauthenticated"],
+        role=role_label,
+        timeout=300,
+    ).strip()
+
+    if response in ("Enable browser-assisted login", "1"):
+        vc.log(f"[auth:L4] Operator enabled browser assist{_role_sfx}", "INFO")
+        return "__BROWSER_AUTH__"
+
+    if not response:
+        vc.log(
+            f"[auth:L4] No response within 5 minutes — continuing "
+            f"unauthenticated{_role_sfx}",
+            "WARNING",
+        )
+    else:
+        vc.log(
+            f"[auth:L4] Operator declined browser assist — continuing "
+            f"unauthenticated{_role_sfx}",
+            "WARNING",
+        )
+
+    return None
+
+
+# ─────────────────────────────────────────────
+# Differential response analysis + session heartbeat
+# ─────────────────────────────────────────────
+
+def _diff_fetch_with_param(sess, url, param_name, payload, timeout=10):
+    parsed = urllib.parse.urlparse(url)
+    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    qs[param_name] = [payload]
+    new_query = urllib.parse.urlencode(qs, doseq=True)
+    test_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
+    try:
+        r = sess.get(test_url, timeout=timeout, allow_redirects=True)
+        return r
+    except Exception:
+        return None
+
+
+def _diff_sig_or_len(resp):
+    if resp is None:
+        return None
+    if _ps is not None:
+        return _ps.page_signature(resp.text)
+    return len(resp.text)
+
+
+def _diff_sig_match(a, b, threshold=0.85):
+    if a is None or b is None:
+        return False
+    if _ps is not None and isinstance(a, dict) and isinstance(b, dict):
+        return _ps.compare_signatures(a, b) >= threshold
+    if isinstance(a, int) and isinstance(b, int):
+        mx = max(a, b, 1)
+        return abs(a - b) / mx < 0.05
+    return False
+
+
+def _diff_sig_diverge(a, c, threshold=0.85):
+    if a is None or c is None:
+        return False
+    if _ps is not None and isinstance(a, dict) and isinstance(c, dict):
+        return _ps.compare_signatures(a, c) < threshold
+    if isinstance(a, int) and isinstance(c, int):
+        mx = max(a, c, 1)
+        return abs(a - c) / mx > 0.10
+    return False
+
+
+def _diff_run_triplet(sess, url, param_name, payload_a, payload_b, payload_c,
+                      vc, timeout=10):
+    resp_a = _diff_fetch_with_param(sess, url, param_name, payload_a, timeout)
+    resp_b = _diff_fetch_with_param(sess, url, param_name, payload_b, timeout)
+    resp_c = _diff_fetch_with_param(sess, url, param_name, payload_c, timeout)
+    if resp_a is None or resp_b is None or resp_c is None:
+        return None
+    sig_a = _diff_sig_or_len(resp_a)
+    sig_b = _diff_sig_or_len(resp_b)
+    sig_c = _diff_sig_or_len(resp_c)
+    if _diff_sig_match(sig_a, sig_b) and _diff_sig_diverge(sig_a, sig_c):
+        return True
+    return False
+
+
+def _differential_sqli_check(sess, url, param_name, param_value, vc,
+                             timeout=10):
+    vc.log(f"[diff] SQLi check: {param_name}={param_value!r} at {url}", "INFO")
+    is_numeric = param_value.strip().isdigit() if param_value else False
+
+    if is_numeric:
+        result = _diff_run_triplet(
+            sess, url, param_name, "9-8", "8-7", "9-1", vc, timeout,
+        )
+        if result:
+            method = "arithmetic" if _ps else "length_heuristic"
+            confidence = "Firm" if _ps else "Tentative"
+            return {
+                "confirmed": True, "method": method,
+                "detail": (f"Numeric param '{param_name}': equivalent "
+                           f"arithmetic (9-8≈8-7) produced matching pages, "
+                           f"different value (9-1) diverged"),
+                "confidence": confidence,
+            }
+        result2 = _diff_run_triplet(
+            sess, url, param_name, "3*2", "2*3", "3*3", vc, timeout,
+        )
+        if result2:
+            method = "arithmetic" if _ps else "length_heuristic"
+            confidence = "Firm" if _ps else "Tentative"
+            return {
+                "confirmed": True, "method": method,
+                "detail": (f"Numeric param '{param_name}': equivalent "
+                           f"multiplication (3*2≈2*3) matched, "
+                           f"different value (3*3) diverged"),
+                "confidence": confidence,
+            }
+    else:
+        pv = param_value or ""
+        result = _diff_run_triplet(
+            sess, url, param_name,
+            f"{pv}' AND '1'='1", f"{pv}' AND '2'='2", f"{pv}' AND '1'='2",
+            vc, timeout,
+        )
+        if result:
+            method = "tautology" if _ps else "length_heuristic"
+            confidence = "Firm" if _ps else "Tentative"
+            return {
+                "confirmed": True, "method": method,
+                "detail": (f"String param '{param_name}': true tautologies "
+                           f"(AND '1'='1' ≈ AND '2'='2') matched, "
+                           f"false condition (AND '1'='2') diverged"),
+                "confidence": confidence,
+            }
+
+        result2 = _diff_run_triplet(
+            sess, url, param_name,
+            f"{pv}' OR 'a'='a", f"{pv}' OR 'b'='b", f"{pv}' OR 'a'='b",
+            vc, timeout,
+        )
+        if result2:
+            method = "tautology" if _ps else "length_heuristic"
+            confidence = "Firm" if _ps else "Tentative"
+            return {
+                "confirmed": True, "method": method,
+                "detail": (f"String param '{param_name}': OR tautologies "
+                           f"matched, false OR diverged"),
+                "confidence": confidence,
+            }
+
+    return None
+
+
+def _differential_xss_check(sess, url, param_name, param_value, vc,
+                            timeout=10):
+    vc.log(f"[diff] XSS check: {param_name}={param_value!r} at {url}", "INFO")
+    pv = param_value or ""
+
+    result = _diff_run_triplet(
+        sess, url, param_name,
+        f"{pv}<xprtsta>", f"{pv}<xprtstb>", f"{pv}<script>1</script>",
+        vc, timeout,
+    )
+    if result:
+        method = "tag_differential" if _ps else "length_heuristic"
+        confidence = "Firm" if _ps else "Tentative"
+        return {
+            "confirmed": True, "method": method,
+            "detail": (f"Param '{param_name}': unknown tags rendered "
+                       f"identically, <script> tag handled differently "
+                       f"— HTML context injection surface"),
+            "confidence": confidence,
+        }
+
+    result2 = _diff_run_triplet(
+        sess, url, param_name,
+        f'{pv}" data-xprta="1', f'{pv}" data-xprtb="1',
+        f'{pv}" onmouseover="1',
+        vc, timeout,
+    )
+    if result2:
+        method = "attr_differential" if _ps else "length_heuristic"
+        confidence = "Firm" if _ps else "Tentative"
+        return {
+            "confirmed": True, "method": method,
+            "detail": (f"Param '{param_name}': inert data-* attributes "
+                       f"matched, event handler attribute diverged "
+                       f"— attribute injection surface"),
+            "confidence": confidence,
+        }
+
+    return None
+
+
+_DIFF_CMDI_SEPARATORS = [
+    (";", "#"),
+    ("|", ""),
+    ("$(", ")"),
+]
+
+
+def _differential_cmdi_check(sess, url, param_name, param_value, vc,
+                             timeout=10):
+    vc.log(f"[diff] CMDi check: {param_name}={param_value!r} at {url}", "INFO")
+    pv = param_value or ""
+
+    for sep_pre, sep_post in _DIFF_CMDI_SEPARATORS:
+        if sep_pre == "$(":
+            pa = f"{pv}$(echo AAAA){sep_post}"
+            pb = f"{pv}$(echo BBBB){sep_post}"
+            pc = f"{pv}$(echo AAAAAAAAAAAA){sep_post}"
+        else:
+            end = f"{sep_post}" if sep_post else ""
+            pa = f"{pv}{sep_pre}echo AAAA{end}"
+            pb = f"{pv}{sep_pre}echo BBBB{end}"
+            pc = f"{pv}{sep_pre}echo AAAAAAAAAAAA{end}"
+
+        result = _diff_run_triplet(
+            sess, url, param_name, pa, pb, pc, vc, timeout,
+        )
+        if result:
+            method = "output_length" if _ps else "length_heuristic"
+            confidence = "Firm" if _ps else "Tentative"
+            sep_label = sep_pre.replace("$(", "subshell")
+            return {
+                "confirmed": True, "method": method,
+                "detail": (f"Param '{param_name}': equal-length echo "
+                           f"commands ({sep_label} separator) matched, "
+                           f"longer echo diverged — command execution"),
+                "confidence": confidence,
+            }
+
+    return None
+
+
+def _differential_path_traversal_check(sess, url, param_name, param_value, vc,
+                                       timeout=10):
+    vc.log(f"[diff] Path traversal check: {param_name}={param_value!r} at "
+           f"{url}", "INFO")
+    pv = param_value or ""
+
+    base_name = pv.rsplit("/", 1)[-1] if "/" in pv else pv
+
+    result = _diff_run_triplet(
+        sess, url, param_name,
+        f"{pv}/../{base_name}", f"{pv}/./",
+        f"{pv}/../../../../etc/hostname",
+        vc, timeout,
+    )
+    if result:
+        method = "traversal_differential" if _ps else "length_heuristic"
+        confidence = "Firm" if _ps else "Tentative"
+        return {
+            "confirmed": True, "method": method,
+            "detail": (f"Param '{param_name}': self-referencing paths "
+                       f"(../{base_name}, ./) matched, real traversal "
+                       f"(../../../../etc/hostname) diverged"),
+            "confidence": confidence,
+        }
+
+    result2 = _diff_run_triplet(
+        sess, url, param_name,
+        f"{pv}/../{base_name}", f"./{pv}",
+        "....//....//....//....//etc/passwd",
+        vc, timeout,
+    )
+    if result2:
+        method = "traversal_differential" if _ps else "length_heuristic"
+        confidence = "Firm" if _ps else "Tentative"
+        return {
+            "confirmed": True, "method": method,
+            "detail": (f"Param '{param_name}': equivalent-path variants "
+                       f"matched, double-dot-slash bypass diverged"),
+            "confidence": confidence,
+        }
+
+    return None
+
+
+_HB_LOGIN_URL_RE = re.compile(
+    r'/login|/signin|/sign-in|/auth|/sso|/cas/login|'
+    r'/j_spring_security_check|/Account/Login|/saml/login',
+    re.IGNORECASE,
+)
+
+
+def _session_heartbeat_init(sess, verify_url, vc, timeout=10):
+    vc.log(f"[heartbeat] Capturing baseline from {verify_url}", "INFO")
+    try:
+        r = sess.get(verify_url, timeout=timeout, allow_redirects=False)
+    except Exception as e:
+        vc.log(f"[heartbeat] Baseline capture failed: {e}", "WARNING")
+        return None
+
+    sig = None
+    if _ps is not None:
+        try:
+            sig = _ps.page_signature(r.text)
+        except Exception:
+            pass
+
+    cookie_names = sorted(c.name for c in sess.cookies)
+
+    return {
+        "status_code": r.status_code,
+        "signature": sig,
+        "content_length": len(r.text),
+        "cookie_names": cookie_names,
+        "url": verify_url,
+    }
+
+
+def _session_heartbeat_check(sess, verify_url, baseline, vc, timeout=10):
+    try:
+        r = sess.get(verify_url, timeout=timeout, allow_redirects=False)
+    except Exception as e:
+        vc.log(f"[heartbeat] Check failed: {e}", "WARNING")
+        return False
+
+    if r.status_code in (301, 302, 303, 307, 308):
+        loc = r.headers.get("Location", "")
+        if _HB_LOGIN_URL_RE.search(loc):
+            vc.log(
+                f"[heartbeat] Session expired: redirected to login ({loc})",
+                "WARNING",
+            )
+            return False
+
+    if baseline["status_code"] == 200 and r.status_code in (401, 403):
+        vc.log(
+            f"[heartbeat] Session expired: {baseline['status_code']} → "
+            f"{r.status_code}",
+            "WARNING",
+        )
+        return False
+
+    if baseline["status_code"] == 200 and r.status_code in (301, 302, 303,
+                                                              307, 308):
+        vc.log(
+            f"[heartbeat] Session expired: 200 → {r.status_code} redirect",
+            "WARNING",
+        )
+        return False
+
+    if _ps is not None and baseline.get("signature"):
+        try:
+            current_sig = _ps.page_signature(r.text)
+            sim = _ps.compare_signatures(baseline["signature"], current_sig)
+            if sim < 0.6:
+                vc.log(
+                    f"[heartbeat] Session expired: page similarity {sim:.2f} "
+                    f"< 0.6 threshold",
+                    "WARNING",
+                )
+                return False
+        except Exception:
+            pass
+
+    current_cookies = {c.name for c in sess.cookies}
+    expected = set(baseline.get("cookie_names", []))
+    _HB_SESSION_COOKIE_PATTERNS = (
+        "jsessionid", "asp.net_sessionid", "phpsessid", "session",
+        "sid", "sessionid", "connect.sid", "token",
+    )
+    for name in expected:
+        if name.lower() in _HB_SESSION_COOKIE_PATTERNS and name not in current_cookies:
+            vc.log(
+                f"[heartbeat] Session expired: critical cookie '{name}' "
+                f"missing",
+                "WARNING",
+            )
+            return False
+
+    return True
+
+
+_CONFIDENCE_MAP = {
+    "banner_grab": "Tentative",
+    "header_check": "Tentative",
+    "version_string": "Tentative",
+    "default_page": "Tentative",
+    "error_message": "Tentative",
+    "nuclei_template": "Firm",
+    "version_match": "Firm",
+    "nse_script": "Firm",
+    "config_check": "Firm",
+    "authenticated_scan": "Firm",
+    "differential_confirmed": "Firm",
+    "tautology": "Firm",
+    "arithmetic": "Firm",
+    "tag_differential": "Firm",
+    "attr_differential": "Firm",
+    "output_length": "Firm",
+    "traversal_differential": "Firm",
+    "exploit_confirmed": "Certain",
+    "authenticated_check": "Certain",
+    "code_execution": "Certain",
+    "data_exfiltration": "Certain",
+}
+
+
+def _confidence_for_method(detection_method):
+    return _CONFIDENCE_MAP.get(detection_method, "Tentative")
 
 
 # ─────────────────────────────────────────────
@@ -12718,6 +13887,7 @@ return null;
         #   4. digest      — HTTP Digest Auth (RFC 7616)
         #   5. ntlm        — NTLM / Windows Integrated Auth (Active Directory)
         _auto_methods = ["form_login", "token_login", "basic", "digest", "ntlm"]
+        _auto_last_exc = None
         _auto_hdr_names = frozenset({
             "authorization", "x-auth-token", "x-api-key", "x-csrf-token",
             "x-access-token", "x-session-token", "token",
@@ -12925,35 +14095,43 @@ return null;
                         if _ampe not in _auto_ex_mfa_e:
                             _auto_ex_mfa_e.append(_ampe)
                     auth["mfa_providers"] = _auto_ex_mfa_e
+                _auto_last_exc = _auto_e
                 vc.log(f"[auth:auto] Method '{_auto_m}' error: {_auto_e} — skipping", "INFO")
 
         vc.log("[auth:auto] All username/password methods exhausted — no session established",
                "WARNING")
-        # Browser-auth fallback: open a real browser so the user (or headless
-        # automation) can complete login manually when no automated method works.
+        # Auth escalation chain: L2 (connection resilience) → L3 (headless/recipe) → L4 (operator prompt)
         _auto_ba_url = auth.get("login_url", "").strip() or _auto_base_url
         if _auto_ba_url and not no_interactive:
-            if cfg.get("_no_browser_assist"):
-                vc.log("[auth:auto] No-browser-assist mode — skipping browser fallback", "INFO")
-            elif cfg.get("browser_auth"):
-                vc.log("[auth:auto] Falling back to browser-assisted login", "INFO")
+            _esc_result = _auth_escalation(
+                _auto_ba_url,
+                auth.get("username", ""),
+                auth.get("password", ""),
+                sess, cfg, vc,
+                role_label=role_label,
+                timeout=cfg.get("timeout", 10),
+                scope_hostnames=scope_hostnames,
+                l1_result=(False, _auto_last_exc),
+            )
+            if _esc_result == "__BROWSER_AUTH__":
                 if not auth.get("login_url"):
                     auth["login_url"] = _auto_ba_url
                 return _browser_assisted_login(_auto_ba_url)
+            elif _esc_result is not None:
+                sess = _esc_result
+                _write_auth_status(
+                    cfg.get("project_dir", ""), role_label,
+                    auth.get("username", ""), "success", sess,
+                    target_url=_auto_ba_url,
+                )
+                vc.log(f"[auth:auto] Auth escalation succeeded for role '{role_label}'",
+                       "SUCCESS")
             else:
-                _auto_ba_sfx = f" for role '{role_label}'" if role_label else ""
-                _auto_ba_choice = vc.prompt(
-                    f"Open a browser window to complete login manually{_auto_ba_sfx}?",
-                    prompt_type="confirm",
-                    options=["Yes", "No"],
-                    role=role_label,
-                ).strip()
-                if _auto_ba_choice.lower() in ("yes", "y", "1"):
-                    if not auth.get("login_url"):
-                        auth["login_url"] = _auto_ba_url
-                    return _browser_assisted_login(_auto_ba_url)
-                vc.log("[auth:auto] Browser login declined", "WARNING")
-        return None
+                vc.log("[auth:auto] Auth escalation exhausted — continuing unauthenticated",
+                       "WARNING")
+                return None
+        else:
+            return None
 
     # Transfer auth state (cookies + key headers) to a scoped session for scanning.
     # This lets login_url be on a different host while scan requests remain scope-enforced.
@@ -32844,6 +34022,96 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
     else:
         vc.log("[oob] OOB testing disabled (no oob_callback_url configured)", "INFO")
 
+    # Differential response analysis — WAF-transparent structural comparison
+    if params:
+        vc.status(phase, "Injection Testing", "running", "Differential analysis", 27, 28)
+        _diff_count = 0
+        for entry in params[:20]:
+            _check_pause()
+            purl = entry["url"]
+            for param in entry["params"][:5]:
+                _pv = urllib.parse.parse_qs(
+                    urllib.parse.urlparse(purl).query,
+                    keep_blank_values=True,
+                ).get(param, [""])[0]
+
+                _dsqli = _differential_sqli_check(sess, purl, param, _pv, vc, timeout)
+                if _dsqli:
+                    try:
+                        _rq, _rp = _save_http_evidence(out, phase, f"diff_sqli_{param}",
+                            sess.get(purl, timeout=timeout), endpoint_url=purl, method="GET")
+                    except Exception:
+                        _rq = _rp = ""
+                    out.add_finding(
+                        title="Injection: SQL Injection — Differential Confirmed",
+                        url=purl, port=target["port"], risk="CRITICAL",
+                        description=(
+                            f"Differential response analysis confirmed SQL injection in "
+                            f"parameter '{param}'. {_dsqli['detail']}"
+                        ),
+                        output=f"Method: {_dsqli['method']}\nParameter: {param}\nURL: {purl}",
+                        output_file=f"{_rq},{_rp}" if _rq else "",
+                        sources="fracture-differential", service=target["scheme"],
+                        affected=purl, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation="Use parameterised queries for all database interactions.",
+                        confidence=_dsqli.get("confidence", "Firm"),
+                    )
+                    _diff_count += 1
+                    vc.log(f"[diff] SQLi confirmed: {purl} param={param}", "SUCCESS")
+
+                _dxss = _differential_xss_check(sess, purl, param, _pv, vc, timeout)
+                if _dxss:
+                    try:
+                        _rq, _rp = _save_http_evidence(out, phase, f"diff_xss_{param}",
+                            sess.get(purl, timeout=timeout), endpoint_url=purl, method="GET")
+                    except Exception:
+                        _rq = _rp = ""
+                    out.add_finding(
+                        title="Injection: Cross-Site Scripting (XSS) — Differential Confirmed",
+                        url=purl, port=target["port"], risk="HIGH",
+                        description=(
+                            f"Differential response analysis confirmed XSS in "
+                            f"parameter '{param}'. {_dxss['detail']}"
+                        ),
+                        output=f"Method: {_dxss['method']}\nParameter: {param}\nURL: {purl}",
+                        output_file=f"{_rq},{_rp}" if _rq else "",
+                        sources="fracture-differential", service=target["scheme"],
+                        affected=purl, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation="Encode all user-supplied output for the target context.",
+                        confidence=_dxss.get("confidence", "Firm"),
+                    )
+                    _diff_count += 1
+                    vc.log(f"[diff] XSS confirmed: {purl} param={param}", "SUCCESS")
+
+                _dcmdi = _differential_cmdi_check(sess, purl, param, _pv, vc, timeout)
+                if _dcmdi:
+                    try:
+                        _rq, _rp = _save_http_evidence(out, phase, f"diff_cmdi_{param}",
+                            sess.get(purl, timeout=timeout), endpoint_url=purl, method="GET")
+                    except Exception:
+                        _rq = _rp = ""
+                    out.add_finding(
+                        title="Injection: Command Injection — Differential Confirmed",
+                        url=purl, port=target["port"], risk="CRITICAL",
+                        description=(
+                            f"Differential response analysis confirmed OS command injection "
+                            f"in parameter '{param}'. {_dcmdi['detail']}"
+                        ),
+                        output=f"Method: {_dcmdi['method']}\nParameter: {param}\nURL: {purl}",
+                        output_file=f"{_rq},{_rp}" if _rq else "",
+                        sources="fracture-differential", service=target["scheme"],
+                        affected=purl, owasp="A03:2025 Injection", nist="SI-10",
+                        remediation="Never pass user input to OS commands. Use language-native APIs.",
+                        confidence=_dcmdi.get("confidence", "Firm"),
+                    )
+                    _diff_count += 1
+                    vc.log(f"[diff] CMDi confirmed: {purl} param={param}", "SUCCESS")
+
+        if _diff_count:
+            vc.log(f"[diff] Differential analysis found {_diff_count} additional findings", "SUCCESS")
+        else:
+            vc.log("[diff] Differential analysis: no additional findings", "INFO")
+
     vc.status(phase, "Injection Testing", "complete", "Done", 28, 28)
     vc.log("[injection] Phase complete", "SUCCESS")
 
@@ -32908,6 +34176,46 @@ def _phase_traversal(target: dict, cfg: dict, pm: ProgressManager,
                     )
                     vc.log(f"[traversal] LFI: {purl} param={param}", "SUCCESS")
                     break
+
+    # Differential path traversal analysis
+    if params:
+        _dtrav_count = 0
+        for entry in params[:15]:
+            _check_pause()
+            purl = entry["url"]
+            for param in entry["params"][:3]:
+                _pv = urllib.parse.parse_qs(
+                    urllib.parse.urlparse(purl).query,
+                    keep_blank_values=True,
+                ).get(param, [""])[0]
+                _dtrav = _differential_path_traversal_check(
+                    sess, purl, param, _pv, vc, timeout)
+                if _dtrav:
+                    try:
+                        _rq, _rp = _save_http_evidence(out, phase, f"diff_trav_{param}",
+                            sess.get(purl, timeout=timeout), endpoint_url=purl, method="GET")
+                    except Exception:
+                        _rq = _rp = ""
+                    out.add_finding(
+                        title="Path Traversal — Differential Confirmed",
+                        url=purl, port=target["port"], risk="HIGH",
+                        description=(
+                            f"Differential response analysis confirmed path traversal in "
+                            f"parameter '{param}'. {_dtrav['detail']}"
+                        ),
+                        output=f"Method: {_dtrav['method']}\nParameter: {param}\nURL: {purl}",
+                        output_file=f"{_rq},{_rp}" if _rq else "",
+                        sources="fracture-differential", service=target["scheme"],
+                        affected=f"{purl}?{param}=<traversal>",
+                        owasp="A01:2025 Broken Access Control", nist="AC-3",
+                        remediation="Canonicalise all user-supplied paths against a fixed base directory.",
+                        confidence=_dtrav.get("confidence", "Firm"),
+                    )
+                    _dtrav_count += 1
+                    vc.log(f"[diff] Path traversal confirmed: {purl} param={param}", "SUCCESS")
+
+        if _dtrav_count:
+            vc.log(f"[diff] Differential traversal found {_dtrav_count} additional findings", "SUCCESS")
 
     vc.status(phase, "Path Traversal", "complete", "Done", len(params), len(params))
     vc.log("[traversal] Phase complete", "SUCCESS")
@@ -52809,6 +54117,16 @@ def main() -> None:
                 effective_auth = _make_session(_ctx_cfg, _scope_hostnames)
                 _attach_redirect_hook(effective_auth, _scope_hostnames, target,
                                       out, _in_scope_new, cfg=cfg)
+
+            # ── Session heartbeat baseline ─────────────────────────────────
+            _session_hb_baseline = None
+            if effective_auth is not None and _ctx_label != "unauthenticated":
+                try:
+                    _session_hb_baseline = _session_heartbeat_init(
+                        effective_auth, target["url"], vc)
+                except Exception:
+                    pass
+            _ctx_cfg["_session_hb_baseline"] = _session_hb_baseline
 
             # ── Seed _ep_base with the post-login landing URL ────────────────
             # After successful auth the server typically redirects to the
