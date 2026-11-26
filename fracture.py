@@ -8295,6 +8295,29 @@ document.addEventListener('submit', function(e) {
                     except Exception:
                         pass
             if _base_r0.status_code == 200:
+                # Check if the page we landed on (via redirect or directly)
+                # IS itself a login form.  Covers the common case where the
+                # base URL 302s to the login page (e.g. Spring Security
+                # redirecting / → /ma/Login.do).
+                _base_dest_page = _analyse_form_page(
+                    _base_r0.text, _base_r0.url)
+                if _base_dest_page.get("login_form") or (
+                        _base_dest_page.get("has_username")
+                        and _base_dest_page.get("has_password")):
+                    vc.log(
+                        f"[auth] Login form found at base URL destination: "
+                        f"{_base_r0.url}",
+                        "SUCCESS",
+                    )
+                    return _base_r0.url
+                if _base_dest_page.get("js_rendered_login"):
+                    vc.log(
+                        f"[auth] JS-rendered login at base URL destination: "
+                        f"{_base_r0.url}",
+                        "INFO",
+                    )
+                    return _base_r0.url
+
                 # Extract (href, anchor_text) from all <a> tags on the base page
                 _login_link_found = False
                 for _am in _re4.finditer(
