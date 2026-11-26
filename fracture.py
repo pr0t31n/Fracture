@@ -50680,19 +50680,34 @@ def main() -> None:
     _ss_bin = _find_tool("searchsploit")
     if _ss_bin:
         vc.status("init_updates", label="INIT: Plugin Updates", status="running",
-                  step="searchsploit -u")
+                  step="searchsploit db update (git)")
         print(f"{Fore.CYAN}[*] Updating searchsploit database...{Style.RESET_ALL}", flush=True)
         _ss_r = "failed"
-        try:
-            _ss_upd = subprocess.run(
-                [_ss_bin, "-u"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, timeout=300)
-            _ss_r = "updated" if _ss_upd.returncode == 0 else "skipped"
-        except subprocess.TimeoutExpired:
-            _ss_r = "timed out"
-        except Exception:
-            pass
+        _ss_db_path = Path("/usr/share/exploitdb")
+        if not _ss_db_path.is_dir():
+            for _sp in [Path("/opt/exploitdb"), Path("/usr/local/opt/exploitdb")]:
+                if _sp.is_dir():
+                    _ss_db_path = _sp
+                    break
+        if (_ss_db_path / ".git").is_dir():
+            try:
+                _ss_upd = subprocess.run(
+                    ["git", "-C", str(_ss_db_path), "pull", "--ff-only"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, timeout=120)
+                _ss_r = "updated" if _ss_upd.returncode == 0 else "skipped"
+            except subprocess.TimeoutExpired:
+                _ss_r = "timed out"
+                _git_lock = _ss_db_path / ".git" / "index.lock"
+                if _git_lock.exists():
+                    try:
+                        _git_lock.unlink()
+                    except OSError:
+                        pass
+            except Exception:
+                pass
+        else:
+            _ss_r = "skipped (no git repo)"
         _update_results["searchsploit"] = _ss_r
         print(f"{Fore.GREEN if _ss_r == 'updated' else Fore.YELLOW}"
               f"[{'+'if _ss_r=='updated' else '~'}] searchsploit: {_ss_r}"
