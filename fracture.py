@@ -11826,7 +11826,7 @@ return null;
         if _login_url:
             vc.log(f"[auth] Submitting credentials to: {_login_url}", "INFO")
             # Snapshot cookie names BEFORE credential submission for comparison
-            _pre_login_cookie_names: set = {c.name for c in sess.cookies}
+            _pre_login_cookie_names: set = {(c.name, c.value) for c in sess.cookies}
             _post_resp, _ = _login_post(_login_url, api_endpoint=_guard_is_api)
             _login_post_called = True
             if _post_resp is not None:
@@ -12001,13 +12001,17 @@ return null;
                 if _av_login_path and _av_post_path and _av_post_path != _av_login_path:
                     _av_ok.append(f"URL changed post-login: {_av_login_path!r} → {_av_post_path!r}")
                 elif _av_login_path and _av_post_path == _av_login_path:
-                    _av_fail.append(f"URL unchanged — still on login page ({_av_login_path!r})")
+                    if _P20_LOGIN_PATH_RE.search(_av_login_path) and _P20_LOGIN_PATH_RE.search(_av_post_path):
+                        _av_ok.append(f"Both pre/post URLs are login pages ({_av_login_path!r}) — base URL always redirects to login")
+                    else:
+                        _av_fail.append(f"URL unchanged — still on login page ({_av_login_path!r})")
 
                 # Signal 2: New cookies set that were absent before credential POST
-                _av_new_ck = {c.name for c in sess.cookies} - _pre_login_cookie_names
-                if _av_new_ck:
-                    _av_ok.append(f"New session cookies after login: {sorted(_av_new_ck)}")
-                elif sess.cookies and not _av_new_ck:
+                _av_new_ck = {(c.name, c.value) for c in sess.cookies} - _pre_login_cookie_names
+                _av_new_names = {nv[0] for nv in _av_new_ck}
+                if _av_new_names:
+                    _av_ok.append(f"New/changed session cookies after login: {sorted(_av_new_names)}")
+                elif sess.cookies and not _av_new_names:
                     _av_fail.append("No new cookies set by credential submission")
 
                 # Signal 3: Login form absent from post-login page (success)
@@ -30987,7 +30991,8 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                 if _sstikey in _sstimap_found_params:
                     continue
                 _sstimap_out = _sstimap_dir / f"sstimap_{param}.txt"
-                _sstimap_cmd = [sstimap_bin, "-u", f"{purl}?{param}=INJECT",
+                _sstimap_sep = "&" if "?" in purl else "?"
+                _sstimap_cmd = [sstimap_bin, "-u", f"{purl}{_sstimap_sep}{param}=INJECT",
                                 "--level", "2", "--no-color"]
                 try:
                     proc = _popen(_sstimap_cmd, stdout=subprocess.PIPE,
@@ -37113,7 +37118,7 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
 
     import random as _zap_rnd
     api_port = 8090 + _zap_rnd.randint(0, 900)
-    api_key = uuid.uuid4().hex
+    api_key = _uuid.uuid4().hex
 
     cmd = [
         zap_bin, "-daemon",
@@ -51273,7 +51278,8 @@ def main() -> None:
                         _last_seg = _early_landing_path.rsplit("/", 1)[-1]
                         _early_on_login = (
                             _early_landing_path == _early_target_path
-                            or _last_seg == "login")
+                            or _last_seg == "login"
+                            or _P20_LOGIN_PATH_RE.search(_early_landing_path))
                         # SPA targets keep the same URL for login and
                         # the authenticated landing page — the routing
                         # is client-side.  When auth cookies that look
@@ -51316,7 +51322,8 @@ def main() -> None:
                                     ).path.rstrip("/").lower()
                                     _esp_seg = _esp.rsplit("/", 1)[-1]
                                     if (_esp != _early_target_path
-                                            and _esp_seg != "login"):
+                                            and _esp_seg != "login"
+                                            and not _P20_LOGIN_PATH_RE.search(_esp)):
                                         # Verify the URL is reachable
                                         # by the requests session (not
                                         # just the Chrome session).
@@ -51342,12 +51349,13 @@ def main() -> None:
                                                 _redir_to = (
                                                     _esp_v.headers
                                                     .get("Location", ""))
-                                                _rto_seg = (
+                                                _rto_path = (
                                                     urllib.parse.urlparse(
                                                         _redir_to)
-                                                    .path.rsplit("/", 1)[-1]
-                                                    .lower())
-                                                if _rto_seg == "login":
+                                                    .path.lower())
+                                                _rto_seg = _rto_path.rsplit("/", 1)[-1]
+                                                if (_rto_seg == "login"
+                                                        or _P20_LOGIN_PATH_RE.search(_rto_path)):
                                                     _early_browser_only = True
                                         except Exception:
                                             pass
@@ -52355,7 +52363,8 @@ def main() -> None:
                         _last_seg = _landing_path.rsplit("/", 1)[-1]
                         _still_on_login = (
                             _landing_path == _target_path
-                            or _last_seg == "login")
+                            or _last_seg == "login"
+                            or _P20_LOGIN_PATH_RE.search(_landing_path))
                         # SPA auth cookie bypass — same logic as
                         # the early check at _early_on_login: when
                         # auth session cookies look like session
@@ -52397,7 +52406,8 @@ def main() -> None:
                                     _spa_seg = _spa_lnd_path.rsplit(
                                         "/", 1)[-1]
                                     if (_spa_lnd_path != _target_path
-                                            and _spa_seg != "login"):
+                                            and _spa_seg != "login"
+                                            and not _P20_LOGIN_PATH_RE.search(_spa_lnd_path)):
                                         _late_browser_only = False
                                         try:
                                             _lv = _as_session.get(
@@ -52410,12 +52420,11 @@ def main() -> None:
                                                 _rto = (
                                                     _lv.headers
                                                     .get("Location", ""))
-                                                _rtos = (
-                                                    urllib.parse.urlparse(
-                                                        _rto)
-                                                    .path.rsplit("/", 1)[-1]
-                                                    .lower())
-                                                if _rtos == "login":
+                                                _rto_path = urllib.parse.urlparse(
+                                                    _rto).path.lower()
+                                                _rtos = _rto_path.rsplit("/", 1)[-1]
+                                                if (_rtos == "login"
+                                                        or _P20_LOGIN_PATH_RE.search(_rto_path)):
                                                     _late_browser_only = True
                                         except Exception:
                                             pass
