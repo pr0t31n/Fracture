@@ -8227,7 +8227,18 @@ document.addEventListener('submit', function(e) {
         #    and in the spider below accept links from the redirected page.
         _effective_base = base  # updated below if redirect changes the hostname
         try:
-            _base_r0 = sess.get(base, timeout=timeout, allow_redirects=True)
+            _base_r0 = None
+            for _bf_attempt in range(3):
+                try:
+                    _base_r0 = sess.get(base, timeout=timeout, allow_redirects=True)
+                    break
+                except Exception as _bf_exc:
+                    if _bf_attempt < 2:
+                        vc.log(f"[auth] Base URL fetch attempt {_bf_attempt + 1} failed ({_bf_exc.__class__.__name__}), retrying…", "WARN")
+                        import time as _t_bf; _t_bf.sleep(1.5 * (_bf_attempt + 1))
+                    else:
+                        raise
+            _base_r0  # type: ignore — guaranteed non-None after the loop
             _redir_netloc = _up4(_base_r0.url).netloc
             if _redir_netloc and _redir_netloc != _base_host:
                 vc.log(
@@ -9193,10 +9204,17 @@ return null;
             if depth > 3:
                 continue
             vc.log(f"[auth] Spidering (depth {depth}): {cur_url}", "INFO")
-            try:
-                r = sess.get(cur_url, timeout=timeout, allow_redirects=True)
-            except Exception as _se:
-                vc.log(f"[auth] Spider fetch failed: {_se}", "INFO")
+            r = None
+            for _sp_att in range(3):
+                try:
+                    r = sess.get(cur_url, timeout=timeout, allow_redirects=True)
+                    break
+                except Exception as _se:
+                    if _sp_att < 2:
+                        import time as _t_sp; _t_sp.sleep(1.0 * (_sp_att + 1))
+                    else:
+                        vc.log(f"[auth] Spider fetch failed after 3 attempts: {_se}", "INFO")
+            if r is None:
                 continue
             if r.status_code != 200:
                 vc.log(
