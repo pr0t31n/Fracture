@@ -205,7 +205,7 @@ _SCAN_SEM           = _AdaptiveSemaphore(_SCAN_CONCURRENCY)
 
 # ── Per-subprocess memory limit ──────────────────────────────────────────────
 _SUBPROCESS_MEM_LIMIT_BYTES = int(2 * 1024 ** 3)  # 2 GB per child process
-_GO_SUBPROCESS_MEM_LIMIT_BYTES = int(8 * 1024 ** 3)  # 8 GB for Go binaries (need large virtual arenas)
+_GO_SUBPROCESS_MEM_LIMIT_BYTES = int(min(8, max(2, _hw_ram * 0.6)) * 1024 ** 3)
 
 def _mem_limit_preexec():
     """preexec_fn: set process group + cap virtual address space."""
@@ -289,9 +289,14 @@ def _start_oom_watchdog(threshold_pct=90, interval=15):
                 for p in live:
                     try:
                         pi = _psw.Process(p.pid)
-                        rss = pi.memory_info().rss
-                        if rss > biggest_rss:
-                            biggest, biggest_rss = p, rss
+                        tree_rss = pi.memory_info().rss
+                        for _ch in pi.children(recursive=True):
+                            try:
+                                tree_rss += _ch.memory_info().rss
+                            except (_psw.NoSuchProcess, _psw.AccessDenied):
+                                pass
+                        if tree_rss > biggest_rss:
+                            biggest, biggest_rss = p, tree_rss
                     except (_psw.NoSuchProcess, _psw.AccessDenied, OSError):
                         pass
                 if biggest and biggest_rss > 100 * 1024 * 1024:
@@ -28058,6 +28063,8 @@ def _phase_crawl(target: dict, cfg: dict, pm: ProgressManager,
     _crawl_html_secrets:   dict = {}     # {snippet: first_url} — secrets found in HTML comments
     _crawl_bucket_urls:    dict = {}     # {bucket_url: first_url} — cloud storage bucket URLs
     _crawl_pw_autocomplete: list = []    # [(page_url, field_name)] — password fields with autocomplete
+    _crawl_html_cache:     dict = {}     # {url: html_text} — cached for JS library scanning
+    _crawl_all_script_srcs: list = []    # [abs_src_url] — all external <script src> URLs found
 
     # Path-prefix scoping: when the target URL has a non-trivial first path
     # segment (e.g. /OMT in https://host/OMT/Client/Login), only follow links
@@ -36251,10 +36258,12 @@ def _launch_vulnscan_bg(target: dict, cfg: dict, pm: ProgressManager,
         )
 
         nuc_out.parent.mkdir(parents=True, exist_ok=True)
+        _nuc_conc = max(5, min(25, int(_hw_ram * 2.5)))
         cmd = [nuclei, "-l", str(_nuc_list_file),
                "-s", "critical,high,medium,low,info",
                "-silent", "-jsonl", "-no-interactsh",
-               "-duc", "-stats", "-c", "25",
+               "-duc", "-stats", "-c", str(_nuc_conc),
+               "-bs", str(max(5, _nuc_conc // 2)),
                "-o", str(nuc_out)]
         _nuc_env = os.environ.copy()
         _nuc_home = Path(out.root) / ".nuclei_home"
