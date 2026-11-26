@@ -99,17 +99,22 @@ def _csrf_prefetch(
     try:
         r = sess.get(login_url, timeout=timeout)
         html = r.text
-    except Exception:
+    except Exception as exc:
+        sess._csrf_diag = {"error": str(exc), "login_url": login_url}
         return "", {}, "", ""
     hidden: dict = {}
     form_action = ""
     detected_user_field = ""
     detected_pass_field = ""
+    _forms_scanned = 0
+    _pw_form_found = False
     for form_m in re.finditer(r"(?s)<form[^>]*>(.+?)</form>", html, re.IGNORECASE):
+        _forms_scanned += 1
         form_tag  = form_m.group(0)
         form_body = form_m.group(1)
         if not re.search(r'<input[^>]+type=["\']?password["\']?', form_body, re.IGNORECASE):
             continue
+        _pw_form_found = True
         act_m = re.search(r'\baction=["\']([^"\']*)["\']', form_tag, re.IGNORECASE)
         if act_m:
             raw = act_m.group(1).strip()
@@ -130,6 +135,18 @@ def _csrf_prefetch(
             elif ftype in ("text", "email") and not detected_user_field:
                 detected_user_field = n_m.group(1)
         break  # use first form containing a password field
+    sess._csrf_diag = {
+        "login_url": login_url,
+        "get_status": r.status_code,
+        "final_url": r.url,
+        "html_len": len(html),
+        "forms_scanned": _forms_scanned,
+        "pw_form_found": _pw_form_found,
+        "form_action": form_action,
+        "hidden_fields": list(hidden.keys()),
+        "detected_user": detected_user_field,
+        "detected_pass": detected_pass_field,
+    }
     return form_action, hidden, detected_user_field, detected_pass_field
 
 
@@ -194,6 +211,18 @@ def _login_post(
 
     default_ct = "application/x-www-form-urlencoded" if login_mode == "fields" else "application/json"
     ct = auth.get("login_content_type", default_ct)
+
+    sess._login_diag = {
+        "post_url": post_url,
+        "content_type": ct,
+        "user_field": uf,
+        "pass_field": pf,
+        "csrf_found": bool(hidden),
+        "csrf_fields": list(hidden.keys()),
+        "form_action_detected": bool(form_action),
+        "field_detection": {"username": det_uf, "password": det_pf},
+    }
+
     try:
         if "json" in ct:
             return sess.post(post_url, json=data, timeout=timeout,
@@ -225,30 +254,75 @@ def build_auth_session(
 
     # ── Form Login ────────────────────────────────────────────────────────────
     if method == "form_login":
+        import re as _re_fl
         login_url = auth.get("login_url", "")
         if not login_url:
             return sess, "ERROR: login_url is required for form_login"
         resp, post_url = _login_post(sess, auth, timeout)
         if resp is None:
             return sess, f"ERROR: POST to {post_url or login_url} failed (network/timeout)"
+
+        # Build diagnostic context for error messages
+        _diag_parts = []
+        _initial_sc = resp.history[0].status_code if resp.history else resp.status_code
+        _final_url = resp.url
+        if resp.history:
+            _chain = " → ".join(
+                f"{h.status_code} {h.headers.get('Location', '?')}" for h in resp.history)
+            _diag_parts.append(f"redirect chain: {_chain} → {resp.status_code} {_final_url}")
+        _diag_parts.append(f"final URL: {_final_url}")
+        _diag_parts.append(f"cookies: {len(sess.cookies)}")
+        _ld = getattr(sess, "_login_diag", {})
+        if _ld:
+            _diag_parts.append(f"ct: {_ld.get('content_type', '?')}")
+            _diag_parts.append(f"fields: user={_ld.get('user_field', '?')}, pass={_ld.get('pass_field', '?')}")
+            _diag_parts.append(f"csrf: {_ld.get('csrf_fields', [])}")
+            if _ld.get("field_detection"):
+                _diag_parts.append(f"detected: {_ld['field_detection']}")
+        _cd = getattr(sess, "_csrf_diag", {})
+        if _cd:
+            _diag_parts.append(f"prefetch: GET {_cd.get('get_status', '?')} → {_cd.get('final_url', '?')}")
+            _diag_parts.append(f"forms: {_cd.get('forms_scanned', 0)}, pw_form: {_cd.get('pw_form_found', False)}")
+            if _cd.get("error"):
+                _diag_parts.append(f"prefetch_error: {_cd['error']}")
+        _diag = "; ".join(_diag_parts)
+
         if not resp.ok:
             if resp.status_code == 405:
                 return sess, (
                     f"ERROR: POST {post_url} → HTTP 405 Method Not Allowed — "
                     "this URL only accepts GET; check the HTML form action attribute "
-                    "for the correct submission endpoint"
-                )
+                    f"for the correct submission endpoint [{_diag}]")
             return sess, (
                 f"ERROR: POST {post_url} → HTTP {resp.status_code} — "
-                "login rejected (check credentials and login URL)"
-            )
+                f"login rejected (check credentials and login URL) [{_diag}]")
+
+        # Detect login-error redirects: Spring Security ?login_error=1,
+        # generic ?error, ?auth=failed, etc.
+        _LOGIN_ERROR_PAT = _re_fl.compile(
+            r'[?&](login_error|error|auth_error|login_failed|failed|invalid)'
+            r'(=|&|$)', _re_fl.IGNORECASE)
+        _bounced_to_login = bool(
+            _re_fl.search(r'<input[^>]+type=["\']?password["\']?',
+                          resp.text[:8192], _re_fl.IGNORECASE)
+        ) if resp.text else False
+        _error_redirect = bool(_LOGIN_ERROR_PAT.search(_final_url))
+        if _error_redirect or (_bounced_to_login and resp.history):
+            _reason = ""
+            if _error_redirect:
+                _reason = f"login error redirect detected in URL ({_final_url})"
+            elif _bounced_to_login:
+                _reason = "redirected back to login page (password field present)"
+            return sess, (
+                f"ERROR: POST {post_url} → credentials rejected — "
+                f"{_reason} [{_diag}]")
+
         n = len(sess.cookies)
         sc = resp.status_code
         if n == 0:
             return sess, (
                 f"WARNING: POST {post_url} → HTTP {sc} — "
-                "login accepted but no session cookies returned"
-            )
+                f"login accepted but no session cookies returned [{_diag}]")
         return sess, f"POST {post_url} → HTTP {sc}, {n} cookie(s) stored"
 
     # ── HTTP Basic ────────────────────────────────────────────────────────────
@@ -323,11 +397,34 @@ def build_auth_session(
         resp, post_url = _login_post(sess, auth, timeout)
         if resp is None:
             return sess, f"ERROR: POST to {post_url or login_url} failed (network/timeout)"
+
+        _tl_diag = []
+        _tl_final = resp.url
+        if resp.history:
+            _tl_chain = " → ".join(
+                f"{h.status_code} {h.headers.get('Location', '?')}" for h in resp.history)
+            _tl_diag.append(f"redirect chain: {_tl_chain} → {resp.status_code} {_tl_final}")
+        _tl_diag.append(f"final URL: {_tl_final}")
+        _tl_ld = getattr(sess, "_login_diag", {})
+        if _tl_ld:
+            _tl_diag.append(f"ct: {_tl_ld.get('content_type', '?')}")
+            _tl_diag.append(f"fields: user={_tl_ld.get('user_field', '?')}, pass={_tl_ld.get('pass_field', '?')}")
+            _tl_diag.append(f"csrf: {_tl_ld.get('csrf_fields', [])}")
+        _tl_diag_s = "; ".join(_tl_diag)
+
         if not resp.ok:
             return sess, (
                 f"ERROR: POST {post_url} → HTTP {resp.status_code} — "
-                "login rejected (check credentials and login URL)"
-            )
+                f"login rejected (check credentials and login URL) [{_tl_diag_s}]")
+
+        import re as _re_tl
+        _TL_ERR_PAT = _re_tl.compile(
+            r'[?&](login_error|error|auth_error|login_failed|failed|invalid)'
+            r'(=|&|$)', _re_tl.IGNORECASE)
+        if _TL_ERR_PAT.search(_tl_final):
+            return sess, (
+                f"ERROR: POST {post_url} → credentials rejected — "
+                f"login error redirect ({_tl_final}) [{_tl_diag_s}]")
         try:
             body = resp.json()
         except Exception:
@@ -1643,6 +1740,14 @@ def test_connection(
             "status_code": None,
             "auth_info":   auth_info,
         }
+        _cd = getattr(sess, "_csrf_diag", None)
+        _ld = getattr(sess, "_login_diag", None)
+        if _cd or _ld:
+            result["_diagnostics"] = {}
+            if _cd:
+                result["_diagnostics"]["csrf_prefetch"] = _cd
+            if _ld:
+                result["_diagnostics"]["login_post"] = _ld
         # When auto-detect discovers a working endpoint, return its
         # method and URL so the caller (Crucible) can persist them —
         # fracture.py can then use the proven endpoint directly
@@ -1659,11 +1764,9 @@ def test_connection(
                 result["discovered_method"] = _disc_m.group(1)
             if _disc_u:
                 result["discovered_login_url"] = _disc_u.group(1)
-            # testConnection always defaults to application/json for
-            # login POSTs.  Surface that so the caller (Crucible Apply
-            # button) can set Fracture's content-type to match.
+            _ld = getattr(sess, "_login_diag", {})
             if result.get("discovered_login_url"):
-                result["discovered_content_type"] = "application/json"
+                result["discovered_content_type"] = _ld.get("content_type", "application/json")
         return result
 
     # ── Login-based methods: POST result is the definitive answer ─────────────
@@ -2008,6 +2111,7 @@ def main() -> None:
             if "timeout"    in j: timeout     = int(j["timeout"])
             if "proxy"      in j: proxy       = j["proxy"]
             if "verify_ssl" in j: verify_ssl  = bool(j["verify_ssl"])
+            if j.get("no_verify"):  verify_ssl = False
         except Exception as exc:
             print(f"ERROR: could not parse --json: {exc}", file=sys.stderr)
             sys.exit(1)
