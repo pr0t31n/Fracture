@@ -12900,6 +12900,14 @@ def _url_rel_path(full_url: str, base_url: str) -> str:
     Falls back to full_url unchanged if parsing fails or origin doesn't match."""
     try:
         origin = urllib.parse.urlparse(base_url)
+        full_p = urllib.parse.urlparse(full_url)
+        if (origin.hostname or "").lower() == (full_p.hostname or "").lower():
+            rel = full_p.path or "/"
+            if full_p.query:
+                rel += "?" + full_p.query
+            if full_p.fragment:
+                rel += "#" + full_p.fragment
+            return rel
         prefix = f"{origin.scheme}://{origin.netloc}"
         if full_url.startswith(prefix):
             rel = full_url[len(prefix):]
@@ -16624,12 +16632,15 @@ def _phase_recon(target: dict, cfg: dict, pm: ProgressManager,
         _lnd_path = urllib.parse.urlparse(landing_url).path.rstrip("/")
         if _lnd_path and _lnd_path not in _base_seed_paths:
             _base_seed_paths.append(_lnd_path)
+    _FILE_EXT_RE = re.compile(r'\.\w{1,5}$')
     for _seed_path in _base_seed_paths:
         if not _seed_path:
             continue
         _sp_parts = _seed_path.split("/")
         for i in range(2, len(_sp_parts) + 1):
             _parent = "/".join(_sp_parts[:i])
+            if _FILE_EXT_RE.search(_sp_parts[i - 1]):
+                continue
             _parent_url = _recon_origin + _parent
             if _parent_url not in _recon_bases:
                 _recon_bases.append(_parent_url)
@@ -30833,9 +30844,23 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
             #  - Double/triple URL-encoding (%25XX) — browsers don't multi-decode
             #  - ASP.NET infra params (__VIEWSTATE, __EVENTVALIDATION, etc.)
             #  - Payload injected into URL path (before ?) rather than query params
+            #  - Error-page reflection (400/500 responses that echo the payload
+            #    in a Tomcat/IIS/nginx error message without rendering it)
             _ASPNET_INFRA_RE = re.compile(
                 r'__VIEWSTATE|__EVENTVALIDATION|__VIEWSTATEGENERATOR|'
                 r'__PREVIOUSPAGE|__ASYNCPOST', re.I)
+            _ERROR_PAGE_RE = re.compile(
+                r'(?:HTTP\s+Status\s+[45]\d\d)|'
+                r'(?:java\.lang\.\w+Exception)|'
+                r'(?:org\.apache\.\w+)|'
+                r'(?:Exception\s+Report)|'
+                r'(?:Invalid\s+character\s+found\s+in\s+the\s+request\s+target)|'
+                r'(?:The\s+server\s+cannot\s+or\s+will\s+not\s+process\s+the\s+request)|'
+                r'(?:Bad\s+Request\s+[-–—]\s+Invalid\s+URL)|'
+                r'(?:IIS\s+\d+\.\d+\s+Detailed\s+Error)|'
+                r'(?:<title>400\s+Bad\s+Request</title>)|'
+                r'(?:<title>500\s+Internal\s+Server\s+Error</title>)',
+                re.I)
             _valid_pocs = []
             for _dl in stdout.splitlines():
                 _dl = _dl.strip()
@@ -30865,6 +30890,30 @@ def _phase_injection(target: dict, cfg: dict, pm: ProgressManager,
                         or any(c in _dp_dec for c in ('<', '>', '"', "'", '='))):
                     vc.log(f"[injection] dalfox: skipping path-injection POC (malformed URL)", "INFO")
                     continue
+                # Verify POC: replay the URL and check if response is an
+                # error page that merely echoes the payload in its error text
+                # (e.g. Tomcat 400 "Invalid character in request target").
+                try:
+                    _vr = sess.get(_durl, timeout=15, verify=False,
+                                   allow_redirects=False)
+                    if _vr.status_code >= 400:
+                        _vbody = _vr.text[:8000]
+                        if _ERROR_PAGE_RE.search(_vbody):
+                            vc.log(
+                                f"[injection] dalfox: skipping error-page reflection "
+                                f"(HTTP {_vr.status_code}, payload echoed in "
+                                f"server error page, not rendered as HTML)",
+                                "INFO")
+                            continue
+                        ct = (_vr.headers.get("Content-Type") or "").lower()
+                        if "text/html" not in ct:
+                            vc.log(
+                                f"[injection] dalfox: skipping non-HTML "
+                                f"{_vr.status_code} response (CT: {ct})",
+                                "INFO")
+                            continue
+                except Exception:
+                    pass
                 _valid_pocs.append(_dl)
             if _valid_pocs:
                 _df_ss_url = params[0]["url"]
@@ -37064,12 +37113,14 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
 
     import random as _zap_rnd
     api_port = 8090 + _zap_rnd.randint(0, 900)
+    api_key = uuid.uuid4().hex
 
     cmd = [
         zap_bin, "-daemon",
+        "-host", "127.0.0.1",
         "-port", str(api_port),
-        "-config", "api.disablekey=true",
-        "-config", "api.addrs.addr.name=127.0.0.1",
+        "-config", f"api.key={api_key}",
+        "-config", "api.addrs.addr.name=.*",
         "-config", "api.addrs.addr.regex=true",
         "-config", "connection.timeoutInSecs=120",
         "-config", "start.addonUpdate=false",
@@ -37078,8 +37129,7 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
     ]
     _zap_env = os.environ.copy()
     _zap_env["JAVA_TOOL_OPTIONS"] = "-Xmx1024m"
-    _zap_env["ZAP_IN_DOCKER"] = "true"
-    vc.log(f"[zap] Launching ZAP daemon on port {api_port} (heap capped at 1024 MB)", "INFO")
+    vc.log(f"[zap] Launching ZAP daemon on 127.0.0.1:{api_port} (heap capped at 1024 MB)", "INFO")
     vc.status(phase, "ZAP Scan", "running", "starting daemon", 0, 4)
 
     _zap_log = Path(out.root) / "zap_daemon.log"
@@ -37098,7 +37148,9 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
     # Wait for ZAP API to become ready
     import requests as _zap_req
     _zap_base = f"http://127.0.0.1:{api_port}"
+    _zap_params = {"apikey": api_key}
     _zap_ready = False
+    _zap_last_err = ""
     for _attempt in range(40):
         _zap_rc = proc.poll()
         if _zap_rc is not None:
@@ -37118,12 +37170,20 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
             _deregister_proc(proc)
             return None
         try:
-            _r = _zap_req.get(f"{_zap_base}/JSON/core/view/version/", timeout=5)
+            _r = _zap_req.get(
+                f"{_zap_base}/JSON/core/view/version/",
+                params=_zap_params, timeout=5)
             if _r.status_code == 200:
                 _zap_ready = True
                 _ver = _r.json().get("version", "unknown")
                 vc.log(f"[zap] ZAP daemon ready (v{_ver})", "INFO")
                 break
+            else:
+                _zap_last_err = f"HTTP {_r.status_code}: {_r.text[:200]}"
+                if _attempt == 10:
+                    vc.log(
+                        f"[zap] API responding but non-200 after {_attempt} "
+                        f"attempts: {_zap_last_err}", "WARNING")
         except Exception:
             pass
         import time as _zap_time
@@ -37137,17 +37197,17 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
             _zp_port = str(_zpu.port or 1080)
             _zap_req.get(
                 f"{_zap_base}/JSON/core/action/setOptionProxyChainName/",
-                params={"String": _zp_host}, timeout=10)
+                params={**_zap_params, "String": _zp_host}, timeout=10)
             _zap_req.get(
                 f"{_zap_base}/JSON/core/action/setOptionProxyChainPort/",
-                params={"Integer": _zp_port}, timeout=10)
+                params={**_zap_params, "Integer": _zp_port}, timeout=10)
             _zap_req.get(
                 f"{_zap_base}/JSON/core/action/setOptionUseProxyChain/",
-                params={"Boolean": "true"}, timeout=10)
+                params={**_zap_params, "Boolean": "true"}, timeout=10)
             if _zpu.scheme.startswith("socks"):
                 _zap_req.get(
                     f"{_zap_base}/JSON/core/action/setOptionUseSocksProxy/",
-                    params={"Boolean": "true"}, timeout=10)
+                    params={**_zap_params, "Boolean": "true"}, timeout=10)
             vc.log(f"[zap] Outgoing proxy configured: {_PROXY_URL}", "INFO")
         except Exception as _zp_e:
             vc.log(f"[zap] Could not configure outgoing proxy: {_zp_e}", "WARNING")
@@ -37159,12 +37219,13 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
             _zap_tail = _zap_log.read_text()[-2000:]
         except Exception:
             pass
+        _why = f"Last API error: {_zap_last_err}" if _zap_last_err else "No API response received"
         vc.log(
             f"[zap] ZAP daemon did not become ready within 120s — aborting. "
-            f"Last output:\n{_zap_tail}",
+            f"{_why}\nLast output:\n{_zap_tail}",
             "WARNING",
         )
-        out.log_error("zap", " ".join(cmd), "daemon startup timeout (120s)")
+        out.log_error("zap", " ".join(cmd), f"daemon startup timeout (120s). {_why}")
         try:
             _kill_proc_tree(proc)
             proc.wait(timeout=10)
@@ -37182,7 +37243,7 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
                 try:
                     _zap_req.get(
                         f"{_zap_base}/JSON/httpsession/action/setSessionTokenValue/",
-                        params={"site": urllib.parse.urlparse(url).netloc,
+                        params={**_zap_params, "site": urllib.parse.urlparse(url).netloc,
                                 "sessionToken": _ck_name, "tokenValue": _ck_val},
                         timeout=10,
                     )
@@ -37194,7 +37255,7 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
         try:
             _zap_req.get(
                 f"{_zap_base}/JSON/replacer/action/addRule/",
-                params={
+                params={**_zap_params,
                     "description": f"FractureAuth_{_zah_name}",
                     "enabled": "true",
                     "matchType": "REQ_HEADER",
@@ -37212,7 +37273,7 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
         try:
             _zap_req.get(
                 f"{_zap_base}/JSON/replacer/action/addRule/",
-                params={
+                params={**_zap_params,
                     "description": "FractureUA",
                     "enabled": "true",
                     "matchType": "REQ_HEADER",
@@ -37233,8 +37294,8 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
     try:
         _sr = _zap_req.get(
             f"{_zap_base}/JSON/spider/action/scan/",
-            params={"url": url, "maxChildren": "10", "recurse": "true",
-                    "subtreeOnly": "true"},
+            params={**_zap_params, "url": url, "maxChildren": "10",
+                    "recurse": "true", "subtreeOnly": "true"},
             timeout=30,
         )
         spider_id = _sr.json().get("scan")
@@ -37246,7 +37307,7 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
     try:
         _zap_req.get(
             f"{_zap_base}/JSON/ajaxSpider/action/scan/",
-            params={"url": url, "subtreeOnly": "true"},
+            params={**_zap_params, "url": url, "subtreeOnly": "true"},
             timeout=30,
         )
         vc.log("[zap] AJAX spider started", "INFO")
@@ -37255,6 +37316,7 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
 
     handle = {
         "zap_proc": proc, "zap_port": api_port, "zap_cmd": cmd,
+        "zap_key": api_key,
         "spider_id": spider_id, "target": target, "out": out,
         "started": started, "phase": phase, "log_fh": _zap_log_fh,
     }
@@ -37269,6 +37331,7 @@ def _collect_zap_bg(handle: dict) -> None:
     phase    = handle["phase"]
     proc     = handle["zap_proc"]
     api_port = handle["zap_port"]
+    api_key  = handle.get("zap_key", "")
     url      = target["url"]
     hostname = target.get("hostname", "target")
     started  = handle["started"]
@@ -37276,6 +37339,7 @@ def _collect_zap_bg(handle: dict) -> None:
     import requests as _zap_req
     import time as _zap_time
     _zap_base = f"http://127.0.0.1:{api_port}"
+    _zap_params = {"apikey": api_key}
 
     _ZAP_RISK_MAP = {
         "High": "HIGH", "Medium": "MEDIUM", "Low": "LOW",
@@ -37291,7 +37355,7 @@ def _collect_zap_bg(handle: dict) -> None:
             try:
                 _ss = _zap_req.get(
                     f"{_zap_base}/JSON/spider/view/status/",
-                    params={"scanId": str(spider_id)}, timeout=30,
+                    params={**_zap_params, "scanId": str(spider_id)}, timeout=30,
                 )
                 if _ss.json().get("status") == "100":
                     vc.log("[zap] Spider complete", "INFO")
@@ -37308,7 +37372,7 @@ def _collect_zap_bg(handle: dict) -> None:
         vc.status(phase, "ZAP Scan", "running", "active scan", 2, 4)
         _ar = _zap_req.get(
             f"{_zap_base}/JSON/ascan/action/scan/",
-            params={"url": url, "recurse": "true"},
+            params={**_zap_params, "url": url, "recurse": "true"},
             timeout=30,
         )
         ascan_id = _ar.json().get("scan")
@@ -37323,7 +37387,7 @@ def _collect_zap_bg(handle: dict) -> None:
             try:
                 _as = _zap_req.get(
                     f"{_zap_base}/JSON/ascan/view/status/",
-                    params={"scanId": str(ascan_id)}, timeout=30,
+                    params={**_zap_params, "scanId": str(ascan_id)}, timeout=30,
                 )
                 _pct = _as.json().get("status", "0")
                 if _pct == "100":
@@ -37343,7 +37407,7 @@ def _collect_zap_bg(handle: dict) -> None:
     try:
         _al = _zap_req.get(
             f"{_zap_base}/JSON/core/view/alerts/",
-            params={"baseurl": url, "start": "0", "count": "500"},
+            params={**_zap_params, "baseurl": url, "start": "0", "count": "500"},
             timeout=30,
         )
         alerts = _al.json().get("alerts", [])
@@ -37402,7 +37466,8 @@ def _collect_zap_bg(handle: dict) -> None:
     _html_out = out.output_path("zap", f"zap_report_{hostname}.html")
     try:
         _html_out.parent.mkdir(parents=True, exist_ok=True)
-        _hr = _zap_req.get(f"{_zap_base}/OTHER/core/other/htmlreport/", timeout=30)
+        _hr = _zap_req.get(f"{_zap_base}/OTHER/core/other/htmlreport/",
+                           params=_zap_params, timeout=30)
         _html_out.write_bytes(_hr.content)
         vc.log(f"[zap] HTML report saved: {_html_out.name}", "INFO")
     except Exception as e:
@@ -37420,7 +37485,8 @@ def _collect_zap_bg(handle: dict) -> None:
 
     # ── Shut down ZAP ────────────────────────────────────────────────────────
     try:
-        _zap_req.get(f"{_zap_base}/JSON/core/action/shutdown/", timeout=10)
+        _zap_req.get(f"{_zap_base}/JSON/core/action/shutdown/",
+                     params=_zap_params, timeout=10)
     except Exception:
         pass
     try:
@@ -44849,11 +44915,12 @@ class _SessionKeepalive:
         Prefer the role's own landing URL (guaranteed accessible to the
         current role) over structure_map paths (crawled by Role 1 — may
         be admin-gated and produce misleading 302s for lower roles).
+        Skip login pages — they return 200 for everyone.
         """
         base = target["url"].rstrip("/")
         if landing_url:
             _lp = urllib.parse.urlparse(landing_url).path or "/"
-            if _lp not in self._CANARY_SKIP:
+            if _lp not in self._CANARY_SKIP and not _P20_LOGIN_PATH_RE.search(_lp):
                 return landing_url
         if sm_data is None:
             return None
@@ -45527,9 +45594,9 @@ _P20_LOGIN_FORM_RE = re.compile(
     re.I)
 _P20_LOGIN_PATH_RE = re.compile(
     r'(?:^|/)(?:login|log[-_]in|signin|sign[-_]in|auth(?:enticate)?'
-    r'|sso|cas|adfs'
+    r'|sso|cas|adfs|logout|log[-_]out|signout|sign[-_]out'
     r'|login[-_](?:okta|saml|azure|sso|adfs|ping|auth0|onelogin|duo|cognito)'
-    r')/?$', re.I)
+    r')(?:\.(?:do|action|aspx|jsp|php|cfm|html?|xhtml))?/?$', re.I)
 # ── Per-request entropy normalization (CSP nonces, CSRF tokens) ──────────────
 # Some SPAs embed a per-request 32-char hex CSP nonce in <meta>, <script>,
 # and <style> tags.  This rotates every response, making every body hash unique
@@ -45795,20 +45862,27 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                     _cr_actually_dead = True
                     _cr_landing = (landing_urls or {}).get(_cr_role, "")
                     if _cr_landing and not _p20_spa_public.get(_cr_role):
-                        try:
-                            _cr_lr = _cr_sess.get(
-                                _cr_landing, timeout=timeout,
-                                allow_redirects=False,
-                                headers={"Accept": "text/html,application/json"})
-                            if _cr_lr.status_code in range(200, 400) and _cr_lr.status_code not in (301, 302, 303, 307, 308):
-                                _cr_actually_dead = False
-                                vc.log(
-                                    f"[access-matrix/p20] {_cr_role} canary "
-                                    f"{_canary_p} → {_cr_r.status_code} but "
-                                    f"landing page → {_cr_lr.status_code} — "
-                                    f"session alive, canary is role-gated", "INFO")
-                        except Exception:
-                            pass
+                        _cr_lp = urllib.parse.urlparse(_cr_landing).path or "/"
+                        if _P20_LOGIN_PATH_RE.search(_cr_lp):
+                            vc.log(
+                                f"[access-matrix/p20] {_cr_role} landing URL "
+                                f"is a login page ({_cr_lp}) — cannot use as "
+                                f"session-alive indicator", "WARNING")
+                        else:
+                            try:
+                                _cr_lr = _cr_sess.get(
+                                    _cr_landing, timeout=timeout,
+                                    allow_redirects=False,
+                                    headers={"Accept": "text/html,application/json"})
+                                if _cr_lr.status_code in range(200, 400) and _cr_lr.status_code not in (301, 302, 303, 307, 308):
+                                    _cr_actually_dead = False
+                                    vc.log(
+                                        f"[access-matrix/p20] {_cr_role} canary "
+                                        f"{_canary_p} → {_cr_r.status_code} but "
+                                        f"landing page → {_cr_lr.status_code} — "
+                                        f"session alive, canary is role-gated", "INFO")
+                            except Exception:
+                                pass
                     if _cr_actually_dead:
                         vc.log(
                             f"[access-matrix/p20] {_cr_role} session expired "
@@ -46005,12 +46079,21 @@ def _phase_access_matrix(target: dict, cfg: dict, pm: ProgressManager,
                                     allow_redirects=False,
                                     headers={"Accept": "text/html,application/json"})
                                 if _p20_lr.status_code not in (301, 302, 303, 307, 308):
-                                    _p20_landing_alive = True
-                                    vc.log(
-                                        f"[access-matrix/p20] {role} session alive "
-                                        f"(landing URL → {_p20_lr.status_code}), "
-                                        f"path {rel} is role-gated — not re-authenticating",
-                                        "INFO")
+                                    _p20_lp = urllib.parse.urlparse(
+                                        _p20_role_landing).path or "/"
+                                    if _P20_LOGIN_PATH_RE.search(_p20_lp):
+                                        vc.log(
+                                            f"[access-matrix/p20] {role} landing URL "
+                                            f"is a login page ({_p20_lp}) — cannot "
+                                            f"use it as session-alive indicator",
+                                            "WARNING")
+                                    else:
+                                        _p20_landing_alive = True
+                                        vc.log(
+                                            f"[access-matrix/p20] {role} session alive "
+                                            f"(landing URL → {_p20_lr.status_code}), "
+                                            f"path {rel} is role-gated — not re-authenticating",
+                                            "INFO")
                             except Exception:
                                 pass
                         if not _p20_landing_alive:
