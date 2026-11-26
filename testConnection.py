@@ -172,11 +172,6 @@ def _login_post(
     u  = auth.get("username", "")
     p  = auth.get("password", "")
 
-    import sys as _dbg_sys
-    _dbg_sys.stderr.write(f"DEBUG _login_post: auth_keys={sorted(auth.keys())} login_mode={login_mode!r} "
-                          f"login_ct_override={auth.get('login_content_type', '<UNSET>')!r} "
-                          f"login_uf_override={auth.get('login_username_field', '<UNSET>')!r}\n")
-
     # Prefetch login page: resolve form action URL + collect hidden/CSRF fields
     form_action, hidden, det_uf, det_pf = _csrf_prefetch(sess, url, timeout)
     post_url = form_action if form_action else url
@@ -1569,8 +1564,12 @@ def build_auth_session(
 
         _tried_api_urls: set[str] = set()
 
+        _AUTO_STRIP = {"login_content_type", "login_username_field",
+                       "login_password_field", "login_mode", "login_data",
+                       "login_token_path"}
+
         for _am in _auto_order:
-            _auto_auth = dict(auth)
+            _auto_auth = {k: v for k, v in auth.items() if k not in _AUTO_STRIP}
             _auto_auth["method"] = _am
             if _am in ("form_login", "token_login") and effective_login:
                 _auto_auth["login_url"] = effective_login
