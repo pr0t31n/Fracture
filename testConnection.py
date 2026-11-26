@@ -118,12 +118,12 @@ def _csrf_prefetch(
         for inp in re.finditer(r"<input[^>]+>", form_body, re.IGNORECASE):
             tag = inp.group(0)
             t_m = re.search(r'\btype=["\']?(\w+)["\']?', tag, re.IGNORECASE)
-            n_m = re.search(r'\bname=["\']([^"\']]+)["\']', tag, re.IGNORECASE)
+            n_m = re.search(r'\bname=["\']([^"\']+)["\']', tag, re.IGNORECASE)
             if not n_m:
                 continue
             ftype = t_m.group(1).lower() if t_m else "text"
             if ftype == "hidden":
-                v_m = re.search(r'\bvalue=["\']([^"\']]*)["\']', tag, re.IGNORECASE)
+                v_m = re.search(r'\bvalue=["\']([^"\']*)["\']', tag, re.IGNORECASE)
                 hidden[n_m.group(1)] = v_m.group(1) if v_m else ""
             elif ftype == "password" and not detected_pass_field:
                 detected_pass_field = n_m.group(1)
