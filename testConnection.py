@@ -85,9 +85,9 @@ def _csrf_prefetch(
     sess: "requests.Session",
     login_url: str,
     timeout: int,
-) -> "tuple[str, dict]":
+) -> "tuple[str, dict, str, str]":
     """
-    GET login_url; return (form_action_url, hidden_input_fields).
+    GET login_url; return (form_action_url, hidden_input_fields, username_field, password_field).
 
     Locates the first <form> that contains a password input, extracts its
     action URL (resolved relative to login_url) and all hidden <input> values
@@ -100,9 +100,11 @@ def _csrf_prefetch(
         r = sess.get(login_url, timeout=timeout)
         html = r.text
     except Exception:
-        return "", {}
+        return "", {}, "", ""
     hidden: dict = {}
     form_action = ""
+    detected_user_field = ""
+    detected_pass_field = ""
     for form_m in re.finditer(r"(?s)<form[^>]*>(.+?)</form>", html, re.IGNORECASE):
         form_tag  = form_m.group(0)
         form_body = form_m.group(1)
@@ -116,14 +118,19 @@ def _csrf_prefetch(
         for inp in re.finditer(r"<input[^>]+>", form_body, re.IGNORECASE):
             tag = inp.group(0)
             t_m = re.search(r'\btype=["\']?(\w+)["\']?', tag, re.IGNORECASE)
-            if not t_m or t_m.group(1).lower() != "hidden":
+            n_m = re.search(r'\bname=["\']([^"\']]+)["\']', tag, re.IGNORECASE)
+            if not n_m:
                 continue
-            n_m = re.search(r'\bname=["\']([^"\']+)["\']', tag, re.IGNORECASE)
-            v_m = re.search(r'\bvalue=["\']([^"\']*)["\']', tag, re.IGNORECASE)
-            if n_m:
+            ftype = t_m.group(1).lower() if t_m else "text"
+            if ftype == "hidden":
+                v_m = re.search(r'\bvalue=["\']([^"\']]*)["\']', tag, re.IGNORECASE)
                 hidden[n_m.group(1)] = v_m.group(1) if v_m else ""
+            elif ftype == "password" and not detected_pass_field:
+                detected_pass_field = n_m.group(1)
+            elif ftype in ("text", "email") and not detected_user_field:
+                detected_user_field = n_m.group(1)
         break  # use first form containing a password field
-    return form_action, hidden
+    return form_action, hidden, detected_user_field, detected_pass_field
 
 
 def _login_post(
@@ -145,14 +152,16 @@ def _login_post(
         return None, ""
 
     login_mode = auth.get("login_mode", "fields")
-    uf = auth.get("login_username_field", "username")
-    pf = auth.get("login_password_field", "password")
     u  = auth.get("username", "")
     p  = auth.get("password", "")
 
     # Prefetch login page: resolve form action URL + collect hidden/CSRF fields
-    form_action, hidden = _csrf_prefetch(sess, url, timeout)
+    form_action, hidden, det_uf, det_pf = _csrf_prefetch(sess, url, timeout)
     post_url = form_action if form_action else url
+
+    # Use auto-detected field names when the caller didn't specify them
+    uf = auth.get("login_username_field") or det_uf or "username"
+    pf = auth.get("login_password_field") or det_pf or "password"
 
     if login_mode == "fields":
         # Start with hidden fields (CSRF tokens etc.), then overlay credentials
@@ -183,7 +192,8 @@ def _login_post(
             if k not in data:
                 data[k] = v
 
-    ct = auth.get("login_content_type", "application/json")
+    default_ct = "application/x-www-form-urlencoded" if login_mode == "fields" else "application/json"
+    ct = auth.get("login_content_type", default_ct)
     try:
         if "json" in ct:
             return sess.post(post_url, json=data, timeout=timeout,
