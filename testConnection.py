@@ -172,6 +172,11 @@ def _login_post(
     u  = auth.get("username", "")
     p  = auth.get("password", "")
 
+    import sys as _dbg_sys
+    _dbg_sys.stderr.write(f"DEBUG _login_post: auth_keys={sorted(auth.keys())} login_mode={login_mode!r} "
+                          f"login_ct_override={auth.get('login_content_type', '<UNSET>')!r} "
+                          f"login_uf_override={auth.get('login_username_field', '<UNSET>')!r}\n")
+
     # Prefetch login page: resolve form action URL + collect hidden/CSRF fields
     form_action, hidden, det_uf, det_pf = _csrf_prefetch(sess, url, timeout)
     post_url = form_action if form_action else url
@@ -281,10 +286,15 @@ def build_auth_session(
         _ld = getattr(sess, "_login_diag", {})
         if _ld:
             _diag_parts.append(f"ct: {_ld.get('content_type', '?')}")
+            _diag_parts.append(f"mode: {_ld.get('login_mode', '?')}")
             _diag_parts.append(f"fields: user={_ld.get('user_field', '?')}, pass={_ld.get('pass_field', '?')}")
             _diag_parts.append(f"csrf: {_ld.get('csrf_fields', [])}")
             if _ld.get("field_detection"):
                 _diag_parts.append(f"detected: {_ld['field_detection']}")
+            _diag_parts.append(f"auth_ct: {_ld.get('auth_login_ct', '?')}")
+            _diag_parts.append(f"auth_mode: {_ld.get('auth_login_mode', '?')}")
+            _diag_parts.append(f"auth_uf: {_ld.get('auth_login_uf', '?')}")
+            _diag_parts.append(f"auth_keys: {_ld.get('auth_keys', '?')}")
         _cd = getattr(sess, "_csrf_diag", {})
         if _cd:
             _diag_parts.append(f"prefetch: GET {_cd.get('get_status', '?')} → {_cd.get('final_url', '?')}")
