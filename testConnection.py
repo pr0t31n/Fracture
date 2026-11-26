@@ -215,12 +215,18 @@ def _login_post(
     sess._login_diag = {
         "post_url": post_url,
         "content_type": ct,
+        "login_mode": login_mode,
         "user_field": uf,
         "pass_field": pf,
         "csrf_found": bool(hidden),
         "csrf_fields": list(hidden.keys()),
         "form_action_detected": bool(form_action),
         "field_detection": {"username": det_uf, "password": det_pf},
+        "auth_keys": sorted(auth.keys()),
+        "auth_login_ct": auth.get("login_content_type", "<unset>"),
+        "auth_login_mode": auth.get("login_mode", "<unset>"),
+        "auth_login_uf": auth.get("login_username_field", "<unset>"),
+        "auth_login_pf": auth.get("login_password_field", "<unset>"),
     }
 
     try:
