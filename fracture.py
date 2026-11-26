@@ -5500,7 +5500,9 @@ class _ScopedSession(requests.Session):
             host = urllib.parse.urlparse(request.url).hostname or ""
         except Exception:
             host = ""
-        if host and host not in self._scope and host.lower() not in self._auth_domains:
+        if (host and host not in self._scope
+                and host.lower() not in self._auth_domains
+                and not host.startswith("_fracture_nxdomain_")):
             vc.log(
                 f"[scope] Blocked out-of-scope request: {request.method} {request.url}",
                 "WARNING",
@@ -37031,9 +37033,13 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
         vc.log("[zap] ZAP not found — skipping", "WARNING")
         return None
 
-    # ZAP requires Java 17+. Pre-check to avoid a 120s timeout waiting
-    # for a daemon that exits immediately.
-    _java = shutil.which("java")
+    # ZAP requires Java 17+. Pre-check to avoid a timeout waiting for a
+    # daemon that exits immediately. zap.sh prefers JAVA_HOME, so check
+    # the same binary ZAP will actually use.
+    _java_home = os.environ.get("JAVA_HOME", "")
+    _java = (os.path.join(_java_home, "bin", "java")
+             if _java_home and Path(_java_home, "bin", "java").exists()
+             else shutil.which("java"))
     if not _java:
         vc.log("[zap] Java not installed — skipping ZAP", "WARNING")
         return None
@@ -37046,9 +37052,12 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
         _jv_major = int(_jv_m.group(1)) if _jv_m else 0
         if _jv_major < 17:
             vc.log(
-                f"[zap] Java {_jv_major} found but ZAP requires Java 17+ — skipping",
+                f"[zap] Java {_jv_major} found ({_java}) but ZAP requires "
+                f"Java 17+ — skipping. Install Java 17+: "
+                f"apt install -y openjdk-17-jre-headless",
                 "WARNING")
             return None
+        vc.log(f"[zap] Java {_jv_major} found ({_java})", "INFO")
     except Exception:
         vc.log("[zap] Could not determine Java version — skipping ZAP", "WARNING")
         return None
@@ -37063,9 +37072,13 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
         "-config", "api.addrs.addr.name=127.0.0.1",
         "-config", "api.addrs.addr.regex=true",
         "-config", "connection.timeoutInSecs=120",
+        "-config", "start.addonUpdate=false",
+        "-config", "start.checkForUpdates=false",
+        "-silent",
     ]
     _zap_env = os.environ.copy()
     _zap_env["JAVA_TOOL_OPTIONS"] = "-Xmx1024m"
+    _zap_env["ZAP_IN_DOCKER"] = "true"
     vc.log(f"[zap] Launching ZAP daemon on port {api_port} (heap capped at 1024 MB)", "INFO")
     vc.status(phase, "ZAP Scan", "running", "starting daemon", 0, 4)
 
@@ -37087,6 +37100,23 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
     _zap_base = f"http://127.0.0.1:{api_port}"
     _zap_ready = False
     for _attempt in range(40):
+        _zap_rc = proc.poll()
+        if _zap_rc is not None:
+            _zap_log_fh.close()
+            _zap_tail = ""
+            try:
+                _zap_tail = _zap_log.read_text()[-2000:]
+            except Exception:
+                pass
+            vc.log(
+                f"[zap] ZAP daemon exited immediately (rc={_zap_rc}). "
+                f"Last output:\n{_zap_tail}",
+                "ERROR",
+            )
+            out.log_error("zap", " ".join(cmd),
+                          f"daemon exited rc={_zap_rc}")
+            _deregister_proc(proc)
+            return None
         try:
             _r = _zap_req.get(f"{_zap_base}/JSON/core/view/version/", timeout=5)
             if _r.status_code == 200:
@@ -37123,14 +37153,23 @@ def _launch_zap_bg(target: dict, cfg: dict, pm: ProgressManager,
             vc.log(f"[zap] Could not configure outgoing proxy: {_zp_e}", "WARNING")
 
     if not _zap_ready:
-        vc.log("[zap] ZAP daemon did not become ready within 120s — aborting", "WARNING")
+        _zap_log_fh.close()
+        _zap_tail = ""
+        try:
+            _zap_tail = _zap_log.read_text()[-2000:]
+        except Exception:
+            pass
+        vc.log(
+            f"[zap] ZAP daemon did not become ready within 120s — aborting. "
+            f"Last output:\n{_zap_tail}",
+            "WARNING",
+        )
         out.log_error("zap", " ".join(cmd), "daemon startup timeout (120s)")
         try:
             _kill_proc_tree(proc)
             proc.wait(timeout=10)
         except Exception:
             pass
-        _zap_log_fh.close()
         _deregister_proc(proc)
         return None
 
@@ -39841,6 +39880,8 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                "INFO")
 
     # ── Cookie intel emission ─────────────────────────────────────────────────
+    _sess_role = (cfg.get("auth", {}).get("role_label", "")
+                  or cfg.get("auth", {}).get("_role_label", "")).strip()
     if _ie:
         try:
             for _ck in auth_sess.cookies:
@@ -39877,7 +39918,7 @@ def _phase_session(target: dict, cfg: dict, pm: ProgressManager,
                     "httponly": bool(_ck_ho),
                     "samesite": _ck_ss,
                     "url": target["url"],
-                    "role": "",
+                    "role": _sess_role,
                     "risk": "LOW" if _ck_issues else "INFO",
                     "issues": ("Missing: " + ", ".join(_ck_issues)) if _ck_issues else "",
                 })

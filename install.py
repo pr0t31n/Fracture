@@ -315,6 +315,7 @@ DNF_PACKAGES = [
     "java-21-openjdk-headless",
     # Headless browser for SPA crawl
     "chromium", "chromedriver",
+    "proxychains-ng",
 ]
 DNF_PACKAGES_OPTIONAL = [
     "firefox", "geckodriver",
@@ -1021,6 +1022,140 @@ def git_clone_or_update(url, dest):
         run(["git", "clone", url, dest])
 
 
+def _get_java_major(java_bin):
+    """Return the major version of a Java binary, or 0 on failure."""
+    try:
+        r = subprocess.run([java_bin, "-version"],
+                           capture_output=True, text=True, timeout=10)
+        out = (r.stderr + r.stdout).strip()
+        import re
+        m = re.search(r'"(\d+)[\._]', out)
+        return int(m.group(1)) if m else 0
+    except Exception:
+        return 0
+
+
+def _ensure_java17():
+    """Ensure Java 17+ is installed — required for ZAP.
+
+    Checks JAVA_HOME first (zap.sh uses it), then system java.
+    If neither is 17+, force-installs the best available openjdk.
+    """
+    # Check what ZAP will actually use
+    java_home = os.environ.get("JAVA_HOME", "")
+    java_bin = None
+    if java_home:
+        candidate = os.path.join(java_home, "bin", "java")
+        if os.path.isfile(candidate):
+            java_bin = candidate
+    if not java_bin:
+        java_bin = shutil.which("java")
+
+    if java_bin:
+        ver = _get_java_major(java_bin)
+        if ver >= 17:
+            info(f"✓ Java {ver} found ({java_bin}) — meets ZAP requirement")
+            return
+        warn(f"Java {ver} found ({java_bin}) — ZAP requires 17+, installing upgrade...")
+    else:
+        info("Java not found — installing Java 17+ for ZAP...")
+
+    # Install Java 17+ (not optional — ZAP won't work without it)
+    if OS == "apt":
+        _jdk = _apt_best_jdk()
+        if _jdk:
+            try:
+                apt_install([_jdk])
+                info(f"✓ {_jdk} installed")
+            except Exception as e:
+                warn(f"Failed to install {_jdk}: {e}")
+        else:
+            warn("No openjdk 17+ package found in apt repos")
+            note("Add a PPA or install manually: apt install openjdk-17-jre-headless")
+    elif OS == "dnf":
+        try:
+            run(["dnf", "install", "-y", "java-21-openjdk-headless"], check=True)
+            info("✓ java-21-openjdk-headless installed")
+        except subprocess.CalledProcessError:
+            try:
+                run(["dnf", "install", "-y", "java-17-openjdk-headless"], check=True)
+                info("✓ java-17-openjdk-headless installed")
+            except subprocess.CalledProcessError:
+                warn("Failed to install Java 17+ via dnf")
+    elif OS == "macos":
+        brew_install("openjdk")
+    else:
+        note("Install Java 17+ manually: https://adoptium.net/")
+
+    # Set JAVA_HOME if we can find the new install and it's not set
+    if not os.environ.get("JAVA_HOME"):
+        for jdir in ["/usr/lib/jvm/java-21-openjdk-amd64",
+                     "/usr/lib/jvm/java-17-openjdk-amd64",
+                     "/usr/lib/jvm/java-21-openjdk-arm64",
+                     "/usr/lib/jvm/java-17-openjdk-arm64",
+                     "/usr/lib/jvm/java-21-openjdk",
+                     "/usr/lib/jvm/java-17-openjdk"]:
+            if os.path.isdir(jdir) and os.path.isfile(os.path.join(jdir, "bin", "java")):
+                jver = _get_java_major(os.path.join(jdir, "bin", "java"))
+                if jver >= 17:
+                    info(f"Setting JAVA_HOME={jdir} (Java {jver})")
+                    os.environ["JAVA_HOME"] = jdir
+                    break
+
+    # Final check
+    java_bin = shutil.which("java")
+    if java_home := os.environ.get("JAVA_HOME", ""):
+        candidate = os.path.join(java_home, "bin", "java")
+        if os.path.isfile(candidate):
+            java_bin = candidate
+    if java_bin:
+        ver = _get_java_major(java_bin)
+        if ver >= 17:
+            info(f"✓ Java {ver} confirmed available ({java_bin})")
+        else:
+            warn(f"Java {ver} still active — ZAP will fail at runtime")
+            warn("Fix: update-alternatives --set java <path-to-java-17+>")
+    else:
+        warn("Java still not found after install attempt — ZAP will not work")
+
+
+def _verify_zap_java():
+    """Post-install check: confirm ZAP can find Java 17+."""
+    _zap_bin = shutil.which("zaproxy") or shutil.which("zap.sh")
+    if not _zap_bin:
+        return
+    # zap.sh checks JAVA_HOME, then JAVA, then PATH
+    java_home = os.environ.get("JAVA_HOME", "")
+    if java_home:
+        jbin = os.path.join(java_home, "bin", "java")
+        if os.path.isfile(jbin):
+            ver = _get_java_major(jbin)
+            if ver >= 17:
+                info(f"✓ ZAP will use JAVA_HOME Java {ver}")
+                return
+            warn(f"JAVA_HOME points to Java {ver} — ZAP needs 17+")
+            warn(f"Fix: export JAVA_HOME=<path-to-jdk-17+>")
+            # Try to fix it now
+            for jdir in ["/usr/lib/jvm/java-21-openjdk-amd64",
+                         "/usr/lib/jvm/java-17-openjdk-amd64",
+                         "/usr/lib/jvm/java-21-openjdk-arm64",
+                         "/usr/lib/jvm/java-17-openjdk-arm64"]:
+                cand = os.path.join(jdir, "bin", "java")
+                if os.path.isfile(cand) and _get_java_major(cand) >= 17:
+                    info(f"Auto-fixing: JAVA_HOME={jdir}")
+                    os.environ["JAVA_HOME"] = jdir
+                    return
+    java_bin = shutil.which("java")
+    if java_bin:
+        ver = _get_java_major(java_bin)
+        if ver >= 17:
+            info(f"✓ ZAP will use system Java {ver} ({java_bin})")
+        else:
+            warn(f"System java is {ver} — ZAP requires 17+")
+            warn("Fix: update-alternatives --set java <path-to-jdk-17+>")
+            note("Or: export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64")
+
+
 def install_git():
     banner("Phase: git tools")
     # testssl.sh — prefer git clone (latest), fall back to apt package
@@ -1052,6 +1187,10 @@ def install_git():
         warn("testssl.sh could not be installed — install manually: apt install testssl.sh")
 
     # OWASP ZAP — automated web vulnerability scanner
+    # ZAP requires Java 17+. Ensure it is installed BEFORE ZAP so zap.sh
+    # finds the right JRE on first launch.
+    _ensure_java17()
+
     _zap_bin = shutil.which("zaproxy") or shutil.which("zap.sh")
     if _zap_bin:
         info(f"  ✓ ZAP already installed: {_zap_bin}")
@@ -1064,14 +1203,19 @@ def install_git():
                 info("  ✓ ZAP installed via apt")
             except Exception as _ze:
                 warn(f"ZAP install failed (non-fatal): {_ze}")
-        elif OS == "brew":
+        elif OS == "macos":
             try:
                 brew_install("zap", cask=True)
                 info("  ✓ ZAP installed via brew")
             except Exception as _ze:
                 warn(f"ZAP install failed (non-fatal): {_ze}")
+        elif OS == "dnf":
+            note("ZAP: install manually from https://www.zaproxy.org/download/")
         else:
             note("ZAP: install manually from https://www.zaproxy.org/download/")
+
+    # Verify ZAP can actually start with the installed Java
+    _verify_zap_java()
 
     # jwt_tool
     git_clone_or_update("https://github.com/ticarpi/jwt_tool.git", "/opt/jwt_tool")
@@ -1286,6 +1430,29 @@ def run_check():
             info(f"{pkg:30s} {G}OK{W}")
         except ImportError:
             warn(f"{pkg:30s} {Y}MISSING{W}")
+
+    print(f"\n{C}ZAP + Java:{W}")
+    _zap_bin = shutil.which("zaproxy") or shutil.which("zap.sh")
+    if _zap_bin:
+        info(f"{'ZAP':30s} {G}FOUND{W} ({_zap_bin})")
+    else:
+        warn(f"{'ZAP':30s} {Y}NOT FOUND{W}")
+    _java_home = os.environ.get("JAVA_HOME", "")
+    _jbin = None
+    if _java_home:
+        _jcand = os.path.join(_java_home, "bin", "java")
+        if os.path.isfile(_jcand):
+            _jbin = _jcand
+    if not _jbin:
+        _jbin = shutil.which("java")
+    if _jbin:
+        _jver = _get_java_major(_jbin)
+        if _jver >= 17:
+            info(f"{'Java (ZAP runtime)':30s} {G}Java {_jver}{W} ({_jbin})")
+        else:
+            warn(f"{'Java (ZAP runtime)':30s} {R}Java {_jver}{W} — ZAP requires 17+ ({_jbin})")
+    else:
+        warn(f"{'Java (ZAP runtime)':30s} {Y}NOT FOUND{W} — ZAP will not work")
 
     print(f"\n{C}Git tools:{W}")
     for path, label in [
